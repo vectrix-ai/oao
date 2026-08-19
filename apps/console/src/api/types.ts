@@ -146,6 +146,10 @@ export interface ListFilters {
 export interface ProjectContext {
   readonly organization: { readonly id: string; readonly name: string };
   readonly project: { readonly id: string; readonly name: string };
+  readonly currentPrincipal?: {
+    readonly displayName: string;
+    readonly role: string;
+  };
   readonly organizations: readonly {
     readonly id: string;
     readonly name: string;

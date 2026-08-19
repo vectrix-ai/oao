@@ -19,6 +19,7 @@ export class HttpConsoleApi implements ConsoleApi {
     const token = await this.#getAccessToken();
     const response = await fetch(`${this.#baseUrl}${path}`, {
       ...init,
+      credentials: "include",
       headers: {
         "content-type": "application/json",
         ...(token ? { authorization: `Bearer ${token}` } : {}),
@@ -127,6 +128,7 @@ export class HttpConsoleApi implements ConsoleApi {
       try {
         const token = await this.#getAccessToken();
         const response = await fetch(`${this.#baseUrl}/events`, {
+          credentials: "include",
           headers: {
             accept: "text/event-stream",
             ...(cursor ? { "last-event-id": cursor } : {}),

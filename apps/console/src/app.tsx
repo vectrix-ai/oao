@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useState } from "react";
 import { Navigate, Route, Routes } from "react-router";
 import type { ConsoleApi } from "./api/types";
 import { ConsoleApiProvider } from "./api/context";
@@ -15,11 +16,13 @@ export function ConsoleApp({
   readonly api?: ConsoleApi;
   readonly queryClient?: QueryClient;
 }) {
-  const client =
-    queryClient ??
-    new QueryClient({
-      defaultOptions: { queries: { staleTime: 15_000, retry: false } },
-    });
+  const [defaultClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: { queries: { staleTime: 15_000, retry: false } },
+      }),
+  );
+  const client = queryClient ?? defaultClient;
   const routes = (
     <Routes>
       <Route element={<AppLayout />}>

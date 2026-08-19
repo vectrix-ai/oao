@@ -32,6 +32,8 @@ describe("management console", () => {
       await screen.findByRole("heading", { name: "Agents" }),
     ).toBeInTheDocument();
     expect(await screen.findByText("Support operator")).toBeInTheDocument();
+    expect(await screen.findByText("Demo Operator")).toBeInTheDocument();
+    expect(screen.getByText("Platform Owner")).toBeInTheDocument();
     await user.type(
       screen.getByRole("searchbox", { name: "Search agents" }),
       "not-a-real-agent",
@@ -39,6 +41,32 @@ describe("management console", () => {
     expect(
       await screen.findByRole("heading", { name: "No matching agents" }),
     ).toBeInTheDocument();
+  });
+
+  it("keeps the default query cache stable across app rerenders", async () => {
+    class CountingApi extends DemoConsoleApi {
+      calls = 0;
+      override async listAgents(
+        filters: Parameters<DemoConsoleApi["listAgents"]>[0],
+      ) {
+        this.calls += 1;
+        return super.listAgents(filters);
+      }
+    }
+    const api = new CountingApi({ eventDelayMs: 60_000 });
+    const view = render(
+      <MemoryRouter initialEntries={["/agents"]}>
+        <ConsoleApp api={api} />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("Support operator")).toBeInTheDocument();
+    expect(api.calls).toBe(1);
+    view.rerender(
+      <MemoryRouter initialEntries={["/agents"]}>
+        <ConsoleApp api={api} />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(api.calls).toBe(1));
   });
 
   it("renders deterministic empty and error states", async () => {

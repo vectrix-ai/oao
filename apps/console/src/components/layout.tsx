@@ -38,6 +38,7 @@ export function AppLayout() {
   });
   const events = useProjectEvents();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const principal = context.data?.currentPrincipal;
   return (
     <div className="app-shell">
       <header className="mobile-header">
@@ -127,13 +128,15 @@ export function AppLayout() {
             <CircleHelp size={16} />
             Hosting diagnostics
           </a>
-          <div className="avatar-row">
-            <span className="avatar">BS</span>
-            <div>
-              <strong>Ben Selleslagh</strong>
-              <span>Owner</span>
+          {principal ? (
+            <div className="avatar-row">
+              <span className="avatar">{initials(principal.displayName)}</span>
+              <div>
+                <strong>{principal.displayName}</strong>
+                <span>{principal.role}</span>
+              </div>
             </div>
-          </div>
+          ) : null}
         </footer>
       </aside>
       {mobileOpen ? (
@@ -148,4 +151,14 @@ export function AppLayout() {
       </main>
     </div>
   );
+}
+
+function initials(displayName: string): string {
+  return displayName
+    .split(/\s+/u)
+    .filter(Boolean)
+    .map((part) => part[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
 }

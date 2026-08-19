@@ -67,7 +67,7 @@ const agentsSeed: AgentDetail[] = [
         version: 3,
         contentHash: "8fd2e5d2bfe74a12",
         createdAt: "2026-08-20T07:18:00.000Z",
-        createdBy: "Ben Selleslagh",
+        createdBy: "Demo Operator",
         config: supportConfig,
       },
       {
@@ -75,7 +75,7 @@ const agentsSeed: AgentDetail[] = [
         version: 2,
         contentHash: "e2804314b2df993d",
         createdAt: "2026-08-17T16:04:00.000Z",
-        createdBy: "Ben Selleslagh",
+        createdBy: "Demo Operator",
         config: { ...supportConfig, modelPreset: "fast-routing-v1" },
       },
       {
@@ -83,7 +83,7 @@ const agentsSeed: AgentDetail[] = [
         version: 1,
         contentHash: "f827b8f782e0396c",
         createdAt: "2026-08-12T08:40:00.000Z",
-        createdBy: "Ben Selleslagh",
+        createdBy: "Demo Operator",
         config: { ...supportConfig, tools: supportConfig.tools.slice(0, 1) },
       },
     ],
@@ -131,7 +131,7 @@ const agentsSeed: AgentDetail[] = [
         version: 1,
         contentHash: "15302b77e958df18",
         createdAt: "2026-08-19T09:12:00.000Z",
-        createdBy: "Ben Selleslagh",
+        createdBy: "Demo Operator",
         config: {
           ...supportConfig,
           systemInstructions:
@@ -404,14 +404,14 @@ const settingsSeed: SettingsData = {
   members: [
     {
       id: principalId,
-      name: "Ben Selleslagh",
-      email: "ben@example.test",
+      name: "Demo Operator",
+      email: "demo.operator@example.test",
       role: "owner",
     },
     {
       id: "34343434-3434-4343-8343-343434343434",
-      name: "Maya Chen",
-      email: "maya@example.test",
+      name: "Review Operator",
+      email: "review.operator@example.test",
       role: "operator",
     },
   ],
@@ -505,6 +505,10 @@ export class DemoConsoleApi implements ConsoleApi {
     return {
       organization: { id: ORG_ID, name: "Example operations" },
       project: { id: PROJECT_ID, name: "Managed agents" },
+      currentPrincipal: {
+        displayName: "Demo Operator",
+        role: "Platform Owner",
+      },
       organizations: [{ id: ORG_ID, name: "Example operations" }],
       projects: [
         { id: PROJECT_ID, name: "Managed agents" },
@@ -561,7 +565,7 @@ export class DemoConsoleApi implements ConsoleApi {
           version: 1,
           contentHash: "draft00000000000",
           createdAt: now,
-          createdBy: "Ben Selleslagh",
+          createdBy: "Demo Operator",
           config,
         },
       ],
@@ -587,7 +591,7 @@ export class DemoConsoleApi implements ConsoleApi {
           version,
           contentHash: `demo${String(version).padStart(12, "0")}`,
           createdAt: now,
-          createdBy: "Ben Selleslagh",
+          createdBy: "Demo Operator",
           config,
         },
         ...agent.versions,
@@ -691,7 +695,7 @@ export class DemoConsoleApi implements ConsoleApi {
         ? {
             ...work,
             stage: "caller_claimed",
-            claimedBy: "Ben Selleslagh",
+            claimedBy: "Demo Operator",
             claimFence: String(Number(work.claimFence) + 1),
           }
         : work,
