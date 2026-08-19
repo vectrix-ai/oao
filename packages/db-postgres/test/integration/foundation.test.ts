@@ -187,9 +187,12 @@ test(
     try {
       await t.test("migration applies cleanly and is idempotent", async () => {
         const first = await migrate(pool);
-        assert.equal(first.applied.length + first.alreadyApplied.length, 1);
+        assert.equal(first.applied.length + first.alreadyApplied.length, 2);
         const second = await migrate(pool);
-        assert.deepEqual(second.alreadyApplied, ["0001_foundation.sql"]);
+        assert.deepEqual(second.alreadyApplied, [
+          "0001_foundation.sql",
+          "0002_foundation_followup.sql",
+        ]);
         await seed(pool);
       });
 
@@ -223,6 +226,103 @@ test(
           assert.deepEqual(
             visible.rows.map((row) => row.id),
             [ids.project],
+          );
+        },
+      );
+
+      await t.test(
+        "same-tenant rows still reject mismatched thread and parent identities",
+        async () => {
+          const threadA = uuid(230) as ThreadId;
+          const sessionA = uuid(231);
+          const runA = uuid(232) as RunId;
+          const threadB = uuid(233) as ThreadId;
+          const sessionB = uuid(234);
+          const runB = uuid(235) as RunId;
+          const secondAgent = uuid(236);
+          const secondVersion = uuid(237);
+          await insertThreadRun(pool, threadA, sessionA, runA, "parent-a");
+          await insertThreadRun(pool, threadB, sessionB, runB, "parent-b");
+          await withTenantTransaction(pool, tenant, async (transaction) => {
+            await transaction.query(
+              "INSERT INTO oao.agent_definitions (organization_id,project_id,id,agent_key,name) VALUES ($1,$2,$3,'agent-second','Second agent')",
+              [ids.organization, ids.project, secondAgent],
+            );
+            await transaction.query(
+              `INSERT INTO oao.agent_versions
+                (organization_id,project_id,id,agent_definition_id,version,config,content_hash,created_by_principal_id)
+               VALUES ($1,$2,$3,$4,1,'{}',digest('agent-second','sha256'),$5)`,
+              [
+                ids.organization,
+                ids.project,
+                secondVersion,
+                secondAgent,
+                ids.principal,
+              ],
+            );
+          });
+
+          const rejectTenantWrite = (sql: string, parameters: unknown[]) =>
+            assert.rejects(
+              withTenantTransaction(pool, tenant, (transaction) =>
+                transaction.query(sql, parameters),
+              ),
+              /foreign key constraint/u,
+            );
+
+          await rejectTenantWrite(
+            `INSERT INTO oao.thread_admission_heads
+              (organization_id,project_id,thread_id,run_id,admission_key,request_hash)
+             VALUES ($1,$2,$3,$4,'mismatched-thread',digest('mismatch','sha256'))`,
+            [ids.organization, ids.project, threadB, runA],
+          );
+          await rejectTenantWrite(
+            `INSERT INTO oao.runs
+              (organization_id,project_id,id,thread_id,session_id,agent_version_id,created_by_principal_id,idempotency_key)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'mismatched-session-thread')`,
+            [
+              ids.organization,
+              ids.project,
+              uuid(238),
+              threadB,
+              sessionA,
+              ids.version,
+              ids.principal,
+            ],
+          );
+          await rejectTenantWrite(
+            `INSERT INTO oao.runs
+              (organization_id,project_id,id,thread_id,session_id,agent_version_id,created_by_principal_id,idempotency_key)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'mismatched-session-version')`,
+            [
+              ids.organization,
+              ids.project,
+              uuid(239),
+              threadA,
+              sessionA,
+              secondVersion,
+              ids.principal,
+            ],
+          );
+          await rejectTenantWrite(
+            `INSERT INTO oao.messages
+              (organization_id,project_id,id,thread_id,run_id,role,redacted_content)
+             VALUES ($1,$2,$3,$4,$5,'assistant','safe')`,
+            [ids.organization, ids.project, uuid(240), threadB, runA],
+          );
+
+          const toolCall = uuid(241) as ToolCallId;
+          await withTenantTransaction(pool, tenant, (transaction) =>
+            transaction.query(
+              "INSERT INTO oao.tool_calls (organization_id,project_id,id,run_id,tool_name,safe_arguments) VALUES ($1,$2,$3,$4,'lookup','{}')",
+              [ids.organization, ids.project, toolCall, runA],
+            ),
+          );
+          await rejectTenantWrite(
+            `INSERT INTO oao.approvals
+              (organization_id,project_id,id,run_id,tool_call_id,summary)
+             VALUES ($1,$2,$3,$4,$5,'Wrong run')`,
+            [ids.organization, ids.project, uuid(242), runB, toolCall],
           );
         },
       );
@@ -472,7 +572,7 @@ test(
               }),
           );
           await pool.query(
-            "UPDATE oao.tool_calls SET claim_expires_at = clock_timestamp() - interval '1 second' WHERE organization_id=$1 AND project_id=$2 AND id=$3",
+            "UPDATE oao.tool_calls SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE organization_id=$1 AND project_id=$2 AND id=$3",
             [ids.organization, ids.project, toolCall],
           );
           const secondFence = await withTenantTransaction(
@@ -499,7 +599,10 @@ test(
                 safeResult: { found: true },
               }),
             );
-          await assert.rejects(submit(firstFence), /stale tool claim fence/u);
+          await assert.rejects(
+            submit(firstFence),
+            /stale tool execution fence/u,
+          );
           assert.equal(await submit(secondFence), "submitted");
           assert.equal(await submit(secondFence), "replayed");
           await assert.rejects(submit(secondFence, 4), /idempotency conflict/u);
@@ -529,6 +632,104 @@ test(
             ).rows[0]?.outcome,
             "committed",
           );
+          const committed = await withTenantTransaction(
+            pool,
+            tenant,
+            (transaction) =>
+              transaction.query(
+                "SELECT owner, stage, claim_fence FROM oao.tool_calls WHERE id=$1",
+                [toolCall],
+              ),
+          );
+          assert.deepEqual(committed.rows[0], {
+            owner: "caller",
+            stage: "result_committed",
+            claim_fence: secondFence.toString(),
+          });
+        },
+      );
+
+      await t.test(
+        "platform tools use execution leases and are never caller-claimable",
+        async () => {
+          const run = uuid(243) as RunId;
+          const platformTool = uuid(244) as ToolCallId;
+          const callerTool = uuid(245) as ToolCallId;
+          await insertRun(pool, run, "owner-stages");
+          await withTenantTransaction(pool, tenant, async (transaction) => {
+            await transaction.query(
+              `INSERT INTO oao.tool_calls
+                (organization_id,project_id,id,run_id,tool_name,owner,stage,safe_arguments)
+               VALUES ($1,$2,$3,$4,'platform_lookup','platform','platform_ready','{}')`,
+              [ids.organization, ids.project, platformTool, run],
+            );
+            await transaction.query(
+              "INSERT INTO oao.tool_calls (organization_id,project_id,id,run_id,tool_name,safe_arguments) VALUES ($1,$2,$3,$4,'caller_lookup','{}')",
+              [ids.organization, ids.project, callerTool, run],
+            );
+          });
+          await assert.rejects(
+            withTenantTransaction(pool, tenant, (transaction) =>
+              repository.claimToolCall(transaction, {
+                ...tenant,
+                toolCallId: platformTool,
+                principalId: ids.principal,
+                leaseMilliseconds: 60_000,
+              }),
+            ),
+            /not claimable/u,
+          );
+          await assert.rejects(
+            withTenantTransaction(pool, tenant, (transaction) =>
+              repository.beginPlatformExecution(transaction, {
+                ...tenant,
+                toolCallId: callerTool,
+                servicePrincipalId: ids.principal,
+                leaseMilliseconds: 60_000,
+              }),
+            ),
+            /not executable/u,
+          );
+          const fence = await withTenantTransaction(
+            pool,
+            tenant,
+            (transaction) =>
+              repository.beginPlatformExecution(transaction, {
+                ...tenant,
+                toolCallId: platformTool,
+                servicePrincipalId: ids.principal,
+                leaseMilliseconds: 60_000,
+              }),
+          );
+          assert.equal(
+            await withTenantTransaction(pool, tenant, (transaction) =>
+              repository.submitResult(transaction, {
+                ...tenant,
+                toolCallId: platformTool,
+                principalId: ids.principal,
+                fence,
+                idempotencyKey: "platform-result",
+                requestHash: Buffer.alloc(32, 6),
+                safeResult: { inputTokens: 12, outputTokens: 4 },
+              }),
+            ),
+            "submitted",
+          );
+          const result = await withTenantTransaction(
+            pool,
+            tenant,
+            (transaction) =>
+              transaction.query(
+                "SELECT owner, stage, lease_holder_principal_id, lease_expires_at FROM oao.tool_calls WHERE id=$1",
+                [platformTool],
+              ),
+          );
+          assert.deepEqual(result.rows[0], {
+            owner: "platform",
+            stage: "result_submitted",
+            lease_holder_principal_id: null,
+            lease_expires_at: null,
+          });
         },
       );
 
@@ -573,14 +774,42 @@ test(
               tenant,
               (transaction) =>
                 transaction.query(
-                  "SELECT status, claimed_by_principal_id, claim_expires_at, claim_fence FROM oao.tool_calls WHERE id=$1",
+                  "SELECT stage, lease_holder_principal_id, lease_expires_at, claim_fence FROM oao.tool_calls WHERE id=$1",
                   [tool],
                 ),
             );
-            assert.equal(result.rows[0]?.status, "cancelled");
-            assert.equal(result.rows[0]?.claimed_by_principal_id, null);
-            assert.equal(result.rows[0]?.claim_expires_at, null);
+            assert.equal(
+              result.rows[0]?.stage,
+              offset === 207 ? "approval_denied" : "approval_expired",
+            );
+            assert.equal(result.rows[0]?.lease_holder_principal_id, null);
+            assert.equal(result.rows[0]?.lease_expires_at, null);
             assert.equal(result.rows[0]?.claim_fence, "2");
+            await assert.rejects(
+              withTenantTransaction(pool, tenant, (transaction) =>
+                repository.claimToolCall(transaction, {
+                  ...tenant,
+                  toolCallId: tool,
+                  principalId: ids.principal,
+                  leaseMilliseconds: 60_000,
+                }),
+              ),
+              /not claimable/u,
+            );
+            await assert.rejects(
+              withTenantTransaction(pool, tenant, (transaction) =>
+                repository.submitResult(transaction, {
+                  ...tenant,
+                  toolCallId: tool,
+                  principalId: ids.principal,
+                  fence: 2n,
+                  idempotencyKey: `terminal-result-${offset}`,
+                  requestHash: Buffer.alloc(32, 7),
+                  safeResult: { ok: true },
+                }),
+              ),
+              /stale tool execution fence/u,
+            );
           }
         },
       );
@@ -677,8 +906,72 @@ test(
       );
 
       await t.test(
-        "product events reject unsafe keys and audit appends form a chain",
+        "product events allow token counts, reject sensitive keys, and audit appends form a chain",
         async () => {
+          const keyChecks = await withTenantTransaction(
+            pool,
+            otherTenant,
+            (transaction) =>
+              transaction.query(
+                `SELECT key, oao.is_sensitive_public_key(key) AS sensitive
+                 FROM unnest(ARRAY[
+                   'inputTokens', 'output_tokens', 'reasoningTokens', 'tokenCount',
+                   'Authorization', 'set-cookie', 'db_password', 'API_TOKEN', 'API_KEY',
+                   'accessToken', 'refresh-token', 'session.token', 'client_secret', 'databaseSecretValue',
+                   'rawPrompt', 'raw_payload', 'tool-payload', 'rawToolPayload', 'reasoning_content', 'chain-of-thought'
+                 ]) AS key`,
+              ),
+          );
+          const sensitivity = Object.fromEntries(
+            keyChecks.rows.map((row) => [row.key, row.sensitive]),
+          );
+          for (const key of [
+            "inputTokens",
+            "output_tokens",
+            "reasoningTokens",
+            "tokenCount",
+          ]) {
+            assert.equal(sensitivity[key], false, key);
+          }
+          for (const key of [
+            "Authorization",
+            "set-cookie",
+            "db_password",
+            "API_TOKEN",
+            "API_KEY",
+            "accessToken",
+            "refresh-token",
+            "session.token",
+            "client_secret",
+            "databaseSecretValue",
+            "rawPrompt",
+            "raw_payload",
+            "tool-payload",
+            "rawToolPayload",
+            "reasoning_content",
+            "chain-of-thought",
+          ]) {
+            assert.equal(sensitivity[key], true, key);
+          }
+          const usageEvent = await withTenantTransaction(
+            pool,
+            otherTenant,
+            (transaction) =>
+              eventAppender.append(transaction, {
+                id: uuid(409) as EventId,
+                ...otherTenant,
+                aggregateType: "model_invocation",
+                aggregateId: uuid(408),
+                kind: "model.invocation_completed",
+                publicPayload: {
+                  inputTokens: 1_024,
+                  outputTokens: 128,
+                  tokenCount: 1_152,
+                },
+                occurredAt: new Date("2026-08-20T12:02:00.000Z"),
+              }),
+          );
+          assert.equal(usageEvent.projectPosition, 4n);
           await assert.rejects(
             withTenantTransaction(pool, otherTenant, (transaction) =>
               transaction.query(
@@ -688,7 +981,7 @@ test(
                   ids.otherProject,
                   uuid(410),
                   uuid(411),
-                  { nested: { authorization: "Bearer secret" } },
+                  { nested: { accessToken: "secret" } },
                 ],
               ),
             ),

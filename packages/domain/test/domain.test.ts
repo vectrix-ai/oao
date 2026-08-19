@@ -6,6 +6,7 @@ import {
   canInstallAdmissionHead,
   evaluateRunTransition,
   isAuthorized,
+  isSensitivePublicKey,
   redactForPublic,
   type OrganizationId,
   type Brand,
@@ -118,4 +119,40 @@ test("redaction is recursive and unsafe payloads are rejected", () => {
     () => assertPublicPayload({ raw_payload: "no" }),
     /Unsafe public payload key/u,
   );
+});
+
+test("sensitive-key normalization allows usage metadata and blocks credential variants", () => {
+  for (const key of [
+    "inputTokens",
+    "output_tokens",
+    "cachedInputTokens",
+    "reasoningTokens",
+    "tokenCount",
+    "token_budget",
+  ]) {
+    assert.equal(isSensitivePublicKey(key), false, key);
+  }
+  for (const key of [
+    "Authorization",
+    "set-cookie",
+    "db_password",
+    "API_TOKEN",
+    "API_KEY",
+    "accessToken",
+    "refresh-token",
+    "session.token",
+    "client_secret",
+    "databaseSecretValue",
+    "rawPrompt",
+    "raw_payload",
+    "tool-payload",
+    "rawToolPayload",
+    "reasoning_content",
+    "chain-of-thought",
+  ]) {
+    assert.equal(isSensitivePublicKey(key), true, key);
+  }
+  const usage = { inputTokens: 12, output_tokens: 4, tokenCount: 16 };
+  assert.deepEqual(redactForPublic(usage), usage);
+  assert.doesNotThrow(() => assertPublicPayload(usage));
 });

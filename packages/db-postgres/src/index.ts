@@ -194,6 +194,14 @@ export interface ToolClaimRepository {
       readonly leaseMilliseconds: number;
     },
   ): Promise<bigint>;
+  beginPlatformExecution(
+    transaction: Queryable,
+    input: TenantContext & {
+      readonly toolCallId: ToolCallId;
+      readonly servicePrincipalId: PrincipalId;
+      readonly leaseMilliseconds: number;
+    },
+  ): Promise<bigint>;
   submitResult(
     transaction: Queryable,
     input: TenantContext & {
@@ -366,6 +374,27 @@ export class PostgresFoundationRepository
         input.projectId,
         input.toolCallId,
         input.principalId,
+        input.leaseMilliseconds,
+      ],
+    );
+    return BigInt((result.rows[0] as { fence: string }).fence);
+  }
+
+  async beginPlatformExecution(
+    transaction: Queryable,
+    input: TenantContext & {
+      readonly toolCallId: ToolCallId;
+      readonly servicePrincipalId: PrincipalId;
+      readonly leaseMilliseconds: number;
+    },
+  ): Promise<bigint> {
+    const result = await transaction.query(
+      "SELECT oao.begin_platform_tool_execution($1,$2,$3,$4,($5 || ' milliseconds')::interval) AS fence",
+      [
+        input.organizationId,
+        input.projectId,
+        input.toolCallId,
+        input.servicePrincipalId,
         input.leaseMilliseconds,
       ],
     );

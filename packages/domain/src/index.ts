@@ -281,9 +281,65 @@ export interface TelemetryPort {
   ): void;
 }
 
-const FORBIDDEN_KEYS =
-  /(?:authorization|cookie|password|secret|token|chain.?of.?thought|reasoning|raw.?payload|tool.?payload)/iu;
 const REDACTED = "[REDACTED]";
+const SAFE_TOKEN_METADATA_KEYS =
+  /^(?:(?:cached)?(?:input|output)|total|reasoning)tokens?$|^tokencounts?$/u;
+const SENSITIVE_TOKEN_KEYS =
+  /^(?:tokens?|(?:access|api|auth|bearer|csrf|id|oauth|personalaccess|provider|refresh|session)tokens?)$/u;
+const SENSITIVE_KEY_MARKERS =
+  /(?:authorization|cookie|password|passwd|secret|rawprompt|rawpayload|toolpayload|reasoning|chainofthought)/u;
+const SENSITIVE_EXACT_KEYS = new Set([
+  "authorization",
+  "authorizationheader",
+  "cookie",
+  "cookies",
+  "setcookie",
+  "password",
+  "passwd",
+  "dbpassword",
+  "secret",
+  "secrets",
+  "secretkey",
+  "secretvalue",
+  "clientsecret",
+  "apisecret",
+  "apikey",
+  "accesskey",
+  "privatekey",
+  "signingsecret",
+  "webhooksecret",
+  "rawprompt",
+  "rawprompts",
+  "promptraw",
+  "rawpayload",
+  "rawpayloads",
+  "payloadraw",
+  "toolpayload",
+  "toolpayloads",
+  "reasoning",
+  "reasoningcontent",
+  "rawreasoning",
+  "chainofthought",
+  "chainofthoughts",
+  "cot",
+]);
+
+export function normalizePublicKey(key: string): string {
+  return key
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/gu, "");
+}
+
+export function isSensitivePublicKey(key: string): boolean {
+  const normalized = normalizePublicKey(key);
+  if (SAFE_TOKEN_METADATA_KEYS.test(normalized)) return false;
+  return (
+    SENSITIVE_EXACT_KEYS.has(normalized) ||
+    SENSITIVE_TOKEN_KEYS.test(normalized) ||
+    SENSITIVE_KEY_MARKERS.test(normalized)
+  );
+}
 
 export type PublicValue =
   | null
@@ -302,7 +358,7 @@ export function redactForPublic(value: unknown): PublicValue {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
         key,
-        FORBIDDEN_KEYS.test(key) ? REDACTED : redactForPublic(nested),
+        isSensitivePublicKey(key) ? REDACTED : redactForPublic(nested),
       ]),
     );
   }
@@ -316,7 +372,7 @@ export function assertPublicPayload(value: PublicValue): void {
   }
   if (value !== null && typeof value === "object") {
     for (const [key, nested] of Object.entries(value)) {
-      if (FORBIDDEN_KEYS.test(key))
+      if (isSensitivePublicKey(key))
         throw new TypeError(`Unsafe public payload key: ${key}`);
       assertPublicPayload(nested);
     }

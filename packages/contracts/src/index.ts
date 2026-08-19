@@ -111,12 +111,19 @@ export const MessageSchema = v.object({
   createdAt: TimestampSchema,
 });
 
-export const ToolCallStatusSchema = v.picklist([
-  "pending",
-  "claimed",
+export const ToolOwnerSchema = v.picklist(["caller", "platform"]);
+export const ToolStageSchema = v.picklist([
+  "caller_pending",
+  "caller_claimed",
+  "platform_ready",
+  "platform_executing",
   "result_submitted",
-  "committed",
+  "result_committed",
+  "approval_denied",
+  "approval_expired",
   "cancelled",
+  "expired",
+  "failed",
 ]);
 export const ToolCallSchema = v.object({
   id: IdSchema,
@@ -124,9 +131,10 @@ export const ToolCallSchema = v.object({
   projectId: IdSchema,
   runId: IdSchema,
   toolName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
-  status: ToolCallStatusSchema,
+  owner: ToolOwnerSchema,
+  stage: ToolStageSchema,
   safeArguments: JsonObjectSchema,
-  claimFence: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  claimFence: v.pipe(v.string(), v.regex(/^(?:0|[1-9]\d*)$/u)),
   createdAt: TimestampSchema,
 });
 
@@ -225,6 +233,8 @@ export type RunState = v.InferOutput<typeof RunStateSchema>;
 export type Run = v.InferOutput<typeof RunSchema>;
 export type Message = v.InferOutput<typeof MessageSchema>;
 export type ToolCall = v.InferOutput<typeof ToolCallSchema>;
+export type ToolOwner = v.InferOutput<typeof ToolOwnerSchema>;
+export type ToolStage = v.InferOutput<typeof ToolStageSchema>;
 export type Approval = v.InferOutput<typeof ApprovalSchema>;
 export type ProductEventKind = v.InferOutput<typeof ProductEventKindSchema>;
 export type ProductEvent = v.InferOutput<typeof ProductEventSchema>;
