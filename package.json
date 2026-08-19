@@ -16,14 +16,22 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "turbo run lint",
+    "db:down": "infra/compose/down.sh",
+    "db:migrate": "pnpm --filter @oao/db-postgres migrate",
+    "db:up": "infra/compose/up.sh",
     "test": "turbo run test",
+    "test:integration": "pnpm --filter @oao/db-postgres test:integration",
+    "test:postgres:fresh": "infra/compose/test-fresh.sh",
     "typecheck": "turbo run typecheck"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@types/node": "22.19.15",
     "eslint": "10.8.1",
     "prettier": "3.9.6",
+    "tsx": "4.23.12",
     "turbo": "2.10.11",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.67.0"
   }
 }

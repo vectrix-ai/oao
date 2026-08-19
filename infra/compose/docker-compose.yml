@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: oao
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+    ports:
+      - "${OAO_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d oao"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - oao-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  oao-postgres-data:

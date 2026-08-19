@@ -1,0 +1,28 @@
+{
+  "name": "@oao/db-postgres",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && cp -R migrations dist/migrations",
+    "lint": "eslint src test",
+    "migrate": "node --import tsx src/cli.ts",
+    "test": "node --import tsx --test test/unit/**/*.test.ts",
+    "test:integration": "node --import tsx --test --test-concurrency=1 test/integration/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@oao/domain": "workspace:*",
+    "@oao/events": "workspace:*",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@types/pg": "8.20.0"
+  }
+}
