@@ -26,8 +26,11 @@ postgres_port=$(docker port "$container_name" 5432/tcp | head -n 1 | sed 's/.*:/
 export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:${postgres_port}/oao"
 pnpm --filter @oao/db-postgres migrate
 pnpm --filter @oao/db-postgres migrate
+# Run the recovery suite before other integration fixtures enqueue synthetic
+# wakes. The worker claims globally by design, so sharing those fixture wakes
+# would make its intentional lease-bound restart assertion order-dependent.
+pnpm --filter @oao/runtime-worker test
 pnpm --filter @oao/db-postgres test:integration
 pnpm --filter @oao/api test:integration
 pnpm --filter @oao/tool-broker test:integration
 pnpm --filter @oao/sandbox-daytona test:integration
-pnpm --filter @oao/runtime-worker test
