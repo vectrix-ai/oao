@@ -66,8 +66,11 @@ export function SessionsPage() {
     queryFn: () => api.listAgents({}),
   });
   const create = useMutation({
-    mutationFn: (input: { agentId: string; title: string }) =>
-      api.createSession(input),
+    mutationFn: (input: {
+      agentId: string;
+      title: string;
+      initialMessage: string;
+    }) => api.createSession(input),
     onSuccess: async (session) => {
       await queryClient.invalidateQueries({ queryKey: ["sessions"] });
       setCreating(false);
@@ -253,7 +256,11 @@ function CreateSessionModal({
   readonly pending: boolean;
   readonly error: Error | null;
   readonly onClose: () => void;
-  readonly onSubmit: (input: { agentId: string; title: string }) => void;
+  readonly onSubmit: (input: {
+    agentId: string;
+    title: string;
+    initialMessage: string;
+  }) => void;
 }) {
   const published = agents.filter((agent) => agent.status === "published");
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -262,6 +269,7 @@ function CreateSessionModal({
     onSubmit({
       agentId: String(data.get("agentId") ?? ""),
       title: String(data.get("title") ?? ""),
+      initialMessage: String(data.get("initialMessage") ?? ""),
     });
   };
   return (
@@ -286,6 +294,15 @@ function CreateSessionModal({
             required
             minLength={2}
             placeholder="What is this session for?"
+          />
+        </Field>
+        <Field label="First message">
+          <textarea
+            name="initialMessage"
+            required
+            minLength={1}
+            rows={5}
+            placeholder="What should the agent do?"
           />
         </Field>
         {error ? (
@@ -329,6 +346,14 @@ export function SessionDetailPage() {
       await queryClient.invalidateQueries({ queryKey: ["sessions"] });
     },
   });
+  const submitMessage = useMutation({
+    mutationFn: (message: string) => api.submitMessage(sessionId, message),
+    onSuccess: async (session) => {
+      queryClient.setQueryData(["session", sessionId], session);
+      await queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
+  });
   if (query.isPending)
     return (
       <div className="page">
@@ -346,6 +371,9 @@ export function SessionDetailPage() {
       session={query.data}
       actionPending={action.isPending}
       onAction={(value) => action.mutate(value)}
+      messagePending={submitMessage.isPending}
+      messageError={submitMessage.error}
+      onSubmitMessage={(message) => submitMessage.mutate(message)}
     />
   );
 }
@@ -354,10 +382,16 @@ function SessionDetailView({
   session,
   actionPending,
   onAction,
+  messagePending,
+  messageError,
+  onSubmitMessage,
 }: {
   readonly session: SessionDetail;
   readonly actionPending: boolean;
   readonly onAction: (action: "cancel" | "resume" | "branch-replay") => void;
+  readonly messagePending: boolean;
+  readonly messageError: Error | null;
+  readonly onSubmitMessage: (message: string) => void;
 }) {
   const [params, setParams] = useSearchParams();
   const tab = params.get("tab") === "debug" ? "debug" : "transcript";
@@ -382,6 +416,17 @@ function SessionDetailView({
       ),
     [session.events, kind, search],
   );
+  const settled = ["completed", "failed", "cancelled", "timed_out"].includes(
+    session.status,
+  );
+  const submitNextMessage = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const message = String(new FormData(form).get("message") ?? "").trim();
+    if (!message) return;
+    onSubmitMessage(message);
+    form.reset();
+  };
   return (
     <div className="page page--wide">
       <Link className="back-link" to="/sessions">
@@ -462,6 +507,36 @@ function SessionDetailView({
           </dd>
         </div>
       </dl>
+      {settled ? (
+        <section className="panel">
+          <div className="section-heading">
+            <div>
+              <h2>Continue session</h2>
+              <p>A new message creates another durable run on this session.</p>
+            </div>
+          </div>
+          <form className="form-stack" onSubmit={submitNextMessage}>
+            <Field label="Message">
+              <textarea
+                name="message"
+                rows={4}
+                required
+                placeholder="Send a follow-up to the same agent and thread"
+              />
+            </Field>
+            {messageError ? (
+              <p className="form-error" role="alert">
+                {messageError.message}
+              </p>
+            ) : null}
+            <div>
+              <button className="button" disabled={messagePending}>
+                {messagePending ? "Submitting…" : "Submit next message"}
+              </button>
+            </div>
+          </form>
+        </section>
+      ) : null}
       <div className="tabs" role="tablist" aria-label="Session views">
         <button
           role="tab"

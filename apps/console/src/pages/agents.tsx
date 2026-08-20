@@ -19,6 +19,16 @@ import {
 
 const agentStatuses = ["", "published", "draft", "archived"];
 
+function initialAgentConfig(name: string): AgentVersionConfig {
+  return {
+    systemPrompt: `You are ${name}, a helpful managed agent. Complete the user's request carefully and do not expose secrets or internal reasoning.`,
+    modelPreset: "local-default",
+    tools: [],
+    sandbox: { enabled: false, network: "none" },
+    limits: { maxTurns: 32, timeoutMs: 60_000 },
+  };
+}
+
 export function AgentsPage() {
   const api = useApi();
   const queryClient = useQueryClient();
@@ -34,7 +44,10 @@ export function AgentsPage() {
   });
   const create = useMutation({
     mutationFn: (input: { name: string; description: string }) =>
-      api.createAgent(input),
+      api.createAgent({
+        ...input,
+        initialConfig: initialAgentConfig(input.name),
+      }),
     onSuccess: async (agent) => {
       await queryClient.invalidateQueries({ queryKey: ["agents"] });
       setCreating(false);
@@ -197,7 +210,7 @@ function CreateAgentModal({
   return (
     <Modal title="Create agent" onClose={onClose}>
       <form className="form-stack" onSubmit={submit}>
-        <p>Start with a draft. Publishing creates a new immutable version.</p>
+        <p>Create the definition with a valid immutable first version.</p>
         <Field label="Name">
           <input
             name="name"
@@ -229,7 +242,7 @@ function CreateAgentModal({
             Cancel
           </button>
           <button className="button" disabled={pending}>
-            {pending ? "Creating…" : "Create draft"}
+            {pending ? "Creating…" : "Create agent"}
           </button>
         </div>
       </form>
@@ -244,6 +257,10 @@ export function AgentDetailPage() {
   const query = useQuery({
     queryKey: ["agent", agentId],
     queryFn: () => api.getAgent(agentId),
+  });
+  const context = useQuery({
+    queryKey: ["context"],
+    queryFn: () => api.getContext(),
   });
   const publish = useMutation({
     mutationFn: (config: AgentVersionConfig) =>
@@ -272,6 +289,7 @@ export function AgentDetailPage() {
       publishing={publish.isPending}
       publishError={publish.error}
       onPublish={(config) => publish.mutate(config)}
+      modelPresets={context.data?.activeModelPresets ?? ["local-default"]}
     />
   );
 }
@@ -281,34 +299,33 @@ function AgentEditor({
   publishing,
   publishError,
   onPublish,
+  modelPresets,
 }: {
   readonly agent: Awaited<ReturnType<ReturnType<typeof useApi>["getAgent"]>>;
   readonly publishing: boolean;
   readonly publishError: Error | null;
   readonly onPublish: (config: AgentVersionConfig) => void;
+  readonly modelPresets: readonly string[];
 }) {
   const [selectedVersion, setSelectedVersion] = useState(agent.version);
   const selected =
     agent.versions.find((version) => version.version === selectedVersion) ??
-    agent.versions[0]!;
-  const [instructions, setInstructions] = useState(
-    selected.config.systemInstructions,
-  );
-  const [modelPreset, setModelPreset] = useState(selected.config.modelPreset);
+    agent.versions[0];
+  const baseConfig = selected?.config ?? initialAgentConfig(agent.name);
+  const [instructions, setInstructions] = useState(baseConfig.systemPrompt);
+  const [modelPreset, setModelPreset] = useState(baseConfig.modelPreset);
   const [sandboxEnabled, setSandboxEnabled] = useState(
-    selected.config.sandbox.enabled,
+    baseConfig.sandbox.enabled,
   );
-  const [target, setTarget] = useState(selected.config.sandbox.target);
-  const [timeout, setTimeoutValue] = useState(
-    selected.config.sandbox.timeoutSeconds,
-  );
-  const isLatest = selectedVersion === agent.version;
+  const [network, setNetwork] = useState(baseConfig.sandbox.network);
+  const [timeout, setTimeoutValue] = useState(baseConfig.limits.timeoutMs);
+  const isLatest = !selected || selectedVersion === agent.version;
   const validation = useMemo(() => {
     const errors: string[] = [];
     if (instructions.trim().length < 20)
       errors.push("System instructions must contain at least 20 characters.");
-    if (timeout < 30 || timeout > 3600)
-      errors.push("Sandbox timeout must be between 30 and 3,600 seconds.");
+    if (timeout < 1_000 || timeout > 3_600_000)
+      errors.push("Run timeout must be between 1,000 and 3,600,000 ms.");
     if (!modelPreset) errors.push("An approved model preset is required.");
     return errors;
   }, [instructions, modelPreset, timeout]);
@@ -316,22 +333,22 @@ function AgentEditor({
     const next = agent.versions.find((item) => item.version === version);
     if (!next) return;
     setSelectedVersion(version);
-    setInstructions(next.config.systemInstructions);
+    setInstructions(next.config.systemPrompt);
     setModelPreset(next.config.modelPreset);
     setSandboxEnabled(next.config.sandbox.enabled);
-    setTarget(next.config.sandbox.target);
-    setTimeoutValue(next.config.sandbox.timeoutSeconds);
+    setNetwork(next.config.sandbox.network);
+    setTimeoutValue(next.config.limits.timeoutMs);
   };
   const config: AgentVersionConfig = {
-    ...selected.config,
-    systemInstructions: instructions,
+    ...baseConfig,
+    systemPrompt: instructions,
     modelPreset,
     sandbox: {
-      ...selected.config.sandbox,
+      ...baseConfig.sandbox,
       enabled: sandboxEnabled,
-      target,
-      timeoutSeconds: timeout,
+      network,
     },
+    limits: { maxTurns: 32, timeoutMs: timeout },
   };
   return (
     <div className="page">
@@ -365,6 +382,11 @@ function AgentEditor({
               <p>Immutable history</p>
             </div>
           </div>
+          {agent.versions.length === 0 ? (
+            <p className="muted">
+              No versions yet. Publish the default draft below.
+            </p>
+          ) : null}
           {agent.versions.map((version) => (
             <button
               key={version.id}
@@ -411,11 +433,16 @@ function AgentEditor({
                   onChange={(event) => setModelPreset(event.target.value)}
                   disabled={!isLatest}
                 >
-                  <option value="balanced-reasoning-v2">
-                    Balanced reasoning v2
-                  </option>
-                  <option value="fast-routing-v1">Fast routing v1</option>
-                  <option value="long-context-v1">Long context v1</option>
+                  {!modelPresets.includes(modelPreset) ? (
+                    <option value={modelPreset}>{modelPreset}</option>
+                  ) : null}
+                  {modelPresets.map((preset) => (
+                    <option key={preset} value={preset}>
+                      {preset === "local-default"
+                        ? "Local deterministic"
+                        : preset}
+                    </option>
+                  ))}
                 </select>
               </Field>
               <Field
@@ -443,14 +470,14 @@ function AgentEditor({
               </button>
             </div>
             <div className="tool-list">
-              {selected.config.tools.length === 0 ? (
+              {baseConfig.tools.length === 0 ? (
                 <EmptyState
                   title="No tools configured"
                   description="This version can only use model capabilities."
                 />
               ) : (
-                selected.config.tools.map((tool) => (
-                  <article className="tool-card" key={tool.id}>
+                baseConfig.tools.map((tool) => (
+                  <article className="tool-card" key={tool.name}>
                     <div>
                       <code>{tool.name}</code>
                       <p>{tool.description}</p>
@@ -467,7 +494,11 @@ function AgentEditor({
                     </dl>
                     <details>
                       <summary>Input schema</summary>
-                      <pre>{tool.inputSchema}</pre>
+                      <pre>{JSON.stringify(tool.inputSchema, null, 2)}</pre>
+                    </details>
+                    <details>
+                      <summary>Output schema</summary>
+                      <pre>{JSON.stringify(tool.outputSchema, null, 2)}</pre>
                     </details>
                   </article>
                 ))
@@ -491,36 +522,32 @@ function AgentEditor({
               </label>
             </div>
             <div className="inline-fields">
-              <Field label="Target">
+              <Field label="Network policy">
                 <select
-                  value={target}
+                  value={network}
                   onChange={(event) =>
-                    setTarget(event.target.value as "local" | "eu" | "us")
+                    setNetwork(event.target.value as "none" | "restricted")
                   }
                   disabled={!isLatest || !sandboxEnabled}
                 >
-                  <option value="local">Local</option>
-                  <option value="eu">EU preference</option>
-                  <option value="us">US preference</option>
+                  <option value="none">No network</option>
+                  <option value="restricted">Restricted</option>
                 </select>
               </Field>
-              <Field label="Timeout (seconds)">
+              <Field label="Run timeout (ms)">
                 <input
                   type="number"
-                  min={30}
-                  max={3600}
+                  min={1000}
+                  max={3600000}
                   value={timeout}
                   onChange={(event) =>
                     setTimeoutValue(Number(event.target.value))
                   }
-                  disabled={!isLatest || !sandboxEnabled}
+                  disabled={!isLatest}
                 />
               </Field>
-              <Field label="Network policy">
-                <select value={selected.config.sandbox.networkPolicy} disabled>
-                  <option value="restricted">Restricted</option>
-                  <option value="deny">Deny all</option>
-                </select>
+              <Field label="Maximum turns">
+                <input type="number" value={32} disabled />
               </Field>
             </div>
           </section>

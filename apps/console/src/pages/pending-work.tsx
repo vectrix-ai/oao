@@ -35,7 +35,14 @@ export function PendingWorkPage() {
     }: {
       id: string;
       result: Record<string, unknown>;
-    }) => api.submitToolResult(id, result),
+    }) => {
+      const work = query.data?.find(
+        (item) => item.kind === "tool" && item.id === id,
+      );
+      if (!work || work.kind !== "tool")
+        throw new Error("Claimed tool work was not found.");
+      return api.submitToolResult(id, work.claimFence, result);
+    },
     onSuccess: async () => {
       setResultFor(null);
       await refresh();

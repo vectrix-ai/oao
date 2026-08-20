@@ -20,23 +20,25 @@ export interface AgentSummary {
 }
 
 export interface ToolDefinition {
-  readonly id: string;
   readonly name: string;
   readonly description: string;
   readonly owner: ToolOwner;
-  readonly approval: "never" | "always" | "conditional";
-  readonly inputSchema: string;
+  readonly approval: "never" | "always";
+  readonly inputSchema: Readonly<Record<string, unknown>>;
+  readonly outputSchema: Readonly<Record<string, unknown>>;
 }
 
 export interface AgentVersionConfig {
-  readonly systemInstructions: string;
+  readonly systemPrompt: string;
   readonly modelPreset: string;
   readonly tools: readonly ToolDefinition[];
   readonly sandbox: {
     readonly enabled: boolean;
-    readonly target: "local" | "eu" | "us";
-    readonly timeoutSeconds: number;
-    readonly networkPolicy: "deny" | "restricted";
+    readonly network: "none" | "restricted";
+  };
+  readonly limits: {
+    readonly maxTurns: 32;
+    readonly timeoutMs: number;
   };
 }
 
@@ -100,6 +102,10 @@ export interface SessionDetail extends SessionSummary {
     readonly canResume: boolean;
     readonly canBranchReplay: boolean;
   };
+  readonly runs?: readonly Readonly<Record<string, unknown>>[];
+  readonly transcript?: readonly Readonly<Record<string, unknown>>[];
+  readonly pendingWork?: readonly Readonly<Record<string, unknown>>[];
+  readonly debug?: Readonly<Record<string, unknown>>;
 }
 
 export type PendingWork =
@@ -147,14 +153,20 @@ export interface ProjectContext {
   readonly organization: { readonly id: string; readonly name: string };
   readonly project: { readonly id: string; readonly name: string };
   readonly currentPrincipal?: {
+    readonly id: string;
+    readonly kind: "human" | "api_key" | "service";
+    readonly subject: string;
     readonly displayName: string;
     readonly role: string;
+    readonly scopes: readonly string[];
   };
   readonly organizations: readonly {
     readonly id: string;
     readonly name: string;
   }[];
   readonly projects: readonly { readonly id: string; readonly name: string }[];
+  readonly activeModelPresets?: readonly string[];
+  readonly authProvider?: "development" | "workos";
 }
 
 export interface SettingsData {
@@ -172,7 +184,7 @@ export interface SettingsData {
     readonly id: string;
     readonly name: string;
     readonly email: string;
-    readonly role: "owner" | "admin" | "operator" | "viewer";
+    readonly role: "owner" | "admin" | "member" | "operator" | "viewer";
   }[];
   readonly apiKeys: readonly {
     readonly id: string;
@@ -201,6 +213,7 @@ export interface ConsoleApi {
   createAgent(input: {
     readonly name: string;
     readonly description: string;
+    readonly initialConfig: AgentVersionConfig;
   }): Promise<AgentSummary>;
   publishAgentVersion(
     id: string,
@@ -211,7 +224,9 @@ export interface ConsoleApi {
   createSession(input: {
     readonly agentId: string;
     readonly title: string;
+    readonly initialMessage: string;
   }): Promise<SessionSummary>;
+  submitMessage(id: string, message: string): Promise<SessionSummary>;
   runSessionAction(
     id: string,
     action: "cancel" | "resume" | "branch-replay",
@@ -220,6 +235,7 @@ export interface ConsoleApi {
   claimTool(id: string): Promise<void>;
   submitToolResult(
     id: string,
+    fence: string,
     result: Readonly<Record<string, unknown>>,
   ): Promise<void>;
   decideApproval(id: string, decision: "approved" | "denied"): Promise<void>;

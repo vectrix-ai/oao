@@ -17,36 +17,52 @@ const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
 const principalId = "33333333-3333-4333-8333-333333333333";
 
 const supportConfig: AgentVersionConfig = {
-  systemInstructions:
+  systemPrompt:
     "You are a careful support operations agent. Verify the customer and summarize only the information needed to resolve the request. Never disclose secrets or internal reasoning.",
-  modelPreset: "balanced-reasoning-v2",
+  modelPreset: "local-default",
   tools: [
     {
-      id: "tool-lookup",
       name: "lookup_customer",
       description: "Find a customer record by a safe external identifier.",
       owner: "platform",
       approval: "never",
-      inputSchema:
-        '{\n  "type": "object",\n  "properties": { "customer_ref": { "type": "string" } },\n  "required": ["customer_ref"]\n}',
+      inputSchema: {
+        type: "object",
+        properties: { customer_ref: { type: "string" } },
+        required: ["customer_ref"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: { found: { type: "boolean" } },
+        required: ["found"],
+      },
     },
     {
-      id: "tool-refund",
       name: "issue_refund",
       description:
         "Request a refund through the caller-owned billing workflow.",
       owner: "caller",
       approval: "always",
-      inputSchema:
-        '{\n  "type": "object",\n  "properties": { "amount": { "type": "number" }, "currency": { "type": "string" } },\n  "required": ["amount", "currency"]\n}',
+      inputSchema: {
+        type: "object",
+        properties: {
+          amount: { type: "number" },
+          currency: { type: "string" },
+        },
+        required: ["amount", "currency"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: { accepted: { type: "boolean" } },
+        required: ["accepted"],
+      },
     },
   ],
   sandbox: {
     enabled: true,
-    target: "local",
-    timeoutSeconds: 300,
-    networkPolicy: "restricted",
+    network: "restricted",
   },
+  limits: { maxTurns: 32, timeoutMs: 300_000 },
 };
 
 const agentsSeed: AgentDetail[] = [
@@ -76,7 +92,7 @@ const agentsSeed: AgentDetail[] = [
         contentHash: "e2804314b2df993d",
         createdAt: "2026-08-17T16:04:00.000Z",
         createdBy: "Demo Operator",
-        config: { ...supportConfig, modelPreset: "fast-routing-v1" },
+        config: supportConfig,
       },
       {
         id: "aaaaaaa1-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -107,9 +123,9 @@ const agentsSeed: AgentDetail[] = [
         createdBy: "Maya Chen",
         config: {
           ...supportConfig,
-          systemInstructions:
+          systemPrompt:
             "Extract verifiable facts from provided documents. Cite the source page. Do not infer missing values.",
-          modelPreset: "long-context-v1",
+          modelPreset: "local-default",
           tools: [],
         },
       },
@@ -134,9 +150,9 @@ const agentsSeed: AgentDetail[] = [
         createdBy: "Demo Operator",
         config: {
           ...supportConfig,
-          systemInstructions:
+          systemPrompt:
             "Classify incoming orders into standard, exception, or needs review.",
-          modelPreset: "fast-routing-v1",
+          modelPreset: "local-default",
         },
       },
     ],
@@ -506,8 +522,12 @@ export class DemoConsoleApi implements ConsoleApi {
       organization: { id: ORG_ID, name: "Example operations" },
       project: { id: PROJECT_ID, name: "Managed agents" },
       currentPrincipal: {
+        id: principalId,
+        kind: "human" as const,
+        subject: "demo.operator@example.test",
         displayName: "Demo Operator",
         role: "Platform Owner",
+        scopes: ["*"],
       },
       organizations: [{ id: ORG_ID, name: "Example operations" }],
       projects: [
@@ -541,11 +561,12 @@ export class DemoConsoleApi implements ConsoleApi {
   async createAgent(input: {
     readonly name: string;
     readonly description: string;
+    readonly initialConfig: AgentVersionConfig;
   }): Promise<AgentSummary> {
     this.#counter += 1;
     const now = new Date().toISOString();
     const id = `dddddddd-dddd-4ddd-8ddd-${String(this.#counter).padStart(12, "0")}`;
-    const config = { ...supportConfig, tools: [] };
+    const config = input.initialConfig;
     const detail: AgentDetail = {
       id,
       name: input.name,
@@ -554,7 +575,7 @@ export class DemoConsoleApi implements ConsoleApi {
         .replace(/[^a-z0-9]+/gu, "-")
         .replace(/^-|-$/gu, ""),
       description: input.description,
-      model: "Balanced reasoning v2",
+      model: config.modelPreset,
       status: "draft",
       version: 1,
       createdAt: now,
@@ -626,6 +647,7 @@ export class DemoConsoleApi implements ConsoleApi {
   async createSession(input: {
     readonly agentId: string;
     readonly title: string;
+    readonly initialMessage: string;
   }) {
     const agent = this.#agents.find((item) => item.id === input.agentId);
     if (!agent) throw new Error("Agent not found");
@@ -648,7 +670,17 @@ export class DemoConsoleApi implements ConsoleApi {
       startedAt: now,
       completedAt: null,
       attempt: 1,
-      events: [],
+      events: [
+        {
+          id: `message_demo_${this.#counter}`,
+          kind: "user",
+          title: "User",
+          summary: input.initialMessage,
+          createdAt: now,
+          durationMs: null,
+          status: "success",
+        },
+      ],
       capabilities: {
         canCancel: true,
         canResume: false,
@@ -657,6 +689,42 @@ export class DemoConsoleApi implements ConsoleApi {
     };
     this.#sessions.unshift(detail);
     return detail;
+  }
+
+  async submitMessage(id: string, message: string) {
+    const session = this.#sessions.find((item) => item.id === id);
+    if (!session) throw new Error("Session not found");
+    this.#counter += 1;
+    const now = new Date().toISOString();
+    const updated: SessionDetail = {
+      ...session,
+      status: "queued",
+      runId: `run_demo_${this.#counter}`,
+      startedAt: now,
+      completedAt: null,
+      lastActivityAt: now,
+      events: [
+        ...session.events,
+        {
+          id: `message_demo_${this.#counter}`,
+          kind: "user",
+          title: "User",
+          summary: message,
+          createdAt: now,
+          durationMs: null,
+          status: "success",
+        },
+      ],
+      capabilities: {
+        canCancel: true,
+        canResume: false,
+        canBranchReplay: false,
+      },
+    };
+    this.#sessions = this.#sessions.map((item) =>
+      item.id === id ? updated : item,
+    );
+    return updated;
   }
 
   async runSessionAction(
@@ -702,7 +770,8 @@ export class DemoConsoleApi implements ConsoleApi {
     );
   }
 
-  async submitToolResult(id: string) {
+  async submitToolResult(id: string, _fence: string) {
+    void _fence;
     this.#pending = this.#pending.filter((work) => work.id !== id);
   }
 

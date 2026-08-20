@@ -65,54 +65,73 @@ export function useProjectEvents(): {
 
   useEffect(() => {
     const controller = new AbortController();
-    const after = sessionStorage.getItem("oao:event-cursor");
-    const connection = api.connectEvents({
-      ...(after ? { after } : {}),
-      signal: controller.signal,
-      onCursor: (cursor) => sessionStorage.setItem("oao:event-cursor", cursor),
-      onError: (streamError) => {
-        setConnected(false);
-        setError(streamError.message);
-      },
-      onEvent: (event) => {
-        setConnected(true);
-        setError(null);
-        const sessionId =
-          typeof event.publicPayload.sessionId === "string"
-            ? event.publicPayload.sessionId
-            : event.aggregateId;
-        if (event.kind === "run.state_changed") {
-          queryClient.setQueriesData<{ data: SessionSummary[] }>(
-            { queryKey: ["sessions"] },
-            (old) =>
-              old
-                ? {
-                    ...old,
-                    data: old.data.map((session) =>
-                      applyRunState(session, event),
-                    ),
-                  }
-                : old,
-          );
-          queryClient.setQueryData<SessionDetail>(
-            ["session", sessionId],
-            (old) => (old ? applyRunState(old, event) : old),
+    let connection: ReturnType<ConsoleApi["connectEvents"]> | undefined;
+    void api
+      .getContext()
+      .then((context) => {
+        if (controller.signal.aborted) return;
+        const cursorKey = `oao:event-cursor:${context.project.id}`;
+        const after = sessionStorage.getItem(cursorKey);
+        connection = api.connectEvents({
+          ...(after ? { after } : {}),
+          signal: controller.signal,
+          onCursor: (cursor) => sessionStorage.setItem(cursorKey, cursor),
+          onError: (streamError) => {
+            setConnected(false);
+            setError(streamError.message);
+          },
+          onEvent: (event) => {
+            setConnected(true);
+            setError(null);
+            const sessionId =
+              typeof event.publicPayload.sessionId === "string"
+                ? event.publicPayload.sessionId
+                : event.aggregateId;
+            if (event.kind === "run.state_changed") {
+              queryClient.setQueriesData<{ data: SessionSummary[] }>(
+                { queryKey: ["sessions"] },
+                (old) =>
+                  old
+                    ? {
+                        ...old,
+                        data: old.data.map((session) =>
+                          applyRunState(session, event),
+                        ),
+                      }
+                    : old,
+              );
+              queryClient.setQueryData<SessionDetail>(
+                ["session", sessionId],
+                (old) => (old ? applyRunState(old, event) : old),
+              );
+            }
+            void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+            void queryClient.invalidateQueries({
+              queryKey: ["session", sessionId],
+            });
+            if (
+              event.kind.startsWith("tool_call.") ||
+              event.kind.startsWith("approval.")
+            )
+              void queryClient.invalidateQueries({
+                queryKey: ["pending-work"],
+              });
+          },
+        });
+      })
+      .catch((contextError: unknown) => {
+        if (!controller.signal.aborted) {
+          setConnected(false);
+          setError(
+            contextError instanceof Error
+              ? contextError.message
+              : "Unable to load project context",
           );
         }
-        void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-        void queryClient.invalidateQueries({
-          queryKey: ["session", sessionId],
-        });
-        if (
-          event.kind.startsWith("tool_call.") ||
-          event.kind.startsWith("approval.")
-        )
-          void queryClient.invalidateQueries({ queryKey: ["pending-work"] });
-      },
-    });
+      });
     return () => {
       controller.abort();
-      connection.close();
+      connection?.close();
     };
   }, [api, queryClient]);
 

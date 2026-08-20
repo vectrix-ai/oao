@@ -114,6 +114,46 @@ describe("management console", () => {
     ).toBeInTheDocument();
   });
 
+  it("creates a session with its first durable user message", async () => {
+    const user = userEvent.setup();
+    renderConsole("/sessions");
+    await user.click(
+      await screen.findByRole("button", { name: "Create session" }),
+    );
+    await user.selectOptions(
+      screen.getByLabelText("Agent"),
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    );
+    await user.type(screen.getByLabelText("Title"), "Local browser slice");
+    await user.type(
+      screen.getByLabelText("First message"),
+      "Complete the deterministic local task.",
+    );
+    await user.click(
+      screen.getAllByRole("button", { name: "Create session" }).at(-1)!,
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Local browser slice" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findAllByText("Complete the deterministic local task."),
+    ).not.toHaveLength(0);
+  });
+
+  it("submits a second message only after the latest run settles", async () => {
+    const user = userEvent.setup();
+    renderConsole("/sessions/session_01J5PDRS7WZTP4H3F6M2A9B8CX");
+    const message = await screen.findByLabelText("Message");
+    await user.type(message, "Now summarize only the renewal exceptions.");
+    await user.click(
+      screen.getByRole("button", { name: "Submit next message" }),
+    );
+    expect(
+      await screen.findByText("Now summarize only the renewal exceptions."),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
+  });
+
   it("claims caller work and resolves approvals", async () => {
     const user = userEvent.setup();
     renderConsole("/pending-work");
@@ -150,6 +190,10 @@ describe("management console", () => {
       await screen.findByText("Q3 contract extraction"),
     ).toBeInTheDocument();
     await waitFor(() => expect(api.calls).toBeGreaterThan(1));
-    expect(sessionStorage.getItem("oao:event-cursor")).toBe("djE6NDI");
+    expect(
+      sessionStorage.getItem(
+        "oao:event-cursor:22222222-2222-4222-8222-222222222222",
+      ),
+    ).toBe("djE6NDI");
   });
 });
