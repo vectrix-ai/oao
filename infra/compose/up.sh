@@ -9,12 +9,15 @@ if command -v docker-compose >/dev/null 2>&1; then
 fi
 
 container_name=oao-postgres-local
+volume_name=oao-postgres-data
 if docker container inspect "$container_name" >/dev/null 2>&1; then
   docker start "$container_name" >/dev/null
 else
+  docker volume create "$volume_name" >/dev/null
   docker run -d --name "$container_name" \
     -e POSTGRES_DB=oao -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
     -p "${OAO_POSTGRES_PORT:-5432}:5432" \
+    -v "$volume_name:/var/lib/postgresql/data" \
     --health-cmd='pg_isready -U postgres -d oao' --health-interval=2s --health-timeout=3s --health-retries=30 \
     postgres:17-alpine >/dev/null
 fi

@@ -25,7 +25,9 @@ pnpm db:down
 `DATABASE_URL` defaults to
 `postgresql://postgres:postgres@127.0.0.1:5432/oao` in `.env.example`. Set both
 `OAO_POSTGRES_PORT` and the matching `DATABASE_URL` if port 5432 is occupied.
-Compose keeps the named data volume when the service is stopped.
+Both the Compose path and the Docker CLI fallback keep the same named
+`oao-postgres-data` volume when the service is stopped, so agents, sessions,
+transcripts, and debug history survive a full `dev:local` stop/start.
 
 For isolated clean-room checks, use `pnpm test:postgres:fresh` and
 `pnpm test:stack:fresh`. The first applies migrations twice and runs all
