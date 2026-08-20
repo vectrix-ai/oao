@@ -95,7 +95,7 @@ export class DevelopmentAuthAdapter implements AuthTenantAdapter {
 
   constructor(options: DevelopmentAuthOptions = {}) {
     this.#principal = options.principal ?? DEVELOPMENT_PRINCIPAL;
-    this.#now = options.now ?? (() => new Date("2026-01-01T00:00:00.000Z"));
+    this.#now = options.now ?? (() => new Date());
     this.#bearerToken = options.bearerToken;
   }
 

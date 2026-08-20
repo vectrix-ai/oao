@@ -10,7 +10,9 @@ import {
 } from "../src/index.ts";
 
 test("development auth is deterministic and trusted by default", async () => {
-  const adapter = new DevelopmentAuthAdapter();
+  const adapter = new DevelopmentAuthAdapter({
+    now: () => new Date("2026-01-01T00:00:00.000Z"),
+  });
   const request = new Request("http://localhost/api");
 
   assert.equal(await adapter.authenticate(request), DEVELOPMENT_PRINCIPAL);
@@ -22,6 +24,18 @@ test("development auth is deterministic and trusted by default", async () => {
       .principal,
     DEVELOPMENT_PRINCIPAL,
   );
+});
+
+test("development auth uses a live clock unless a test clock is injected", async () => {
+  const before = Date.now();
+  const session = await new DevelopmentAuthAdapter().callback({
+    code: "ignored",
+    redirectUri: "/",
+  });
+  const after = Date.now();
+
+  assert.ok(session.expiresAt.getTime() >= before + 24 * 60 * 60 * 1000);
+  assert.ok(session.expiresAt.getTime() <= after + 24 * 60 * 60 * 1000);
 });
 
 test("development auth can require an explicit bearer token", async () => {
