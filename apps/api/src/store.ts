@@ -75,14 +75,16 @@ export class PostgresApiStore {
 
   async transaction<T>(
     principal: Principal,
-    action: AuthorizationAction,
+    action: AuthorizationAction | readonly AuthorizationAction[] | undefined,
     callback: (transaction: PgClient, tenant: TenantContext) => Promise<T>,
   ): Promise<T> {
     const tenant = {
       organizationId: principal.organizationId,
       projectId: principal.projectId,
     };
-    if (!isAuthorized(principal, action, tenant))
+    const actions =
+      action === undefined ? [] : Array.isArray(action) ? action : [action];
+    if (actions.some((required) => !isAuthorized(principal, required, tenant)))
       throw new HttpApiError("forbidden", "Principal lacks the required scope");
     try {
       return await withTenantTransaction(
@@ -290,10 +292,11 @@ export class PostgresApiStore {
     cursor: ListCursor | undefined,
     timestampColumn: string,
     firstParameter: number,
+    idColumn = "id",
   ): { readonly sql: string; readonly values: readonly unknown[] } {
     if (!cursor) return { sql: "", values: [] };
     return {
-      sql: ` AND (${timestampColumn},id) < ($${firstParameter}::timestamptz,$${firstParameter + 1}::uuid)`,
+      sql: ` AND (${timestampColumn},${idColumn}) < ($${firstParameter}::timestamptz,$${firstParameter + 1}::uuid)`,
       values: [cursor.timestamp, cursor.id],
     };
   }

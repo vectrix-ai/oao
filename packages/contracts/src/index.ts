@@ -277,6 +277,7 @@ export const ProductEventKindSchema = v.picklist([
 ]);
 
 export const RuntimeToolSnapshotSchema = v.strictObject({
+  schemaVersion: v.optional(v.literal(1), 1),
   name: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
   description: v.pipe(v.string(), v.minLength(1), v.maxLength(2_000)),
   owner: v.picklist(["platform", "caller"]),
@@ -287,17 +288,15 @@ export const RuntimeToolSnapshotSchema = v.strictObject({
 
 export const PLATFORM_MAX_TURNS = 32;
 
-export const ManagedAgentSnapshotSchema = v.object({
-  agentVersionId: IdSchema,
-  contentHash: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
+export const ManagedAgentPublicationConfigSchema = v.strictObject({
   systemPrompt: v.pipe(v.string(), v.minLength(1), v.maxLength(100_000)),
   modelPreset: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
   tools: v.array(RuntimeToolSnapshotSchema),
-  sandbox: v.object({
+  sandbox: v.strictObject({
     enabled: v.boolean(),
     network: v.picklist(["none", "restricted"]),
   }),
-  limits: v.object({
+  limits: v.strictObject({
     maxTurns: v.literal(PLATFORM_MAX_TURNS),
     timeoutMs: v.pipe(v.number(), v.integer(), v.minValue(1_000)),
   }),
@@ -305,9 +304,15 @@ export const ManagedAgentSnapshotSchema = v.object({
 
 export function parseManagedAgentSnapshotForPublication(
   input: unknown,
-): ManagedAgentSnapshot {
-  return v.parse(ManagedAgentSnapshotSchema, input);
+): ManagedAgentPublicationConfig {
+  return v.parse(ManagedAgentPublicationConfigSchema, input);
 }
+
+export const ManagedAgentSnapshotSchema = v.strictObject({
+  agentVersionId: IdSchema,
+  contentHash: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
+  ...ManagedAgentPublicationConfigSchema.entries,
+});
 
 export const ManagedAgentInstanceDataSchema = v.object({
   organizationId: IdSchema,
@@ -420,6 +425,9 @@ export type ProductEventKind = v.InferOutput<typeof ProductEventKindSchema>;
 export type ProductEvent = v.InferOutput<typeof ProductEventSchema>;
 export type ManagedAgentSnapshot = v.InferOutput<
   typeof ManagedAgentSnapshotSchema
+>;
+export type ManagedAgentPublicationConfig = v.InferOutput<
+  typeof ManagedAgentPublicationConfigSchema
 >;
 export type ManagedAgentInstanceData = v.InferOutput<
   typeof ManagedAgentInstanceDataSchema

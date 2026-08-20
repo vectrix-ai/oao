@@ -248,12 +248,7 @@ export function withPlatformTurnLimit<T extends Provider>(
 }
 
 export function createDeterministicModelProvider(
-  responses: readonly FauxResponseStep[] = [
-    fauxAssistantMessage("deterministic response", {
-      responseId: "oao-fake-response-1",
-      timestamp: 1,
-    }),
-  ],
+  responses?: readonly FauxResponseStep[],
 ): FauxProviderHandle {
   const handle = fauxProvider({
     provider: "fake",
@@ -271,11 +266,59 @@ export function createDeterministicModelProvider(
     ],
     tokensPerSecond: 0,
   });
-  handle.setResponses([...responses]);
+  if (responses) {
+    handle.setResponses([...responses]);
+  } else {
+    const repeat: FauxResponseStep = (_context, _options, state) => {
+      handle.appendResponses([repeat]);
+      return fauxAssistantMessage("deterministic response", {
+        responseId: `oao-fake-response-${state.callCount}`,
+      });
+    };
+    handle.setResponses([repeat]);
+  }
   return handle;
 }
 
 export const DEFAULT_LOCAL_PRESETS = deepFreeze([
   { key: "local-default", model: "fake/deterministic" },
 ]);
+
+export interface ModelPresetConfiguration {
+  readonly hostedEnabled: boolean;
+  readonly hostedPresets: readonly ApprovedModelPreset[];
+  readonly presets: readonly ApprovedModelPreset[];
+  readonly registry: ImmutableModelPresetRegistry;
+}
+
+/**
+ * Loads the one model-preset catalog shared by publication and execution.
+ * Hosted presets are deliberately unavailable unless the operator opts in;
+ * constructing the registry also verifies every OpenRouter model against the
+ * catalog pinned by the runtime's Pi dependency.
+ */
+export function loadModelPresetConfiguration(
+  environment: Readonly<Record<string, string | undefined>>,
+): ModelPresetConfiguration {
+  const hostedEnabled = environment.OAO_ENABLE_HOSTED_MODELS === "true";
+  if (hostedEnabled && !environment.OAO_OPENROUTER_PRESETS_JSON)
+    throw new Error(
+      "OAO_OPENROUTER_PRESETS_JSON is required when hosted models are enabled",
+    );
+  const hostedPresets = hostedEnabled
+    ? parseApprovedModelPresets(
+        JSON.parse(environment.OAO_OPENROUTER_PRESETS_JSON ?? "[]") as unknown,
+      )
+    : [];
+  const presets = [
+    ...(DEFAULT_LOCAL_PRESETS as readonly ApprovedModelPreset[]),
+    ...hostedPresets,
+  ];
+  return {
+    hostedEnabled,
+    hostedPresets,
+    presets,
+    registry: new ImmutableModelPresetRegistry(presets, { hostedEnabled }),
+  };
+}
 import { createHash } from "node:crypto";

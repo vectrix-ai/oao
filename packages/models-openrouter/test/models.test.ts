@@ -6,6 +6,7 @@ import {
   createDeterministicModelProvider,
   createOpenRouterProvider,
   createOpenRouterPresetProviders,
+  loadModelPresetConfiguration,
   parseApprovedModelPresets,
   withPlatformTurnLimit,
 } from "../src/index.js";
@@ -23,6 +24,30 @@ test("local preset is immutable and resolves without hosted opt-in", () => {
   );
 });
 
+test("publication and runtime load the same opt-in preset catalog", () => {
+  const local = loadModelPresetConfiguration({});
+  assert.deepEqual(
+    local.registry.list().map((preset) => preset.key),
+    ["local-default"],
+  );
+  assert.equal(local.hostedEnabled, false);
+
+  assert.throws(
+    () => loadModelPresetConfiguration({ OAO_ENABLE_HOSTED_MODELS: "true" }),
+    /OAO_OPENROUTER_PRESETS_JSON/u,
+  );
+  assert.throws(
+    () =>
+      loadModelPresetConfiguration({
+        OAO_ENABLE_HOSTED_MODELS: "true",
+        OAO_OPENROUTER_PRESETS_JSON: JSON.stringify([
+          { key: "missing", model: "openrouter/not-a-real/model" },
+        ]),
+      }),
+    /pinned OpenRouter catalog/u,
+  );
+});
+
 test("fake and OpenRouter adapters use Pi providers", () => {
   assert.equal(createDeterministicModelProvider().provider.id, "fake");
   const openrouter = createOpenRouterProvider({
@@ -35,6 +60,20 @@ test("fake and OpenRouter adapters use Pi providers", () => {
     openrouter.getModels()[0]?.compat?.openRouterRouting?.data_collection,
     "deny",
   );
+});
+
+test("default deterministic provider remains available across turns", async () => {
+  const faux = createDeterministicModelProvider();
+  const model = faux.provider.getModels()[0];
+  assert.ok(model);
+  const context = {
+    messages: [{ role: "user" as const, content: "first", timestamp: 1 }],
+  };
+  const first = await faux.provider.stream(model, context).result();
+  const second = await faux.provider.stream(model, context).result();
+  assert.equal(first.stopReason, "stop");
+  assert.equal(second.stopReason, "stop");
+  assert.equal(faux.getPendingResponseCount(), 1);
 });
 
 test("hosted presets must exist in the pinned Pi OpenRouter catalog", () => {

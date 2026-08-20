@@ -29,6 +29,7 @@
     "@oao/db-postgres": "workspace:*",
     "@oao/domain": "workspace:*",
     "@oao/events": "workspace:*",
+    "@oao/models-openrouter": "workspace:*",
     "hono": "4.13.3",
     "pg": "8.23.0"
   },

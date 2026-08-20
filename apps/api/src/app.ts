@@ -1,6 +1,11 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { AuthSession, AuthTenantAdapter } from "@oao/auth-core";
 import { readCookie } from "@oao/auth-core";
+import {
+  PLATFORM_MAX_TURNS,
+  parseManagedAgentSnapshotForPublication,
+  type ManagedAgentPublicationConfig,
+} from "@oao/contracts";
 import type { ArtifactPort, Principal, PublicValue } from "@oao/domain";
 import { assertPublicPayload, AUTHORIZATION_ACTIONS } from "@oao/domain";
 import { decodeEventCursor, encodeEventCursor } from "@oao/events";
@@ -39,6 +44,7 @@ export interface ApiDependencies {
   readonly artifacts?: ArtifactPort;
   readonly notifier?: WakeOnlyNotifier;
   readonly runtimeCommands: RuntimeCommandPort;
+  readonly activeModelPresetKeys?: ReadonlySet<string>;
   readonly authConfiguration?: ApiAuthConfiguration;
   readonly onError?: (input: {
     readonly requestId: string;
@@ -145,42 +151,44 @@ function parseFence(value: unknown): bigint {
 
 function parseAgentConfig(
   value: unknown,
-): Readonly<Record<string, PublicValue>> {
-  if (!value || Array.isArray(value) || typeof value !== "object")
-    throw new HttpApiError("bad_request", "config must be an object");
-  const config = value as Record<string, unknown>;
-  requiredString(config.systemPrompt, "config.systemPrompt", 100_000);
-  requiredString(config.modelPreset, "config.modelPreset", 200);
-  if (!Array.isArray(config.tools))
-    throw new HttpApiError("bad_request", "config.tools must be an array");
-  for (const tool of config.tools) {
-    if (!tool || Array.isArray(tool) || typeof tool !== "object")
-      throw new HttpApiError("bad_request", "Each tool must be an object");
-    const item = tool as Record<string, unknown>;
-    requiredString(item.name, "tool.name", 200);
-    if (item.owner !== "caller" && item.owner !== "platform")
-      throw new HttpApiError(
-        "bad_request",
-        "tool.owner must be caller or platform",
-      );
-    if (item.approval !== "never" && item.approval !== "always")
-      throw new HttpApiError(
-        "bad_request",
-        "tool.approval must be never or always",
-      );
-    if (!item.inputSchema || typeof item.inputSchema !== "object")
-      throw new HttpApiError(
-        "bad_request",
-        "tool.inputSchema must be an object",
-      );
-  }
-  if (!config.sandboxPolicy || typeof config.sandboxPolicy !== "object")
+  activeModelPresetKeys: ReadonlySet<string>,
+): ManagedAgentPublicationConfig {
+  let config: ManagedAgentPublicationConfig;
+  try {
+    config = parseManagedAgentSnapshotForPublication(value);
+  } catch {
     throw new HttpApiError(
       "bad_request",
-      "config.sandboxPolicy must be an object",
+      "config must match the managed-agent publication contract",
+    );
+  }
+  if (!activeModelPresetKeys.has(config.modelPreset))
+    throw new HttpApiError(
+      "bad_request",
+      "config.modelPreset is not active in this deployment",
     );
   assertPublicPayload(config as Readonly<Record<string, PublicValue>>);
-  return config as Readonly<Record<string, PublicValue>>;
+  return config;
+}
+
+function defaultAgentConfig(name: string): ManagedAgentPublicationConfig {
+  return {
+    systemPrompt: `You are ${name}, a helpful managed agent.`,
+    modelPreset: "local-default",
+    tools: [],
+    sandbox: { enabled: false, network: "none" },
+    limits: { maxTurns: PLATFORM_MAX_TURNS, timeoutMs: 60_000 },
+  };
+}
+
+function defaultAgentKey(name: string): string {
+  const base = name
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-|-$/gu, "")
+    .slice(0, 100);
+  return `${base || "agent"}-${randomUUID().slice(0, 8)}`;
 }
 
 export function createApiApp(dependencies: ApiDependencies): Hono<{
@@ -189,6 +197,8 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   const app = new Hono<{ Variables: Variables }>();
   const authConfiguration =
     dependencies.authConfiguration ?? DEFAULT_AUTH_CONFIGURATION;
+  const activeModelPresetKeys =
+    dependencies.activeModelPresetKeys ?? new Set(["local-default"]);
 
   app.use("*", async (c, next) => {
     const incoming = c.req.header("x-request-id");
@@ -384,6 +394,37 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   app.use("/v1/projects/*", authenticate);
   app.use("/v1/projects", authenticate);
   app.use("/v1/organizations*", authenticate);
+  app.use("/v1/context", authenticate);
+
+  app.get("/v1/context", async (c) => {
+    const actor = principal(c);
+    return dependencies.store.transaction(actor, undefined, async (tx) => {
+      const [organizationResult, projectResult] = await Promise.all([
+        tx.query(
+          "SELECT id,slug,name,created_at FROM oao.organizations WHERE id=$1",
+          [actor.organizationId],
+        ),
+        tx.query(
+          `SELECT id,organization_id,slug,name,created_at FROM oao.projects
+           WHERE organization_id=$1 AND id=$2`,
+          [actor.organizationId, actor.projectId],
+        ),
+      ]);
+      const organization = publicValue(organizationResult.rows[0]);
+      const project = publicValue(projectResult.rows[0]);
+      if (!organization || !project)
+        throw new HttpApiError("not_found", "Authenticated project not found");
+      return c.json({
+        principal: publicPrincipal(actor),
+        organization,
+        project,
+        organizations: [organization],
+        projects: [project],
+        activeModelPresets: [...activeModelPresetKeys].sort(),
+        authProvider: authConfiguration.provider,
+      });
+    });
+  });
 
   app.get("/v1/organizations", async (c) => {
     const actor = principal(c);
@@ -477,6 +518,7 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           cursor,
           "pm.created_at",
           3,
+          "p.id",
         );
         const result = await tx.query(
           `SELECT p.id,pm.organization_id,pm.project_id,pm.principal_id,p.kind,p.subject,p.scopes,pm.role,pm.created_at
@@ -895,6 +937,8 @@ function registerAgentRoutes(
   app: Hono<{ Variables: Variables }>,
   dependencies: ApiDependencies,
 ): void {
+  const activeModelPresetKeys =
+    dependencies.activeModelPresetKeys ?? new Set(["local-default"]);
   app.get("/v1/projects/:projectId/agents", async (c) => {
     const actor = assertProject(c);
     const limit = parseLimit(c.req.query("limit"));
@@ -902,13 +946,20 @@ function registerAgentRoutes(
     return dependencies.store.transaction(actor, "agent:read", async (tx) => {
       const condition = dependencies.store.cursorCondition(
         cursor,
-        "created_at",
+        "d.created_at",
         3,
+        "d.id",
       );
       const result = await tx.query(
-        `SELECT id,organization_id,project_id,agent_key AS key,name,description,latest_version_id,created_at
-         FROM oao.agent_definitions WHERE organization_id=$1 AND project_id=$2${condition.sql}
-         ORDER BY created_at DESC,id DESC LIMIT $${3 + condition.values.length}`,
+        `SELECT d.id,d.organization_id,d.project_id,d.agent_key AS key,d.name,COALESCE(d.description,'') AS description,
+                d.latest_version_id,v.version,v.config->>'modelPreset' AS model,
+                CASE WHEN v.id IS NULL THEN 'draft' ELSE 'published' END AS status,
+                d.created_at,COALESCE(v.created_at,d.created_at) AS updated_at
+         FROM oao.agent_definitions d
+         LEFT JOIN oao.agent_versions v ON v.organization_id=d.organization_id
+           AND v.project_id=d.project_id AND v.id=d.latest_version_id
+         WHERE d.organization_id=$1 AND d.project_id=$2${condition.sql}
+         ORDER BY d.created_at DESC,d.id DESC LIMIT $${3 + condition.values.length}`,
         [actor.organizationId, actor.projectId, ...condition.values, limit + 1],
       );
       return c.json(pagination(rows(result), limit, "createdAt"));
@@ -919,9 +970,19 @@ function registerAgentRoutes(
     const actor = assertProject(c);
     const body = await readJsonObject(c.req.raw);
     const idem = idempotencyKey(c.req.raw);
-    const agentKey = requiredString(body.key, "key", 120);
     const name = requiredString(body.name, "name", 200);
-    const description = optionalString(body.description, "description");
+    const agentKey =
+      body.key === undefined
+        ? defaultAgentKey(name)
+        : requiredString(body.key, "key", 120);
+    const description =
+      body.description === ""
+        ? undefined
+        : optionalString(body.description, "description");
+    const config = parseAgentConfig(
+      body.initialConfig ?? body.config ?? defaultAgentConfig(name),
+      activeModelPresetKeys,
+    );
     return dependencies.store.transaction(actor, "agent:write", async (tx) => {
       const response = await dependencies.store.idempotent(tx, actor, {
         scope: "POST:/agents",
@@ -929,19 +990,43 @@ function registerAgentRoutes(
         hash: requestHash(body),
         status: 201,
         execute: async () => {
-          const result = await tx.query(
+          const agentId = randomUUID();
+          const versionId = randomUUID();
+          await tx.query(
             `INSERT INTO oao.agent_definitions
                (organization_id,project_id,id,agent_key,name,description)
              VALUES ($1,$2,$3,$4,$5,$6)
-             RETURNING id,organization_id,project_id,agent_key AS key,name,description,latest_version_id,created_at`,
+             RETURNING id`,
             [
               actor.organizationId,
               actor.projectId,
-              randomUUID(),
+              agentId,
               agentKey,
               name,
               description ?? null,
             ],
+          );
+          await tx.query(
+            "SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7)",
+            [
+              actor.organizationId,
+              actor.projectId,
+              agentId,
+              versionId,
+              config,
+              requestHash(config),
+              actor.id,
+            ],
+          );
+          const result = await tx.query(
+            `SELECT d.id,d.organization_id,d.project_id,d.agent_key AS key,d.name,COALESCE(d.description,'') AS description,
+                    d.latest_version_id,v.version,v.config->>'modelPreset' AS model,'published' AS status,
+                    d.created_at,v.created_at AS updated_at
+             FROM oao.agent_definitions d JOIN oao.agent_versions v
+               ON v.organization_id=d.organization_id AND v.project_id=d.project_id
+              AND v.id=d.latest_version_id
+             WHERE d.organization_id=$1 AND d.project_id=$2 AND d.id=$3`,
+            [actor.organizationId, actor.projectId, agentId],
           );
           const agent = publicValue(result.rows[0]) as Readonly<
             Record<string, unknown>
@@ -949,7 +1034,14 @@ function registerAgentRoutes(
           await dependencies.store.appendAudit(tx, actor, {
             action: "agent.created",
             resourceType: "agent",
-            resourceId: String(agent.id),
+            resourceId: agentId,
+            detail: { initialVersionId: versionId },
+          });
+          await dependencies.store.appendAudit(tx, actor, {
+            action: "agent_version.published",
+            resourceType: "agent_version",
+            resourceId: versionId,
+            detail: { agentId, version: 1 },
           });
           return agent;
         },
@@ -963,13 +1055,27 @@ function registerAgentRoutes(
     const actor = assertProject(c);
     return dependencies.store.transaction(actor, "agent:read", async (tx) => {
       const result = await tx.query(
-        `SELECT id,organization_id,project_id,agent_key AS key,name,description,latest_version_id,created_at
-         FROM oao.agent_definitions WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+        `SELECT d.id,d.organization_id,d.project_id,d.agent_key AS key,d.name,COALESCE(d.description,'') AS description,
+                d.latest_version_id,v.version,v.config->>'modelPreset' AS model,
+                CASE WHEN v.id IS NULL THEN 'draft' ELSE 'published' END AS status,
+                d.created_at,COALESCE(v.created_at,d.created_at) AS updated_at
+         FROM oao.agent_definitions d
+         LEFT JOIN oao.agent_versions v ON v.organization_id=d.organization_id
+           AND v.project_id=d.project_id AND v.id=d.latest_version_id
+         WHERE d.organization_id=$1 AND d.project_id=$2 AND d.id=$3`,
         [actor.organizationId, actor.projectId, c.req.param("agentId")],
       );
-      const agent = publicValue(result.rows[0]);
+      const agent = publicValue(result.rows[0]) as
+        Readonly<Record<string, unknown>> | undefined;
       if (!agent) throw new HttpApiError("not_found", "Agent not found");
-      return c.json(agent);
+      const versions = await tx.query(
+        `SELECT id,organization_id,project_id,agent_definition_id,version,config,
+                encode(content_hash,'hex') AS content_hash,created_by_principal_id,created_at
+         FROM oao.agent_versions WHERE organization_id=$1 AND project_id=$2
+           AND agent_definition_id=$3 ORDER BY version DESC`,
+        [actor.organizationId, actor.projectId, c.req.param("agentId")],
+      );
+      return c.json({ ...agent, versions: rows(versions) });
     });
   });
 
@@ -1029,12 +1135,7 @@ function registerAgentRoutes(
     const actor = assertProject(c);
     const body = await readJsonObject(c.req.raw);
     const idem = idempotencyKey(c.req.raw);
-    const config = parseAgentConfig(
-      body.config ?? {
-        ...body,
-        systemPrompt: body.instructions,
-      },
-    );
+    const config = parseAgentConfig(body.config ?? body, activeModelPresetKeys);
     return dependencies.store.transaction(actor, "agent:write", async (tx) => {
       const response = await dependencies.store.idempotent(tx, actor, {
         scope: `POST:/agents/${c.req.param("agentId")}/versions`,
@@ -1087,13 +1188,44 @@ function registerRunRoutes(
     return dependencies.store.transaction(actor, "session:read", async (tx) => {
       const condition = dependencies.store.cursorCondition(
         cursor,
-        "last_activity_at",
+        "s.last_activity_at",
         3,
+        "s.id",
       );
       const result = await tx.query(
-        `SELECT id,organization_id,project_id,thread_id,agent_version_id,status,created_at,last_activity_at
-         FROM oao.sessions WHERE organization_id=$1 AND project_id=$2${condition.sql}
-         ORDER BY last_activity_at DESC,id DESC LIMIT $${3 + condition.values.length}`,
+        `SELECT s.id,s.organization_id,s.project_id,s.thread_id,s.agent_version_id,t.title,
+                d.id AS agent_id,d.name AS agent_name,v.version AS agent_version,
+                v.config->>'modelPreset' AS model,lr.id AS latest_run_id,
+                COALESCE(lr.state::text,'queued') AS status,
+                lr.created_at AS started_at,lr.settled_at AS completed_at,
+                COALESCE(ss.input_tokens,0)::float8 AS input_tokens,
+                COALESCE(ss.output_tokens,0)::float8 AS output_tokens,
+                COALESCE(ss.cost_microunits,0)::float8 AS cost_microunits,
+                CASE WHEN COALESCE(mi.invocations,0)=0 THEN 'unavailable'
+                     WHEN mi.unavailable=mi.invocations THEN 'unavailable'
+                     WHEN mi.provider_observed=mi.invocations THEN 'provider_observed'
+                     ELSE 'estimated' END AS cost_provenance,
+                s.created_at,s.last_activity_at
+         FROM oao.sessions s
+         JOIN oao.threads t ON t.organization_id=s.organization_id AND t.project_id=s.project_id AND t.id=s.thread_id
+         JOIN oao.agent_versions v ON v.organization_id=s.organization_id AND v.project_id=s.project_id AND v.id=s.agent_version_id
+         JOIN oao.agent_definitions d ON d.organization_id=v.organization_id AND d.project_id=v.project_id AND d.id=v.agent_definition_id
+         LEFT JOIN oao.session_summaries ss ON ss.organization_id=s.organization_id AND ss.project_id=s.project_id AND ss.session_id=s.id
+         LEFT JOIN LATERAL (
+           SELECT r.id,r.state,r.created_at,r.settled_at FROM oao.runs r
+           WHERE r.organization_id=s.organization_id AND r.project_id=s.project_id AND r.session_id=s.id
+           ORDER BY r.created_at DESC,r.id DESC LIMIT 1
+         ) lr ON true
+         LEFT JOIN LATERAL (
+           SELECT count(*)::int AS invocations,
+                  count(*) FILTER (WHERE m.usage_source='unavailable')::int AS unavailable,
+                  count(*) FILTER (WHERE m.usage_source='provider_reported')::int AS provider_observed
+           FROM oao.model_invocations m JOIN oao.runs r
+             ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id
+           WHERE r.organization_id=s.organization_id AND r.project_id=s.project_id AND r.session_id=s.id
+         ) mi ON true
+         WHERE s.organization_id=$1 AND s.project_id=$2${condition.sql}
+         ORDER BY s.last_activity_at DESC,s.id DESC LIMIT $${3 + condition.values.length}`,
         [actor.organizationId, actor.projectId, ...condition.values, limit + 1],
       );
       return c.json(pagination(rows(result), limit, "lastActivityAt"));
@@ -1104,15 +1236,28 @@ function registerRunRoutes(
     const actor = assertProject(c);
     const body = await readJsonObject(c.req.raw);
     const idem = idempotencyKey(c.req.raw);
-    const agentVersionId = requiredString(
-      body.agentVersionId,
-      "agentVersionId",
-      50,
+    const submittedAgentVersionId =
+      body.agentVersionId === undefined
+        ? undefined
+        : requiredString(body.agentVersionId, "agentVersionId", 50);
+    const submittedAgentId =
+      body.agentId === undefined
+        ? undefined
+        : requiredString(body.agentId, "agentId", 50);
+    if (!submittedAgentVersionId && !submittedAgentId)
+      throw new HttpApiError(
+        "bad_request",
+        "agentVersionId or agentId is required",
+      );
+    const initialMessage = requiredString(
+      body.initialMessage,
+      "initialMessage",
+      100_000,
     );
     const title = optionalString(body.title, "title", 500);
     return dependencies.store.transaction(
       actor,
-      "session:write",
+      ["session:write", "run:create"],
       async (tx) => {
         const response = await dependencies.store.idempotent(tx, actor, {
           scope: "POST:/sessions",
@@ -1122,14 +1267,47 @@ function registerRunRoutes(
           execute: async () => {
             const threadId = randomUUID();
             const sessionId = randomUUID();
+            const runId = randomUUID();
+            const messageId = randomUUID();
+            let agentVersionId = submittedAgentVersionId;
+            if (submittedAgentId) {
+              const definition = await tx.query<{
+                latest_version_id: string | null;
+              }>(
+                `SELECT latest_version_id FROM oao.agent_definitions
+                 WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
+                [actor.organizationId, actor.projectId, submittedAgentId],
+              );
+              const latestVersionId = definition.rows[0]?.latest_version_id;
+              if (!latestVersionId)
+                throw new HttpApiError(
+                  "conflict",
+                  "Agent does not have a published version",
+                );
+              if (agentVersionId && agentVersionId !== latestVersionId)
+                throw new HttpApiError(
+                  "bad_request",
+                  "agentVersionId is not the agent's latest published version",
+                );
+              agentVersionId = latestVersionId;
+            }
             const result = await tx.query(
               `WITH thread AS (
-               INSERT INTO oao.threads (organization_id,project_id,id,title)
-               VALUES ($1,$2,$3,$4) RETURNING id
-             )
-             INSERT INTO oao.sessions (organization_id,project_id,id,thread_id,agent_version_id)
-             VALUES ($1,$2,$5,$3,$6)
-             RETURNING id,organization_id,project_id,thread_id,agent_version_id,status,created_at,last_activity_at`,
+                 INSERT INTO oao.threads (organization_id,project_id,id,title)
+                 VALUES ($1,$2,$3,$4) RETURNING id
+               ), session AS (
+                 INSERT INTO oao.sessions (organization_id,project_id,id,thread_id,agent_version_id)
+                 VALUES ($1,$2,$5,$3,$6) RETURNING *
+               ), run AS (
+                 INSERT INTO oao.runs
+                   (organization_id,project_id,id,thread_id,session_id,agent_version_id,created_by_principal_id,idempotency_key,input_public)
+                 VALUES ($1,$2,$7,$3,$5,$6,$8,$9,$10) RETURNING *
+               ), message AS (
+                 INSERT INTO oao.messages
+                   (organization_id,project_id,id,thread_id,run_id,role,redacted_content)
+                 VALUES ($1,$2,$11,$3,$7,'user',$12)
+               )
+               SELECT row_to_json(session) AS session,row_to_json(run) AS run FROM session,run`,
               [
                 actor.organizationId,
                 actor.projectId,
@@ -1137,17 +1315,46 @@ function registerRunRoutes(
                 title ?? null,
                 sessionId,
                 agentVersionId,
+                runId,
+                actor.id,
+                idem,
+                { message: initialMessage },
+                messageId,
+                initialMessage,
               ],
             );
-            const session = publicValue(result.rows[0]) as Readonly<
+            const session = publicValue(result.rows[0]?.session) as Readonly<
               Record<string, unknown>
             >;
+            const run = publicValue(result.rows[0]?.run) as Readonly<
+              Record<string, unknown>
+            >;
+            await dependencies.store.appendEvent(tx, actor, {
+              aggregateType: "run",
+              aggregateId: runId,
+              kind: "run.created",
+              payload: { state: "queued", sessionId },
+            });
+            await dependencies.store.appendEvent(tx, actor, {
+              aggregateType: "thread",
+              aggregateId: threadId,
+              kind: "message.created",
+              payload: { messageId, runId, role: "user" },
+            });
             await dependencies.store.appendAudit(tx, actor, {
               action: "session.created",
               resourceType: "session",
               resourceId: sessionId,
+              detail: { initialRunId: runId },
             });
-            return session;
+            await dependencies.runtimeCommands.enqueue(tx, {
+              organizationId: actor.organizationId,
+              projectId: actor.projectId,
+              runId,
+              kind: "admit",
+              payload: { reason: "api_session_created" },
+            });
+            return { ...session, run, latestRunId: runId, status: "queued" };
           },
         });
         c.header("idempotency-replayed", String(response.replayed));
@@ -1160,13 +1367,185 @@ function registerRunRoutes(
     const actor = assertProject(c);
     return dependencies.store.transaction(actor, "session:read", async (tx) => {
       const result = await tx.query(
-        `SELECT id,organization_id,project_id,thread_id,agent_version_id,status,created_at,last_activity_at
-         FROM oao.sessions WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+        `SELECT s.id,s.organization_id,s.project_id,s.thread_id,s.agent_version_id,t.title,
+                d.id AS agent_id,d.name AS agent_name,v.version AS agent_version,
+                v.config->>'modelPreset' AS model,lr.id AS latest_run_id,
+                COALESCE(lr.state::text,'queued') AS status,
+                lr.created_at AS started_at,lr.settled_at AS completed_at,
+                COALESCE(ss.input_tokens,0)::float8 AS input_tokens,
+                COALESCE(ss.output_tokens,0)::float8 AS output_tokens,
+                COALESCE(ss.cost_microunits,0)::float8 AS cost_microunits,
+                CASE WHEN COALESCE(mi.invocations,0)=0 THEN 'unavailable'
+                     WHEN mi.unavailable=mi.invocations THEN 'unavailable'
+                     WHEN mi.provider_observed=mi.invocations THEN 'provider_observed'
+                     ELSE 'estimated' END AS cost_provenance,
+                s.created_at,s.last_activity_at
+         FROM oao.sessions s
+         JOIN oao.threads t ON t.organization_id=s.organization_id AND t.project_id=s.project_id AND t.id=s.thread_id
+         JOIN oao.agent_versions v ON v.organization_id=s.organization_id AND v.project_id=s.project_id AND v.id=s.agent_version_id
+         JOIN oao.agent_definitions d ON d.organization_id=v.organization_id AND d.project_id=v.project_id AND d.id=v.agent_definition_id
+         LEFT JOIN oao.session_summaries ss ON ss.organization_id=s.organization_id AND ss.project_id=s.project_id AND ss.session_id=s.id
+         LEFT JOIN LATERAL (
+           SELECT r.id,r.state,r.created_at,r.settled_at FROM oao.runs r
+           WHERE r.organization_id=s.organization_id AND r.project_id=s.project_id AND r.session_id=s.id
+           ORDER BY r.created_at DESC,r.id DESC LIMIT 1
+         ) lr ON true
+         LEFT JOIN LATERAL (
+           SELECT count(*)::int AS invocations,
+                  count(*) FILTER (WHERE m.usage_source='unavailable')::int AS unavailable,
+                  count(*) FILTER (WHERE m.usage_source='provider_reported')::int AS provider_observed
+           FROM oao.model_invocations m JOIN oao.runs r
+             ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id
+           WHERE r.organization_id=s.organization_id AND r.project_id=s.project_id AND r.session_id=s.id
+         ) mi ON true
+         WHERE s.organization_id=$1 AND s.project_id=$2 AND s.id=$3`,
         [actor.organizationId, actor.projectId, c.req.param("sessionId")],
       );
-      const session = publicValue(result.rows[0]);
+      const session = publicValue(result.rows[0]) as
+        Readonly<Record<string, unknown>> | undefined;
       if (!session) throw new HttpApiError("not_found", "Session not found");
-      return c.json(session);
+      const values: unknown[] = [
+        actor.organizationId,
+        actor.projectId,
+        c.req.param("sessionId"),
+      ];
+      const [
+        runs,
+        transcript,
+        timeline,
+        invocations,
+        events,
+        toolCalls,
+        approvals,
+        sandboxes,
+      ] = await Promise.all([
+        tx.query(
+          `SELECT id,thread_id,session_id,agent_version_id,state,cancellation_requested_at,
+                    admitted_at,settled_at,created_at,updated_at
+             FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND session_id=$3
+             ORDER BY created_at,id`,
+          values,
+        ),
+        tx.query(
+          `SELECT m.id,m.thread_id,m.run_id,m.role,m.redacted_content,m.created_at
+             FROM oao.messages m JOIN oao.runs r
+               ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id
+             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+             ORDER BY m.created_at,m.id`,
+          values,
+        ),
+        tx.query(
+          `SELECT e.run_id,e.entry_sequence,e.entry_type,e.started_at,e.completed_at,e.safe_detail
+             FROM oao.timeline_entries e JOIN oao.runs r
+               ON r.organization_id=e.organization_id AND r.project_id=e.project_id AND r.id=e.run_id
+             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+             ORDER BY r.created_at,e.entry_sequence`,
+          values,
+        ),
+        tx.query(
+          `SELECT m.id,m.run_id,m.attempt,m.provider_key,m.model_key,m.provider_request_id,
+                    m.status,m.input_tokens,m.output_tokens,m.cost_microunits,m.usage_source,
+                    m.pricing_snapshot,m.provider_route,m.safe_request,m.safe_response,
+                    m.started_at,m.completed_at
+             FROM oao.model_invocations m JOIN oao.runs r
+               ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id
+             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+             ORDER BY m.started_at,m.attempt`,
+          values,
+        ),
+        tx.query(
+          `SELECT e.project_position,e.id,e.aggregate_type,e.aggregate_id,e.aggregate_sequence,
+                    e.event_kind,e.public_payload,e.occurred_at
+             FROM oao.product_events e WHERE e.organization_id=$1 AND e.project_id=$2
+               AND (e.aggregate_id=$3 OR e.aggregate_id IN (
+                 SELECT r.id FROM oao.runs r WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+               )) ORDER BY e.project_position`,
+          values,
+        ),
+        tx.query(
+          `SELECT c.id,c.run_id,c.tool_name,c.owner,c.stage,c.safe_arguments,c.claim_fence,
+                    c.lease_expires_at,c.flue_tool_call_ref,c.created_at,c.updated_at
+             FROM oao.tool_calls c JOIN oao.runs r
+               ON r.organization_id=c.organization_id AND r.project_id=c.project_id AND r.id=c.run_id
+             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+             ORDER BY c.created_at,c.id`,
+          values,
+        ),
+        tx.query(
+          `SELECT a.id,a.run_id,a.tool_call_id,a.status,a.summary,a.expires_at,
+                    a.resolved_by_principal_id,a.resolved_at,a.created_at
+             FROM oao.approvals a JOIN oao.runs r
+               ON r.organization_id=a.organization_id AND r.project_id=a.project_id AND r.id=a.run_id
+             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+             ORDER BY a.created_at,a.id`,
+          values,
+        ),
+        tx.query(
+          `SELECT id,run_id,thread_id,session_id,provider,provider_ref,target_preference,
+                    state,egress_policy,safe_error,created_at,updated_at,stopped_at
+             FROM oao.sandbox_instances WHERE organization_id=$1 AND project_id=$2 AND session_id=$3
+             ORDER BY created_at,id`,
+          values,
+        ),
+      ]);
+      return c.json({
+        ...session,
+        runs: rows(runs),
+        transcript: rows(transcript),
+        timeline: rows(timeline),
+        pendingWork: [
+          ...rows(toolCalls).filter((item) =>
+            [
+              "caller_pending",
+              "caller_claimed",
+              "platform_ready",
+              "platform_executing",
+            ].includes(String((item as Record<string, unknown>).stage)),
+          ),
+          ...rows(approvals).filter(
+            (item) => (item as Record<string, unknown>).status === "pending",
+          ),
+        ],
+        debug: {
+          productEvents: rows(events),
+          modelInvocations: rows(invocations),
+          toolCalls: rows(toolCalls),
+          approvals: rows(approvals),
+          sandboxes: rows(sandboxes),
+        },
+      });
+    });
+  });
+
+  app.get("/v1/projects/:projectId/pending-work", async (c) => {
+    const actor = assertProject(c);
+    return dependencies.store.transaction(actor, "run:read", async (tx) => {
+      const values: unknown[] = [actor.organizationId, actor.projectId];
+      const [tools, approvals] = await Promise.all([
+        tx.query(
+          `SELECT 'tool' AS kind,c.id,c.run_id,r.session_id,t.title,c.tool_name,c.owner,c.stage,
+                  c.safe_arguments,c.claim_fence,c.lease_holder_principal_id AS claimed_by,
+                  c.lease_expires_at AS expires_at,c.created_at
+           FROM oao.tool_calls c JOIN oao.runs r
+             ON r.organization_id=c.organization_id AND r.project_id=c.project_id AND r.id=c.run_id
+           JOIN oao.threads t ON t.organization_id=r.organization_id AND t.project_id=r.project_id AND t.id=r.thread_id
+           WHERE c.organization_id=$1 AND c.project_id=$2
+             AND c.stage IN ('caller_pending','caller_claimed','platform_ready','platform_executing')
+           ORDER BY c.created_at,c.id`,
+          values,
+        ),
+        tx.query(
+          `SELECT 'approval' AS kind,a.id,a.run_id,r.session_id,t.title,a.tool_call_id,
+                  a.summary,a.status,a.created_at,a.expires_at
+           FROM oao.approvals a JOIN oao.runs r
+             ON r.organization_id=a.organization_id AND r.project_id=a.project_id AND r.id=a.run_id
+           JOIN oao.threads t ON t.organization_id=r.organization_id AND t.project_id=r.project_id AND t.id=r.thread_id
+           WHERE a.organization_id=$1 AND a.project_id=$2 AND a.status='pending'
+           ORDER BY a.created_at,a.id`,
+          values,
+        ),
+      ]);
+      return c.json({ data: [...rows(tools), ...rows(approvals)] });
     });
   });
 
@@ -1209,8 +1588,8 @@ function registerRunRoutes(
     const body = await readJsonObject(c.req.raw);
     const idem = idempotencyKey(c.req.raw);
     const redactedInput = requiredString(
-      body.redactedInput,
-      "redactedInput",
+      body.message ?? body.redactedInput,
+      body.message === undefined ? "redactedInput" : "message",
       100_000,
     );
     const submittedSessionId = resumeRunId
@@ -1227,7 +1606,11 @@ function registerRunRoutes(
         execute: async () => {
           let sessionId = submittedSessionId;
           let parent:
-            | { readonly thread_id: string; readonly agent_version_id: string }
+            | {
+                readonly thread_id: string;
+                readonly agent_version_id: string;
+                readonly latest_run_state?: string | null;
+              }
             | undefined;
           if (resumeRunId) {
             const previous = await tx.query<{
@@ -1257,12 +1640,26 @@ function registerRunRoutes(
             const session = await tx.query<{
               thread_id: string;
               agent_version_id: string;
+              latest_run_state: string | null;
             }>(
-              `SELECT thread_id,agent_version_id FROM oao.sessions
-               WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
+              `SELECT s.thread_id,s.agent_version_id,
+                      (SELECT r.state::text FROM oao.runs r
+                       WHERE r.organization_id=s.organization_id AND r.project_id=s.project_id
+                         AND r.session_id=s.id ORDER BY r.created_at DESC,r.id DESC LIMIT 1) AS latest_run_state
+               FROM oao.sessions s WHERE s.organization_id=$1 AND s.project_id=$2 AND s.id=$3 FOR UPDATE`,
               [actor.organizationId, actor.projectId, sessionId],
             );
             parent = session.rows[0];
+            if (
+              parent?.latest_run_state &&
+              !["completed", "failed", "cancelled", "timed_out"].includes(
+                parent.latest_run_state,
+              )
+            )
+              throw new HttpApiError(
+                "conflict",
+                "The session's latest run must settle before another message",
+              );
           }
           if (!parent || !sessionId)
             throw new HttpApiError("not_found", "Session not found");

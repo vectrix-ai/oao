@@ -10,13 +10,10 @@ import type {
   ThreadId,
 } from "@oao/domain";
 import {
-  DEFAULT_LOCAL_PRESETS,
-  ImmutableModelPresetRegistry,
   createDeterministicModelProvider,
   createOpenRouterPresetProviders,
-  parseApprovedModelPresets,
+  loadModelPresetConfiguration,
   withPlatformTurnLimit,
-  type ApprovedModelPreset,
   type FauxResponseStep,
 } from "@oao/models-openrouter";
 import { PostgresWakeQueue, WakeWorker } from "@oao/queue-postgres";
@@ -40,16 +37,6 @@ import { Hono } from "hono";
 
 const DEFAULT_SERVICE_PRINCIPAL =
   "00000000-0000-4000-8000-000000000099" as PrincipalId;
-
-function hostedPresets(env: NodeJS.ProcessEnv): readonly ApprovedModelPreset[] {
-  if (env.OAO_ENABLE_HOSTED_MODELS !== "true") return [];
-  if (!env.OAO_OPENROUTER_PRESETS_JSON)
-    throw new Error(
-      "OAO_OPENROUTER_PRESETS_JSON is required when hosted models are enabled",
-    );
-  const parsed: unknown = JSON.parse(env.OAO_OPENROUTER_PRESETS_JSON);
-  return parseApprovedModelPresets(parsed);
-}
 
 function sandboxProvider(env: NodeJS.ProcessEnv): "fake" | "daytona" {
   const provider = env.OAO_SANDBOX_PROVIDER ?? "fake";
@@ -133,17 +120,18 @@ export async function startRuntimeWorker(input: {
     (env.OAO_RUNTIME_SERVICE_PRINCIPAL_ID as PrincipalId | undefined) ??
     DEFAULT_SERVICE_PRINCIPAL;
   const broker = new PostgresToolBroker(pool, { servicePrincipalId });
-  const hostedEnabled = env.OAO_ENABLE_HOSTED_MODELS === "true";
-  const presets = new ImmutableModelPresetRegistry(
-    [...DEFAULT_LOCAL_PRESETS, ...hostedPresets(env)],
-    { hostedEnabled },
-  );
+  const modelConfiguration = loadModelPresetConfiguration(env);
+  const {
+    hostedEnabled,
+    hostedPresets,
+    registry: presets,
+  } = modelConfiguration;
   const fake = input.fakeResponses
     ? createDeterministicModelProvider(input.fakeResponses)
     : createDeterministicModelProvider();
   const providers = [
     withPlatformTurnLimit(fake.provider),
-    ...createOpenRouterPresetProviders(hostedPresets(env)).map((provider) =>
+    ...createOpenRouterPresetProviders(hostedPresets).map((provider) =>
       withPlatformTurnLimit(provider),
     ),
   ];

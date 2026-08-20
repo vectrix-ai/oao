@@ -77,12 +77,11 @@ test("tool claim fences remain precise above Number.MAX_SAFE_INTEGER", () => {
 
 test("agent publication rejects JSON schema keywords the runtime cannot enforce", () => {
   const snapshot = {
-    agentVersionId: id,
-    contentHash: "a".repeat(64),
     systemPrompt: "Be deterministic",
     modelPreset: "local-fake",
     tools: [
       {
+        schemaVersion: 1 as const,
         name: "lookup",
         description: "Look up a value",
         owner: "caller",

@@ -59,6 +59,9 @@ importers:
       '@oao/events':
         specifier: workspace:*
         version: link:../../packages/events
+      '@oao/models-openrouter':
+        specifier: workspace:*
+        version: link:../../packages/models-openrouter
       hono:
         specifier: 4.13.3
         version: 4.13.3

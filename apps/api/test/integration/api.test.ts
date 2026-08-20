@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash, randomUUID } from "node:crypto";
 import test from "node:test";
 import { DevelopmentAuthAdapter } from "@oao/auth-core";
 import { InMemoryArtifactAdapter } from "@oao/artifact-s3";
@@ -163,8 +164,15 @@ test(
       runtimeCommands,
     });
 
-    await t.test("readiness and tenant/RLS route scope", async () => {
+    await t.test("context, readiness and tenant/RLS route scope", async () => {
       assert.equal((await app.request("/readyz")).status, 200);
+      const context = await app.request("/v1/context");
+      assert.equal(context.status, 200);
+      assert.deepEqual(
+        ((await context.json()) as { activeModelPresets: string[] })
+          .activeModelPresets,
+        ["local-default"],
+      );
       assert.equal(
         (
           await app.request(
@@ -184,17 +192,31 @@ test(
       const first = await app.request(
         `${projectPath}/agents`,
         jsonRequest(
-          { key: "integration-agent", name: "Integration agent" },
+          {
+            key: "integration-agent",
+            name: "Integration agent",
+            description: "",
+          },
           "agent-create-1",
         ),
       );
       assert.equal(first.status, 201);
-      const firstBody = (await first.json()) as { id: string };
+      const firstBody = (await first.json()) as {
+        id: string;
+        latestVersionId: string;
+        version: number;
+      };
       agentId = firstBody.id;
+      assert.ok(firstBody.latestVersionId);
+      assert.equal(firstBody.version, 1);
       const replay = await app.request(
         `${projectPath}/agents`,
         jsonRequest(
-          { key: "integration-agent", name: "Integration agent" },
+          {
+            key: "integration-agent",
+            name: "Integration agent",
+            description: "",
+          },
           "agent-create-1",
         ),
       );
@@ -229,6 +251,76 @@ test(
     });
 
     await t.test(
+      "database publication guard rejects incomplete and unsafe configs",
+      async () => {
+        const valid = {
+          systemPrompt: "Safe deterministic agent",
+          modelPreset: "local-default",
+          tools: [],
+          sandbox: { enabled: false, network: "none" },
+          limits: { maxTurns: 32, timeoutMs: 60_000 },
+        };
+        const invalid = [
+          { ...valid, limits: { timeoutMs: 60_000 } },
+          { ...valid, limits: { maxTurns: 32 } },
+          { ...valid, limits: { maxTurns: "32", timeoutMs: 60_000 } },
+          { ...valid, sandbox: { enabled: false } },
+          {
+            ...valid,
+            tools: [
+              {
+                schemaVersion: 1,
+                name: "invalid",
+                description: "Unsupported schema keyword",
+                owner: "caller",
+                approval: "never",
+                inputSchema: {
+                  type: "object",
+                  properties: { query: { type: "string", minLength: 1 } },
+                  required: ["query"],
+                  additionalProperties: false,
+                },
+                outputSchema: {
+                  type: "object",
+                  properties: {},
+                  required: [],
+                  additionalProperties: false,
+                },
+              },
+            ],
+          },
+        ];
+        for (const config of invalid) {
+          await assert.rejects(
+            pool.query(
+              "SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7)",
+              [
+                integrationPrincipal.organizationId,
+                integrationPrincipal.projectId,
+                agentId,
+                randomUUID(),
+                config,
+                createHash("sha256").update(JSON.stringify(config)).digest(),
+                integrationPrincipal.id,
+              ],
+            ),
+            (error: unknown) => (error as { code?: string }).code === "22023",
+          );
+        }
+        const versions = await pool.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM oao.agent_versions
+         WHERE organization_id=$1 AND project_id=$2 AND agent_definition_id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            agentId,
+          ],
+        );
+        assert.equal(versions.rows[0]?.count, "1");
+      },
+    );
+
+    await t.test(
       "immutable version, session, and durable run submission",
       async () => {
         const version = await app.request(
@@ -237,16 +329,30 @@ test(
             {
               config: {
                 systemPrompt: "Answer with redacted public output.",
-                modelPreset: "deterministic-test",
+                modelPreset: "local-default",
                 tools: [
                   {
+                    schemaVersion: 1,
                     name: "lookup",
+                    description: "Look up a safe public value",
                     owner: "caller",
                     approval: "always",
-                    inputSchema: { type: "object" },
+                    inputSchema: {
+                      type: "object",
+                      properties: { query: { type: "string" } },
+                      required: ["query"],
+                      additionalProperties: false,
+                    },
+                    outputSchema: {
+                      type: "object",
+                      properties: { found: { type: "boolean" } },
+                      required: ["found"],
+                      additionalProperties: false,
+                    },
                   },
                 ],
-                sandboxPolicy: { enabled: false, network: "none" },
+                sandbox: { enabled: false, network: "none" },
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
               },
             },
             "version-create-1",
@@ -257,12 +363,38 @@ test(
         const session = await app.request(
           `${projectPath}/sessions`,
           jsonRequest(
-            { agentVersionId: versionId, title: "API test" },
+            {
+              agentId,
+              agentVersionId: versionId,
+              title: "API test",
+              initialMessage: "first safe operator request",
+            },
             "session-create-1",
           ),
         );
         assert.equal(session.status, 201);
-        sessionId = ((await session.json()) as { id: string }).id;
+        const sessionBody = (await session.json()) as {
+          id: string;
+          run: { id: string; state: string };
+        };
+        sessionId = sessionBody.id;
+        assert.equal(sessionBody.run.state, "queued");
+        await pool.query(
+          `UPDATE oao.runs SET state='running' WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            sessionBody.run.id,
+          ],
+        );
+        await pool.query(
+          `UPDATE oao.runs SET state='completed' WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            sessionBody.run.id,
+          ],
+        );
         runtimeCommands.failNext = true;
         const run = await app.request(
           `${projectPath}/sessions/${sessionId}/runs`,
@@ -282,7 +414,7 @@ test(
         const rolledBackCommands = await pool.query<{ count: string }>(
           "SELECT count(*)::text AS count FROM public.api_test_runtime_commands",
         );
-        assert.equal(rolledBackCommands.rows[0]?.count, "0");
+        assert.equal(rolledBackCommands.rows[0]?.count, "1");
 
         const submitted = await app.request(
           `${projectPath}/sessions/${sessionId}/runs`,

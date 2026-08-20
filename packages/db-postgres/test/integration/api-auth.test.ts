@@ -329,7 +329,7 @@ test(
               `SELECT (version).version AS version
                FROM (SELECT oao.publish_agent_version(
                  $1,$2,$3,$4,
-                 '{"systemPrompt":"safe instructions","modelPreset":"approved","tools":[],"sandboxPolicy":{"enabled":false}}',
+                 '{"systemPrompt":"safe instructions","modelPreset":"local-default","tools":[],"sandbox":{"enabled":false,"network":"none"},"limits":{"maxTurns":32,"timeoutMs":60000}}',
                  digest('published-agent-v1','sha256'),$5
                ) AS version) q`,
               [
