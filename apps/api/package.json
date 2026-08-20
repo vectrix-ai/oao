@@ -1,0 +1,38 @@
+{
+  "name": "@oao/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "node --import tsx --watch src/server.ts",
+    "lint": "eslint src test",
+    "seed:dev": "node --import tsx src/seed.ts",
+    "start": "node dist/server.js",
+    "test": "node --import tsx --test test/unit/**/*.test.ts",
+    "test:integration": "node --import tsx --test --test-concurrency=1 test/integration/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hono/node-server": "1.19.9",
+    "@oao/auth-core": "workspace:*",
+    "@oao/auth-workos": "workspace:*",
+    "@oao/artifact-s3": "workspace:*",
+    "@oao/contracts": "workspace:*",
+    "@oao/db-postgres": "workspace:*",
+    "@oao/domain": "workspace:*",
+    "@oao/events": "workspace:*",
+    "hono": "4.13.3",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@oao/testkit": "workspace:*",
+    "@types/pg": "8.20.0"
+  }
+}

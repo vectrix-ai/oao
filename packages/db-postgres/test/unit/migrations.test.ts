@@ -30,3 +30,27 @@ test("follow-up migration correlates parents and separates caller from platform 
   assert.match(sql, /approval_denied/u);
   assert.match(sql, /is_sensitive_public_key/u);
 });
+
+test("API/auth migration keeps secrets hashed and scopes every mutable boundary", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0003_api_auth.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE oao\.organization_members/u);
+  assert.match(sql, /CREATE TABLE oao\.project_members/u);
+  assert.match(sql, /key_hash bytea NOT NULL/u);
+  assert.doesNotMatch(sql, /(?:raw_key|secret_value|plaintext_key)/u);
+  assert.match(
+    sql,
+    /SECURITY DEFINER[\s\S]+SET search_path = pg_catalog, oao/u,
+  );
+  assert.match(sql, /authenticate_api_key/u);
+  assert.match(sql, /claim_workos_webhook_event/u);
+  assert.match(sql, /release_workos_webhook_event/u);
+  assert.match(sql, /api_request_idempotency/u);
+  assert.match(sql, /principal_id, http_method, route_key, idempotency_key/u);
+  assert.match(sql, /renew_tool_call_claim/u);
+  assert.match(sql, /release_tool_call_claim/u);
+  assert.match(sql, /latest_version_id/u);
+  assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
+});

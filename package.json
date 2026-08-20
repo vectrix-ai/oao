@@ -20,7 +20,7 @@
     "db:migrate": "pnpm --filter @oao/db-postgres migrate",
     "db:up": "infra/compose/up.sh",
     "test": "turbo run test",
-    "test:integration": "pnpm --filter @oao/db-postgres test:integration",
+    "test:integration": "pnpm --filter @oao/db-postgres test:integration && pnpm --filter @oao/api test:integration",
     "test:postgres:fresh": "infra/compose/test-fresh.sh",
     "typecheck": "turbo run typecheck"
   },

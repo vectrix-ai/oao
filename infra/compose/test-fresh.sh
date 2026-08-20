@@ -27,3 +27,4 @@ export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:${postgres_port}/o
 pnpm --filter @oao/db-postgres migrate
 pnpm --filter @oao/db-postgres migrate
 pnpm --filter @oao/db-postgres test:integration
+pnpm --filter @oao/api test:integration
