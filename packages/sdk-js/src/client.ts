@@ -101,11 +101,7 @@ export class OaoClient {
   }
 
   login(
-    input: {
-      readonly redirectUri: string;
-      readonly state?: string;
-      readonly organizationHint?: string;
-    },
+    input: { readonly organizationHint?: string } = {},
     options?: RequestOptions,
   ): Promise<{ readonly redirectUrl: string }> {
     return this.#request(this.routes.auth.login, {
@@ -113,13 +109,6 @@ export class OaoClient {
       method: "POST",
       body: input,
     });
-  }
-
-  authCallback(
-    input: { readonly code: string; readonly redirectUri: string },
-    options?: RequestOptions,
-  ): Promise<AuthSession> {
-    return this.#request(this.#path(this.routes.auth.callback, input), options);
   }
 
   developmentLogin(

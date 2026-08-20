@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@oao/auth-core": "workspace:*",
-    "@oao/domain": "workspace:*"
+    "@oao/domain": "workspace:*",
+    "@workos-inc/node": "10.10.0"
   }
 }

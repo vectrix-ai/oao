@@ -36,3 +36,7 @@ pnpm test:postgres:fresh
 ```
 
 The last command starts an isolated PostgreSQL container, applies the migration twice, runs all database integration/race tests, and removes the container. See [infra/compose/README.md](infra/compose/README.md) for the persistent local database workflow.
+
+See [apps/api/README.md](apps/api/README.md) for the runnable API commands,
+development/Vite proxy setup, exact authentication environment contract, WorkOS
+callback/webhook URLs, and operator identity provisioning.

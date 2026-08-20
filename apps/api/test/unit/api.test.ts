@@ -1,18 +1,67 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DevelopmentAuthAdapter } from "@oao/auth-core";
+import {
+  DevelopmentAuthAdapter,
+  type AuthCallbackInput,
+  type AuthLoginInput,
+  type AuthLogoutInput,
+  type AuthTenantAdapter,
+} from "@oao/auth-core";
 import type { PgPool } from "@oao/db-postgres";
 import { createApiApp } from "../../src/app.js";
 import { PostgresApiStore } from "../../src/store.js";
+import type { RuntimeCommandPort } from "../../src/runtime-commands.js";
 
 const unusedPool = {
   query: async () => ({ rowCount: 0, rows: [] }),
 } as unknown as PgPool;
+const unusedRuntimeCommands: RuntimeCommandPort = {
+  enqueue: async () => {
+    throw new Error("runtime commands are not expected in this unit test");
+  },
+};
+
+class RecordingAuth implements AuthTenantAdapter {
+  readonly delegate = new DevelopmentAuthAdapter();
+  loginInput: AuthLoginInput | undefined;
+  callbackInput: AuthCallbackInput | undefined;
+  logoutInput: AuthLogoutInput | undefined;
+
+  authenticate(request: Request) {
+    return this.delegate.authenticate(request);
+  }
+
+  login(input: AuthLoginInput) {
+    this.loginInput = input;
+    return this.delegate.login(input);
+  }
+
+  callback(input: AuthCallbackInput) {
+    this.callbackInput = input;
+    return this.delegate.callback(input);
+  }
+
+  refresh(input: { readonly refreshToken: string }) {
+    return this.delegate.refresh(input);
+  }
+
+  logout(input: AuthLogoutInput) {
+    this.logoutInput = input;
+    return this.delegate.logout(input);
+  }
+}
+
+function cookieFrom(header: string, name: string): string {
+  const match = new RegExp(`(?:^|,\\s*)${name}=([^;]*)`, "u").exec(header);
+  assert.ok(match?.[1]);
+  return `${name}=${match[1]}`;
+}
 
 test("health is public and deterministic", async () => {
   const app = createApiApp({
     store: new PostgresApiStore(unusedPool, "unit-test-api-key-pepper"),
     auth: new DevelopmentAuthAdapter(),
+    runtimeCommands: unusedRuntimeCommands,
   });
   const response = await app.request("/healthz");
   assert.equal(response.status, 200);
@@ -24,6 +73,7 @@ test("route tenant scope is checked before database access", async () => {
   const app = createApiApp({
     store: new PostgresApiStore(unusedPool, "unit-test-api-key-pepper"),
     auth: new DevelopmentAuthAdapter(),
+    runtimeCommands: unusedRuntimeCommands,
   });
   const response = await app.request(
     "/v1/projects/00000000-0000-4000-8000-000000000099/agents",
@@ -45,6 +95,7 @@ test("error envelopes never return internal exception messages", async () => {
   const app = createApiApp({
     store: new PostgresApiStore(failingPool, "unit-test-api-key-pepper"),
     auth: new DevelopmentAuthAdapter(),
+    runtimeCommands: unusedRuntimeCommands,
   });
   const response = await app.request("/readyz");
   assert.equal(response.status, 503);
@@ -56,11 +107,152 @@ test("development auth lifecycle keeps tokens in HttpOnly cookies", async () => 
   const app = createApiApp({
     store: new PostgresApiStore(unusedPool, "unit-test-api-key-pepper"),
     auth: new DevelopmentAuthAdapter(),
+    runtimeCommands: unusedRuntimeCommands,
   });
-  const callback = await app.request(
-    "/v1/auth/callback?code=development&redirectUri=http%3A%2F%2Flocalhost%2Fcallback",
+  const login = await app.request("/v1/auth/development/login", {
+    method: "POST",
+  });
+  assert.equal(login.status, 200);
+  const setCookie = login.headers.get("set-cookie") ?? "";
+  assert.match(setCookie, /HttpOnly/u);
+  assert.doesNotMatch(setCookie, /; Secure/u);
+  assert.doesNotMatch(await login.text(), /oao-development-session/u);
+});
+
+test("cookie-authenticated writes enforce APP_ORIGIN", async () => {
+  const app = createApiApp({
+    store: new PostgresApiStore(unusedPool, "unit-test-api-key-pepper"),
+    auth: new DevelopmentAuthAdapter(),
+    runtimeCommands: unusedRuntimeCommands,
+    authConfiguration: {
+      provider: "development",
+      appOrigins: ["http://localhost:5173"],
+      appOrigin: "http://localhost:5173",
+      callbackUri: "http://localhost:5173/v1/auth/callback",
+      cookieSecure: false,
+    },
+  });
+  const login = await app.request("/v1/auth/development/login", {
+    method: "POST",
+  });
+  const refreshCookie = cookieFrom(
+    login.headers.get("set-cookie") ?? "",
+    "oao_refresh",
   );
-  assert.equal(callback.status, 200);
-  assert.match(callback.headers.get("set-cookie") ?? "", /HttpOnly/u);
-  assert.doesNotMatch(await callback.text(), /oao-development-session/u);
+  const rejectedMissing = await app.request("/v1/auth/refresh", {
+    method: "POST",
+    headers: { cookie: refreshCookie },
+  });
+  assert.equal(rejectedMissing.status, 403);
+  const rejectedForeign = await app.request("/v1/auth/refresh", {
+    method: "POST",
+    headers: { cookie: refreshCookie, origin: "https://evil.example" },
+  });
+  assert.equal(rejectedForeign.status, 403);
+  const accepted = await app.request("/v1/auth/refresh", {
+    method: "POST",
+    headers: { cookie: refreshCookie, origin: "http://localhost:5173" },
+  });
+  assert.equal(accepted.status, 200);
+  const bearerDoesNotBypassPublicCookieAuth = await app.request(
+    "/v1/auth/refresh",
+    {
+      method: "POST",
+      headers: {
+        authorization: "Bearer oao_key-credential",
+        cookie: refreshCookie,
+      },
+    },
+  );
+  assert.equal(bearerDoesNotBypassPublicCookieAuth.status, 403);
+});
+
+test("login uses configured callback, binds state, and rejects caller redirects", async () => {
+  const auth = new RecordingAuth();
+  const app = createApiApp({
+    store: new PostgresApiStore(unusedPool, "unit-test-api-key-pepper"),
+    auth,
+    runtimeCommands: unusedRuntimeCommands,
+    authConfiguration: {
+      provider: "development",
+      appOrigins: ["https://app.example.test"],
+      appOrigin: "https://app.example.test",
+      callbackUri: "https://app.example.test/v1/auth/callback",
+      cookieSecure: true,
+    },
+  });
+  const openRedirect = await app.request("/v1/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ redirectUri: "https://evil.example/callback" }),
+  });
+  assert.equal(openRedirect.status, 400);
+
+  const login = await app.request("/v1/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(login.status, 200);
+  assert.equal(
+    auth.loginInput?.redirectUri,
+    "https://app.example.test/v1/auth/callback",
+  );
+  assert.ok(auth.loginInput?.state);
+  const stateCookie = cookieFrom(
+    login.headers.get("set-cookie") ?? "",
+    "oao_auth_state",
+  );
+  assert.match(login.headers.get("set-cookie") ?? "", /HttpOnly; Secure/u);
+
+  const mismatch = await app.request(
+    "/v1/auth/callback?code=development&state=wrong",
+    { headers: { cookie: stateCookie } },
+  );
+  assert.equal(mismatch.status, 400);
+  assert.equal(auth.callbackInput, undefined);
+
+  const callback = await app.request(
+    `/v1/auth/callback?code=development&state=${encodeURIComponent(auth.loginInput?.state ?? "")}&returnTo=https%3A%2F%2Fevil.example`,
+    { headers: { cookie: stateCookie } },
+  );
+  assert.equal(callback.status, 303);
+  assert.equal(callback.headers.get("location"), "https://app.example.test");
+  assert.equal(
+    (auth.callbackInput as AuthCallbackInput | undefined)?.redirectUri,
+    "https://app.example.test/v1/auth/callback",
+  );
+  const sessionCookie = cookieFrom(
+    callback.headers.get("set-cookie") ?? "",
+    "oao_session",
+  );
+  const logout = await app.request("/v1/auth/logout", {
+    method: "POST",
+    headers: {
+      cookie: sessionCookie,
+      origin: "https://app.example.test",
+    },
+  });
+  assert.equal(logout.status, 200);
+  assert.equal(auth.logoutInput?.returnTo, "https://app.example.test");
+  assert.match(logout.headers.get("set-cookie") ?? "", /; Secure/u);
+});
+
+test("WorkOS mode does not expose deterministic development login", async () => {
+  const app = createApiApp({
+    store: new PostgresApiStore(unusedPool, "unit-test-api-key-pepper"),
+    auth: new DevelopmentAuthAdapter(),
+    runtimeCommands: unusedRuntimeCommands,
+    authConfiguration: {
+      provider: "workos",
+      appOrigins: ["https://app.example.test"],
+      appOrigin: "https://app.example.test",
+      callbackUri: "https://app.example.test/v1/auth/callback",
+      cookieSecure: true,
+    },
+  });
+  const response = await app.request("/v1/auth/development/login", {
+    method: "POST",
+  });
+  assert.equal(response.status, 404);
 });

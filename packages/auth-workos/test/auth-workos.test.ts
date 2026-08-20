@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
 import test from "node:test";
 import { AuthenticationError, DEVELOPMENT_PRINCIPAL } from "@oao/auth-core";
+import { WorkOS } from "@workos-inc/node";
 import {
   InMemoryWorkOsWebhookLedger,
   WorkOsAuthAdapter,
-  WorkOsHmacWebhookVerifier,
+  WorkOsNodeAuthTransport,
+  WorkOsNodeWebhookVerifier,
   WorkOsWebhookVerificationError,
   type WorkOsAuthTransport,
   type WorkOsIdentity,
@@ -79,8 +80,21 @@ function adapterFixture(overrides?: {
       },
     },
     webhookVerifier: {
-      async verify() {
-        return undefined;
+      async verify({ rawBody }) {
+        const value = JSON.parse(new TextDecoder().decode(rawBody)) as {
+          id: string;
+          event: string;
+          created_at?: string;
+          data: unknown;
+        };
+        return {
+          id: value.id,
+          type: value.event,
+          ...(value.created_at === undefined
+            ? {}
+            : { createdAt: value.created_at }),
+          data: value.data,
+        };
       },
     },
     webhookLedger: ledger,
@@ -213,44 +227,68 @@ test("failed reconciliation releases the claim for a later retry", async () => {
   assert.equal(attempts, 2);
 });
 
-test("HMAC verifier authenticates exact raw bytes and rejects tampering and staleness", async () => {
+test("official WorkOS helper verifies exact raw bytes and its signature contract", async () => {
   const rawBody = new TextEncoder().encode(
-    '{"id":"event_01","event":"user.created","data":{}}',
+    '{"id":"event_01","event":"user.created","created_at":"2026-01-01T00:00:00.000Z","data":{"object":"user","id":"user_01"}}',
   );
-  const timestamp = 1_767_225_600_000;
+  const timestamp = Date.now();
   const secret = "webhook-secret";
-  const digest = createHmac("sha256", secret)
-    .update(new TextEncoder().encode(`${timestamp}.`))
-    .update(rawBody)
-    .digest("hex");
-  const verifier = new WorkOsHmacWebhookVerifier({
-    secret,
-    now: () => new Date(timestamp),
-  });
-  await verifier.verify({
+  const workos = new WorkOS({ clientId: "client_test" });
+  const digest = await workos.webhooks.computeSignature(
+    timestamp,
     rawBody,
-    signature: `t=${timestamp}, v1=bad, v1=${digest}`,
+    secret,
+  );
+  const verifier = new WorkOsNodeWebhookVerifier({
+    secret,
+    workos,
   });
+  const event = await verifier.verify({
+    rawBody,
+    signature: `t=${timestamp},v1=${digest}`,
+  });
+  assert.equal(event.id, "event_01");
+  assert.equal(event.type, "user.created");
   await assert.rejects(
     verifier.verify({
       rawBody: new TextEncoder().encode("tampered"),
-      signature: `t=${timestamp}, v1=${digest}`,
+      signature: `t=${timestamp},v1=${digest}`,
     }),
-    (error: unknown) =>
-      error instanceof WorkOsWebhookVerificationError &&
-      error.reason === "invalid_signature",
+    WorkOsWebhookVerificationError,
   );
-  const staleVerifier = new WorkOsHmacWebhookVerifier({
+  const staleTimestamp = Date.now() - 181_000;
+  const staleDigest = await workos.webhooks.computeSignature(
+    staleTimestamp,
+    rawBody,
     secret,
-    now: () => new Date(timestamp + 301_000),
-  });
-  await assert.rejects(
-    staleVerifier.verify({
-      rawBody,
-      signature: `t=${timestamp}, v1=${digest}`,
-    }),
-    (error: unknown) =>
-      error instanceof WorkOsWebhookVerificationError &&
-      error.reason === "stale_signature",
   );
+  await assert.rejects(
+    verifier.verify({
+      rawBody,
+      signature: `t=${staleTimestamp},v1=${staleDigest}`,
+    }),
+    WorkOsWebhookVerificationError,
+  );
+});
+
+test("official AuthKit transport builds the configured server callback URL", async () => {
+  const transport = new WorkOsNodeAuthTransport({
+    apiKey: "sk_test_not-a-real-credential",
+    clientId: "client_test",
+    cookiePassword: "test-cookie-password-at-least-32-characters",
+  });
+  const authorizationUrl = await transport.authorizationUrl({
+    redirectUri: "https://app.example.test/v1/auth/callback",
+    state: "server-state",
+    organizationHint: "org_01",
+  });
+  const url = new URL(authorizationUrl);
+  assert.equal(url.origin, "https://api.workos.com");
+  assert.equal(url.searchParams.get("provider"), "authkit");
+  assert.equal(
+    url.searchParams.get("redirect_uri"),
+    "https://app.example.test/v1/auth/callback",
+  );
+  assert.equal(url.searchParams.get("state"), "server-state");
+  assert.equal(url.searchParams.get("organization_id"), "org_01");
 });

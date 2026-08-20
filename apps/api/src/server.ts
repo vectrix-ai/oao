@@ -1,29 +1,33 @@
 import { serve } from "@hono/node-server";
-import { DevelopmentAuthAdapter } from "@oao/auth-core";
 import { InMemoryArtifactAdapter } from "@oao/artifact-s3";
 import { createPool, migrate, PostgresWakeNotifier } from "@oao/db-postgres";
 import { createApiApp } from "./app.js";
-import { seedDevelopment } from "./bootstrap.js";
+import { composeAuthentication } from "./composition.js";
+import { loadServerConfiguration } from "./config.js";
 import { PostgresApiStore } from "./store.js";
+import { PostgresRuntimeCommandPort } from "./runtime-commands.js";
 
-const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) throw new Error("DATABASE_URL is required");
-const port = Number(process.env.PORT ?? "3000");
-if (!Number.isInteger(port) || port < 1 || port > 65_535)
-  throw new Error("PORT must be a valid TCP port");
+const configuration = loadServerConfiguration(process.env);
 
-const pool = createPool(databaseUrl);
+const pool = createPool(configuration.databaseUrl);
 await migrate(pool);
-await seedDevelopment(pool);
+
+const { auth, webhookAuth } = await composeAuthentication(configuration, pool);
 
 const app = createApiApp({
-  store: new PostgresApiStore(
-    pool,
-    process.env.API_KEY_PEPPER ?? "oao-development-api-key-pepper",
-  ),
-  auth: new DevelopmentAuthAdapter(),
+  store: new PostgresApiStore(pool, configuration.apiKeyPepper),
+  auth,
+  ...(webhookAuth === undefined ? {} : { webhookAuth }),
   artifacts: new InMemoryArtifactAdapter(),
   notifier: new PostgresWakeNotifier(pool),
+  runtimeCommands: new PostgresRuntimeCommandPort(),
+  authConfiguration: {
+    provider: configuration.authProvider,
+    appOrigins: configuration.appOrigins,
+    appOrigin: configuration.appOrigin,
+    callbackUri: configuration.callbackUri,
+    cookieSecure: configuration.cookieSecure,
+  },
   onError: ({ requestId, error }) => {
     process.stderr.write(
       `${JSON.stringify({
@@ -35,8 +39,10 @@ const app = createApiApp({
   },
 });
 
-const server = serve({ fetch: app.fetch, port });
-process.stdout.write(`OAO API listening on http://127.0.0.1:${port}\n`);
+const server = serve({ fetch: app.fetch, port: configuration.port });
+process.stdout.write(
+  `OAO API listening on http://127.0.0.1:${configuration.port}\n`,
+);
 
 const close = (): void => {
   server.close(() => {

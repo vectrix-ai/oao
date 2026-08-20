@@ -13,6 +13,7 @@
     "build": "tsc -p tsconfig.build.json",
     "dev": "node --import tsx --watch src/server.ts",
     "lint": "eslint src test",
+    "provision:workos": "node --import tsx src/provision-workos-cli.ts",
     "seed:dev": "node --import tsx src/seed.ts",
     "start": "node dist/server.js",
     "test": "node --import tsx --test test/unit/**/*.test.ts",

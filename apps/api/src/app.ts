@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { AuthSession, AuthTenantAdapter } from "@oao/auth-core";
 import { readCookie } from "@oao/auth-core";
 import type { ArtifactPort, Principal, PublicValue } from "@oao/domain";
@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import type { Context, MiddlewareHandler } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { PostgresApiStore } from "./store.js";
+import type { RuntimeCommandPort } from "./runtime-commands.js";
 import { errorEnvelope, HttpApiError } from "./errors.js";
 import {
   decodeListCursor,
@@ -37,15 +38,33 @@ export interface ApiDependencies {
   readonly webhookAuth?: WebhookAuthenticationAdapter;
   readonly artifacts?: ArtifactPort;
   readonly notifier?: WakeOnlyNotifier;
+  readonly runtimeCommands: RuntimeCommandPort;
+  readonly authConfiguration?: ApiAuthConfiguration;
   readonly onError?: (input: {
     readonly requestId: string;
     readonly error: unknown;
   }) => void;
 }
 
+export interface ApiAuthConfiguration {
+  readonly provider: "development" | "workos";
+  readonly appOrigins: readonly string[];
+  readonly appOrigin: string;
+  readonly callbackUri: string;
+  readonly cookieSecure: boolean;
+}
+
 type Variables = { principal: Principal; requestId: string };
 type ApiContext = Context<{ Variables: Variables }>;
 const ALLOWED_SCOPES = new Set<string>(["*", ...AUTHORIZATION_ACTIONS]);
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const DEFAULT_AUTH_CONFIGURATION: ApiAuthConfiguration = Object.freeze({
+  provider: "development",
+  appOrigins: ["http://localhost"],
+  appOrigin: "http://localhost",
+  callbackUri: "http://localhost/v1/auth/callback",
+  cookieSecure: false,
+});
 
 function principal(c: ApiContext): Principal {
   return c.get("principal");
@@ -168,6 +187,8 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   Variables: Variables;
 }> {
   const app = new Hono<{ Variables: Variables }>();
+  const authConfiguration =
+    dependencies.authConfiguration ?? DEFAULT_AUTH_CONFIGURATION;
 
   app.use("*", async (c, next) => {
     const incoming = c.req.header("x-request-id");
@@ -177,6 +198,33 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     c.header("x-request-id", requestId);
     c.header("x-content-type-options", "nosniff");
     c.header("cache-control", "no-store");
+    await next();
+  });
+
+  app.use("*", async (c, next) => {
+    const request = c.req.raw;
+    const pathname = new URL(request.url).pathname;
+    const apiKeyBearer = /^Bearer\s+oao_/iu.test(
+      request.headers.get("authorization") ?? "",
+    );
+    const apiKeyProtectedRoute =
+      pathname === "/v1/projects" ||
+      pathname.startsWith("/v1/projects/") ||
+      pathname.startsWith("/v1/organizations");
+    const cookieAuthenticated =
+      readCookie(request, "oao_session") !== undefined ||
+      readCookie(request, "oao_refresh") !== undefined;
+    if (
+      UNSAFE_METHODS.has(request.method) &&
+      cookieAuthenticated &&
+      !(apiKeyBearer && apiKeyProtectedRoute) &&
+      pathname !== "/v1/auth/workos/webhook"
+    ) {
+      const origin = request.headers.get("origin");
+      if (!origin || !authConfiguration.appOrigins.includes(origin)) {
+        throw new HttpApiError("forbidden", "Request origin is not allowed");
+      }
+    }
     await next();
   });
 
@@ -205,11 +253,20 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
 
   app.post("/v1/auth/login", async (c) => {
     const body = await readJsonObject(c.req.raw);
+    if (
+      body.redirectUri !== undefined ||
+      body.returnTo !== undefined ||
+      body.state !== undefined
+    ) {
+      throw new HttpApiError(
+        "bad_request",
+        "Authentication redirect parameters are server configured",
+      );
+    }
+    const state = randomUUID();
     const result = await dependencies.auth.login({
-      redirectUri: requiredString(body.redirectUri, "redirectUri", 2_000),
-      ...(body.state === undefined
-        ? {}
-        : { state: requiredString(body.state, "state", 1_000) }),
+      redirectUri: authConfiguration.callbackUri,
+      state,
       ...(body.organizationHint === undefined
         ? {}
         : {
@@ -220,23 +277,41 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
             ),
           }),
     });
+    appendCookie(
+      c,
+      "oao_auth_state",
+      state,
+      "/v1/auth/callback",
+      "Lax",
+      600,
+      authConfiguration.cookieSecure,
+    );
     return c.json(result);
   });
 
   app.get("/v1/auth/callback", async (c) => {
+    const expectedState = readCookie(c.req.raw, "oao_auth_state");
+    const returnedState = c.req.query("state");
+    clearCookie(
+      c,
+      "oao_auth_state",
+      "/v1/auth/callback",
+      "Lax",
+      authConfiguration.cookieSecure,
+    );
+    if (
+      expectedState === undefined ||
+      returnedState === undefined ||
+      !safeStringEqual(expectedState, returnedState)
+    ) {
+      throw new HttpApiError("bad_request", "Invalid authentication state");
+    }
     const session = await dependencies.auth.callback({
       code: requiredString(c.req.query("code"), "code", 2_000),
-      redirectUri: requiredString(
-        c.req.query("redirectUri"),
-        "redirectUri",
-        2_000,
-      ),
+      redirectUri: authConfiguration.callbackUri,
     });
-    setSessionCookies(c, session);
-    return c.json({
-      expiresAt: session.expiresAt.toISOString(),
-      principal: publicPrincipal(session.principal),
-    });
+    setSessionCookies(c, session, authConfiguration.cookieSecure);
+    return c.redirect(authConfiguration.appOrigin, 303);
   });
 
   app.post("/v1/auth/refresh", async (c) => {
@@ -244,7 +319,7 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     if (!refreshToken)
       throw new HttpApiError("unauthenticated", "Refresh session is required");
     const session = await dependencies.auth.refresh({ refreshToken });
-    setSessionCookies(c, session);
+    setSessionCookies(c, session, authConfiguration.cookieSecure);
     return c.json({
       expiresAt: session.expiresAt.toISOString(),
       principal: publicPrincipal(session.principal),
@@ -257,16 +332,17 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       c.req.header("authorization")?.replace(/^Bearer\s+/iu, "");
     if (!sessionToken)
       throw new HttpApiError("unauthenticated", "Session is required");
-    const result = await dependencies.auth.logout({ sessionToken });
-    c.header(
-      "set-cookie",
-      "oao_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
-      { append: true },
-    );
-    c.header(
-      "set-cookie",
-      "oao_refresh=; Path=/v1/auth; HttpOnly; Secure; SameSite=Strict; Max-Age=0",
-      { append: true },
+    const result = await dependencies.auth.logout({
+      sessionToken,
+      returnTo: authConfiguration.appOrigin,
+    });
+    clearCookie(c, "oao_session", "/", "Lax", authConfiguration.cookieSecure);
+    clearCookie(
+      c,
+      "oao_refresh",
+      "/v1/auth",
+      "Strict",
+      authConfiguration.cookieSecure,
     );
     return c.json(result);
   });
@@ -292,11 +368,13 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   });
 
   app.post("/v1/auth/development/login", async (c) => {
+    if (authConfiguration.provider !== "development")
+      throw new HttpApiError("not_found", "Route not found");
     const session = await dependencies.auth.callback({
       code: "development",
-      redirectUri: "http://localhost/development",
+      redirectUri: authConfiguration.callbackUri,
     });
-    setSessionCookies(c, session);
+    setSessionCookies(c, session, authConfiguration.cookieSecure);
     return c.json({
       expiresAt: session.expiresAt.toISOString(),
       principal: publicPrincipal(session.principal),
@@ -747,23 +825,70 @@ function publicPrincipal(value: Principal) {
   };
 }
 
-function setSessionCookies(c: ApiContext, session: AuthSession): void {
+function setSessionCookies(
+  c: ApiContext,
+  session: AuthSession,
+  secure: boolean,
+): void {
   const maxAge = Math.max(
     0,
     Math.floor((session.expiresAt.getTime() - Date.now()) / 1_000),
   );
-  c.header(
-    "set-cookie",
-    `oao_session=${encodeURIComponent(session.sessionToken)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`,
-    { append: true },
+  appendCookie(
+    c,
+    "oao_session",
+    session.sessionToken,
+    "/",
+    "Lax",
+    maxAge,
+    secure,
   );
   if (session.refreshToken) {
-    c.header(
-      "set-cookie",
-      `oao_refresh=${encodeURIComponent(session.refreshToken)}; Path=/v1/auth; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`,
-      { append: true },
+    appendCookie(
+      c,
+      "oao_refresh",
+      session.refreshToken,
+      "/v1/auth",
+      "Strict",
+      maxAge,
+      secure,
     );
   }
+}
+
+function appendCookie(
+  c: ApiContext,
+  name: string,
+  value: string,
+  path: string,
+  sameSite: "Lax" | "Strict",
+  maxAge: number,
+  secure: boolean,
+): void {
+  c.header(
+    "set-cookie",
+    `${name}=${encodeURIComponent(value)}; Path=${path}; HttpOnly${secure ? "; Secure" : ""}; SameSite=${sameSite}; Max-Age=${maxAge}`,
+    { append: true },
+  );
+}
+
+function clearCookie(
+  c: ApiContext,
+  name: string,
+  path: string,
+  sameSite: "Lax" | "Strict",
+  secure: boolean,
+): void {
+  appendCookie(c, name, "", path, sameSite, 0, secure);
+}
+
+function safeStringEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+  return (
+    leftBytes.length === rightBytes.length &&
+    timingSafeEqual(leftBytes, rightBytes)
+  );
 }
 
 function registerAgentRoutes(
@@ -1165,7 +1290,7 @@ function registerRunRoutes(
               parent.agent_version_id,
               actor.id,
               idem,
-              { redactedInput },
+              { message: redactedInput },
               messageId,
               redactedInput,
             ],
@@ -1187,6 +1312,13 @@ function registerRunRoutes(
             resourceType: "run",
             resourceId: runId,
             detail: resumeRunId ? { previousRunId: resumeRunId } : {},
+          });
+          await dependencies.runtimeCommands.enqueue(tx, {
+            organizationId: actor.organizationId,
+            projectId: actor.projectId,
+            runId,
+            kind: "admit",
+            payload: { reason: resumeRunId ? "api_resume" : "api_submit" },
           });
           return publicValue(result.rows[0]?.run) as Readonly<
             Record<string, unknown>
@@ -1265,6 +1397,13 @@ function registerRunRoutes(
             resourceType: "run",
             resourceId: c.req.param("runId"),
             detail: { outcome },
+          });
+          await dependencies.runtimeCommands.enqueue(tx, {
+            organizationId: actor.organizationId,
+            projectId: actor.projectId,
+            runId: c.req.param("runId"),
+            kind: "cancel",
+            payload: { reason: "api_cancel" },
           });
           const current = await tx.query(
             `SELECT id,organization_id,project_id,thread_id,session_id,agent_version_id,created_by_principal_id,state,cancellation_requested_at,

@@ -151,6 +151,9 @@ importers:
       '@oao/domain':
         specifier: workspace:*
         version: link:../domain
+      '@workos-inc/node':
+        specifier: 10.10.0
+        version: 10.10.0
 
   packages/contracts:
     dependencies:
@@ -1061,6 +1064,10 @@ packages:
 
   '@vitest/utils@3.2.4':
     resolution: {integrity: sha512-fB2V0JFrQSMsCo9HiSq3Ezpdv4iYaXRG1Sx8edX3MwxfyNn83mKiGzOcH+Fkxt4MHxr3y42fQi1oeAInqgX2QA==}
+
+  '@workos-inc/node@10.10.0':
+    resolution: {integrity: sha512-qAf00a0DaIFD2yX4D11jCnMsk8w5FpE4Oif8EDBxGnPR1WNelqPeQqRrwX4/9xUpQV0asI6SFkdaffEj6IO33Q==}
+    engines: {node: '>=22.11.0'}
 
   acorn-jsx@5.3.2:
     resolution: {integrity: sha512-rq9s+JNhf0IChjtDXxllJ7g41oZk5SlXtp0LHwyA5cejwn7vKmKp4pPri6YEePv2PU65sAsegbXtIinmDFDXgQ==}
@@ -2623,6 +2630,8 @@ snapshots:
       '@vitest/pretty-format': 3.2.4
       loupe: 3.2.1
       tinyrainbow: 2.0.0
+
+  '@workos-inc/node@10.10.0': {}
 
   acorn-jsx@5.3.2(acorn@8.18.0):
     dependencies:

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DevelopmentAuthAdapter } from "@oao/auth-core";
 import { InMemoryArtifactAdapter } from "@oao/artifact-s3";
-import { createPool, migrate } from "@oao/db-postgres";
+import { createPool, migrate, type Queryable } from "@oao/db-postgres";
 import {
   brandedId,
   type AuthorizationScope,
@@ -13,6 +13,12 @@ import {
 } from "@oao/domain";
 import { createApiApp } from "../../src/app.js";
 import { PostgresApiStore } from "../../src/store.js";
+import { provisionWorkOsIdentity } from "../../src/workos-provisioning.js";
+import type {
+  RuntimeCommand,
+  RuntimeCommandPort,
+} from "../../src/runtime-commands.js";
+import { buildRuntimeWake } from "../../src/runtime-commands.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const integrationPrincipal: Principal = {
@@ -26,6 +32,37 @@ const integrationPrincipal: Principal = {
   scopes: new Set<AuthorizationScope>(["*"]),
 };
 const projectPath = `/v1/projects/${integrationPrincipal.projectId}`;
+
+class TransactionalTestRuntimeCommands implements RuntimeCommandPort {
+  failNext = false;
+
+  async enqueue(
+    transaction: Queryable,
+    command: RuntimeCommand,
+  ): Promise<void> {
+    const wake = buildRuntimeWake(command);
+    await transaction.query(
+      `INSERT INTO public.api_test_runtime_commands
+         (organization_id,project_id,wake_id,run_id,dispatch_key,request_hash,command_kind,payload_public)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT DO NOTHING`,
+      [
+        wake.organizationId,
+        wake.projectId,
+        wake.id,
+        wake.runId,
+        wake.dispatchKey,
+        wake.requestHash,
+        wake.kind,
+        wake.payload,
+      ],
+    );
+    if (this.failNext) {
+      this.failNext = false;
+      throw new Error("injected runtime command failure");
+    }
+  }
+}
 
 function jsonRequest(
   body: Readonly<Record<string, unknown>>,
@@ -50,6 +87,27 @@ test(
     assert.ok(databaseUrl);
     const pool = createPool(databaseUrl);
     await migrate(pool);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS public.api_test_runtime_commands (
+        organization_id uuid NOT NULL,
+        project_id uuid NOT NULL,
+        wake_id uuid NOT NULL,
+        run_id uuid NOT NULL,
+        dispatch_key text NOT NULL,
+        request_hash bytea NOT NULL CHECK (octet_length(request_hash)=32),
+        command_kind text NOT NULL,
+        payload_public jsonb NOT NULL,
+        PRIMARY KEY (organization_id,project_id,dispatch_key)
+      )
+    `);
+    await pool.query(
+      "GRANT INSERT, SELECT ON public.api_test_runtime_commands TO oao_app",
+    );
+    await pool.query("TRUNCATE public.api_test_runtime_commands");
+    t.after(async () => {
+      await pool.query("DROP TABLE IF EXISTS public.api_test_runtime_commands");
+      await pool.end();
+    });
     await pool.query(
       `SELECT oao.bootstrap_project(
         $1,'api-integration','API integration organization',
@@ -62,11 +120,47 @@ test(
         integrationPrincipal.subject,
       ],
     );
+    await t.test(
+      "operator provisioning idempotently links real WorkOS IDs",
+      async () => {
+        const input = {
+          organizationId: integrationPrincipal.organizationId,
+          projectId: integrationPrincipal.projectId,
+          principalId: integrationPrincipal.id,
+          workosUserId: "user_api_integration",
+          workosOrganizationId: "org_api_integration",
+          email: "integration@example.test",
+        };
+        await provisionWorkOsIdentity(pool, input);
+        await provisionWorkOsIdentity(pool, input);
+        const resolved = await pool.query<{
+          principal_id: string;
+          organization_id: string;
+          project_id: string;
+        }>("SELECT * FROM oao.resolve_workos_principal($1,$2,$3)", [
+          input.workosUserId,
+          input.workosOrganizationId,
+          input.projectId,
+        ]);
+        assert.equal(resolved.rows.length, 1);
+        assert.equal(resolved.rows[0]?.principal_id, input.principalId);
+
+        await assert.rejects(
+          provisionWorkOsIdentity(pool, {
+            ...input,
+            workosOrganizationId: "org_different",
+          }),
+          /different organization/u,
+        );
+      },
+    );
     const artifacts = new InMemoryArtifactAdapter();
+    const runtimeCommands = new TransactionalTestRuntimeCommands();
     const app = createApiApp({
       store: new PostgresApiStore(pool, "integration-api-key-pepper"),
       auth: new DevelopmentAuthAdapter({ principal: integrationPrincipal }),
       artifacts,
+      runtimeCommands,
     });
 
     await t.test("readiness and tenant/RLS route scope", async () => {
@@ -169,15 +263,71 @@ test(
         );
         assert.equal(session.status, 201);
         sessionId = ((await session.json()) as { id: string }).id;
+        runtimeCommands.failNext = true;
         const run = await app.request(
+          `${projectPath}/sessions/${sessionId}/runs`,
+          jsonRequest(
+            { redactedInput: "must roll back" },
+            "run-command-rollback",
+          ),
+        );
+        assert.equal(run.status, 500);
+        const rolledBack = await pool.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM oao.runs
+           WHERE organization_id=$1 AND project_id=$2
+             AND idempotency_key='run-command-rollback'`,
+          [integrationPrincipal.organizationId, integrationPrincipal.projectId],
+        );
+        assert.equal(rolledBack.rows[0]?.count, "0");
+        const rolledBackCommands = await pool.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM public.api_test_runtime_commands",
+        );
+        assert.equal(rolledBackCommands.rows[0]?.count, "0");
+
+        const submitted = await app.request(
           `${projectPath}/sessions/${sessionId}/runs`,
           jsonRequest(
             { redactedInput: "safe operator request" },
             "run-create-1",
           ),
         );
-        assert.equal(run.status, 202);
-        runId = ((await run.json()) as { id: string }).id;
+        assert.equal(submitted.status, 202);
+        runId = ((await submitted.json()) as { id: string }).id;
+        const persistedInput = await pool.query<{
+          input_public: { message?: string; redactedInput?: string };
+          message_count: string;
+        }>(
+          `SELECT run.input_public,
+             (SELECT count(*)::text FROM oao.messages message
+              WHERE message.organization_id=run.organization_id
+                AND message.project_id=run.project_id AND message.run_id=run.id
+                AND message.role='user') AS message_count
+           FROM oao.runs run
+           WHERE run.organization_id=$1 AND run.project_id=$2 AND run.id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            runId,
+          ],
+        );
+        assert.deepEqual(persistedInput.rows[0]?.input_public, {
+          message: "safe operator request",
+        });
+        assert.equal(persistedInput.rows[0]?.message_count, "1");
+        const replay = await app.request(
+          `${projectPath}/sessions/${sessionId}/runs`,
+          jsonRequest(
+            { redactedInput: "safe operator request" },
+            "run-create-1",
+          ),
+        );
+        assert.equal(replay.status, 202);
+        assert.equal(replay.headers.get("idempotency-replayed"), "true");
+        const commands = await pool.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM public.api_test_runtime_commands WHERE run_id=$1 AND command_kind='admit' AND dispatch_key=$2 AND octet_length(request_hash)=32",
+          [runId, `admit:${runId}`],
+        );
+        assert.equal(commands.rows[0]?.count, "1");
       },
     );
 
@@ -194,6 +344,16 @@ test(
         jsonRequest({}, "cancel-run-1"),
       );
       assert.equal(cancel.status, 202);
+      const cancelReplay = await app.request(
+        `${projectPath}/runs/${runId}/cancel`,
+        jsonRequest({}, "cancel-run-1"),
+      );
+      assert.equal(cancelReplay.headers.get("idempotency-replayed"), "true");
+      const cancelCommands = await pool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM public.api_test_runtime_commands WHERE run_id=$1 AND command_kind='cancel' AND dispatch_key=$2",
+        [runId, `cancel:${runId}`],
+      );
+      assert.equal(cancelCommands.rows[0]?.count, "1");
       const resumed = await app.request(`${projectPath}/events?once=true`, {
         headers: { "last-event-id": lastId },
       });
@@ -203,6 +363,34 @@ test(
     });
 
     await t.test(
+      "run resume has one transactional durable command",
+      async () => {
+        const resumed = await app.request(
+          `${projectPath}/runs/${runId}/resume`,
+          jsonRequest(
+            { redactedInput: "safe resumed request" },
+            "resume-run-1",
+          ),
+        );
+        assert.equal(resumed.status, 202, await resumed.clone().text());
+        const resumedRunId = ((await resumed.json()) as { id: string }).id;
+        const replay = await app.request(
+          `${projectPath}/runs/${runId}/resume`,
+          jsonRequest(
+            { redactedInput: "safe resumed request" },
+            "resume-run-1",
+          ),
+        );
+        assert.equal(replay.headers.get("idempotency-replayed"), "true");
+        const commands = await pool.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM public.api_test_runtime_commands WHERE run_id=$1 AND command_kind='admit' AND dispatch_key=$2",
+          [resumedRunId, `admit:${resumedRunId}`],
+        );
+        assert.equal(commands.rows[0]?.count, "1");
+      },
+    );
+
+    await t.test(
       "API keys show once, authenticate with scoped principal, and revoke",
       async () => {
         const created = await app.request(
@@ -210,7 +398,7 @@ test(
           jsonRequest(
             {
               name: "Integration key",
-              scopes: ["project:admin", "agent:read"],
+              scopes: ["*"],
             },
             "api-key-create-1",
           ),
@@ -228,7 +416,7 @@ test(
           jsonRequest(
             {
               name: "Integration key",
-              scopes: ["project:admin", "agent:read"],
+              scopes: ["*"],
             },
             "api-key-create-1",
           ),
@@ -246,6 +434,19 @@ test(
           },
         );
         assert.equal(authenticated.status, 200);
+        const csrfExemptWrite = await app.request(`${projectPath}/agents`, {
+          ...jsonRequest(
+            { key: "api-key-agent", name: "API key agent" },
+            "api-key-agent-create-1",
+          ),
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "api-key-agent-create-1",
+            authorization: `Bearer ${createdBody.secret}`,
+            cookie: "oao_session=untrusted-browser-cookie",
+          },
+        });
+        assert.equal(csrfExemptWrite.status, 201);
         const revoked = await app.request(
           `${projectPath}/api-keys/${createdBody.id}`,
           {
@@ -274,7 +475,5 @@ test(
       assert.match(body.artifactRef, /^artifact:\/\//u);
       assert.equal(body.contentType, "application/x-ndjson");
     });
-
-    await pool.end();
   },
 );

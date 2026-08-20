@@ -1,4 +1,3 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   AuthenticationError,
   readBearerToken,
@@ -13,6 +12,11 @@ import {
   type AuthTenantAdapter,
 } from "@oao/auth-core";
 import type { Principal } from "@oao/domain";
+import {
+  WorkOS,
+  type AuthenticationResponse,
+  type Event,
+} from "@workos-inc/node";
 
 export interface WorkOsIdentity {
   readonly subject: string;
@@ -68,7 +72,7 @@ export interface WorkOsWebhookVerifier {
   verify(input: {
     readonly rawBody: Uint8Array;
     readonly signature: string;
-  }): Promise<void>;
+  }): Promise<WorkOsWebhookEvent>;
 }
 
 /** Durable implementation must atomically claim an event ID before reconciliation. */
@@ -191,11 +195,10 @@ export class WorkOsAuthAdapter implements AuthTenantAdapter {
       typeof input.rawBody === "string"
         ? new TextEncoder().encode(input.rawBody)
         : input.rawBody;
-    await this.#webhookVerifier.verify({
+    const event = await this.#webhookVerifier.verify({
       rawBody,
       signature: input.signature,
     });
-    const event = parseWebhookEvent(rawBody);
     if ((await this.#webhookLedger.claim(event, rawBody)) === "duplicate") {
       return { status: "duplicate", eventId: event.id };
     }
@@ -234,117 +237,221 @@ export class WorkOsAuthAdapter implements AuthTenantAdapter {
 }
 
 export class WorkOsWebhookVerificationError extends Error {
-  constructor(readonly reason: "invalid_signature" | "stale_signature") {
+  constructor() {
     super("webhook verification failed");
     this.name = "WorkOsWebhookVerificationError";
   }
 }
 
-export interface WorkOsHmacWebhookVerifierOptions {
-  readonly secret: string;
-  readonly toleranceSeconds?: number;
+export interface WorkOsNodeAuthTransportOptions {
+  readonly apiKey: string;
+  readonly clientId: string;
+  readonly cookiePassword: string;
+  readonly workos?: WorkOS;
   readonly now?: () => Date;
+  readonly sessionLifetimeSeconds?: number;
 }
 
-/** Verifies WorkOS `t=..., v1=...` signatures over the unmodified request bytes. */
-export class WorkOsHmacWebhookVerifier implements WorkOsWebhookVerifier {
-  readonly #secret: string;
-  readonly #toleranceSeconds: number;
+/** Concrete AuthKit transport backed by the official WorkOS Node SDK. */
+export class WorkOsNodeAuthTransport implements WorkOsAuthTransport {
+  readonly #workos: WorkOS;
+  readonly #clientId: string;
+  readonly #cookiePassword: string;
   readonly #now: () => Date;
+  readonly #sessionLifetimeSeconds: number;
 
-  constructor(options: WorkOsHmacWebhookVerifierOptions) {
+  constructor(options: WorkOsNodeAuthTransportOptions) {
+    if (options.apiKey.length === 0) throw new TypeError("apiKey is required");
+    if (options.clientId.length === 0)
+      throw new TypeError("clientId is required");
+    if (options.cookiePassword.length < 32)
+      throw new TypeError("cookiePassword must contain at least 32 characters");
+    this.#workos =
+      options.workos ??
+      new WorkOS({ apiKey: options.apiKey, clientId: options.clientId });
+    this.#clientId = options.clientId;
+    this.#cookiePassword = options.cookiePassword;
+    this.#now = options.now ?? (() => new Date());
+    this.#sessionLifetimeSeconds = options.sessionLifetimeSeconds ?? 3_600;
+  }
+
+  async authorizationUrl(input: {
+    readonly redirectUri: string;
+    readonly state?: string;
+    readonly organizationHint?: string;
+  }): Promise<string> {
+    return this.#workos.userManagement.getAuthorizationUrl({
+      clientId: this.#clientId,
+      provider: "authkit",
+      redirectUri: input.redirectUri,
+      ...(input.state === undefined ? {} : { state: input.state }),
+      ...(input.organizationHint === undefined
+        ? {}
+        : { organizationId: input.organizationHint }),
+    });
+  }
+
+  async exchangeCode(input: {
+    readonly code: string;
+    readonly redirectUri: string;
+  }): Promise<WorkOsProviderSession> {
+    void input.redirectUri;
+    const response = await this.#workos.userManagement.authenticateWithCode({
+      clientId: this.#clientId,
+      code: input.code,
+      session: {
+        sealSession: true,
+        cookiePassword: this.#cookiePassword,
+      },
+    });
+    return this.#providerSession(response);
+  }
+
+  async refresh(input: {
+    readonly refreshToken: string;
+  }): Promise<WorkOsProviderSession> {
+    const session = this.#workos.userManagement.loadSealedSession({
+      sessionData: input.refreshToken,
+      cookiePassword: this.#cookiePassword,
+    });
+    const response = await session.refresh();
+    if (!response.authenticated || !response.sealedSession) {
+      throw new AuthenticationError("invalid_session");
+    }
+    return {
+      sessionToken: response.sealedSession,
+      refreshToken: response.sealedSession,
+      expiresAt: this.#expiresAt(),
+      identity: identityFromUser(response.user, response.organizationId),
+    };
+  }
+
+  async validateSession(
+    sessionToken: string,
+  ): Promise<WorkOsIdentity | undefined> {
+    const session = this.#workos.userManagement.loadSealedSession({
+      sessionData: sessionToken,
+      cookiePassword: this.#cookiePassword,
+    });
+    const result = await session.authenticate();
+    return result.authenticated
+      ? identityFromUser(result.user, result.organizationId)
+      : undefined;
+  }
+
+  async logout(input: {
+    readonly sessionToken: string;
+    readonly returnTo?: string;
+  }): Promise<{ readonly redirectUrl?: string }> {
+    const session = this.#workos.userManagement.loadSealedSession({
+      sessionData: input.sessionToken,
+      cookiePassword: this.#cookiePassword,
+    });
+    return {
+      redirectUrl: await session.getLogoutUrl(
+        input.returnTo === undefined ? {} : { returnTo: input.returnTo },
+      ),
+    };
+  }
+
+  #providerSession(response: AuthenticationResponse): WorkOsProviderSession {
+    if (!response.sealedSession)
+      throw new AuthenticationError("provider_unavailable");
+    return {
+      sessionToken: response.sealedSession,
+      refreshToken: response.sealedSession,
+      expiresAt:
+        expiresAtFromAccessToken(response.accessToken) ?? this.#expiresAt(),
+      identity: identityFromUser(response.user, response.organizationId),
+    };
+  }
+
+  #expiresAt(): Date {
+    return new Date(
+      this.#now().getTime() + this.#sessionLifetimeSeconds * 1_000,
+    );
+  }
+}
+
+export interface WorkOsNodeWebhookVerifierOptions {
+  readonly secret: string;
+  readonly workos?: WorkOS;
+  readonly clientId?: string;
+  /** Official SDK tolerance in milliseconds. */
+  readonly toleranceMilliseconds?: number;
+}
+
+/** Exact raw-body verification through the official WorkOS helper. */
+export class WorkOsNodeWebhookVerifier implements WorkOsWebhookVerifier {
+  readonly #secret: string;
+  readonly #workos: WorkOS;
+  readonly #toleranceMilliseconds: number | undefined;
+
+  constructor(options: WorkOsNodeWebhookVerifierOptions) {
     if (options.secret.length === 0) throw new TypeError("secret is required");
     this.#secret = options.secret;
-    this.#toleranceSeconds = options.toleranceSeconds ?? 300;
-    this.#now = options.now ?? (() => new Date());
+    this.#workos =
+      options.workos ??
+      new WorkOS({ clientId: options.clientId ?? "client_webhook_verifier" });
+    this.#toleranceMilliseconds = options.toleranceMilliseconds;
   }
 
   async verify(input: {
     readonly rawBody: Uint8Array;
     readonly signature: string;
-  }): Promise<void> {
-    const parsed = parseSignature(input.signature);
-    const nowMilliseconds = this.#now().getTime();
-    if (
-      Math.abs(nowMilliseconds - parsed.timestamp) >
-      this.#toleranceSeconds * 1000
-    ) {
-      throw new WorkOsWebhookVerificationError("stale_signature");
+  }): Promise<WorkOsWebhookEvent> {
+    let event: Event;
+    try {
+      event = await this.#workos.webhooks.constructEvent({
+        payload: Buffer.from(input.rawBody),
+        sigHeader: input.signature,
+        secret: this.#secret,
+        ...(this.#toleranceMilliseconds === undefined
+          ? {}
+          : { tolerance: this.#toleranceMilliseconds }),
+      });
+    } catch {
+      throw new WorkOsWebhookVerificationError();
     }
-    const prefix = new TextEncoder().encode(`${parsed.timestamp}.`);
-    const signedPayload = new Uint8Array(prefix.length + input.rawBody.length);
-    signedPayload.set(prefix);
-    signedPayload.set(input.rawBody, prefix.length);
-    const expected = createHmac("sha256", this.#secret)
-      .update(signedPayload)
-      .digest();
-    const valid = parsed.signatures.some((signature) => {
-      if (!/^[0-9a-f]{64}$/iu.test(signature)) return false;
-      const candidate = Buffer.from(signature, "hex");
-      return (
-        candidate.length === expected.length &&
-        timingSafeEqual(candidate, expected)
-      );
-    });
-    if (!valid) {
-      throw new WorkOsWebhookVerificationError("invalid_signature");
-    }
+    return {
+      id: event.id,
+      type: event.event,
+      createdAt: event.createdAt,
+      data: event.data,
+    };
   }
 }
 
-function parseSignature(header: string): {
-  readonly timestamp: number;
-  readonly signatures: readonly string[];
-} {
-  let timestamp: number | undefined;
-  const signatures: string[] = [];
-  for (const segment of header.split(",")) {
-    const [key, value] = segment.trim().split("=", 2);
-    if (key === "t" && value !== undefined && /^\d+$/u.test(value)) {
-      timestamp = Number(value);
-    }
-    if (key === "v1" && value !== undefined) signatures.push(value);
-  }
-  if (
-    timestamp === undefined ||
-    !Number.isSafeInteger(timestamp) ||
-    signatures.length === 0
-  ) {
-    throw new WorkOsWebhookVerificationError("invalid_signature");
-  }
-  return { timestamp, signatures };
-}
-
-function parseWebhookEvent(rawBody: Uint8Array): WorkOsWebhookEvent {
-  let value: unknown;
-  try {
-    value = JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(rawBody),
-    );
-  } catch {
-    throw new WorkOsWebhookVerificationError("invalid_signature");
-  }
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new WorkOsWebhookVerificationError("invalid_signature");
-  }
-  const record = value as Record<string, unknown>;
-  if (
-    typeof record.id !== "string" ||
-    record.id.length === 0 ||
-    typeof record.event !== "string" ||
-    record.event.length === 0 ||
-    !("data" in record)
-  ) {
-    throw new WorkOsWebhookVerificationError("invalid_signature");
-  }
+function identityFromUser(
+  user: AuthenticationResponse["user"],
+  organizationId?: string,
+): WorkOsIdentity {
   return {
-    id: record.id,
-    type: record.event,
-    ...(typeof record.created_at === "string"
-      ? { createdAt: record.created_at }
-      : {}),
-    data: record.data,
+    subject: user.id,
+    email: user.email,
+    ...(user.name === null ? {} : { displayName: user.name }),
+    ...(organizationId === undefined
+      ? {}
+      : { externalOrganizationId: organizationId }),
   };
+}
+
+function expiresAtFromAccessToken(accessToken: string): Date | undefined {
+  const payload = accessToken.split(".")[1];
+  if (!payload) return undefined;
+  try {
+    const value = JSON.parse(
+      Buffer.from(payload, "base64url").toString("utf8"),
+    ) as {
+      readonly exp?: unknown;
+    };
+    if (typeof value.exp !== "number" || !Number.isSafeInteger(value.exp))
+      return undefined;
+    const expiresAt = new Date(value.exp * 1_000);
+    return Number.isNaN(expiresAt.getTime()) ? undefined : expiresAt;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Test/local ledger only. Hosted deployments must use the PostgreSQL seam. */
