@@ -193,7 +193,7 @@ test(
           "0001_foundation.sql",
           "0002_foundation_followup.sql",
           "0003_api_auth.sql",
-          "0003_runtime.sql",
+          "0004_runtime.sql",
         ]);
         await seed(pool);
       });
@@ -556,6 +556,53 @@ test(
           const run = uuid(226) as RunId;
           const wake = uuid(227);
           await insertRun(pool, run, "runtime-wake-run");
+          await withTenantTransaction(pool, tenant, async (transaction) => {
+            await transaction.query(
+              `INSERT INTO oao.runtime_thread_instances (
+                organization_id,project_id,thread_id,session_id,agent_version_id,
+                snapshot_hash,flue_instance_id
+              ) VALUES ($1,$2,$3,$4,$5,digest('runtime-role-test','sha256'),$6)`,
+              [
+                ids.organization,
+                ids.project,
+                ids.thread,
+                ids.session,
+                ids.version,
+                `runtime-role-test:${run}`,
+              ],
+            );
+            await transaction.query(
+              `INSERT INTO oao.runtime_dispatches (
+                organization_id,project_id,run_id,thread_id,admission_key,
+                request_hash,snapshot_hash,state,fence,flue_conversation_id,deadline_at
+              ) VALUES ($1,$2,$3,$4,$5,digest('request','sha256'),
+                digest('snapshot','sha256'),'admitted',1,$6,clock_timestamp()+interval '1 minute')`,
+              [
+                ids.organization,
+                ids.project,
+                run,
+                ids.thread,
+                `runtime-role-test:${run}`,
+                `runtime-role-test:${run}`,
+              ],
+            );
+          });
+          const roleClient = await pool.connect();
+          try {
+            await roleClient.query("BEGIN");
+            await roleClient.query("SET LOCAL ROLE oao_app");
+            await roleClient.query("SELECT oao.set_tenant_context($1,$2)", [
+              ids.organization,
+              ids.otherProject,
+            ]);
+            const active = await roleClient.query<{ active: boolean }>(
+              "SELECT oao.runtime_has_active_dispatches() AS active",
+            );
+            assert.equal(active.rows[0]?.active, true);
+          } finally {
+            await roleClient.query("ROLLBACK").catch(() => undefined);
+            roleClient.release();
+          }
           const enqueue = (payload: Record<string, string>) =>
             withTenantTransaction(pool, tenant, (transaction) =>
               transaction.query(
@@ -607,6 +654,12 @@ test(
             [wake],
           );
           assert.deepEqual(stored.rows[0], { state: "completed", attempts: 2 });
+          await withTenantTransaction(pool, tenant, (transaction) =>
+            transaction.query(
+              "UPDATE oao.runtime_dispatches SET state='settled' WHERE organization_id=$1 AND project_id=$2 AND run_id=$3",
+              [ids.organization, ids.project, run],
+            ),
+          );
         },
       );
 

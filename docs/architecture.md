@@ -22,7 +22,7 @@ PostgreSQL <---------------------------- Flue runtime worker
   session summaries + pg-boss             ManagedAgent + durable tools
   @flue/postgres canonical state                 |
         |                                         +--> OpenRouter adapter / fake model
-        |                                         +--> Daytona EU adapter / fake sandbox
+        |                                         +--> Daytona adapter / fake sandbox
         +--> S3-compatible artifacts              +--> caller tool/approval ledger
 
 OTel SDK -> optional Collector -> configured OTLP backend
@@ -38,6 +38,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 6. Browser clients never receive database credentials and never query Flue tables directly.
 7. Raw sensitive payloads are encrypted or retained only inside the explicitly documented Flue storage boundary. List views, events, logs, and telemetry are redacted.
 8. Cancellation of an unreserved queued run is database-only. Once admission becomes ambiguous or succeeds, cancellation completes keyed admission reconciliation, performs Flue abort, and waits for canonical settlement.
+9. A sandbox workspace is keyed by organization, project, and platform thread. Successive submissions in that thread reuse the same workspace; Flue callback identifiers are correlation metadata, not lifecycle identity.
 
 ## Public run states
 
@@ -61,7 +62,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 - `@oao/queue-postgres`: pg-boss wake jobs and platform dispatch leases.
 - `@oao/tool-broker`: caller requests/claims/results and single-approver gates.
 - `@oao/models-openrouter`: immutable presets and OpenRouter provider construction.
-- `@oao/sandbox-daytona`: committed Flue Daytona blueprint plus lifecycle/region/firewall manager.
+- `@oao/sandbox-daytona`: committed Flue Daytona blueprint plus thread-workspace lifecycle, target diagnostics, and egress-policy manager.
 
 ### Product surfaces
 
@@ -78,7 +79,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 - Pending tool calls and approvals
 - Errors, attempts/recovery, timing waterfall, usage/cost provenance, and redacted payload inspection
 - Organization/project/API-key/member/settings screens
-- Hosting diagnostics for local services and later Railway/Daytona regions; no end-to-end EU-residency claim in MVP
+- Hosting diagnostics for local services and optional Railway/Daytona targets; no residency claim in MVP
 
 ## Authentication
 
@@ -86,7 +87,11 @@ Local development uses a deterministic development identity adapter. Hosted huma
 
 ## Hosting posture
 
-The product is local-first. A later Railway deployment places application services and PostgreSQL in EU West (Amsterdam) and requests Daytona `target="eu"`. WorkOS and OpenRouter remain usable defaults, so the MVP does not claim full EU data residency. Compliance-grade residency is a later phase.
+The product is local-first. A deployment may set `DAYTONA_TARGET` as a provider placement preference; omitting it uses Daytona's provider default. The MVP neither verifies nor claims residency. A strict placement policy, if required later, belongs in a deployment-policy layer with explicit verification and diagnostics.
+
+The MVP publication contract accepts a single platform turn cap of 32 and rejects any other per-agent value. Runtime enforces that cap before provider calls. Each immutable agent snapshot also carries a durable product deadline; expiry aborts the Flue submission and settles the product run as `timed_out`.
+
+Flue 2.0.3's in-process `stop()` aborts active tool executions and records that abort in conversation history. OAO therefore separates full idle-process disposal from process handoff: SIGTERM stops new wake intake, projections, and HTTP, preserves any live Flue lease without calling the aborting stop path, and exits so startup recovery can reclaim that same submission after the bounded 30-second lease. In-process hot restart with an active submission is intentionally unsupported.
 
 ## Implementation order
 

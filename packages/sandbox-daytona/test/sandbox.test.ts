@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import type { OrganizationId, ProjectId, RunId } from "@oao/domain";
+import type {
+  OrganizationId,
+  ProjectId,
+  RunId,
+  SessionId,
+  ThreadId,
+} from "@oao/domain";
 import type { SandboxRepository } from "../src/index.js";
 import {
   DAYTONA_TARGET_POSTURE,
@@ -24,10 +30,13 @@ test("fake sandbox creation, recovery and command results are fenced", async () 
         ...tenant,
         id: input.id,
         runId: input.runId,
+        creatorRunId: input.runId,
+        threadId: input.threadId,
+        sessionId: input.sessionId,
         creationKey: input.creationKey,
         fence: 1n,
         state: instanceState,
-        target: "eu",
+        target: "provider-default",
       };
     },
     async markRunning(record, handle) {
@@ -72,6 +81,8 @@ test("fake sandbox creation, recovery and command results are fenced", async () 
     ...tenant,
     sandboxId: "00000000-0000-4000-8000-000000000020",
     runId: "00000000-0000-4000-8000-000000000010" as RunId,
+    threadId: "00000000-0000-4000-8000-000000000011" as ThreadId,
+    sessionId: "00000000-0000-4000-8000-000000000012" as SessionId,
     creationKey: "sandbox:run-10",
     image: "daytonaio/sandbox:latest",
     egress: { mode: "none" as const },

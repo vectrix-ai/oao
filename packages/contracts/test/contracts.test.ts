@@ -3,9 +3,11 @@ import test from "node:test";
 import * as v from "valibot";
 import {
   ApiErrorSchema,
+  PLATFORM_MAX_TURNS,
   ProductEventSchema,
   RunSchema,
   ToolCallSchema,
+  parseManagedAgentSnapshotForPublication,
 } from "../src/index.js";
 
 const id = "00000000-0000-4000-8000-000000000001";
@@ -70,5 +72,56 @@ test("tool claim fences remain precise above Number.MAX_SAFE_INTEGER", () => {
   assert.equal(parsed.claimFence, claimFence);
   assert.throws(() =>
     v.parse(ToolCallSchema, { ...parsed, claimFence: "09007199254740993" }),
+  );
+});
+
+test("agent publication rejects JSON schema keywords the runtime cannot enforce", () => {
+  const snapshot = {
+    agentVersionId: id,
+    contentHash: "a".repeat(64),
+    systemPrompt: "Be deterministic",
+    modelPreset: "local-fake",
+    tools: [
+      {
+        name: "lookup",
+        description: "Look up a value",
+        owner: "caller",
+        approval: "never",
+        inputSchema: {
+          type: "object",
+          properties: { query: { type: "string" } },
+          required: ["query"],
+          additionalProperties: false,
+        },
+        outputSchema: {
+          type: "object",
+          properties: { found: { type: "boolean" } },
+          required: ["found"],
+          additionalProperties: false,
+        },
+      },
+    ],
+    sandbox: { enabled: false, network: "none" },
+    limits: { maxTurns: PLATFORM_MAX_TURNS, timeoutMs: 60_000 },
+  };
+  assert.equal(
+    parseManagedAgentSnapshotForPublication(snapshot).tools[0]?.name,
+    "lookup",
+  );
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...snapshot,
+      tools: [
+        {
+          ...snapshot.tools[0],
+          inputSchema: {
+            ...snapshot.tools[0]?.inputSchema,
+            properties: {
+              query: { type: "string", minLength: 1 },
+            },
+          },
+        },
+      ],
+    }),
   );
 });

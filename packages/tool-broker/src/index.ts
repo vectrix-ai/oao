@@ -1,8 +1,13 @@
 import { createHash } from "node:crypto";
+import {
+  ToolResultEnvelopeSchema,
+  type ToolResultEnvelope,
+} from "@oao/contracts";
 import type { PgPool, Queryable, TenantContext } from "@oao/db-postgres";
 import { withTenantTransaction } from "@oao/db-postgres";
 import type { PrincipalId, PublicValue, RunId } from "@oao/domain";
 import { assertPublicPayload } from "@oao/domain";
+import * as v from "valibot";
 
 export type ToolFailureCode =
   | "approval_denied"
@@ -10,17 +15,11 @@ export type ToolFailureCode =
   | "run_cancelled"
   | "tool_expired"
   | "tool_failed"
-  | "platform_tool_failed";
+  | "platform_tool_failed"
+  | "invalid_tool_arguments"
+  | "invalid_tool_result";
 
-export type ToolOutcome =
-  | { readonly ok: true; readonly value: PublicValue }
-  | {
-      readonly ok: false;
-      readonly error: {
-        readonly code: ToolFailureCode;
-        readonly message: string;
-      };
-    };
+export type ToolOutcome = ToolResultEnvelope;
 
 export interface ToolObligationInput extends TenantContext {
   readonly runId: RunId;
@@ -84,24 +83,40 @@ function requestHash(input: ToolObligationInput): Uint8Array {
 }
 
 function failure(code: ToolFailureCode, message: string): ToolOutcome {
-  return { ok: false, error: { code, message } };
+  return { version: 1, status: "failure", error: { code, message } };
 }
 
 function decodeResult(
   value: Readonly<Record<string, PublicValue>>,
 ): ToolOutcome {
-  if (value.ok === true) return { ok: true, value: value.value ?? null };
-  const error = value.error;
-  if (error && typeof error === "object" && !Array.isArray(error)) {
-    const code = (error as Readonly<Record<string, PublicValue>>).code;
-    if (typeof code === "string") {
-      return failure(
-        code === "platform_tool_failed" ? code : "tool_failed",
-        "Tool execution failed",
-      );
-    }
-  }
-  return failure("tool_failed", "Tool execution failed");
+  const parsed = v.safeParse(ToolResultEnvelopeSchema, value);
+  if (!parsed.success)
+    return failure("invalid_tool_result", "Tool returned an invalid result");
+  if (parsed.output.status === "success") return parsed.output;
+  const visible = new Set<ToolFailureCode>([
+    "approval_denied",
+    "approval_expired",
+    "run_cancelled",
+    "tool_expired",
+    "tool_failed",
+    "platform_tool_failed",
+    "invalid_tool_arguments",
+    "invalid_tool_result",
+  ]);
+  const code = visible.has(parsed.output.error.code)
+    ? parsed.output.error.code
+    : "tool_failed";
+  const messages: Record<ToolFailureCode, string> = {
+    approval_denied: "Approval was denied",
+    approval_expired: "Approval expired",
+    run_cancelled: "Run was cancelled",
+    tool_expired: "Tool request expired",
+    tool_failed: "Tool execution failed",
+    platform_tool_failed: "Platform tool execution failed",
+    invalid_tool_arguments: "Tool arguments were invalid",
+    invalid_tool_result: "Tool returned an invalid result",
+  };
+  return failure(code, messages[code]);
 }
 
 async function appendEventOnce(
@@ -131,6 +146,32 @@ async function appendEventOnce(
       input.payload,
     ],
   );
+}
+
+async function transitionRun(
+  transaction: Queryable,
+  input: ToolObligationInput,
+  state: "running" | "waiting_for_tool" | "waiting_for_approval",
+  reason: string,
+): Promise<void> {
+  const changed = await transaction.query(
+    `UPDATE oao.runs SET state=$4
+     WHERE organization_id=$1 AND project_id=$2 AND id=$3
+       AND state IN ('running','waiting_for_tool','waiting_for_approval') AND state <> $4
+     RETURNING id`,
+    [input.organizationId, input.projectId, input.runId, state],
+  );
+  if (!changed.rowCount) return;
+  await appendEventOnce(transaction, {
+    ...input,
+    eventId: stableUuid(
+      `event:tool:${input.runId}:${input.flueToolCallId}:state:${state}`,
+    ),
+    aggregateType: "run",
+    aggregateId: input.runId,
+    kind: "run.state_changed",
+    payload: { state, reason, toolName: input.toolName },
+  });
 }
 
 export class PostgresToolBroker {
@@ -213,6 +254,14 @@ export class PostgresToolBroker {
           payload: { approvalId, toolCallId, toolName: input.toolName },
         });
       }
+      await transitionRun(
+        transaction,
+        input,
+        input.approval === "always"
+          ? "waiting_for_approval"
+          : "waiting_for_tool",
+        input.approval === "always" ? "approval_required" : "tool_pending",
+      );
     });
     return toolCallId;
   }
@@ -233,7 +282,10 @@ export class PostgresToolBroker {
     const toolCallId = await this.publishPlatform(input);
     const terminal = await this.read(input, toolCallId);
     const gate = this.stageFailure(terminal);
-    if (gate) return gate;
+    if (gate) {
+      await this.resumeRun(input, terminal);
+      return gate;
+    }
     if (
       terminal.stage === "result_submitted" ||
       terminal.stage === "result_committed"
@@ -250,6 +302,7 @@ export class PostgresToolBroker {
         signal,
       );
     }
+    await this.resumeRun(input, terminal);
     return this.claimExecuteCommit(input, toolCallId, execute);
   }
 
@@ -262,9 +315,14 @@ export class PostgresToolBroker {
     for (;;) {
       const row = await this.read(input, toolCallId);
       const failed = this.stageFailure(row);
-      if (failed) return failed;
-      if (row.approval_status === "approved")
+      if (failed) {
+        await this.resumeRun(input, row);
+        return failed;
+      }
+      if (row.approval_status === "approved") {
+        await this.resumeRun(input, row);
         return this.claimExecuteCommit(input, toolCallId, execute);
+      }
       await this.pause(signal);
     }
   }
@@ -292,11 +350,15 @@ export class PostgresToolBroker {
     );
     let safeResult: Readonly<Record<string, PublicValue>>;
     try {
-      safeResult = { ok: true, value: await execute() };
+      const value = await execute();
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new TypeError("Platform tool output must be an object");
+      safeResult = { version: 1, status: "success", value };
       assertPublicPayload(safeResult);
     } catch {
       safeResult = {
-        ok: false,
+        version: 1,
+        status: "failure",
         error: {
           code: "platform_tool_failed",
           message: "Platform tool execution failed",
@@ -339,6 +401,7 @@ export class PostgresToolBroker {
         payload: { toolCallId, owner: "platform" },
       });
     });
+    await this.resumeRun(input, await this.read(input, toolCallId));
     return decodeResult(safeResult);
   }
 
@@ -350,7 +413,10 @@ export class PostgresToolBroker {
     for (;;) {
       const row = await this.read(input, toolCallId);
       const failed = this.stageFailure(row);
-      if (failed) return failed;
+      if (failed) {
+        await this.resumeRun(input, row);
+        return failed;
+      }
       if (
         (row.stage === "result_submitted" ||
           row.stage === "result_committed") &&
@@ -381,6 +447,7 @@ export class PostgresToolBroker {
             });
           });
         }
+        await this.resumeRun(input, row);
         return decodeResult(row.safe_result);
       }
       await this.pause(signal);
@@ -399,6 +466,32 @@ export class PostgresToolBroker {
     if (row.stage === "failed")
       return failure("tool_failed", "Tool execution failed");
     return undefined;
+  }
+
+  private async resumeRun(
+    input: ToolObligationInput,
+    row: ToolRow,
+  ): Promise<void> {
+    await withTenantTransaction(this.pool, input, async (transaction) => {
+      if (row.approval_status && row.approval_status !== "pending") {
+        await appendEventOnce(transaction, {
+          ...input,
+          eventId: stableUuid(
+            `event:tool:${input.runId}:${input.flueToolCallId}:approval:${row.approval_status}`,
+          ),
+          aggregateType: "run",
+          aggregateId: input.runId,
+          kind: "approval.resolved",
+          payload: { status: row.approval_status, toolName: input.toolName },
+        });
+      }
+      await transitionRun(
+        transaction,
+        input,
+        "running",
+        this.stageFailure(row) ? "tool_gate_failed" : "tool_gate_resolved",
+      );
+    });
   }
 
   private async read(

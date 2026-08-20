@@ -220,6 +220,9 @@ importers:
       '@earendil-works/pi-ai':
         specifier: 0.83.0
         version: 0.83.0(ws@8.21.3)(zod@4.4.3)
+      valibot:
+        specifier: 1.4.2
+        version: 1.4.2(typescript@5.9.3)
 
   packages/queue-postgres:
     dependencies:
@@ -310,12 +313,18 @@ importers:
 
   packages/tool-broker:
     dependencies:
+      '@oao/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@oao/db-postgres':
         specifier: workspace:*
         version: link:../db-postgres
       '@oao/domain':
         specifier: workspace:*
         version: link:../domain
+      valibot:
+        specifier: 1.4.2
+        version: 1.4.2(typescript@5.9.3)
 
 packages:
 

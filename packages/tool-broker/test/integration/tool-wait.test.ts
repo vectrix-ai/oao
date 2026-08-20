@@ -78,11 +78,12 @@ test(
           fence,
           idempotencyKey: "caller-result-1",
           requestHash: createHash("sha256").update("caller-result-1").digest(),
-          safeResult: { ok: true, value: { found: true } },
+          safeResult: { version: 1, status: "success", value: { found: true } },
         }),
       );
       assert.deepEqual(await waiting, {
-        ok: true,
+        version: 1,
+        status: "success",
         value: { found: true },
       });
 
@@ -97,11 +98,13 @@ test(
         return { echoed: true } as const;
       };
       assert.deepEqual(await broker.executePlatform(platform, execute), {
-        ok: true,
+        version: 1,
+        status: "success",
         value: { echoed: true },
       });
       assert.deepEqual(await broker.executePlatform(platform, execute), {
-        ok: true,
+        version: 1,
+        status: "success",
         value: { echoed: true },
       });
       assert.equal(executions, 1);

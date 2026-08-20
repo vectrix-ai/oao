@@ -17,7 +17,9 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@oao/contracts": "workspace:*",
     "@oao/db-postgres": "workspace:*",
-    "@oao/domain": "workspace:*"
+    "@oao/domain": "workspace:*",
+    "valibot": "1.4.2"
   }
 }

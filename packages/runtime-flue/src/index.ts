@@ -3,11 +3,14 @@ import type { Provider } from "@earendil-works/pi-ai";
 import { createOpenTelemetryInstrumentation } from "@flue/opentelemetry";
 import { postgres } from "@flue/postgres";
 import {
+  AgentInstanceExistsError,
   AgentRunError,
   dispatch,
+  getAgentInstance,
   init,
   instrument,
   observe,
+  useDelivery,
   useInitialData,
   useModel,
   useSandbox,
@@ -15,15 +18,22 @@ import {
 } from "@flue/runtime";
 import type {
   DispatchReceipt,
+  DeliveredMessage,
   FlueObservation,
   SandboxFactory,
+  ToolInputSchema,
+  ToolOutputSchema,
 } from "@flue/runtime";
 import { start } from "@flue/runtime/node";
 import type { Flue } from "@flue/runtime/node";
 import {
-  ManagedRunInitialDataSchema,
+  ManagedAgentInstanceDataSchema,
+  ManagedRunDeliverySchema,
+  ManagedRunInputV1Schema,
+  ToolResultFailureCodeSchema,
   type ManagedAgentSnapshot,
-  type ManagedRunInitialData,
+  type ManagedAgentInstanceData,
+  type ManagedRunDelivery,
 } from "@oao/contracts";
 import type { PgPool, Queryable, TenantContext } from "@oao/db-postgres";
 import { withTenantTransaction } from "@oao/db-postgres";
@@ -64,7 +74,10 @@ interface ManagedAgentRuntimeConfig {
   readonly presets: ImmutableModelPresetRegistry;
   readonly broker: PostgresToolBroker;
   readonly platformTools: ReadonlyMap<string, PlatformToolHandler>;
-  readonly sandboxFactory?: SandboxFactory;
+  readonly sandboxFactory?: (
+    initial: ManagedAgentInstanceData,
+    delivery: ManagedRunDelivery,
+  ) => SandboxFactory;
 }
 
 let managedRuntime: ManagedAgentRuntimeConfig | undefined;
@@ -80,18 +93,88 @@ export function configureManagedAgentRuntime(
   });
 }
 
+export function resetManagedAgentRuntime(): void {
+  managedRuntime = undefined;
+}
+
 function runtimeConfig(): ManagedAgentRuntimeConfig {
   if (!managedRuntime)
     throw new Error("ManagedAgent runtime is not configured");
   return managedRuntime;
 }
 
-const ToolInputSchema = v.looseObject({});
-const ToolOutputSchema = v.looseObject({ ok: v.boolean() });
+type PublishedObjectSchema =
+  ManagedAgentSnapshot["tools"][number]["inputSchema"];
 
-function safeArguments(
-  value: Record<string, unknown>,
-): Readonly<Record<string, PublicValue>> {
+function compilePropertySchema(
+  schema: Record<string, unknown>,
+): v.GenericSchema {
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+    const values = schema.enum;
+    return v.custom((value) => values.some((entry) => Object.is(entry, value)));
+  }
+  switch (schema.type) {
+    case "string":
+      return v.string();
+    case "number":
+      return v.number();
+    case "integer":
+      return v.pipe(v.number(), v.integer());
+    case "boolean":
+      return v.boolean();
+    case "null":
+      return v.null();
+    case "array": {
+      if (!schema.items || typeof schema.items !== "object")
+        throw new TypeError("Published array schemas require items");
+      return v.array(
+        compilePropertySchema(schema.items as Record<string, unknown>),
+      );
+    }
+    case "object":
+      return compileObjectSchema(schema as PublishedObjectSchema);
+    default:
+      throw new TypeError("Unsupported published JSON schema type");
+  }
+}
+
+function compileObjectSchema(schema: PublishedObjectSchema): ToolInputSchema {
+  if (schema.type !== "object" || schema.additionalProperties !== false)
+    throw new TypeError("Tool schemas must be closed objects");
+  const required = new Set(schema.required);
+  const entries: Record<string, v.GenericSchema> = {};
+  for (const [key, property] of Object.entries(schema.properties)) {
+    const compiled = compilePropertySchema(property);
+    entries[key] = required.has(key) ? compiled : v.optional(compiled);
+  }
+  for (const key of required) {
+    if (!(key in entries))
+      throw new TypeError(`Required tool schema property is missing: ${key}`);
+  }
+  return v.strictObject(entries);
+}
+
+function compileToolOutputSchema(
+  schema: PublishedObjectSchema,
+): ToolOutputSchema {
+  return v.variant("status", [
+    v.object({
+      version: v.literal(1),
+      status: v.literal("success"),
+      value: compileObjectSchema(schema),
+    }),
+    v.object({
+      version: v.literal(1),
+      status: v.literal("failure"),
+      error: v.object({
+        code: ToolResultFailureCodeSchema,
+        message: v.string(),
+      }),
+    }),
+  ]);
+}
+
+function safeArguments(value: unknown): Readonly<Record<string, PublicValue>> {
   const redacted = redactForPublic(value);
   if (!redacted || typeof redacted !== "object" || Array.isArray(redacted))
     return {};
@@ -99,25 +182,33 @@ function safeArguments(
 }
 
 export function ManagedAgent(): string {
-  const initial = useInitialData<ManagedRunInitialData>();
+  const initial = useInitialData<ManagedAgentInstanceData>();
+  const delivered = useDelivery();
+  if (delivered.kind !== "signal" || delivered.type !== "oao.run.v1")
+    throw new Error("ManagedAgent received an invalid delivery envelope");
+  const delivery = v.parse(ManagedRunDeliverySchema, delivered.attributes);
+  if (delivery.snapshotHash !== digestHex(initial.snapshot))
+    throw new Error(
+      "ManagedAgent delivery snapshot does not match its instance",
+    );
   const config = runtimeConfig();
   const preset = config.presets.resolve(initial.snapshot.modelPreset);
   useModel(preset.model);
   if (initial.snapshot.sandbox.enabled && config.sandboxFactory)
-    useSandbox(config.sandboxFactory);
+    useSandbox(config.sandboxFactory(initial, delivery));
 
   for (const tool of initial.snapshot.tools) {
     useTool({
       name: tool.name,
       description: tool.description,
-      input: ToolInputSchema,
-      output: ToolOutputSchema,
+      input: compileObjectSchema(tool.inputSchema),
+      output: compileToolOutputSchema(tool.outputSchema),
       durable: true,
       async run({ data, signal, step, toolCallId }) {
         const obligation: ToolObligationInput = {
           organizationId: initial.organizationId as OrganizationId,
           projectId: initial.projectId as ProjectId,
-          runId: initial.runId as RunId,
+          runId: delivery.runId as RunId,
           flueToolCallId: toolCallId,
           toolName: tool.name,
           safeArguments: safeArguments(data),
@@ -136,15 +227,19 @@ export function ManagedAgent(): string {
         const outcome = await step.do("execute-platform-obligation", () =>
           config.broker.executePlatform(
             obligation,
-            () => {
+            async () => {
               if (!handler)
                 throw new Error("Platform tool handler unavailable");
-              return handler(obligation.safeArguments, {
+              const result = await handler(obligation.safeArguments, {
                 runId: obligation.runId,
                 toolCallId,
                 idempotencyKey: `platform:${obligation.runId}:${toolCallId}`,
                 ...(signal ? { signal } : {}),
               });
+              return v.parse(
+                compileObjectSchema(tool.outputSchema),
+                result,
+              ) as PublicValue;
             },
             signal,
           ),
@@ -157,7 +252,7 @@ export function ManagedAgent(): string {
 }
 
 ManagedAgent.agentName = "ManagedAgent";
-ManagedAgent.initialData = ManagedRunInitialDataSchema;
+ManagedAgent.initialData = ManagedAgentInstanceDataSchema;
 ManagedAgent.durability = { maxAttempts: 10, timeoutMs: 3_600_000 };
 
 export function createFluePostgresAdapter(pool: PgPool) {
@@ -188,6 +283,7 @@ interface RunContext extends TenantContext {
   readonly runId: RunId;
   readonly threadId: ThreadId;
   readonly sessionId: string;
+  readonly agentVersionId: string;
   readonly state: string;
   readonly cancellationRequested: boolean;
   readonly inputPublic: Readonly<Record<string, PublicValue>>;
@@ -200,15 +296,44 @@ interface DispatchRow {
   run_id: RunId;
   thread_id: ThreadId;
   admission_key: string;
+  request_hash: Uint8Array;
+  snapshot_hash: Uint8Array;
   state: string;
   fence: string;
   flue_conversation_id: string;
   flue_submission_id: string | null;
   flue_instance_uid: string | null;
+  flue_accepted_at: Date | null;
+  deadline_at: Date;
+  timeout_requested_at: Date | null;
+}
+
+interface ThreadInstanceRow {
+  organization_id: OrganizationId;
+  project_id: ProjectId;
+  thread_id: ThreadId;
+  session_id: string;
+  agent_version_id: string;
+  snapshot_hash: Buffer;
+  flue_instance_id: string;
+  flue_instance_uid: string | null;
+  state: "ready" | "corrupt";
+}
+
+class FlueIncarnationCorruptionError extends Error {}
+
+function threadInstanceId(
+  input: TenantContext & { readonly threadId: ThreadId },
+): string {
+  return `oao:v1:${input.organizationId}:${input.projectId}:${input.threadId}`;
 }
 
 function digestJson(value: unknown): Uint8Array {
   return createHash("sha256").update(JSON.stringify(value)).digest();
+}
+
+function digestHex(value: unknown): string {
+  return Buffer.from(digestJson(value)).toString("hex");
 }
 
 function eventUuid(value: string): string {
@@ -248,6 +373,26 @@ async function appendEventOnce(
   );
 }
 
+async function closeRunObligations(
+  transaction: Queryable,
+  input: TenantContext & { readonly runId: RunId },
+  state: "completed" | "failed" | "cancelled" | "timed_out",
+): Promise<void> {
+  await transaction.query(
+    `UPDATE oao.approvals SET status='expired',resolved_at=clock_timestamp(),
+       resolution_note=$4
+     WHERE organization_id=$1 AND project_id=$2 AND run_id=$3 AND status='pending'`,
+    [input.organizationId, input.projectId, input.runId, `run_${state}`],
+  );
+  await transaction.query(
+    `UPDATE oao.tool_calls SET stage='cancelled',claim_fence=claim_fence+1,
+       lease_holder_principal_id=NULL,lease_expires_at=NULL,updated_at=clock_timestamp()
+     WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+       AND stage IN ('caller_pending','caller_claimed','platform_ready','platform_executing','result_submitted')`,
+    [input.organizationId, input.projectId, input.runId],
+  );
+}
+
 export class ManagedRuntimeOrchestrator {
   constructor(
     private readonly pool: PgPool,
@@ -262,6 +407,10 @@ export class ManagedRuntimeOrchestrator {
       await this.cancel(job);
       return;
     }
+    if (job.kind === "deadline") {
+      await this.deadline(job);
+      return;
+    }
     await this.admit(job);
   }
 
@@ -270,10 +419,7 @@ export class ManagedRuntimeOrchestrator {
       organization_id: OrganizationId;
       project_id: ProjectId;
       run_id: RunId;
-    }>(
-      `SELECT organization_id,project_id,run_id FROM oao.thread_admission_heads
-       ORDER BY updated_at`,
-    );
+    }>("SELECT * FROM oao.list_runtime_recovery_heads()");
     for (const head of heads.rows) {
       await withTenantTransaction(
         this.pool,
@@ -300,87 +446,277 @@ export class ManagedRuntimeOrchestrator {
     const run = await this.loadRun(job);
     const admissionKey = `run:${run.runId}`;
     const snapshotHash = digestJson(run.snapshot);
+    const deliveredMessage = this.deliveredMessage(run);
     const requestHash = digestJson({
       runId: run.runId,
       snapshotHash: Buffer.from(snapshotHash).toString("hex"),
+      deliveredMessage,
     });
-    let runtimeDispatch = await withTenantTransaction(
-      this.pool,
-      run,
-      async (transaction) => {
-        const headResult = await transaction.query(
-          "SELECT (oao.reserve_thread_admission($1,$2,$3,$4,$5,$6)).*",
-          [
-            run.organizationId,
-            run.projectId,
-            run.threadId,
-            run.runId,
-            admissionKey,
-            requestHash,
-          ],
-        );
-        const head = headResult.rows[0] as { fence: string };
-        await transaction.query(
-          `INSERT INTO oao.runtime_dispatches (
+    const flueInstanceId = threadInstanceId(run);
+    let runtimeDispatch: DispatchRow;
+    try {
+      runtimeDispatch = await withTenantTransaction(
+        this.pool,
+        run,
+        async (transaction) => {
+          await transaction.query(
+            `INSERT INTO oao.runtime_thread_instances (
+              organization_id,project_id,thread_id,session_id,agent_version_id,
+              snapshot_hash,flue_instance_id
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+            ON CONFLICT (organization_id,project_id,thread_id) DO NOTHING`,
+            [
+              run.organizationId,
+              run.projectId,
+              run.threadId,
+              run.sessionId,
+              run.agentVersionId,
+              snapshotHash,
+              flueInstanceId,
+            ],
+          );
+          const instanceResult = await transaction.query<ThreadInstanceRow>(
+            `SELECT * FROM oao.runtime_thread_instances
+             WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3 FOR UPDATE`,
+            [run.organizationId, run.projectId, run.threadId],
+          );
+          const instance = instanceResult.rows[0];
+          if (
+            !instance ||
+            instance.state !== "ready" ||
+            instance.session_id !== run.sessionId ||
+            instance.agent_version_id !== run.agentVersionId ||
+            instance.flue_instance_id !== flueInstanceId ||
+            !Buffer.from(instance.snapshot_hash).equals(
+              Buffer.from(snapshotHash),
+            )
+          )
+            throw new FlueIncarnationCorruptionError(
+              "Thread runtime identity or immutable snapshot mismatch",
+            );
+          const existingResult = await transaction.query<DispatchRow>(
+            `SELECT * FROM oao.runtime_dispatches
+             WHERE organization_id=$1 AND project_id=$2 AND run_id=$3 FOR UPDATE`,
+            [run.organizationId, run.projectId, run.runId],
+          );
+          const existing = existingResult.rows[0];
+          if (existing) {
+            const headResult = await transaction.query<{
+              run_id: RunId;
+              admission_key: string;
+              request_hash: Uint8Array;
+              fence: string;
+            }>(
+              `SELECT run_id,admission_key,request_hash,fence
+               FROM oao.thread_admission_heads
+               WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3 FOR UPDATE`,
+              [run.organizationId, run.projectId, run.threadId],
+            );
+            const head = headResult.rows[0];
+            if (
+              !head ||
+              head.run_id !== run.runId ||
+              head.admission_key !== admissionKey ||
+              !Buffer.from(head.request_hash).equals(
+                Buffer.from(requestHash),
+              ) ||
+              existing.thread_id !== run.threadId ||
+              existing.admission_key !== admissionKey ||
+              !Buffer.from(existing.request_hash).equals(
+                Buffer.from(requestHash),
+              ) ||
+              !Buffer.from(existing.snapshot_hash).equals(
+                Buffer.from(snapshotHash),
+              ) ||
+              existing.fence !== head.fence ||
+              existing.flue_conversation_id !== flueInstanceId ||
+              (existing.flue_instance_uid !== null &&
+                existing.flue_instance_uid !== instance.flue_instance_uid)
+            )
+              throw new FlueIncarnationCorruptionError(
+                "Existing admission recovery correlation mismatch",
+              );
+          } else {
+            const headResult = await transaction.query<{ fence: string }>(
+              "SELECT (oao.reserve_thread_admission($1,$2,$3,$4,$5,$6)).*",
+              [
+                run.organizationId,
+                run.projectId,
+                run.threadId,
+                run.runId,
+                admissionKey,
+                requestHash,
+              ],
+            );
+            const head = headResult.rows[0];
+            if (!head)
+              throw new Error("Admission reservation did not return a head");
+            await transaction.query(
+              `INSERT INTO oao.runtime_dispatches (
           organization_id,project_id,run_id,thread_id,admission_key,request_hash,
-          snapshot_hash,state,fence,flue_conversation_id
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,'reserved',$8,$9)
+          snapshot_hash,state,fence,flue_conversation_id,deadline_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,'reserved',$8,$9,
+          clock_timestamp()+($10 || ' milliseconds')::interval)
         ON CONFLICT (organization_id,project_id,run_id) DO NOTHING`,
-          [
-            run.organizationId,
-            run.projectId,
-            run.runId,
-            run.threadId,
-            admissionKey,
-            requestHash,
-            snapshotHash,
-            head.fence,
-            run.runId,
-          ],
-        );
-        const result = await transaction.query(
-          `UPDATE oao.runtime_dispatches SET state=CASE WHEN flue_submission_id IS NULL
+              [
+                run.organizationId,
+                run.projectId,
+                run.runId,
+                run.threadId,
+                admissionKey,
+                requestHash,
+                snapshotHash,
+                head.fence,
+                flueInstanceId,
+                run.snapshot.limits.timeoutMs,
+              ],
+            );
+          }
+          const result = await transaction.query(
+            `UPDATE oao.runtime_dispatches SET state=CASE WHEN flue_submission_id IS NULL
           THEN 'dispatching'::oao.runtime_dispatch_state ELSE state END,updated_at=clock_timestamp()
          WHERE organization_id=$1 AND project_id=$2 AND run_id=$3 RETURNING *`,
-          [run.organizationId, run.projectId, run.runId],
-        );
-        await transaction.query(
-          `UPDATE oao.thread_admission_heads SET state=CASE WHEN state='reserved'
+            [run.organizationId, run.projectId, run.runId],
+          );
+          await transaction.query(
+            `UPDATE oao.thread_admission_heads SET state=CASE WHEN state='reserved'
           THEN 'ambiguous'::oao.admission_state ELSE state END,updated_at=clock_timestamp()
          WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
-          [run.organizationId, run.projectId, run.runId],
-        );
-        await appendEventOnce(transaction, {
-          ...run,
-          id: eventUuid(`event:${run.runId}:dispatch-reserved`),
-          aggregateType: "run",
-          aggregateId: run.runId,
-          kind: "runtime.dispatch_reserved",
-          payload: { admissionKey },
-        });
-        return result.rows[0] as DispatchRow;
-      },
-    );
+            [run.organizationId, run.projectId, run.runId],
+          );
+          await appendEventOnce(transaction, {
+            ...run,
+            id: eventUuid(`event:${run.runId}:dispatch-reserved`),
+            aggregateType: "run",
+            aggregateId: run.runId,
+            kind: "runtime.dispatch_reserved",
+            payload: { admissionKey },
+          });
+          return result.rows[0] as DispatchRow;
+        },
+      );
+    } catch (error) {
+      if (error instanceof FlueIncarnationCorruptionError) {
+        await this.terminalizeCorruption(run);
+        return;
+      }
+      throw error;
+    }
 
     if (!runtimeDispatch.flue_submission_id) {
-      const receipt = await dispatch(ManagedAgent, {
-        id: run.runId,
-        idempotencyKey: admissionKey,
-        message: this.deliveredMessage(run.inputPublic),
-        initialData: {
-          organizationId: run.organizationId,
-          projectId: run.projectId,
-          threadId: run.threadId,
-          sessionId: run.sessionId,
-          runId: run.runId,
-          snapshot: run.snapshot,
-        } satisfies ManagedRunInitialData,
-      });
-      runtimeDispatch = await this.commitAdmission(run, receipt);
+      try {
+        const receipt = await this.dispatchFenced(run, runtimeDispatch);
+        runtimeDispatch = await this.commitAdmission(run, receipt);
+      } catch (error) {
+        if (error instanceof FlueIncarnationCorruptionError) {
+          await this.terminalizeCorruption(run);
+          return;
+        }
+        throw error;
+      }
     }
     this.trackAdmission?.(run);
-    if (run.cancellationRequested)
-      await this.abortAdmitted(run, runtimeDispatch);
+    if (run.cancellationRequested) {
+      try {
+        await this.abortAdmitted(run, runtimeDispatch);
+      } catch (error) {
+        if (error instanceof FlueIncarnationCorruptionError) {
+          await this.terminalizeCorruption(run);
+          return;
+        }
+        throw error;
+      }
+    }
+  }
+
+  private async dispatchFenced(
+    run: RunContext,
+    runtimeDispatch: DispatchRow,
+  ): Promise<DispatchReceipt> {
+    let instance = await this.loadThreadInstance(run);
+    const message = this.deliveredMessage(run);
+    if (!instance.flue_instance_uid) {
+      try {
+        const receipt = await dispatch(ManagedAgent, {
+          id: instance.flue_instance_id,
+          uid: null,
+          idempotencyKey: runtimeDispatch.admission_key,
+          message,
+          initialData: {
+            organizationId: run.organizationId,
+            projectId: run.projectId,
+            threadId: run.threadId,
+            sessionId: run.sessionId,
+            snapshot: run.snapshot,
+          } satisfies ManagedAgentInstanceData,
+        });
+        await this.bindThreadUid(run, receipt.uid);
+        return receipt;
+      } catch (error) {
+        if (!(error instanceof AgentInstanceExistsError)) throw error;
+        await this.bindThreadUid(run, error.uid);
+        instance = await this.loadThreadInstance(run);
+      }
+    }
+    const uid = instance.flue_instance_uid;
+    if (!uid)
+      throw new FlueIncarnationCorruptionError(
+        "Flue incarnation UID was not durably bound",
+      );
+    await this.assertFlueIncarnation(instance.flue_instance_id, uid);
+    const receipt = await dispatch(ManagedAgent, {
+      id: instance.flue_instance_id,
+      uid,
+      idempotencyKey: runtimeDispatch.admission_key,
+      message,
+    });
+    if (receipt.uid !== uid)
+      throw new FlueIncarnationCorruptionError(
+        "Flue dispatch receipt UID does not match the thread binding",
+      );
+    return receipt;
+  }
+
+  private async loadThreadInstance(
+    run: RunContext,
+  ): Promise<ThreadInstanceRow> {
+    const result = await withTenantTransaction(this.pool, run, (transaction) =>
+      transaction.query<ThreadInstanceRow>(
+        `SELECT * FROM oao.runtime_thread_instances
+         WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3`,
+        [run.organizationId, run.projectId, run.threadId],
+      ),
+    );
+    const instance = result.rows[0];
+    if (!instance || instance.state !== "ready")
+      throw new FlueIncarnationCorruptionError(
+        "Thread runtime identity is unavailable",
+      );
+    return instance;
+  }
+
+  private async bindThreadUid(run: RunContext, uid: string): Promise<void> {
+    const result = await withTenantTransaction(this.pool, run, (transaction) =>
+      transaction.query(
+        `UPDATE oao.runtime_thread_instances SET flue_instance_uid=$4,updated_at=clock_timestamp()
+         WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3
+           AND state='ready' AND (flue_instance_uid IS NULL OR flue_instance_uid=$4)
+         RETURNING thread_id`,
+        [run.organizationId, run.projectId, run.threadId, uid],
+      ),
+    );
+    if (!result.rowCount)
+      throw new FlueIncarnationCorruptionError(
+        "Flue incarnation UID compare-and-set failed",
+      );
+  }
+
+  private async assertFlueIncarnation(id: string, uid: string): Promise<void> {
+    const current = await getAgentInstance(ManagedAgent, id);
+    if (!current || current.uid !== uid)
+      throw new FlueIncarnationCorruptionError(
+        "Stored Flue incarnation UID does not match the durable instance",
+      );
   }
 
   private async cancel(job: RuntimeWakeJob): Promise<void> {
@@ -397,6 +733,46 @@ export class ManagedRuntimeOrchestrator {
     );
     if (outcome !== "reconcile_and_abort") return;
     await this.admit(job);
+  }
+
+  private async deadline(job: RuntimeWakeJob): Promise<void> {
+    const run = await this.loadRun(job);
+    const dispatchResult = await withTenantTransaction(
+      this.pool,
+      run,
+      async (transaction) => {
+        const result = await transaction.query<DispatchRow>(
+          `UPDATE oao.runtime_dispatches SET timeout_requested_at=COALESCE(timeout_requested_at,clock_timestamp()),
+             state=CASE WHEN state='settled' THEN state ELSE 'aborting'::oao.runtime_dispatch_state END,
+             updated_at=clock_timestamp()
+           WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+             AND state <> 'settled' AND deadline_at <= clock_timestamp()
+           RETURNING *`,
+          [run.organizationId, run.projectId, run.runId],
+        );
+        if (result.rowCount) {
+          await transaction.query(
+            `UPDATE oao.thread_admission_heads
+             SET draining_at=COALESCE(draining_at,clock_timestamp()),updated_at=clock_timestamp()
+             WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
+            [run.organizationId, run.projectId, run.runId],
+          );
+          await appendEventOnce(transaction, {
+            ...run,
+            id: eventUuid(`event:${run.runId}:deadline-draining`),
+            aggregateType: "run",
+            aggregateId: run.runId,
+            kind: "runtime.cancellation_draining",
+            payload: { reason: "deadline_exceeded" },
+          });
+        }
+        return result;
+      },
+    );
+    const runtimeDispatch = dispatchResult.rows[0];
+    if (!runtimeDispatch) return;
+    await this.abortFlueIncarnation(runtimeDispatch);
+    this.trackAdmission?.(run);
   }
 
   private async abortAdmitted(
@@ -425,9 +801,70 @@ export class ManagedRuntimeOrchestrator {
         [run.organizationId, run.projectId, run.runId],
       );
     });
+    await this.abortFlueIncarnation(runtimeDispatch);
+  }
+
+  private async abortFlueIncarnation(
+    runtimeDispatch: DispatchRow,
+  ): Promise<void> {
+    const uid = runtimeDispatch.flue_instance_uid;
+    if (!uid)
+      throw new FlueIncarnationCorruptionError(
+        "Cannot abort an admitted run without a bound Flue UID",
+      );
+    await this.assertFlueIncarnation(runtimeDispatch.flue_conversation_id, uid);
     await init(ManagedAgent, {
       id: runtimeDispatch.flue_conversation_id,
+      uid,
     }).abort();
+  }
+
+  private async terminalizeCorruption(run: RunContext): Promise<void> {
+    await withTenantTransaction(this.pool, run, async (transaction) => {
+      const safeError = {
+        code: "flue_incarnation_mismatch",
+        message: "The durable conversation identity could not be verified",
+      } as const;
+      const headResult = await transaction.query<{ run_id: RunId }>(
+        `SELECT run_id FROM oao.thread_admission_heads
+         WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3 FOR UPDATE`,
+        [run.organizationId, run.projectId, run.threadId],
+      );
+      const affectedRunId = headResult.rows[0]?.run_id ?? run.runId;
+      await transaction.query(
+        `UPDATE oao.runtime_thread_instances SET state='corrupt',safe_error=$4,updated_at=clock_timestamp()
+         WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3`,
+        [run.organizationId, run.projectId, run.threadId, safeError],
+      );
+      await transaction.query(
+        `UPDATE oao.runtime_dispatches SET state='aborting',safe_error=$4,updated_at=clock_timestamp()
+         WHERE organization_id=$1 AND project_id=$2 AND run_id=$3 AND state <> 'settled'`,
+        [run.organizationId, run.projectId, affectedRunId, safeError],
+      );
+      await transaction.query(
+        `UPDATE oao.runs SET state='failed',settled_at=COALESCE(settled_at,clock_timestamp()),
+           updated_at=clock_timestamp()
+         WHERE organization_id=$1 AND project_id=$2 AND id=$3
+           AND state NOT IN ('completed','failed','cancelled','timed_out')`,
+        [run.organizationId, run.projectId, affectedRunId],
+      );
+      const affectedRun = { ...run, runId: affectedRunId };
+      await closeRunObligations(transaction, affectedRun, "failed");
+      await transaction.query(
+        `UPDATE oao.thread_admission_heads SET state='ambiguous',
+           draining_at=COALESCE(draining_at,clock_timestamp()),updated_at=clock_timestamp()
+         WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
+        [run.organizationId, run.projectId, affectedRunId],
+      );
+      await appendEventOnce(transaction, {
+        ...affectedRun,
+        id: eventUuid(`event:${affectedRunId}:incarnation-corrupt`),
+        aggregateType: "run",
+        aggregateId: affectedRunId,
+        kind: "runtime.recovery_completed",
+        payload: { outcome: "failed", code: safeError.code },
+      });
+    });
   }
 
   private async commitAdmission(
@@ -435,10 +872,20 @@ export class ManagedRuntimeOrchestrator {
     receipt: DispatchReceipt,
   ): Promise<DispatchRow> {
     return withTenantTransaction(this.pool, run, async (transaction) => {
+      const bound = await transaction.query(
+        `UPDATE oao.runtime_thread_instances SET updated_at=clock_timestamp()
+         WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3
+           AND state='ready' AND flue_instance_uid=$4 RETURNING thread_id`,
+        [run.organizationId, run.projectId, run.threadId, receipt.uid],
+      );
+      if (!bound.rowCount)
+        throw new FlueIncarnationCorruptionError(
+          "Flue receipt UID did not match the thread control record",
+        );
       const result = await transaction.query(
         `UPDATE oao.runtime_dispatches SET state=CASE WHEN state='settled' THEN state
           ELSE 'admitted'::oao.runtime_dispatch_state END,flue_submission_id=$4,
-          flue_instance_uid=$5,updated_at=clock_timestamp()
+          flue_instance_uid=$5,flue_accepted_at=$6,updated_at=clock_timestamp()
          WHERE organization_id=$1 AND project_id=$2 AND run_id=$3 RETURNING *`,
         [
           run.organizationId,
@@ -446,6 +893,7 @@ export class ManagedRuntimeOrchestrator {
           run.runId,
           receipt.submissionId,
           receipt.uid,
+          new Date(receipt.acceptedAt),
         ],
       );
       await appendEventOnce(transaction, {
@@ -455,14 +903,6 @@ export class ManagedRuntimeOrchestrator {
         aggregateId: run.runId,
         kind: "runtime.dispatch_admitted",
         payload: { submissionId: receipt.submissionId },
-      });
-      await appendEventOnce(transaction, {
-        ...run,
-        id: eventUuid(`event:${run.runId}:user-message`),
-        aggregateType: "run",
-        aggregateId: run.runId,
-        kind: "message.created",
-        payload: { role: "user" },
       });
       await transaction.query(
         `UPDATE oao.thread_admission_heads SET state='admitted',canonical_run_ref=$4,
@@ -475,17 +915,30 @@ export class ManagedRuntimeOrchestrator {
           [run.organizationId, run.projectId, run.runId],
         );
       }
+      await appendEventOnce(transaction, {
+        ...run,
+        id: eventUuid(`event:${run.runId}:running`),
+        aggregateType: "run",
+        aggregateId: run.runId,
+        kind: "run.state_changed",
+        payload: { state: "running", reason: "dispatch_admitted" },
+      });
       await transaction.query(
         `INSERT INTO oao.messages (
           organization_id,project_id,id,thread_id,run_id,role,redacted_content,flue_message_ref
-        ) VALUES ($1,$2,$3,$4,$5,'user',$6,$7) ON CONFLICT DO NOTHING`,
+        ) SELECT $1,$2,$3,$4,$5,'user',$6,$7
+          WHERE NOT EXISTS (
+            SELECT 1 FROM oao.messages
+            WHERE organization_id=$1 AND project_id=$2 AND run_id=$5 AND role='user'
+          )
+        ON CONFLICT DO NOTHING`,
         [
           run.organizationId,
           run.projectId,
           eventUuid(`message:${run.runId}:user`),
           run.threadId,
           run.runId,
-          this.deliveredMessage(run.inputPublic),
+          this.inputText(run.inputPublic),
           `input:${receipt.submissionId}`,
         ],
       );
@@ -495,7 +948,18 @@ export class ManagedRuntimeOrchestrator {
         ) VALUES ($1,$2,$3,1,'run',clock_timestamp(),$4) ON CONFLICT DO NOTHING`,
         [run.organizationId, run.projectId, run.runId, { status: "admitted" }],
       );
-      return result.rows[0] as DispatchRow;
+      const admitted = result.rows[0] as DispatchRow;
+      await this.queue.enqueue(transaction, {
+        organizationId: run.organizationId,
+        projectId: run.projectId,
+        id: eventUuid(`wake:deadline:${run.runId}`),
+        runId: run.runId,
+        dispatchKey: `deadline:${run.runId}`,
+        kind: "deadline",
+        payload: { reason: "product_deadline" },
+        availableAt: new Date(admitted.deadline_at),
+      });
+      return admitted;
     });
   }
 
@@ -513,7 +977,8 @@ export class ManagedRuntimeOrchestrator {
       );
       if (!result.rowCount) throw new Error("Run not found");
       const row = result.rows[0] as Record<string, unknown>;
-      const parsed = v.parse(ManagedRunInitialDataSchema.entries.snapshot, {
+      const runInput = v.parse(ManagedRunInputV1Schema, row.input_public);
+      const parsed = v.parse(ManagedAgentInstanceDataSchema.entries.snapshot, {
         ...(row.config as Record<string, unknown>),
         agentVersionId: row.agent_version_id,
         contentHash: row.content_hash,
@@ -523,20 +988,32 @@ export class ManagedRuntimeOrchestrator {
         runId: row.id as RunId,
         threadId: row.thread_id as ThreadId,
         sessionId: row.session_id as string,
+        agentVersionId: row.agent_version_id as string,
         state: row.state as string,
         cancellationRequested: row.cancellation_requested_at !== null,
-        inputPublic: row.input_public as Readonly<Record<string, PublicValue>>,
+        inputPublic: runInput,
         snapshot: parsed,
       };
     });
   }
 
-  private deliveredMessage(
-    input: Readonly<Record<string, PublicValue>>,
-  ): string {
-    return typeof input.message === "string"
-      ? input.message
-      : "Continue this managed run.";
+  private inputText(input: Readonly<Record<string, PublicValue>>): string {
+    return v.parse(ManagedRunInputV1Schema, input).message;
+  }
+
+  private deliveredMessage(run: RunContext): DeliveredMessage {
+    return {
+      kind: "signal",
+      type: "oao.run.v1",
+      tagName: "oao-run",
+      body: this.inputText(run.inputPublic),
+      attributes: {
+        version: "1",
+        runId: run.runId,
+        sessionId: run.sessionId,
+        snapshotHash: digestHex(run.snapshot),
+      },
+    };
   }
 }
 
@@ -544,6 +1021,14 @@ export class RuntimeProjection {
   #pending = Promise.resolve();
   #unsubscribe: (() => void) | undefined;
   readonly #watching = new Map<string, Promise<void>>();
+  readonly #lastTurns = new Map<
+    RunId,
+    {
+      readonly dispatch: DispatchRow;
+      readonly event: Extract<FlueObservation, { type: "turn" }>;
+    }
+  >();
+  readonly #abort = new AbortController();
 
   constructor(
     private readonly pool: PgPool,
@@ -563,6 +1048,7 @@ export class RuntimeProjection {
   async stop(): Promise<void> {
     this.#unsubscribe?.();
     this.#unsubscribe = undefined;
+    this.#abort.abort(new Error("Runtime projection stopped"));
     await this.#pending;
     await Promise.all(this.#watching.values());
   }
@@ -576,19 +1062,29 @@ export class RuntimeProjection {
     this.#watching.set(key, watching);
   }
 
+  async replayLastTurn(runId: RunId): Promise<boolean> {
+    const observed = this.#lastTurns.get(runId);
+    if (!observed) return false;
+    await this.projectTurn(observed.dispatch, observed.event);
+    return true;
+  }
+
   private async project(event: FlueObservation): Promise<void> {
     const dispatchResult = await this.pool.query<DispatchRow>(
       `SELECT * FROM oao.runtime_dispatches
-       WHERE flue_submission_id=$1 OR flue_conversation_id=$2 OR run_id::text=$3`,
-      [
-        event.submissionId ?? "",
-        event.conversationId ?? "",
-        event.instanceId ?? "",
-      ],
+       WHERE flue_submission_id=$1 OR
+         ($1='' AND flue_conversation_id=$2 AND state <> 'settled')
+       ORDER BY CASE WHEN flue_submission_id=$1 THEN 0 ELSE 1 END,created_at DESC
+       LIMIT 1`,
+      [event.submissionId ?? "", event.conversationId ?? ""],
     );
     const runtimeDispatch = dispatchResult.rows[0];
     if (!runtimeDispatch) return;
     if (event.type === "turn") {
+      this.#lastTurns.set(runtimeDispatch.run_id, {
+        dispatch: runtimeDispatch,
+        event,
+      });
       await this.projectTurn(runtimeDispatch, event);
       return;
     }
@@ -628,9 +1124,11 @@ export class RuntimeProjection {
     )
       return;
     try {
+      const receipt = await this.receiptFor(runtimeDispatch);
       const reply = await init(ManagedAgent, {
         id: runtimeDispatch.flue_conversation_id,
-      }).read(runtimeDispatch.flue_submission_id);
+        uid: receipt.uid,
+      }).read(receipt, { signal: this.#abort.signal });
       await this.settle(
         runtimeDispatch,
         "completed",
@@ -638,13 +1136,111 @@ export class RuntimeProjection {
         reply.text,
       );
     } catch (error) {
+      if (this.#abort.signal.aborted) return;
       const outcome = error instanceof AgentRunError ? error.outcome : "failed";
+      if (error instanceof FlueIncarnationCorruptionError) {
+        await this.recordCorruption(runtimeDispatch);
+        return;
+      }
       await this.settle(
         runtimeDispatch,
         outcome,
         runtimeDispatch.flue_submission_id,
       );
     }
+  }
+
+  private async receiptFor(
+    runtimeDispatch: DispatchRow,
+  ): Promise<DispatchReceipt> {
+    const uid = runtimeDispatch.flue_instance_uid;
+    const submissionId = runtimeDispatch.flue_submission_id;
+    const acceptedAt = runtimeDispatch.flue_accepted_at;
+    if (!uid || !submissionId || !acceptedAt)
+      throw new FlueIncarnationCorruptionError(
+        "Persisted Flue receipt is incomplete",
+      );
+    const current = await getAgentInstance(
+      ManagedAgent,
+      runtimeDispatch.flue_conversation_id,
+    );
+    if (!current || current.uid !== uid)
+      throw new FlueIncarnationCorruptionError(
+        "Persisted Flue receipt UID does not match the instance",
+      );
+    return {
+      submissionId,
+      uid,
+      acceptedAt: new Date(acceptedAt).toISOString(),
+    };
+  }
+
+  private async recordCorruption(runtimeDispatch: DispatchRow): Promise<void> {
+    await withTenantTransaction(
+      this.pool,
+      {
+        organizationId: runtimeDispatch.organization_id,
+        projectId: runtimeDispatch.project_id,
+      },
+      async (transaction) => {
+        const safeError = {
+          code: "flue_incarnation_mismatch",
+          message: "The durable conversation identity could not be verified",
+        } as const;
+        await transaction.query(
+          `UPDATE oao.runtime_thread_instances SET state='corrupt',safe_error=$4,
+             updated_at=clock_timestamp()
+           WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3`,
+          [
+            runtimeDispatch.organization_id,
+            runtimeDispatch.project_id,
+            runtimeDispatch.thread_id,
+            safeError,
+          ],
+        );
+        await transaction.query(
+          `UPDATE oao.runtime_dispatches SET state='aborting',safe_error=$4,
+             updated_at=clock_timestamp()
+           WHERE organization_id=$1 AND project_id=$2 AND run_id=$3 AND state <> 'settled'`,
+          [
+            runtimeDispatch.organization_id,
+            runtimeDispatch.project_id,
+            runtimeDispatch.run_id,
+            safeError,
+          ],
+        );
+        await transaction.query(
+          `UPDATE oao.runs SET state='failed',
+             settled_at=COALESCE(settled_at,clock_timestamp()),updated_at=clock_timestamp()
+           WHERE organization_id=$1 AND project_id=$2 AND id=$3
+             AND state NOT IN ('completed','failed','cancelled','timed_out')`,
+          [
+            runtimeDispatch.organization_id,
+            runtimeDispatch.project_id,
+            runtimeDispatch.run_id,
+          ],
+        );
+        await closeRunObligations(
+          transaction,
+          {
+            organizationId: runtimeDispatch.organization_id,
+            projectId: runtimeDispatch.project_id,
+            runId: runtimeDispatch.run_id,
+          },
+          "failed",
+        );
+        await transaction.query(
+          `UPDATE oao.thread_admission_heads SET state='ambiguous',
+             draining_at=COALESCE(draining_at,clock_timestamp()),updated_at=clock_timestamp()
+           WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
+          [
+            runtimeDispatch.organization_id,
+            runtimeDispatch.project_id,
+            runtimeDispatch.run_id,
+          ],
+        );
+      },
+    );
   }
 
   private async projectTurn(
@@ -673,13 +1269,14 @@ export class RuntimeProjection {
         const attempt = Number(
           (attemptResult.rows[0] as { attempt: string }).attempt,
         );
-        await transaction.query(
+        const inserted = await transaction.query<{ attempt: string }>(
           `INSERT INTO oao.model_invocations (
           organization_id,project_id,id,run_id,attempt,provider_key,model_key,status,
           input_tokens,output_tokens,cost_microunits,safe_request,safe_response,
           started_at,completed_at,usage_source,pricing_snapshot,provider_route
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16,$17)
-        ON CONFLICT (organization_id,project_id,id) DO NOTHING`,
+        ON CONFLICT (organization_id,project_id,id) DO NOTHING
+        RETURNING attempt`,
           [
             runtimeDispatch.organization_id,
             runtimeDispatch.project_id,
@@ -695,11 +1292,13 @@ export class RuntimeProjection {
             { purpose: event.purpose },
             { finishReason: event.response.finishReason ?? "unknown" },
             new Date(event.timestamp),
-            usage ? "provider_reported" : "unavailable",
+            usage ? "estimated" : "unavailable",
             { model: event.request.requestedModel },
             { provider: event.request.providerId },
           ],
         );
+        if (!inserted.rowCount) return;
+        const stableAttempt = Number(inserted.rows[0]?.attempt ?? attempt);
         await transaction.query(
           `INSERT INTO oao.timeline_entries (
             organization_id,project_id,run_id,entry_sequence,entry_type,
@@ -710,7 +1309,7 @@ export class RuntimeProjection {
             runtimeDispatch.organization_id,
             runtimeDispatch.project_id,
             runtimeDispatch.run_id,
-            attempt + 1,
+            stableAttempt + 1,
             new Date(event.timestamp),
             {
               status: event.isError ? "failed" : "completed",
@@ -771,10 +1370,19 @@ export class RuntimeProjection {
       (transaction) =>
         transaction.query<{
           cancellation_requested_at: Date | null;
+          timeout_requested_at: Date | null;
           session_id: string;
           thread_id: ThreadId;
+          thread_instance_state: "ready" | "corrupt";
         }>(
-          "SELECT cancellation_requested_at,session_id,thread_id FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$3",
+          `SELECT r.cancellation_requested_at,r.session_id,r.thread_id,d.timeout_requested_at,
+             i.state AS thread_instance_state
+           FROM oao.runs r JOIN oao.runtime_dispatches d
+             ON d.organization_id=r.organization_id AND d.project_id=r.project_id AND d.run_id=r.id
+           JOIN oao.runtime_thread_instances i
+             ON i.organization_id=r.organization_id AND i.project_id=r.project_id
+            AND i.thread_id=r.thread_id
+           WHERE r.organization_id=$1 AND r.project_id=$2 AND r.id=$3`,
           [tenant.organizationId, tenant.projectId, runtimeDispatch.run_id],
         ),
     );
@@ -783,14 +1391,25 @@ export class RuntimeProjection {
     const state =
       outcome === "completed"
         ? "completed"
-        : outcome === "aborted" && run.cancellation_requested_at
-          ? "cancelled"
-          : "failed";
-    let redactedReply = projectedReply ?? "";
-    if (outcome === "completed" && projectedReply === undefined) {
+        : outcome === "aborted" && run.timeout_requested_at
+          ? "timed_out"
+          : outcome === "aborted" && run.cancellation_requested_at
+            ? "cancelled"
+            : "failed";
+    const productState =
+      run.thread_instance_state === "corrupt" ? "failed" : state;
+    let redactedReply =
+      run.thread_instance_state === "corrupt" ? "" : (projectedReply ?? "");
+    if (
+      run.thread_instance_state !== "corrupt" &&
+      outcome === "completed" &&
+      projectedReply === undefined
+    ) {
+      const receipt = await this.receiptFor(runtimeDispatch);
       const reply = await init(ManagedAgent, {
         id: runtimeDispatch.flue_conversation_id,
-      }).read(submissionId);
+        uid: receipt.uid,
+      }).read(receipt);
       redactedReply = reply.text;
     }
     await withTenantTransaction(this.pool, tenant, async (transaction) => {
@@ -807,7 +1426,7 @@ export class RuntimeProjection {
           tenant.organizationId,
           tenant.projectId,
           runtimeDispatch.run_id,
-          state,
+          productState,
         ],
       );
       await transaction.query(
@@ -817,7 +1436,7 @@ export class RuntimeProjection {
           tenant.organizationId,
           tenant.projectId,
           runtimeDispatch.run_id,
-          { status: state },
+          { status: productState },
         ],
       );
       if (redactedReply) {
@@ -859,7 +1478,7 @@ export class RuntimeProjection {
         aggregateType: "run",
         aggregateId: runtimeDispatch.run_id,
         kind: "run.state_changed",
-        payload: { state },
+        payload: { state: productState },
       });
       await appendEventOnce(transaction, {
         ...tenant,
@@ -867,8 +1486,25 @@ export class RuntimeProjection {
         aggregateType: "session",
         aggregateId: run.session_id,
         kind: "session.summary_changed",
-        payload: { runId: runtimeDispatch.run_id, state },
+        payload: { runId: runtimeDispatch.run_id, state: productState },
       });
+      await closeRunObligations(
+        transaction,
+        {
+          ...tenant,
+          runId: runtimeDispatch.run_id,
+        },
+        productState,
+      );
+      if (run.thread_instance_state === "corrupt") {
+        await transaction.query(
+          `UPDATE oao.thread_admission_heads SET state='ambiguous',
+             draining_at=COALESCE(draining_at,clock_timestamp()),updated_at=clock_timestamp()
+           WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
+          [tenant.organizationId, tenant.projectId, runtimeDispatch.run_id],
+        );
+        return;
+      }
       await transaction.query(
         "DELETE FROM oao.thread_admission_heads WHERE organization_id=$1 AND project_id=$2 AND run_id=$3",
         [tenant.organizationId, tenant.projectId, runtimeDispatch.run_id],
@@ -951,8 +1587,11 @@ export async function configureVendorNeutralTelemetry(
     });
     sdk.start();
   }
-  instrument(createOpenTelemetryInstrumentation({ content: false }));
+  const disposeInstrumentation = instrument(
+    createOpenTelemetryInstrumentation({ content: false }),
+  );
   return async () => {
+    await disposeInstrumentation();
     await sdk?.shutdown();
   };
 }
@@ -963,7 +1602,10 @@ export async function startManagedFlueRuntime(input: {
   readonly presets: ImmutableModelPresetRegistry;
   readonly broker: PostgresToolBroker;
   readonly platformTools?: ReadonlyMap<string, PlatformToolHandler>;
-  readonly sandboxFactory?: SandboxFactory;
+  readonly sandboxFactory?: (
+    initial: ManagedAgentInstanceData,
+    delivery: ManagedRunDelivery,
+  ) => SandboxFactory;
 }): Promise<Flue> {
   configureManagedAgentRuntime({
     presets: input.presets,
@@ -978,4 +1620,9 @@ export async function startManagedFlueRuntime(input: {
   });
 }
 
-export const runtimeTesting = { eventUuid, safeArguments };
+export const runtimeTesting = {
+  eventUuid,
+  safeArguments,
+  threadInstanceId,
+  compileObjectSchema,
+};

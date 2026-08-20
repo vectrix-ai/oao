@@ -4,6 +4,96 @@ const IdSchema = v.pipe(v.string(), v.uuid());
 const TimestampSchema = v.pipe(v.string(), v.isoTimestamp());
 const JsonObjectSchema = v.record(v.string(), v.unknown());
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+export function isSupportedToolJsonSchema(value: unknown): boolean {
+  if (!isPlainRecord(value)) return false;
+  if ("enum" in value) {
+    return (
+      hasOnlyKeys(value, ["enum"]) &&
+      Array.isArray(value.enum) &&
+      value.enum.length > 0 &&
+      value.enum.every(
+        (entry) =>
+          entry === null ||
+          typeof entry === "string" ||
+          typeof entry === "number" ||
+          typeof entry === "boolean",
+      )
+    );
+  }
+  switch (value.type) {
+    case "string":
+    case "number":
+    case "integer":
+    case "boolean":
+    case "null":
+      return hasOnlyKeys(value, ["type"]);
+    case "array":
+      return (
+        hasOnlyKeys(value, ["type", "items"]) &&
+        isSupportedToolJsonSchema(value.items)
+      );
+    case "object": {
+      const properties = value.properties;
+      const required = value.required;
+      if (
+        !hasOnlyKeys(value, [
+          "type",
+          "properties",
+          "required",
+          "additionalProperties",
+        ]) ||
+        value.additionalProperties !== false ||
+        !isPlainRecord(properties) ||
+        !Array.isArray(required) ||
+        required.some((key) => typeof key !== "string") ||
+        new Set(required).size !== required.length ||
+        required.some((key) => typeof key !== "string" || !(key in properties))
+      )
+        return false;
+      return Object.values(properties).every(isSupportedToolJsonSchema);
+    }
+    default:
+      return false;
+  }
+}
+
+const PublishedPropertySchema = v.pipe(
+  JsonObjectSchema,
+  v.check(
+    (value: Record<string, unknown>) => isSupportedToolJsonSchema(value),
+    "Tool JSON schema uses unsupported or ignored keywords",
+  ),
+);
+
+const PublishedObjectSchema = v.pipe(
+  v.strictObject({
+    type: v.literal("object"),
+    properties: v.record(v.string(), PublishedPropertySchema),
+    required: v.optional(v.array(v.string()), []),
+    additionalProperties: v.literal(false),
+  }),
+  v.check(
+    (value: {
+      type: "object";
+      properties: Record<string, Record<string, unknown>>;
+      required: string[];
+      additionalProperties: false;
+    }) => isSupportedToolJsonSchema(value),
+    "Tool JSON schema must be a closed supported object schema",
+  ),
+);
+
 export const OrganizationSchema = v.object({
   id: IdSchema,
   slug: v.pipe(v.string(), v.minLength(1), v.maxLength(80)),
@@ -186,12 +276,16 @@ export const ProductEventKindSchema = v.picklist([
   "session.summary_changed",
 ]);
 
-export const RuntimeToolSnapshotSchema = v.object({
+export const RuntimeToolSnapshotSchema = v.strictObject({
   name: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
   description: v.pipe(v.string(), v.minLength(1), v.maxLength(2_000)),
   owner: v.picklist(["platform", "caller"]),
   approval: v.picklist(["never", "always"]),
+  inputSchema: PublishedObjectSchema,
+  outputSchema: PublishedObjectSchema,
 });
+
+export const PLATFORM_MAX_TURNS = 32;
 
 export const ManagedAgentSnapshotSchema = v.object({
   agentVersionId: IdSchema,
@@ -204,19 +298,62 @@ export const ManagedAgentSnapshotSchema = v.object({
     network: v.picklist(["none", "restricted"]),
   }),
   limits: v.object({
-    maxTurns: v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(1_000)),
+    maxTurns: v.literal(PLATFORM_MAX_TURNS),
     timeoutMs: v.pipe(v.number(), v.integer(), v.minValue(1_000)),
   }),
 });
 
-export const ManagedRunInitialDataSchema = v.object({
+export function parseManagedAgentSnapshotForPublication(
+  input: unknown,
+): ManagedAgentSnapshot {
+  return v.parse(ManagedAgentSnapshotSchema, input);
+}
+
+export const ManagedAgentInstanceDataSchema = v.object({
   organizationId: IdSchema,
   projectId: IdSchema,
   threadId: IdSchema,
   sessionId: IdSchema,
-  runId: IdSchema,
   snapshot: ManagedAgentSnapshotSchema,
 });
+
+export const ManagedRunDeliverySchema = v.object({
+  version: v.literal("1"),
+  runId: IdSchema,
+  sessionId: IdSchema,
+  snapshotHash: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
+});
+
+export const ManagedRunInputV1Schema = v.object({
+  message: v.pipe(v.string(), v.minLength(1), v.maxLength(100_000)),
+});
+
+export const ToolResultFailureCodeSchema = v.picklist([
+  "approval_denied",
+  "approval_expired",
+  "run_cancelled",
+  "tool_expired",
+  "tool_failed",
+  "platform_tool_failed",
+  "invalid_tool_arguments",
+  "invalid_tool_result",
+]);
+
+export const ToolResultEnvelopeSchema = v.variant("status", [
+  v.object({
+    version: v.literal(1),
+    status: v.literal("success"),
+    value: JsonObjectSchema,
+  }),
+  v.object({
+    version: v.literal(1),
+    status: v.literal("failure"),
+    error: v.object({
+      code: ToolResultFailureCodeSchema,
+      message: v.pipe(v.string(), v.minLength(1), v.maxLength(500)),
+    }),
+  }),
+]);
 export const ProductEventSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
@@ -284,9 +421,12 @@ export type ProductEvent = v.InferOutput<typeof ProductEventSchema>;
 export type ManagedAgentSnapshot = v.InferOutput<
   typeof ManagedAgentSnapshotSchema
 >;
-export type ManagedRunInitialData = v.InferOutput<
-  typeof ManagedRunInitialDataSchema
+export type ManagedAgentInstanceData = v.InferOutput<
+  typeof ManagedAgentInstanceDataSchema
 >;
+export type ManagedRunDelivery = v.InferOutput<typeof ManagedRunDeliverySchema>;
+export type ManagedRunInputV1 = v.InferOutput<typeof ManagedRunInputV1Schema>;
+export type ToolResultEnvelope = v.InferOutput<typeof ToolResultEnvelopeSchema>;
 export type ApiError = v.InferOutput<typeof ApiErrorSchema>;
 export type Page<T> = {
   readonly data: readonly T[];

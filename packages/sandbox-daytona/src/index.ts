@@ -5,7 +5,7 @@ import { sandboxFromDriver } from "@flue/runtime";
 import type { FileStat, SandboxDriver, SandboxFactory } from "@flue/runtime";
 import type { PgPool, Queryable, TenantContext } from "@oao/db-postgres";
 import { withTenantTransaction } from "@oao/db-postgres";
-import type { PublicValue, RunId } from "@oao/domain";
+import type { PublicValue, RunId, SessionId, ThreadId } from "@oao/domain";
 import { assertPublicPayload } from "@oao/domain";
 import { daytona } from "./flue-daytona-blueprint.js";
 
@@ -26,7 +26,7 @@ export interface SandboxProviderPort {
   create(input: {
     readonly creationKey: string;
     readonly image: string;
-    readonly targetPreference: "eu";
+    readonly targetPreference?: string;
     readonly egress: SandboxEgressPolicy;
   }): Promise<SandboxHandle>;
   execute(input: {
@@ -37,9 +37,16 @@ export interface SandboxProviderPort {
   stop(sandbox: SandboxHandle): Promise<void>;
 }
 
+export interface FlueSandboxProviderPort extends SandboxProviderPort {
+  flueFactory(sandbox: SandboxHandle): SandboxFactory;
+}
+
 export interface InstanceRecord extends TenantContext {
   readonly id: string;
   readonly runId: RunId;
+  readonly creatorRunId: RunId;
+  readonly threadId: ThreadId;
+  readonly sessionId: SessionId;
   readonly creationKey: string;
   readonly fence: bigint;
   readonly state:
@@ -72,8 +79,11 @@ export interface SandboxRepository {
     input: TenantContext & {
       readonly id: string;
       readonly runId: RunId;
+      readonly threadId: ThreadId;
+      readonly sessionId: SessionId;
       readonly creationKey: string;
       readonly egress: SandboxEgressPolicy;
+      readonly targetPreference?: string;
     },
   ): Promise<InstanceRecord>;
   markRunning(
@@ -127,7 +137,7 @@ async function appendSandboxEvent(
   kind: string,
   payload: Readonly<Record<string, PublicValue>>,
 ): Promise<void> {
-  const id = stableUuid(`sandbox-event:${input.id}:${suffix}`);
+  const id = stableUuid(`sandbox-event:${input.id}:${input.runId}:${suffix}`);
   const exists = await transaction.query(
     "SELECT 1 FROM oao.product_events WHERE organization_id=$1 AND project_id=$2 AND id=$3",
     [input.organizationId, input.projectId, id],
@@ -146,43 +156,61 @@ export class PostgresSandboxRepository implements SandboxRepository {
     input: TenantContext & {
       readonly id: string;
       readonly runId: RunId;
+      readonly threadId: ThreadId;
+      readonly sessionId: SessionId;
       readonly creationKey: string;
       readonly egress: SandboxEgressPolicy;
+      readonly targetPreference?: string;
     },
   ): Promise<InstanceRecord> {
     assertPublicPayload(input.egress as unknown as PublicValue);
     return withTenantTransaction(this.pool, input, async (transaction) => {
       await transaction.query(
         `INSERT INTO oao.sandbox_instances (
-          organization_id,project_id,id,run_id,provider,state,creation_key,egress_policy
-        ) VALUES ($1,$2,$3,$4,'daytona','creating',$5,$6)
+          organization_id,project_id,id,run_id,thread_id,session_id,provider,state,
+          creation_key,egress_policy,target_preference
+        ) VALUES ($1,$2,$3,$4,$5,$6,'daytona','creating',$7,$8,$9)
         ON CONFLICT (organization_id,project_id,creation_key) DO NOTHING`,
         [
           input.organizationId,
           input.projectId,
           input.id,
           input.runId,
+          input.threadId,
+          input.sessionId,
           input.creationKey,
           input.egress,
+          input.targetPreference ?? "provider-default",
         ],
       );
       const result = await transaction.query(
-        `SELECT organization_id,project_id,id,run_id,creation_key,creation_fence,state,
-          provider_ref,target_preference FROM oao.sandbox_instances
+        `SELECT organization_id,project_id,id,run_id,thread_id,session_id,creation_key,
+          creation_fence,state,provider_ref,target_preference,egress_policy
+          FROM oao.sandbox_instances
          WHERE organization_id=$1 AND project_id=$2 AND creation_key=$3 FOR UPDATE`,
         [input.organizationId, input.projectId, input.creationKey],
       );
       const row = result.rows[0] as Record<string, unknown>;
-      if (row.run_id !== input.runId)
+      if (
+        row.thread_id !== input.threadId ||
+        row.session_id !== input.sessionId ||
+        row.target_preference !==
+          (input.targetPreference ?? "provider-default") ||
+        Buffer.compare(
+          Buffer.from(sha256(row.egress_policy)),
+          Buffer.from(sha256(input.egress)),
+        ) !== 0
+      )
         throw new Error("Sandbox creation idempotency conflict");
-      const instance = this.mapInstance(row);
-      await appendSandboxEvent(
-        transaction,
-        instance,
-        "created",
-        "sandbox.created",
-        { sandboxId: instance.id, targetPreference: instance.target },
-      );
+      const instance = this.mapInstance(row, input.runId);
+      if (instance.creatorRunId === input.runId)
+        await appendSandboxEvent(
+          transaction,
+          instance,
+          "created",
+          "sandbox.created",
+          { sandboxId: instance.id, targetPreference: instance.target },
+        );
       return instance;
     });
   }
@@ -193,15 +221,14 @@ export class PostgresSandboxRepository implements SandboxRepository {
   ): Promise<InstanceRecord> {
     return withTenantTransaction(this.pool, instance, async (transaction) => {
       const result = await transaction.query(
-        `UPDATE oao.sandbox_instances SET state='running',provider_ref=$6,
-          target_preference=$7,updated_at=clock_timestamp()
-         WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND run_id=$4
-           AND creation_fence=$5 AND state IN ('creating','recovering','running') RETURNING *`,
+        `UPDATE oao.sandbox_instances SET state='running',provider_ref=$5,
+          target_preference=$6,updated_at=clock_timestamp()
+         WHERE organization_id=$1 AND project_id=$2 AND id=$3
+           AND creation_fence=$4 AND state IN ('creating','recovering','running') RETURNING *`,
         [
           instance.organizationId,
           instance.projectId,
           instance.id,
-          instance.runId,
           instance.fence.toString(),
           handle.providerRef,
           handle.target,
@@ -210,6 +237,7 @@ export class PostgresSandboxRepository implements SandboxRepository {
       if (!result.rowCount) throw new Error("Stale sandbox creation fence");
       const running = this.mapInstance(
         result.rows[0] as Record<string, unknown>,
+        instance.runId,
       );
       await appendSandboxEvent(
         transaction,
@@ -444,12 +472,18 @@ export class PostgresSandboxRepository implements SandboxRepository {
     );
   }
 
-  private mapInstance(row: Record<string, unknown>): InstanceRecord {
+  private mapInstance(
+    row: Record<string, unknown>,
+    activeRunId = row.run_id as RunId,
+  ): InstanceRecord {
     return {
       organizationId: row.organization_id as InstanceRecord["organizationId"],
       projectId: row.project_id as InstanceRecord["projectId"],
       id: row.id as string,
-      runId: row.run_id as RunId,
+      runId: activeRunId,
+      creatorRunId: row.run_id as RunId,
+      threadId: row.thread_id as ThreadId,
+      sessionId: row.session_id as SessionId,
       creationKey: row.creation_key as string,
       fence: BigInt(row.creation_fence as string),
       state: row.state as InstanceRecord["state"],
@@ -482,9 +516,12 @@ export class ManagedSandboxLifecycle {
     input: TenantContext & {
       readonly sandboxId: string;
       readonly runId: RunId;
+      readonly threadId: ThreadId;
+      readonly sessionId: SessionId;
       readonly creationKey: string;
       readonly image: string;
       readonly egress: SandboxEgressPolicy;
+      readonly targetPreference?: string;
     },
   ): Promise<{
     readonly record: InstanceRecord;
@@ -502,8 +539,10 @@ export class ManagedSandboxLifecycle {
         (await this.provider.create({
           creationKey: input.creationKey,
           image: input.image,
-          targetPreference: "eu",
           egress: input.egress,
+          ...(input.targetPreference
+            ? { targetPreference: input.targetPreference }
+            : {}),
         }));
     } catch {
       await this.repository.markFailed(record);
@@ -589,16 +628,17 @@ export class ManagedSandboxLifecycle {
   }
 }
 
-export class DaytonaManagedProvider implements SandboxProviderPort {
+export class DaytonaManagedProvider implements FlueSandboxProviderPort {
   readonly #client: Daytona;
 
-  constructor(input: { readonly apiKey: string; readonly target?: "eu" }) {
+  constructor(input: { readonly apiKey: string; readonly target?: string }) {
     if (!input.apiKey)
       throw new Error("DAYTONA_API_KEY is required for hosted sandboxes");
-    this.#client = new Daytona({
+    const clientOptions = {
       apiKey: input.apiKey,
-      target: input.target ?? "eu",
-    });
+      ...(input.target ? { target: input.target } : {}),
+    } as ConstructorParameters<typeof Daytona>[0];
+    this.#client = new Daytona(clientOptions);
   }
 
   async findByCreationKey(key: string): Promise<SandboxHandle | undefined> {
@@ -612,7 +652,7 @@ export class DaytonaManagedProvider implements SandboxProviderPort {
   async create(input: {
     readonly creationKey: string;
     readonly image: string;
-    readonly targetPreference: "eu";
+    readonly targetPreference?: string;
     readonly egress: SandboxEgressPolicy;
   }): Promise<SandboxHandle> {
     const sandbox = await this.#client.create({
@@ -668,7 +708,7 @@ export class DaytonaManagedProvider implements SandboxProviderPort {
   }
 }
 
-export class FakeSandboxProvider implements SandboxProviderPort {
+export class FakeSandboxProvider implements FlueSandboxProviderPort {
   readonly calls: string[] = [];
   readonly #sandboxes = new Map<string, SandboxHandle>();
 
@@ -678,9 +718,13 @@ export class FakeSandboxProvider implements SandboxProviderPort {
   }
   async create(input: {
     readonly creationKey: string;
+    readonly targetPreference?: string;
   }): Promise<SandboxHandle> {
     this.calls.push(`create:${input.creationKey}`);
-    const handle = { providerRef: `fake:${input.creationKey}`, target: "eu" };
+    const handle = {
+      providerRef: `fake:${input.creationKey}`,
+      target: input.targetPreference ?? "provider-default",
+    };
     this.#sandboxes.set(input.creationKey, handle);
     return handle;
   }
@@ -693,6 +737,53 @@ export class FakeSandboxProvider implements SandboxProviderPort {
   async stop(sandbox: SandboxHandle): Promise<void> {
     this.calls.push(`stop:${sandbox.providerRef}`);
   }
+
+  flueFactory(): SandboxFactory {
+    return createFakeFlueSandbox();
+  }
+}
+
+export function createManagedDaytonaFlueSandbox(input: {
+  readonly pool: PgPool;
+  readonly provider: FlueSandboxProviderPort;
+  readonly organizationId: TenantContext["organizationId"];
+  readonly projectId: TenantContext["projectId"];
+  readonly runId: RunId;
+  readonly threadId: ThreadId;
+  readonly sessionId: SessionId;
+  readonly image?: string;
+  readonly egress: SandboxEgressPolicy;
+  readonly targetPreference?: string;
+}): SandboxFactory {
+  const lifecycle = new ManagedSandboxLifecycle(
+    new PostgresSandboxRepository(input.pool),
+    input.provider,
+  );
+  return {
+    async createSandbox({ id }) {
+      const lifecycleIdentity = [
+        "oao-sandbox-v1",
+        input.organizationId,
+        input.projectId,
+        input.threadId,
+      ].join(":");
+      const managed = await lifecycle.ensure({
+        organizationId: input.organizationId,
+        projectId: input.projectId,
+        runId: input.runId,
+        threadId: input.threadId,
+        sessionId: input.sessionId,
+        sandboxId: stableUuid(lifecycleIdentity),
+        creationKey: lifecycleIdentity,
+        image: input.image ?? "flue-daytona:2.0.3",
+        egress: input.egress,
+        ...(input.targetPreference
+          ? { targetPreference: input.targetPreference }
+          : {}),
+      });
+      return input.provider.flueFactory(managed.handle).createSandbox({ id });
+    },
+  };
 }
 
 export function createFakeFlueSandbox(): SandboxFactory {
@@ -754,8 +845,8 @@ export function createFakeFlueSandbox(): SandboxFactory {
 }
 
 export const DAYTONA_TARGET_POSTURE = Object.freeze({
-  configuredDefault: "eu" as const,
+  configuredDefault: null,
   strictResidencyEnforced: false,
   statement:
-    "The Daytona target is a hosting preference; OAO does not claim strict residency enforcement.",
+    "DAYTONA_TARGET is an optional deployment preference; provider default is accepted and OAO does not claim residency enforcement.",
 });

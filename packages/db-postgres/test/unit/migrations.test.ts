@@ -57,7 +57,7 @@ test("API/auth migration keeps secrets hashed and scopes every mutable boundary"
 
 test("runtime migration encodes durable wakes, dispatch reconciliation, and sandbox fences", async () => {
   const sql = await readFile(
-    new URL("../../migrations/0003_runtime.sql", import.meta.url),
+    new URL("../../migrations/0004_runtime.sql", import.meta.url),
     "utf8",
   );
   assert.match(sql, /FOR UPDATE SKIP LOCKED/u);
@@ -65,7 +65,33 @@ test("runtime migration encodes durable wakes, dispatch reconciliation, and sand
   assert.match(sql, /UNIQUE \(organization_id, project_id, admission_key\)/u);
   assert.match(sql, /tool_calls_runtime_correlation_check/u);
   assert.match(sql, /creation_fence bigint NOT NULL/u);
-  assert.match(sql, /target_preference text NOT NULL DEFAULT 'eu'/u);
+  assert.match(
+    sql,
+    /CREATE TABLE oao\.sandbox_instances \([\s\S]*run_id uuid NOT NULL,\s+thread_id uuid NOT NULL,\s+session_id uuid NOT NULL,\s+provider text NOT NULL/u,
+  );
+  assert.match(
+    sql,
+    /runs \(organization_id, project_id, id, thread_id, session_id\)/u,
+  );
+  assert.match(sql, /sessions \(organization_id, project_id, id, thread_id\)/u);
+  assert.match(
+    sql,
+    /target_preference text NOT NULL DEFAULT 'provider-default'/u,
+  );
+  assert.doesNotMatch(sql, /DEFAULT 'eu'/u);
   assert.match(sql, /session\.summary_changed/u);
+  assert.match(
+    sql,
+    /runtime_has_active_dispatches\(\)[\s\S]*SECURITY DEFINER[\s\S]*SET search_path = pg_catalog, oao/u,
+  );
+  assert.match(
+    sql,
+    /Ownership remains with the privileged migration role, which must have BYPASSRLS/u,
+  );
+  assert.doesNotMatch(sql, /OWNER TO postgres/u);
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.runtime_has_active_dispatches\(\) TO oao_app/u,
+  );
   assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
 });

@@ -26,7 +26,7 @@ const snapshot = {
   modelPreset: "local-default",
   tools: [],
   sandbox: { enabled: true, network: "none" },
-  limits: { maxTurns: 4, timeoutMs: 60_000 },
+  limits: { maxTurns: 32, timeoutMs: 60_000 },
 };
 
 async function run(): Promise<void> {

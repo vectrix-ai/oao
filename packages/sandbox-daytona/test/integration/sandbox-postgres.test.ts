@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { createPool, withTenantTransaction } from "@oao/db-postgres";
-import type { OrganizationId, ProjectId, RunId } from "@oao/domain";
+import type {
+  OrganizationId,
+  ProjectId,
+  RunId,
+  SessionId,
+  ThreadId,
+} from "@oao/domain";
 import {
   FakeSandboxProvider,
   ManagedSandboxLifecycle,
@@ -15,6 +21,8 @@ const tenant = {
   projectId: "00000000-0000-4000-8000-000000000002" as ProjectId,
 };
 const runId = "00000000-0000-4000-8000-000000000302" as RunId;
+const threadId = "00000000-0000-4000-8000-000000000006" as ThreadId;
+const sessionId = "00000000-0000-4000-8000-000000000007" as SessionId;
 
 test(
   "sandbox lifecycle persists fenced commands, artifacts, and safe status events",
@@ -33,8 +41,8 @@ test(
             tenant.organizationId,
             tenant.projectId,
             runId,
-            "00000000-0000-4000-8000-000000000006",
-            "00000000-0000-4000-8000-000000000007",
+            threadId,
+            sessionId,
             "00000000-0000-4000-8000-000000000005",
             "00000000-0000-4000-8000-000000000003",
           ],
@@ -48,6 +56,8 @@ test(
         ...tenant,
         sandboxId: "00000000-0000-4000-8000-000000000303",
         runId,
+        threadId,
+        sessionId,
         creationKey: `sandbox:${runId}`,
         image: "fake/local",
         egress: { mode: "none" },
@@ -89,6 +99,15 @@ test(
         [runId],
       );
       assert.equal(artifacts.rows[0]?.count, "1");
+      const correlation = await pool.query<{
+        thread_id: string;
+        session_id: string;
+      }>(
+        "SELECT thread_id,session_id FROM oao.sandbox_instances WHERE organization_id=$1 AND project_id=$2 AND id=$3",
+        [tenant.organizationId, tenant.projectId, instance.record.id],
+      );
+      assert.equal(correlation.rows[0]?.thread_id, threadId);
+      assert.equal(correlation.rows[0]?.session_id, sessionId);
     } finally {
       await pool.end();
     }

@@ -16,14 +16,16 @@ test("stable runtime ids converge for duplicate delivery", () => {
 test("failed results are sanitized for the model", () => {
   assert.deepEqual(
     toolBrokerTesting.decodeResult({
-      ok: false,
+      version: 1,
+      status: "failure",
       error: {
-        code: "internal_database_failure",
+        code: "tool_failed",
         message: "sensitive details",
       },
     }),
     {
-      ok: false,
+      version: 1,
+      status: "failure",
       error: { code: "tool_failed", message: "Tool execution failed" },
     },
   );

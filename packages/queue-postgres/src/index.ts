@@ -4,7 +4,7 @@ import type { PublicValue, RunId } from "@oao/domain";
 import { assertPublicPayload } from "@oao/domain";
 
 export type WakeKind =
-  "admit" | "reconcile" | "cancel" | "tool_result" | "approval";
+  "admit" | "reconcile" | "cancel" | "deadline" | "tool_result" | "approval";
 
 export interface RuntimeWakeJob extends TenantContext {
   readonly id: string;

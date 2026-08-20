@@ -3,6 +3,14 @@ CREATE TYPE oao.runtime_dispatch_state AS ENUM (
   'reserved', 'dispatching', 'ambiguous', 'admitted', 'aborting', 'settled'
 );
 
+ALTER TABLE oao.sessions
+  ADD CONSTRAINT sessions_thread_correlation_key
+    UNIQUE (organization_id, project_id, id, thread_id);
+
+ALTER TABLE oao.runs
+  ADD CONSTRAINT runs_thread_session_correlation_key
+    UNIQUE (organization_id, project_id, id, thread_id, session_id);
+
 CREATE TABLE oao.runtime_wake_jobs (
   organization_id uuid NOT NULL,
   project_id uuid NOT NULL,
@@ -10,7 +18,7 @@ CREATE TABLE oao.runtime_wake_jobs (
   run_id uuid NOT NULL,
   dispatch_key text NOT NULL,
   request_hash bytea NOT NULL CHECK (octet_length(request_hash) = 32),
-  kind text NOT NULL CHECK (kind IN ('admit', 'reconcile', 'cancel', 'tool_result', 'approval')),
+  kind text NOT NULL CHECK (kind IN ('admit', 'reconcile', 'cancel', 'deadline', 'tool_result', 'approval')),
   state oao.runtime_wake_state NOT NULL DEFAULT 'pending',
   payload_public jsonb NOT NULL DEFAULT '{}',
   available_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -34,6 +42,28 @@ CREATE INDEX runtime_wake_jobs_claim_idx
   ON oao.runtime_wake_jobs (state, available_at, created_at)
   WHERE state IN ('pending', 'leased');
 
+CREATE TABLE oao.runtime_thread_instances (
+  organization_id uuid NOT NULL,
+  project_id uuid NOT NULL,
+  thread_id uuid NOT NULL,
+  session_id uuid NOT NULL,
+  agent_version_id uuid NOT NULL,
+  snapshot_hash bytea NOT NULL CHECK (octet_length(snapshot_hash) = 32),
+  flue_instance_id text NOT NULL,
+  flue_instance_uid text,
+  state text NOT NULL DEFAULT 'ready' CHECK (state IN ('ready', 'corrupt')),
+  safe_error jsonb,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (organization_id, project_id, thread_id),
+  UNIQUE (flue_instance_id),
+  FOREIGN KEY (organization_id, project_id, thread_id)
+    REFERENCES oao.threads (organization_id, project_id, id),
+  FOREIGN KEY (organization_id, project_id, session_id, thread_id, agent_version_id)
+    REFERENCES oao.sessions (organization_id, project_id, id, thread_id, agent_version_id),
+  CHECK (safe_error IS NULL OR NOT oao.jsonb_has_forbidden_public_key(safe_error))
+);
+
 CREATE TABLE oao.runtime_dispatches (
   organization_id uuid NOT NULL,
   project_id uuid NOT NULL,
@@ -47,14 +77,18 @@ CREATE TABLE oao.runtime_dispatches (
   flue_conversation_id text NOT NULL,
   flue_submission_id text,
   flue_instance_uid text,
+  flue_accepted_at timestamptz,
+  deadline_at timestamptz NOT NULL,
+  timeout_requested_at timestamptz,
   safe_error jsonb,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (organization_id, project_id, run_id),
   UNIQUE (organization_id, project_id, admission_key),
-  UNIQUE (organization_id, project_id, flue_conversation_id),
   FOREIGN KEY (organization_id, project_id, thread_id, run_id)
     REFERENCES oao.runs (organization_id, project_id, thread_id, id),
+  FOREIGN KEY (organization_id, project_id, thread_id)
+    REFERENCES oao.runtime_thread_instances (organization_id, project_id, thread_id),
   CHECK (safe_error IS NULL OR NOT oao.jsonb_has_forbidden_public_key(safe_error))
 );
 
@@ -80,9 +114,11 @@ CREATE TABLE oao.sandbox_instances (
   project_id uuid NOT NULL,
   id uuid NOT NULL,
   run_id uuid NOT NULL,
+  thread_id uuid NOT NULL,
+  session_id uuid NOT NULL,
   provider text NOT NULL,
   provider_ref text,
-  target_preference text NOT NULL DEFAULT 'eu',
+  target_preference text NOT NULL DEFAULT 'provider-default',
   state text NOT NULL CHECK (state IN ('creating', 'running', 'recovering', 'stopping', 'stopped', 'failed')),
   creation_key text NOT NULL,
   creation_fence bigint NOT NULL DEFAULT 1 CHECK (creation_fence > 0),
@@ -92,10 +128,12 @@ CREATE TABLE oao.sandbox_instances (
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   stopped_at timestamptz,
   PRIMARY KEY (organization_id, project_id, id),
-  UNIQUE (organization_id, project_id, run_id),
+  UNIQUE (organization_id, project_id, thread_id),
   UNIQUE (organization_id, project_id, creation_key),
-  FOREIGN KEY (organization_id, project_id, run_id)
-    REFERENCES oao.runs (organization_id, project_id, id),
+  FOREIGN KEY (organization_id, project_id, run_id, thread_id, session_id)
+    REFERENCES oao.runs (organization_id, project_id, id, thread_id, session_id),
+  FOREIGN KEY (organization_id, project_id, session_id, thread_id)
+    REFERENCES oao.sessions (organization_id, project_id, id, thread_id),
   CHECK (NOT oao.jsonb_has_forbidden_public_key(egress_policy)),
   CHECK (safe_error IS NULL OR NOT oao.jsonb_has_forbidden_public_key(safe_error))
 );
@@ -196,7 +234,8 @@ $$;
 
 CREATE FUNCTION oao.claim_runtime_wakes(
   p_worker_id text, p_limit integer, p_lease interval
-) RETURNS SETOF oao.runtime_wake_jobs LANGUAGE plpgsql AS $$
+) RETURNS SETOF oao.runtime_wake_jobs LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, oao AS $$
 BEGIN
   IF p_limit < 1 OR p_limit > 100 THEN
     RAISE EXCEPTION 'runtime wake claim limit out of range' USING ERRCODE = '22023';
@@ -226,7 +265,8 @@ $$;
 CREATE FUNCTION oao.complete_runtime_wake(
   p_organization_id uuid, p_project_id uuid, p_id uuid,
   p_worker_id text, p_fence bigint
-) RETURNS void LANGUAGE plpgsql AS $$
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, oao AS $$
 BEGIN
   UPDATE oao.runtime_wake_jobs SET state = 'completed', lease_owner = NULL,
     lease_expires_at = NULL, updated_at = clock_timestamp()
@@ -241,9 +281,11 @@ CREATE FUNCTION oao.retry_runtime_wake(
   p_organization_id uuid, p_project_id uuid, p_id uuid,
   p_worker_id text, p_fence bigint, p_delay interval, p_safe_error jsonb,
   p_dead boolean DEFAULT false
-) RETURNS void LANGUAGE plpgsql AS $$
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, oao AS $$
 BEGIN
-  UPDATE oao.runtime_wake_jobs SET state = CASE WHEN p_dead THEN 'dead' ELSE 'pending' END,
+  UPDATE oao.runtime_wake_jobs SET state = CASE WHEN p_dead
+    THEN 'dead'::oao.runtime_wake_state ELSE 'pending'::oao.runtime_wake_state END,
     lease_owner = NULL, lease_expires_at = NULL,
     available_at = clock_timestamp() + p_delay, safe_error = p_safe_error,
     updated_at = clock_timestamp()
@@ -252,6 +294,35 @@ BEGIN
   IF NOT FOUND THEN RAISE EXCEPTION 'stale runtime wake fence' USING ERRCODE = '55000'; END IF;
 END
 $$;
+
+CREATE FUNCTION oao.list_runtime_recovery_heads()
+RETURNS TABLE (organization_id uuid, project_id uuid, run_id uuid)
+LANGUAGE sql SECURITY DEFINER
+SET search_path = pg_catalog, oao
+AS $$
+  SELECT h.organization_id, h.project_id, h.run_id
+  FROM oao.thread_admission_heads h
+  ORDER BY h.updated_at
+$$;
+
+CREATE FUNCTION oao.runtime_has_active_dispatches()
+RETURNS boolean
+LANGUAGE sql SECURITY DEFINER
+SET search_path = pg_catalog, oao
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM oao.runtime_dispatches WHERE state <> 'settled'
+  )
+$$;
+
+COMMENT ON FUNCTION oao.list_runtime_recovery_heads() IS
+  'Cross-tenant runtime recovery helper. Ownership remains with the privileged migration role, which must have BYPASSRLS; never transfer to oao_app.';
+COMMENT ON FUNCTION oao.runtime_has_active_dispatches() IS
+  'Cross-tenant runtime shutdown helper. Ownership remains with the privileged migration role, which must have BYPASSRLS; never transfer to oao_app.';
+REVOKE ALL ON FUNCTION oao.list_runtime_recovery_heads() FROM PUBLIC;
+REVOKE ALL ON FUNCTION oao.runtime_has_active_dispatches() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION oao.list_runtime_recovery_heads() TO oao_app;
+GRANT EXECUTE ON FUNCTION oao.runtime_has_active_dispatches() TO oao_app;
 
 CREATE FUNCTION oao.publish_runtime_tool_call(
   p_organization_id uuid, p_project_id uuid, p_id uuid, p_run_id uuid,
@@ -284,7 +355,7 @@ DO $$
 DECLARE table_name text;
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
-    'runtime_wake_jobs', 'runtime_dispatches', 'sandbox_instances',
+    'runtime_wake_jobs', 'runtime_thread_instances', 'runtime_dispatches', 'sandbox_instances',
     'sandbox_commands', 'sandbox_artifacts'
   ] LOOP
     EXECUTE format('ALTER TABLE oao.%I ENABLE ROW LEVEL SECURITY', table_name);
@@ -297,7 +368,7 @@ BEGIN
 END
 $$;
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON oao.runtime_wake_jobs, oao.runtime_dispatches,
+GRANT SELECT, INSERT, UPDATE, DELETE ON oao.runtime_wake_jobs, oao.runtime_thread_instances, oao.runtime_dispatches,
   oao.sandbox_instances, oao.sandbox_commands, oao.sandbox_artifacts TO oao_app;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA oao FROM PUBLIC;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA oao TO oao_app;
