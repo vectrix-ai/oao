@@ -173,7 +173,50 @@ export const ProductEventKindSchema = v.picklist([
   "sandbox.stopped",
   "sandbox.failed",
   "model.invocation_completed",
+  "model.invocation_failed",
+  "sandbox.command_started",
+  "sandbox.command_completed",
+  "sandbox.command_failed",
+  "runtime.dispatch_reserved",
+  "runtime.dispatch_admitted",
+  "runtime.dispatch_reconciled",
+  "runtime.recovery_started",
+  "runtime.recovery_completed",
+  "runtime.cancellation_draining",
+  "session.summary_changed",
 ]);
+
+export const RuntimeToolSnapshotSchema = v.object({
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  description: v.pipe(v.string(), v.minLength(1), v.maxLength(2_000)),
+  owner: v.picklist(["platform", "caller"]),
+  approval: v.picklist(["never", "always"]),
+});
+
+export const ManagedAgentSnapshotSchema = v.object({
+  agentVersionId: IdSchema,
+  contentHash: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
+  systemPrompt: v.pipe(v.string(), v.minLength(1), v.maxLength(100_000)),
+  modelPreset: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
+  tools: v.array(RuntimeToolSnapshotSchema),
+  sandbox: v.object({
+    enabled: v.boolean(),
+    network: v.picklist(["none", "restricted"]),
+  }),
+  limits: v.object({
+    maxTurns: v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(1_000)),
+    timeoutMs: v.pipe(v.number(), v.integer(), v.minValue(1_000)),
+  }),
+});
+
+export const ManagedRunInitialDataSchema = v.object({
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  threadId: IdSchema,
+  sessionId: IdSchema,
+  runId: IdSchema,
+  snapshot: ManagedAgentSnapshotSchema,
+});
 export const ProductEventSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
@@ -238,6 +281,12 @@ export type ToolStage = v.InferOutput<typeof ToolStageSchema>;
 export type Approval = v.InferOutput<typeof ApprovalSchema>;
 export type ProductEventKind = v.InferOutput<typeof ProductEventKindSchema>;
 export type ProductEvent = v.InferOutput<typeof ProductEventSchema>;
+export type ManagedAgentSnapshot = v.InferOutput<
+  typeof ManagedAgentSnapshotSchema
+>;
+export type ManagedRunInitialData = v.InferOutput<
+  typeof ManagedRunInitialDataSchema
+>;
 export type ApiError = v.InferOutput<typeof ApiErrorSchema>;
 export type Page<T> = {
   readonly data: readonly T[];

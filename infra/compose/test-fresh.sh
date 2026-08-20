@@ -28,3 +28,5 @@ pnpm --filter @oao/db-postgres migrate
 pnpm --filter @oao/db-postgres migrate
 pnpm --filter @oao/db-postgres test:integration
 pnpm --filter @oao/api test:integration
+pnpm --filter @oao/tool-broker test:integration
+pnpm --filter @oao/sandbox-daytona test:integration

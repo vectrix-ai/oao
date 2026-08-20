@@ -1,0 +1,26 @@
+{
+  "name": "@oao/runtime-worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "node --import tsx --watch src/main.ts",
+    "demo": "node --import tsx src/demo.ts",
+    "lint": "eslint src test",
+    "start": "node dist/main.js",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.0.3",
+    "@oao/db-postgres": "workspace:*",
+    "@oao/domain": "workspace:*",
+    "@oao/models-openrouter": "workspace:*",
+    "@oao/queue-postgres": "workspace:*",
+    "@oao/runtime-flue": "workspace:*",
+    "@oao/sandbox-daytona": "workspace:*",
+    "@oao/tool-broker": "workspace:*",
+    "hono": "4.13.3"
+  }
+}

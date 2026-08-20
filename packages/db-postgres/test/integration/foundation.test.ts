@@ -187,12 +187,13 @@ test(
     try {
       await t.test("migration applies cleanly and is idempotent", async () => {
         const first = await migrate(pool);
-        assert.equal(first.applied.length + first.alreadyApplied.length, 3);
+        assert.equal(first.applied.length + first.alreadyApplied.length, 4);
         const second = await migrate(pool);
         assert.deepEqual(second.alreadyApplied, [
           "0001_foundation.sql",
           "0002_foundation_followup.sql",
           "0003_api_auth.sql",
+          "0003_runtime.sql",
         ]);
         await seed(pool);
       });
@@ -546,6 +547,66 @@ test(
           );
           assert.equal(await claim(1), "replayed");
           await assert.rejects(claim(2), /idempotency key reused/u);
+        },
+      );
+
+      await t.test(
+        "runtime wakes deduplicate and expired leases restart with a new fence",
+        async () => {
+          const run = uuid(226) as RunId;
+          const wake = uuid(227);
+          await insertRun(pool, run, "runtime-wake-run");
+          const enqueue = (payload: Record<string, string>) =>
+            withTenantTransaction(pool, tenant, (transaction) =>
+              transaction.query(
+                "SELECT oao.enqueue_runtime_wake($1,$2,$3,$4,$5,digest($6,'sha256'),'admit',$7)",
+                [
+                  ids.organization,
+                  ids.project,
+                  wake,
+                  run,
+                  `admit:${run}`,
+                  JSON.stringify(payload),
+                  payload,
+                ],
+              ),
+            );
+          await enqueue({ source: "test" });
+          await enqueue({ source: "test" });
+          await assert.rejects(
+            enqueue({ source: "changed" }),
+            /runtime wake idempotency conflict/u,
+          );
+
+          const first = await pool.query(
+            "SELECT * FROM oao.claim_runtime_wakes('worker-before-restart',1,interval '1 minute')",
+          );
+          assert.equal(first.rows[0]?.lease_fence, "1");
+          await pool.query(
+            "UPDATE oao.runtime_wake_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+            [wake],
+          );
+          const recovered = await pool.query(
+            "SELECT * FROM oao.claim_runtime_wakes('worker-after-restart',1,interval '1 minute')",
+          );
+          assert.equal(recovered.rows[0]?.lease_fence, "2");
+          assert.equal(recovered.rows[0]?.attempts, 2);
+          await assert.rejects(
+            pool.query(
+              "SELECT oao.complete_runtime_wake($1,$2,$3,'worker-before-restart',1)",
+              [ids.organization, ids.project, wake],
+            ),
+            /stale runtime wake fence/u,
+          );
+          await pool.query(
+            "SELECT oao.complete_runtime_wake($1,$2,$3,'worker-after-restart',2)",
+            [ids.organization, ids.project, wake],
+          );
+          const stored = await pool.query(
+            "SELECT state,attempts FROM oao.runtime_wake_jobs WHERE id=$1",
+            [wake],
+          );
+          assert.deepEqual(stored.rows[0], { state: "completed", attempts: 2 });
         },
       );
 

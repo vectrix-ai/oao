@@ -1,0 +1,36 @@
+{
+  "name": "@oao/runtime-flue",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "eslint src test",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.83.0",
+    "@flue/opentelemetry": "2.0.3",
+    "@flue/postgres": "2.0.3",
+    "@flue/runtime": "2.0.3",
+    "@oao/contracts": "workspace:*",
+    "@oao/db-postgres": "workspace:*",
+    "@oao/domain": "workspace:*",
+    "@oao/models-openrouter": "workspace:*",
+    "@oao/queue-postgres": "workspace:*",
+    "@oao/tool-broker": "workspace:*",
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "0.221.0",
+    "@opentelemetry/resources": "2.5.0",
+    "@opentelemetry/sdk-node": "0.221.0",
+    "pg": "8.23.0",
+    "valibot": "1.4.2"
+  }
+}

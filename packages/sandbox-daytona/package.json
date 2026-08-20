@@ -1,0 +1,29 @@
+{
+  "name": "@oao/sandbox-daytona",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./flue-blueprint": {
+      "types": "./dist/flue-daytona-blueprint.d.ts",
+      "import": "./dist/flue-daytona-blueprint.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "eslint src test",
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:integration": "node --import tsx --test --test-concurrency=1 test/integration/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@daytona/sdk": "0.205.0",
+    "@flue/runtime": "2.0.3",
+    "@oao/db-postgres": "workspace:*",
+    "@oao/domain": "workspace:*"
+  }
+}

@@ -54,3 +54,18 @@ test("API/auth migration keeps secrets hashed and scopes every mutable boundary"
   assert.match(sql, /latest_version_id/u);
   assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
 });
+
+test("runtime migration encodes durable wakes, dispatch reconciliation, and sandbox fences", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0003_runtime.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /FOR UPDATE SKIP LOCKED/u);
+  assert.match(sql, /lease_fence = jobs\.lease_fence \+ 1/u);
+  assert.match(sql, /UNIQUE \(organization_id, project_id, admission_key\)/u);
+  assert.match(sql, /tool_calls_runtime_correlation_check/u);
+  assert.match(sql, /creation_fence bigint NOT NULL/u);
+  assert.match(sql, /target_preference text NOT NULL DEFAULT 'eu'/u);
+  assert.match(sql, /session\.summary_changed/u);
+  assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
+});
