@@ -6,19 +6,16 @@ authentication provider per process.
 ## Development authentication
 
 ```sh
-AUTH_PROVIDER=development \
-NODE_ENV=development \
-APP_ORIGIN=http://localhost:5173 \
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/oao \
-pnpm --filter @oao/api dev
+pnpm dev:local
 ```
 
 Development mode applies migrations, idempotently seeds the deterministic local
 organization/project/principal, and permits non-`Secure` HttpOnly cookies only
-because `NODE_ENV=development` and the callback is explicit HTTP. A Vite frontend
-should proxy `/v1` to `http://127.0.0.1:3000`; browser requests then remain
-same-origin at `http://localhost:5173` and satisfy CSRF checks without CORS or
-database credentials in the browser.
+because `NODE_ENV=development` and the callback is explicit HTTP. The local Vite
+server proxies `/v1` to `http://127.0.0.1:3000`; browser requests remain
+same-origin at `http://127.0.0.1:5173` and satisfy CSRF checks without CORS or
+database credentials in the browser. See the root `.env.example` for the exact
+standalone variables when running this service without `dev:local`.
 
 ## WorkOS AuthKit
 

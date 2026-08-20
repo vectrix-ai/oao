@@ -19,7 +19,7 @@ Hono API --------------------------------------+
         v                                       v
 PostgreSQL <---------------------------- Flue runtime worker
   control + audit + product events        one active owner
-  session summaries + pg-boss             ManagedAgent + durable tools
+  session summaries + wake/lease queue     ManagedAgent + durable tools
   @flue/postgres canonical state                 |
         |                                         +--> OpenRouter adapter / fake model
         |                                         +--> Daytona adapter / fake sandbox
@@ -59,7 +59,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 ### Runtime
 
 - `@oao/runtime-flue`: generic compiled `ManagedAgent`, pinned `@flue/postgres`, history projection.
-- `@oao/queue-postgres`: pg-boss wake jobs and platform dispatch leases.
+- `@oao/queue-postgres`: PostgreSQL wake jobs and platform dispatch leases.
 - `@oao/tool-broker`: caller requests/claims/results and single-approver gates.
 - `@oao/models-openrouter`: immutable presets and OpenRouter provider construction.
 - `@oao/sandbox-daytona`: committed Flue Daytona blueprint plus thread-workspace lifecycle, target diagnostics, and egress-policy manager.
@@ -68,7 +68,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 
 - `@oao/api`: Hono REST, authentication, authorization, idempotency, SSE, private runtime proxy.
 - `@oao/auth-core` and `@oao/auth-workos`: local principal/session model and WorkOS adapter.
-- `@oao/console`: React 19, Vite, React Router, TanStack Query, `@flue/react`, accessible management/debug UI.
+- `@oao/console`: React 19, Vite, React Router, TanStack Query, and an accessible management/debug UI.
 - `@oao/sdk`: generated/typed JavaScript client.
 
 ## Required console screens
@@ -84,6 +84,11 @@ OTel SDK -> optional Collector -> configured OTLP backend
 ## Authentication
 
 Local development uses a deterministic development identity adapter. Hosted human login uses WorkOS AuthKit behind `AuthTenantAdapter`; API keys remain platform-owned. PostgreSQL is authoritative for memberships, roles, scopes, RLS context, and audit.
+
+The runnable local topology uses a Hono REST/SSE API, a React/Vite console, and
+the Flue runtime worker. `pnpm dev:local` migrates and seeds PostgreSQL before it
+starts those three processes. Local fake model and sandbox adapters are the
+default; hosted adapters are explicit opt-ins.
 
 ## Hosting posture
 
