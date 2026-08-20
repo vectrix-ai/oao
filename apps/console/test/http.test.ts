@@ -84,6 +84,29 @@ describe("HTTP console adapter", () => {
     );
   });
 
+  it("starts WorkOS hosted sign-in when development login is unavailable", async () => {
+    const authorizationUrl =
+      "https://api.workos.com/user_management/authorize?client_id=client_123";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({}, 401))
+      .mockResolvedValueOnce(jsonResponse({}, 404))
+      .mockResolvedValueOnce(jsonResponse({ authorizationUrl }));
+    const navigateTo = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new HttpConsoleApi({ navigateTo });
+    await expect(api.getContext()).rejects.toThrow(
+      "Redirecting to WorkOS sign in.",
+    );
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/context",
+      "/v1/auth/development/login",
+      "/v1/auth/login",
+    ]);
+    expect(navigateTo).toHaveBeenCalledWith(authorizationUrl);
+  });
+
   it("scopes project requests and adds a unique idempotency key to mutations", async () => {
     const agent = {
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",

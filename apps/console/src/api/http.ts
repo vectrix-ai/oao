@@ -289,16 +289,20 @@ function sessionDetail(
 export class HttpConsoleApi implements ConsoleApi {
   readonly #baseUrl: string;
   readonly #getAccessToken: () => Promise<string | null>;
+  readonly #navigateTo: (url: string) => void;
   #contextPromise: Promise<ProjectContext> | undefined;
 
   constructor(
     input: {
       readonly baseUrl?: string;
       readonly getAccessToken?: () => Promise<string | null>;
+      readonly navigateTo?: (url: string) => void;
     } = {},
   ) {
     this.#baseUrl = (input.baseUrl ?? "/v1").replace(/\/$/u, "");
     this.#getAccessToken = input.getAccessToken ?? (async () => null);
+    this.#navigateTo =
+      input.navigateTo ?? ((url) => globalThis.location.assign(url));
   }
 
   async #request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -347,9 +351,26 @@ export class HttpConsoleApi implements ConsoleApi {
           body: "{}",
         });
       } catch (loginError) {
-        if (loginError instanceof HttpConsoleError && loginError.status === 404)
-          throw error;
-        throw loginError;
+        if (
+          !(loginError instanceof HttpConsoleError) ||
+          loginError.status !== 404
+        )
+          throw loginError;
+        const login = await this.#request<{
+          readonly authorizationUrl?: unknown;
+        }>("/auth/login", { method: "POST", body: "{}" });
+        if (
+          typeof login.authorizationUrl !== "string" ||
+          !login.authorizationUrl.startsWith("https://")
+        )
+          throw new Error(
+            "The authentication provider returned an invalid URL.",
+            { cause: loginError },
+          );
+        this.#navigateTo(login.authorizationUrl);
+        throw new Error("Redirecting to WorkOS sign in.", {
+          cause: loginError,
+        });
       }
       return contextView(await this.#request<ContextResponse>("/context"));
     }
