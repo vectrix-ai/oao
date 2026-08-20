@@ -28,7 +28,6 @@ const worker = await startRuntimeWorker({
     ...process.env,
     OAO_RUNTIME_SERVICE_PRINCIPAL_ID:
       "00000000-0000-4000-8000-000000000099" as PrincipalId,
-    OAO_SANDBOX_PROVIDER: "fake",
   },
   fakeResponses: Array.from({ length: 16 }, () => fakeResponse),
 });

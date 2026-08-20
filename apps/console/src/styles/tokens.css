@@ -1,0 +1,170 @@
+/*
+ * OAO design tokens.
+ *
+ * The single source of truth for colour, geometry, type, and motion in the
+ * console. Components reference semantic roles (--accent, --surface, --text-2)
+ * and never a raw shade, so light and dark stay coherent.
+ *
+ * Ported from design/style-guide.html and design/design.html.
+ * Seed green #6ebc91; actions use green 700/800 for contrast.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Primitive scale — green (seed #6ebc91) */
+  --green-50: #f3faf6;
+  --green-100: #e4f4eb;
+  --green-200: #cae8d7;
+  --green-300: #a6d8bc;
+  --green-400: #82c8a1;
+  --green-500: #6ebc91;
+  --green-600: #4e9d74;
+  --green-700: #3d7c5c;
+  --green-800: #326349;
+  --green-900: #2a513e;
+  --green-950: #142d21;
+
+  /* Primitive scale — ink (green-tinted neutrals) */
+  --ink-50: #f7f9f8;
+  --ink-100: #eef1ef;
+  --ink-200: #dde2de;
+  --ink-300: #c3cbc6;
+  --ink-400: #9aa59e;
+  --ink-500: #748079;
+  --ink-600: #52605a;
+  --ink-700: #34403a;
+  --ink-800: #202824;
+  --ink-900: #141a17;
+  --ink-950: #080c0a;
+
+  /* Primitive — signal hues */
+  --amber-100: #fbf3e4;
+  --amber-300: #e3c68e;
+  --amber-600: #956114;
+  --red-100: #fdeeee;
+  --red-300: #eab3b3;
+  --red-600: #b23c3c;
+  --blue-100: #eaf2f9;
+  --blue-300: #a9c9e4;
+  --blue-600: #2f6ea6;
+
+  /* Theme roles — light (default) */
+  --canvas: #f8faf9;
+  --surface: #ffffff;
+  --surface-2: #f2f5f3;
+  --surface-3: #eaefec;
+  --glass: rgba(255, 255, 255, 0.72);
+  --scrim: rgba(20, 26, 23, 0.42);
+  --text: #141a17;
+  --text-2: #52605a;
+  /* Contrast-checked against --surface, --surface-2 and --surface-3 so small
+     mono labels still clear WCAG AA. */
+  --text-3: #5c6961;
+  --border: #e2e7e3;
+  --border-strong: #c9d1cb;
+  --accent: #3d7c5c;
+  --accent-hover: #326349;
+  --accent-weak: #e4f4eb;
+  --accent-weak-border: #cae8d7;
+  /* Green 700 does not clear AA on the weak green tint, so text and glyphs
+     sitting on --accent-weak step down to green 800. */
+  --accent-on-weak: #326349;
+  --on-accent: #ffffff;
+  --focus: #6ebc91;
+  --live: #6ebc91;
+  --success-fg: #2f6a4c;
+  --success-bg: #e4f4eb;
+  --success-bd: #b7dfc8;
+  --warning-fg: #8a5a12;
+  --warning-bg: #fbf3e4;
+  --warning-bd: #e8cf9f;
+  --danger-fg: #a83636;
+  --danger-bg: #fdeeee;
+  --danger-bd: #efc0c0;
+  --info-fg: #2f6ea6;
+  --info-bg: #eaf2f9;
+  --info-bd: #bcd5ea;
+
+  /* Geometry — squared by default */
+  --radius-0: 0;
+  --radius-1: 2px; /* controls: buttons, inputs, chips */
+  --radius-2: 4px; /* panels, cards, menus, dialogs */
+  --radius-pill: 999px; /* compact status chips only */
+  --bw: 1px;
+
+  /* Spacing — 4px base unit */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* Shadows — restrained; borders carry most of the separation */
+  --shadow-1: 0 1px 2px rgba(20, 26, 23, 0.05);
+  --shadow-2: 0 2px 8px rgba(20, 26, 23, 0.07);
+  --shadow-3: 0 12px 32px rgba(20, 26, 23, 0.16);
+
+  /* Type */
+  --font-ui:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-display: Manrope, Inter, ui-sans-serif, system-ui, sans-serif;
+  --font-mono:
+    "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Motion */
+  --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+  --dur-1: 120ms;
+  --dur-2: 200ms;
+
+  /* Shell metrics */
+  --topbar-h: 52px;
+  --sidenav-w: 216px;
+  --content-max: 1200px;
+  --content-max-wide: 1480px;
+  /* Reading measure for the session transcript and the toolbar above it. */
+  --measure-transcript: 880px;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --canvas: #0b100d;
+  --surface: #121814;
+  --surface-2: #181f1b;
+  --surface-3: #1f2822;
+  --glass: rgba(18, 24, 20, 0.72);
+  --scrim: rgba(4, 7, 5, 0.6);
+  --text: #f0f4f1;
+  --text-2: #a8b4ad;
+  --text-3: #8b978f;
+  --border: #252e28;
+  --border-strong: #37423b;
+  --accent: #82c8a1;
+  --accent-hover: #a6d8bc;
+  --accent-weak: #16281f;
+  --accent-weak-border: #2a4a38;
+  --accent-on-weak: #82c8a1;
+  --on-accent: #0b100d;
+  --focus: #6ebc91;
+  --live: #6ebc91;
+  --success-fg: #9bd6b4;
+  --success-bg: #142b1f;
+  --success-bd: #2a4a38;
+  --warning-fg: #e0b46a;
+  --warning-bg: #2a2113;
+  --warning-bd: #4d3d1e;
+  --danger-fg: #e59c9c;
+  --danger-bg: #2c1717;
+  --danger-bd: #523030;
+  --info-fg: #8fbfe6;
+  --info-bg: #142230;
+  --info-bd: #28405a;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.55);
+}

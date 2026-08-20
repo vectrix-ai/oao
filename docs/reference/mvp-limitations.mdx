@@ -1,0 +1,56 @@
+---
+title: MVP limitations
+description: Know which workflows are implemented now and which remain explicit extension points.
+---
+
+The current repository is a local-first MVP. These boundaries are intentional
+and should shape integrations:
+
+- **PostgreSQL is the only application database.** There is no Convex projection
+  or Redis dependency.
+- **The TypeScript SDK is a private workspace package.** OAO applications inside
+  this monorepo can depend on `@oao/sdk-js` with `workspace:*`. External
+  codebases should use the documented HTTP/SSE contracts until the SDK is
+  published or distributed from a registry you control.
+- **There is no public attachment upload API yet.** Small trusted text can be
+  sent in a message within the 100,000-character input limit. For codebases,
+  use narrow caller-owned read/search tools. Binary attachments and general
+  artifact ingestion need a future public upload/reference contract.
+- **One run executes at a time per session thread.** Submit the next turn only
+  after the latest run is completed, failed, cancelled, or timed out.
+- **Runtime execution requires configured providers.** Add a project-scoped
+  OpenRouter or OpenAI provider and preset plus a Daytona connection before
+  publishing an executable agent version. Test doubles are not selectable in
+  the API or console.
+- **Model presets are add-and-link only.** A `project:admin` principal can
+  approve a new project preset from the provider catalog and link it to a new
+  immutable agent version. Preset rows are append-only: there is no rename,
+  repoint, deprecate, or delete route, and no reviewer approval workflow.
+- **Provider credentials are project-scoped encrypted records.** The console can
+  create connections and rotate write-only keys. The API never returns a key,
+  and encryption-key-ring rotation is not included in this MVP.
+- **Workspace backup stores only the latest archive per thread.** OAO backs up
+  the active Daytona workdir to the configured S3-compatible provider, but
+  historical rollback requires bucket versioning and there is no generation
+  browser. The 512 MiB compressed and 2 GiB expanded limits are enforced.
+  Archive objects rely on provider-side encryption; OAO does not add
+  application-layer object encryption.
+- **Routing price caps are not budgets.** There is no project budget,
+  reservation ledger, quota, or spend alerting, and no autonomous per-run model
+  routing.
+- **Daytona target selection is not an EU-residency guarantee.** Strict EU
+  controls and evidence are deferred beyond the MVP.
+- **Daytona browser tools require Chromium in the sandbox image.** The runtime
+  starts Computer Use but does not install a browser into an arbitrary image.
+- **Only selected file, shell, and browser tools are exposed.** Daytona Git,
+  LSP, code interpreter, recording, VNC, and preview APIs are outside the MVP.
+- **Observed cost is not always final billed cost.** The UI labels unavailable,
+  provider-observed, and estimated data rather than presenting every value as
+  authoritative billing.
+- **Session debugging is intentionally detailed.** The authorized management
+  console exposes provider thinking, reasoning duration, and sandbox tool
+  arguments/results. Credentials, authorization headers, provider reasoning
+  signatures, and product-event payloads remain protected.
+
+These constraints do not change the provider seams: model, sandbox, identity,
+artifact, telemetry, and runtime implementations remain replaceable adapters.

@@ -1,0 +1,825 @@
+---
+title: "Create an agent"
+description: "Create, publish, run, and debug an immutable managed agent from the OAO console or REST API."
+---
+
+An OAO agent is a stable definition with an immutable sequence of versions. A
+session pins one version, and every initial or follow-up message creates a
+durable run on that same session and thread.
+
+<Note>
+  Creating an agent publishes version 1 in the same transaction. The current MVP
+  does not have a separate unpublished-draft workflow.
+</Note>
+
+## Before you begin
+
+Start the local stack and open the console:
+
+```bash
+pnpm dev:local
+```
+
+The default URLs are:
+
+- Console: `http://127.0.0.1:5173`
+- Direct API: `http://127.0.0.1:3000/v1`
+
+Runtime execution requires a configured project model preset and Daytona
+connection. There is no selectable fake model or sandbox profile.
+
+For direct API calls, use a project-scoped OAO API key and the project ID from
+`GET /v1/context`:
+
+```bash
+export OAO_API_URL=http://127.0.0.1:3000/v1
+export OAO_API_KEY='oao_...'
+
+curl --fail-with-body \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  "$OAO_API_URL/context"
+```
+
+The context response includes `project.id` and the publication-time model
+allowlist in `activeModelPresets`. That list contains every provider-backed
+preset approved for this project that is currently available. A preset is
+omitted when it lacks a provider connection or platform
+credential decryption is unavailable:
+
+```json
+{
+  "principal": {
+    "id": "00000000-0000-4000-8000-000000000003",
+    "organizationId": "00000000-0000-4000-8000-000000000001",
+    "projectId": "00000000-0000-4000-8000-000000000002",
+    "kind": "api_key",
+    "subject": "api-key:...",
+    "scopes": ["*"]
+  },
+  "organization": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "slug": "development",
+    "name": "Development organization",
+    "createdAt": "2026-08-20T10:00:00.000Z"
+  },
+  "project": {
+    "id": "00000000-0000-4000-8000-000000000002",
+    "organizationId": "00000000-0000-4000-8000-000000000001",
+    "slug": "default",
+    "name": "Default project",
+    "createdAt": "2026-08-20T10:00:00.000Z"
+  },
+  "organizations": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "slug": "development",
+      "name": "Development organization",
+      "createdAt": "2026-08-20T10:00:00.000Z"
+    }
+  ],
+  "projects": [
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "organizationId": "00000000-0000-4000-8000-000000000001",
+      "slug": "default",
+      "name": "Default project",
+      "createdAt": "2026-08-20T10:00:00.000Z"
+    }
+  ],
+  "activeModelPresets": ["project-model-v1"],
+  "authProvider": "development"
+}
+```
+
+```bash
+export OAO_PROJECT_ID=00000000-0000-4000-8000-000000000002
+```
+
+Human browser sessions can also call the API with OAO's HttpOnly session
+cookie. Cookie-authenticated `POST`, `PUT`, `PATCH`, and `DELETE` requests must
+include an `Origin` exactly allowed by `APP_ORIGIN`. Project API-key requests
+authenticate with `Authorization: Bearer oao_...` and do not rely on browser
+cookies.
+
+## Create through the console
+
+<Steps>
+  <Step title="Create the definition">
+    Open **Agents**, select **Create agent**, enter a name and optional
+    description, and choose an approved model preset. You can also enable the
+    sandbox, choose a configured project Daytona connection, select its network
+    policy, optionally select an active Daytona snapshot, and select exact tool
+    capabilities before submitting the form.
+
+    The console publishes version 1 with this initial configuration:
+
+    ```json
+    {
+      "systemPrompt": "You are <agent name>, a helpful managed agent. Complete the user's request carefully and do not expose secrets or internal reasoning.",
+      "modelPreset": "<selected preset key>",
+      "tools": [],
+      "sandbox": {
+        "enabled": false,
+        "provider": "daytona-primary",
+        "network": "none",
+        "capabilities": ["filesystem_read", "filesystem_write", "shell"]
+      },
+      "limits": {
+        "maxTurns": 32,
+        "timeoutMs": 60000
+      }
+    }
+    ```
+
+    The form selects the first available provider-backed project preset and
+    Daytona connection. The sandbox starts disabled until you enable it. The
+    picker searches every preset returned by
+    `GET /projects/{projectId}/model-presets`, showing the preset key and
+    whether it is a deployment or project preset, and leaves an unavailable
+    preset visible but unselectable. The generated agent key is the normalized
+    name plus a random eight-character suffix. Use the API if you need to
+    choose the key explicitly.
+
+  </Step>
+
+  <Step title="Review and publish a new version">
+    On the agent detail page, edit the latest version's system instructions,
+    approved model preset, sandbox switch, network policy, or timeout. The
+    searchable model list is the project's approved preset catalog, and the
+    editor shows the resolved model and routing policy for the selected preset
+    with a link to **Manage models**. Select **Publish new version** to append an immutable
+    version.
+
+    Linking a different model is always a publication. Existing sessions stay
+    attached to the version they were created with.
+
+    Console validation requires:
+
+    - At least 20 characters in the system instructions.
+    - A preset returned by `GET /projects/{projectId}/model-presets`.
+    - A timeout from `1,000` through `3,600,000` milliseconds.
+    - Exactly `32` maximum turns.
+
+    Selecting an older version is read-only. Return to the latest version to
+    prepare another publication.
+
+  </Step>
+
+  <Step title="Create a session">
+    Open **Sessions**, select **Create session**, choose a published agent,
+    enter a title and first message, and submit.
+
+    The session pins the agent's latest version at that moment. Creation returns
+    while the first run is `queued`; the runtime finishes it asynchronously.
+
+  </Step>
+
+  <Step title="Continue after settlement">
+    Open the session. When its latest run is `completed`, `failed`, `cancelled`,
+    or `timed_out`, the **Continue session** form appears. Submitting a message
+    creates a new durable run on the existing session and thread.
+  </Step>
+</Steps>
+
+<Warning>
+  The **Add tool** control is not wired up in the current console. Existing
+  tools are displayed, but publish tool definitions through the API. The current
+  API-key, archive, rename, resume, and branch-replay controls are also not
+  implemented in the console.
+</Warning>
+
+## Create through the API
+
+Every mutation requires:
+
+- `Content-Type: application/json` when it has a JSON body.
+- A non-empty `Idempotency-Key` of at most 200 characters.
+- A principal scoped to the path's project with the required authorization
+  scope.
+
+The routes used in this guide enforce these project scopes:
+
+| Operation                                  | Required scope                   |
+| ------------------------------------------ | -------------------------------- |
+| List or read agents and versions           | `agent:read`                     |
+| Create an agent or publish a version       | `agent:write`                    |
+| Create a session and its first run         | `session:write` and `run:create` |
+| Read a session                             | `session:read`                   |
+| Create a follow-up or resume run           | `run:create`                     |
+| Read runs, pending work, or project events | `run:read`                       |
+| Request cancellation                       | `run:cancel`                     |
+| Claim, renew, or release caller work       | `tool_call:claim`                |
+| Submit a caller tool result                | `tool_call:submit`               |
+| Approve or deny an approval                | `approval:resolve`               |
+
+`*` satisfies every project action. Human principals must also have a current
+membership in the project. The project ID in the URL must match the principal's
+project; otherwise the API returns `403 forbidden` before resource access.
+
+Use a new idempotency key for each logical mutation. Retrying the same route,
+key, principal, project, and JSON body within 24 hours returns the stored public
+response and sets `Idempotency-Replayed: true`. Reusing the key for a different
+body returns `409 idempotency_conflict`.
+
+### 1. Create the agent and version 1
+
+This example uses explicit project model and Daytona provider keys:
+
+```bash
+curl --fail-with-body \
+  --request POST \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: create-support-agent-v1' \
+  --data '{
+    "key": "support-agent",
+    "name": "Support agent",
+    "description": "Answers product-support questions.",
+    "config": {
+      "systemPrompt": "Answer support questions concisely. Never expose secrets or internal reasoning.",
+      "modelPreset": "project-model-v1",
+      "tools": [],
+      "sandbox": {
+        "enabled": false,
+        "provider": "daytona-primary",
+        "network": "none",
+        "capabilities": ["filesystem_read", "filesystem_write", "shell"]
+      },
+      "limits": {
+        "maxTurns": 32,
+        "timeoutMs": 60000
+      }
+    }
+  }' \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/agents"
+```
+
+The route returns `201 Created`. Its response has this exact field shape; UUIDs,
+hash-dependent IDs, and timestamps below are illustrative values:
+
+```json
+{
+  "id": "7e1eb994-328a-4a17-a69f-998998d43984",
+  "organizationId": "00000000-0000-4000-8000-000000000001",
+  "projectId": "00000000-0000-4000-8000-000000000002",
+  "key": "support-agent",
+  "name": "Support agent",
+  "description": "Answers product-support questions.",
+  "latestVersionId": "a9976868-296b-4a1d-907f-a85388db1877",
+  "version": 1,
+  "model": "project-model-v1",
+  "status": "published",
+  "createdAt": "2026-08-20T10:01:00.000Z",
+  "updatedAt": "2026-08-20T10:01:00.000Z"
+}
+```
+
+Save both IDs:
+
+```bash
+export OAO_AGENT_ID=7e1eb994-328a-4a17-a69f-998998d43984
+export OAO_AGENT_VERSION_ID=a9976868-296b-4a1d-907f-a85388db1877
+```
+
+You may send `initialConfig` instead of `config`. One of them is required; OAO
+does not publish a fake-backed default version. An empty description is stored
+as no description and is returned as `"description": ""`.
+
+### 2. Publish a tool-enabled version
+
+Publication always sends the complete next configuration. It does not patch the
+previous version.
+
+```bash
+curl --fail-with-body \
+  --request POST \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: publish-support-agent-v2' \
+  --data '{
+    "config": {
+      "systemPrompt": "Answer support questions concisely. Use lookup_customer when account context is required.",
+      "modelPreset": "project-model-v1",
+      "tools": [
+        {
+          "schemaVersion": 1,
+          "name": "lookup_customer",
+          "description": "Look up safe customer support context.",
+          "owner": "caller",
+          "approval": "always",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "customerRef": {
+                "type": "string"
+              }
+            },
+            "required": ["customerRef"],
+            "additionalProperties": false
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "found": {
+                "type": "boolean"
+              },
+              "tier": {
+                "enum": ["standard", "priority"]
+              }
+            },
+            "required": ["found"],
+            "additionalProperties": false
+          }
+        }
+      ],
+      "sandbox": {
+        "enabled": false,
+        "provider": "daytona-primary",
+        "network": "none",
+        "capabilities": ["filesystem_read", "filesystem_write", "shell"]
+      },
+      "limits": {
+        "maxTurns": 32,
+        "timeoutMs": 60000
+      }
+    }
+  }' \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/agents/$OAO_AGENT_ID/versions"
+```
+
+The route returns `201 Created` with the newly inserted immutable version:
+
+```json
+{
+  "organizationId": "00000000-0000-4000-8000-000000000001",
+  "projectId": "00000000-0000-4000-8000-000000000002",
+  "id": "9f7e7819-6075-4b82-a7c0-47ca7bc45f76",
+  "agentDefinitionId": "7e1eb994-328a-4a17-a69f-998998d43984",
+  "version": 2,
+  "config": {
+    "systemPrompt": "Answer support questions concisely. Use lookup_customer when account context is required.",
+    "modelPreset": "project-model-v1",
+    "tools": [
+      {
+        "schemaVersion": 1,
+        "name": "lookup_customer",
+        "description": "Look up safe customer support context.",
+        "owner": "caller",
+        "approval": "always",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "customerRef": {
+              "type": "string"
+            }
+          },
+          "required": ["customerRef"],
+          "additionalProperties": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "found": {
+              "type": "boolean"
+            },
+            "tier": {
+              "enum": ["standard", "priority"]
+            }
+          },
+          "required": ["found"],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "sandbox": {
+      "enabled": false,
+      "provider": "daytona-primary",
+      "network": "none",
+      "capabilities": ["filesystem_read", "filesystem_write", "shell"]
+    },
+    "limits": {
+      "maxTurns": 32,
+      "timeoutMs": 60000
+    }
+  },
+  "contentHash": "d4e2f52a12218960102f4f72552a6f80d02a5f19754902790986aaaf6274f799",
+  "createdByPrincipalId": "00000000-0000-4000-8000-000000000003",
+  "createdAt": "2026-08-20T10:02:00.000Z"
+}
+```
+
+The example `contentHash` is illustrative; the API returns the actual lowercase
+64-character SHA-256 hash of the canonicalized configuration. Publishing the
+same configuration twice conflicts because content hashes are unique per agent.
+
+### Tool contract
+
+Each published tool has these fields:
+
+| Field           | Supported values                           |
+| --------------- | ------------------------------------------ |
+| `schemaVersion` | `1`; it defaults to `1` when omitted       |
+| `name`          | Non-empty string, at most 200 characters   |
+| `description`   | Non-empty string, at most 2,000 characters |
+| `owner`         | `caller` or `platform`                     |
+| `approval`      | `never` or `always`                        |
+| `inputSchema`   | Closed supported object schema             |
+| `outputSchema`  | Closed supported object schema             |
+
+Both root schemas must be objects with `properties`, `required`, and
+`additionalProperties: false`. Nested schemas support only:
+
+- Primitive `{ "type": "string" | "number" | "integer" | "boolean" | "null" }`.
+- Arrays with exactly `type` and `items`.
+- Closed objects with exactly `type`, `properties`, `required`, and
+  `additionalProperties`.
+- Non-empty primitive `enum` arrays represented by an object containing only
+  `enum`.
+
+Keywords such as `description`, `minLength`, `maximum`, `pattern`, `format`,
+`oneOf`, `$ref`, and open-ended properties are rejected rather than silently
+ignored. Every name in `required` must be unique and present in `properties`.
+
+`caller` tools create durable work for an external operator or integration.
+`platform` tools require a matching handler registered in the runtime worker.
+`approval: "always"` creates a durable approval before either owner can
+execute.
+
+<Warning>
+  The default runtime does not register application-specific platform tool
+  handlers. A published `platform` tool is valid, but an invocation fails with
+  the safe `platform_tool_failed` outcome until the operator supplies a handler.
+</Warning>
+
+### Model presets
+
+`config.modelPreset` must name a durable project preset linked to an
+OpenRouter/OpenAI provider in PostgreSQL. Runnable deployments do not expose a
+built-in deterministic preset.
+
+The check runs inside the same tenant transaction as the write, so an unknown
+key is rejected with `400` before an agent or version row is created. Hosted
+publication requires a provider connection in the same project and platform
+credential encryption. OpenRouter/OpenAI API keys are write-only and stored as
+tenant-scoped ciphertext, never in the agent config.
+
+Hosted model identifiers start with `openrouter/` or `openai/` and must exist in
+the matching provider catalog. OpenRouter saved presets are exposed as
+`openrouter/@preset/<slug>`. See [Adding models](/models/adding-models) for the
+approval workflow and [HTTP API](/reference/http-api) for the preset contract.
+
+### Sandbox policy
+
+Set `sandbox.enabled` to `true` to attach the runtime's configured sandbox
+adapter to the agent:
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "provider": "daytona-primary",
+    "snapshotId": "77777777-7777-4777-8777-777777777777",
+    "network": "restricted",
+    "capabilities": ["filesystem_read", "filesystem_write", "shell", "browser"]
+  }
+}
+```
+
+`provider` is the key of a project Daytona connection, such as
+`daytona-primary`.
+`snapshotId` is an optional active snapshot UUID returned by that provider's
+snapshot discovery route. The selected UUID is immutable version data; omit it
+to use OAO's default `debian:12.9` image.
+`network: "none"` blocks external egress. `restricted` uses that connection's
+domain/CIDR allowlist and is rejected at publication when the allowlist is
+empty. Capabilities map to tools as follows: `filesystem_read` adds `read`;
+`filesystem_write` adds `write` and `edit`; `shell` adds `bash`, `grep`, and
+`glob`; and `browser` adds `browser_navigate`, `browser_snapshot`, and
+`browser_interact`.
+
+The selected provider, snapshot, network policy, and capabilities are immutable
+version data. The API key, target, and allowlist remain mutable project
+connection configuration. See [Daytona sandboxes](/sandboxes/daytona).
+
+The publication contract does not expose arbitrary CPU, memory, disk, image, or
+target selection. Those settings come from the selected Daytona snapshot or
+the adapter default.
+
+## Create and continue a session through the API
+
+### 1. Create the session and first run
+
+Send `agentId` to pin its latest published version. You can alternatively send
+`agentVersionId` directly. If you send both, the version must be that agent's
+latest published version.
+
+```bash
+curl --fail-with-body \
+  --request POST \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: support-session-4831' \
+  --data "{
+    \"agentId\": \"$OAO_AGENT_ID\",
+    \"title\": \"Northwind support request 4831\",
+    \"initialMessage\": \"Summarize the customer's renewal options.\"
+  }" \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/sessions"
+```
+
+The route atomically creates a thread, session, initial user message, queued
+run, product events, audit entry, and durable runtime wake. It returns `201
+Created` without waiting for the model:
+
+```json
+{
+  "organizationId": "00000000-0000-4000-8000-000000000001",
+  "projectId": "00000000-0000-4000-8000-000000000002",
+  "id": "7fd65b84-30ea-4ca9-aa40-ac219698e718",
+  "threadId": "7b102c43-8dee-42ed-8736-a8c69afe5b98",
+  "agentVersionId": "9f7e7819-6075-4b82-a7c0-47ca7bc45f76",
+  "status": "queued",
+  "createdAt": "2026-08-20T10:03:00.000Z",
+  "lastActivityAt": "2026-08-20T10:03:00.000Z",
+  "run": {
+    "organizationId": "00000000-0000-4000-8000-000000000001",
+    "projectId": "00000000-0000-4000-8000-000000000002",
+    "id": "3b1d696c-70c8-4bfd-90df-79772205ee3c",
+    "threadId": "7b102c43-8dee-42ed-8736-a8c69afe5b98",
+    "sessionId": "7fd65b84-30ea-4ca9-aa40-ac219698e718",
+    "agentVersionId": "9f7e7819-6075-4b82-a7c0-47ca7bc45f76",
+    "createdByPrincipalId": "00000000-0000-4000-8000-000000000003",
+    "state": "queued",
+    "inputPublic": {
+      "message": "Summarize the customer's renewal options."
+    },
+    "idempotencyKey": "support-session-4831",
+    "cancellationRequestedAt": null,
+    "admittedAt": null,
+    "settledAt": null,
+    "createdAt": "2026-08-20T10:03:00.000Z",
+    "updatedAt": "2026-08-20T10:03:00.000Z"
+  },
+  "latestRunId": "3b1d696c-70c8-4bfd-90df-79772205ee3c"
+}
+```
+
+Save the session and run IDs from the real response:
+
+```bash
+export OAO_SESSION_ID=7fd65b84-30ea-4ca9-aa40-ac219698e718
+export OAO_RUN_ID=3b1d696c-70c8-4bfd-90df-79772205ee3c
+```
+
+### 2. Wait for the run to settle
+
+Read the session until top-level `status` is `completed`, `failed`, `cancelled`,
+or `timed_out`:
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/sessions/$OAO_SESSION_ID"
+```
+
+The detailed response contains the session summary plus:
+
+- `runs`: every run in chronological order.
+- `transcript`: public, redacted messages across the session.
+- `timeline`: safe runtime entries.
+- `pendingWork`: unresolved tool and approval work.
+- `debug.productEvents`, `debug.modelInvocations`, `debug.toolCalls`,
+  `debug.approvals`, `debug.sandboxes`, and `debug.workspaceBackups`.
+
+The run state progression can include `queued`, `running`,
+`waiting_for_tool`, `waiting_for_approval`, and `retry_scheduled` before a
+terminal state.
+
+### 3. Send a follow-up message
+
+The latest run must be settled before the next message can be accepted:
+
+```bash
+curl --fail-with-body \
+  --request POST \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: support-session-4831-follow-up-1' \
+  --data '{
+    "message": "Now list only the renewal exceptions."
+  }' \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/sessions/$OAO_SESSION_ID/runs"
+```
+
+`redactedInput` is accepted as an alias for `message`. The route returns `202
+Accepted` with the new run object:
+
+```json
+{
+  "organizationId": "00000000-0000-4000-8000-000000000001",
+  "projectId": "00000000-0000-4000-8000-000000000002",
+  "id": "f933bbdb-36b0-4afc-8bf5-62814f6154fb",
+  "threadId": "7b102c43-8dee-42ed-8736-a8c69afe5b98",
+  "sessionId": "7fd65b84-30ea-4ca9-aa40-ac219698e718",
+  "agentVersionId": "9f7e7819-6075-4b82-a7c0-47ca7bc45f76",
+  "createdByPrincipalId": "00000000-0000-4000-8000-000000000003",
+  "state": "queued",
+  "inputPublic": {
+    "message": "Now list only the renewal exceptions."
+  },
+  "idempotencyKey": "support-session-4831-follow-up-1",
+  "cancellationRequestedAt": null,
+  "admittedAt": null,
+  "settledAt": null,
+  "createdAt": "2026-08-20T10:04:00.000Z",
+  "updatedAt": "2026-08-20T10:04:00.000Z"
+}
+```
+
+Follow-up runs retain the session's `agentVersionId`. Publishing a newer agent
+version does not upgrade an existing session; create a new session to use the
+new version.
+
+<Note>
+  `POST /runs/:runId/resume` also accepts `message` or `redactedInput`, but only
+  for a settled run. It creates another run on that run's existing session. The
+  console currently uses the session follow-up route and does not expose the
+  resume action.
+</Note>
+
+## Validate and debug
+
+### In the console
+
+Open a session and use:
+
+- **Transcript** for user, assistant, reasoning, and tool-facing records. User and
+  assistant messages render CommonMark plus GitHub Flavored Markdown, including
+  lists, emphasis, links, code, task lists, and tables. Raw HTML is not rendered.
+- The message composer for another durable run after the latest run settles.
+  Select **Send** or press <kbd>Command</kbd>+<kbd>Enter</kbd>; Enter by itself
+  adds a new line.
+- **Debug** for a chronological waterfall assembled from timeline entries,
+  public product events, model invocations, caller tool calls, sandbox commands,
+  approvals, and sandboxes. Sandbox activity includes its model-facing
+  arguments, result, state, and timing.
+- Reasoning and sandbox commands are expandable rows in **Transcript**. Each
+  reasoning row shows the provider thinking text when supplied and the full
+  model invocation duration. Each sandbox row shows its recorded input/output.
+- The event inspector for rendered metadata. Its **Raw** view is available for
+  reasoning and sandbox calls, and remains unavailable when only a redacted
+  public projection exists.
+- **Pending Work** to inspect approval gates and caller-owned tool calls.
+
+Provider thinking, file/edit content, shell commands, browser arguments, and
+tool output are part of the authorized session read model. Credentials,
+authorization headers, provider reasoning signatures, and unrestricted product
+events remain excluded. A model catalog's reasoning-support flag still
+describes capability; thinking text appears only when the provider returns it.
+
+### Through the API
+
+Useful read endpoints are:
+
+```text
+GET /v1/projects/:projectId/agents/:agentId
+GET /v1/projects/:projectId/sessions/:sessionId
+GET /v1/projects/:projectId/runs/:runId
+GET /v1/projects/:projectId/runs/:runId/messages
+GET /v1/projects/:projectId/runs/:runId/timeline
+GET /v1/projects/:projectId/tool-calls?runId=:runId
+GET /v1/projects/:projectId/approvals?runId=:runId
+GET /v1/projects/:projectId/pending-work
+```
+
+List endpoints use cursor pagination. `limit` defaults to `50` and must be from
+`1` through `200`; pass `pageInfo.nextCursor` as the next request's `cursor`.
+The run timeline instead uses its numeric `entrySequence` as the cursor.
+
+For live updates, connect to the durable project event stream:
+
+```bash
+curl --no-buffer \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --header 'Accept: text/event-stream' \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/events"
+```
+
+Each SSE frame has an opaque `id`, the product event kind in `event`, and a
+public product-event object in `data`. Reconnect with the most recent ID:
+
+```bash
+curl --no-buffer \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --header 'Accept: text/event-stream' \
+  --header "Last-Event-ID: $OAO_LAST_EVENT_ID" \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/events"
+```
+
+The cursor is backed by PostgreSQL project position; notifications only wake
+readers and are not the source of truth. Use `?once=true` to read the currently
+available page and close the connection.
+
+### Resolve caller tools correctly
+
+For a `caller` tool, claim the work, retain the returned positive-string
+`fence`, and submit a versioned result envelope. The `value` must match the
+published `outputSchema`:
+
+```json
+{
+  "fence": "1",
+  "safeResult": {
+    "version": 1,
+    "status": "success",
+    "value": {
+      "found": true,
+      "tier": "priority"
+    }
+  }
+}
+```
+
+The relevant mutation endpoints are:
+
+```text
+POST /v1/projects/:projectId/tool-calls/:toolCallId/claim
+POST /v1/projects/:projectId/tool-calls/:toolCallId/renew
+POST /v1/projects/:projectId/tool-calls/:toolCallId/release
+POST /v1/projects/:projectId/tool-calls/:toolCallId/result
+POST /v1/projects/:projectId/approvals/:approvalId/decision
+```
+
+Claims and results are fenced so a stale worker cannot submit after losing its
+lease. Approval decisions use `{ "status": "approved" }` or
+`{ "status": "denied" }`, with an optional `note` of at most 2,000 characters.
+
+<Warning>
+  The current console's caller-result form sends the entered object directly as
+  `safeResult`; it does not add the required `version`/`status`/`value`
+  envelope. Use the API for caller results until that UI is completed.
+</Warning>
+
+### Errors and cancellation
+
+Errors use one public envelope:
+
+```json
+{
+  "error": {
+    "code": "bad_request",
+    "message": "config must match the managed-agent publication contract",
+    "requestId": "7baecdc8-0cce-4b41-b0a3-32af443ac2ec"
+  }
+}
+```
+
+Possible codes are `bad_request`, `unauthenticated`, `forbidden`, `not_found`,
+`conflict`, `idempotency_conflict`, `rate_limited`, and `internal_error`. Keep
+the `x-request-id` response header or `error.requestId` when investigating.
+Internal failures intentionally return a generic message.
+
+Cancellation is asynchronous:
+
+```bash
+curl --fail-with-body \
+  --request POST \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: cancel-support-run-1' \
+  --data '{}' \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/runs/$OAO_RUN_ID/cancel"
+```
+
+The `202 Accepted` response reports the current run. Continue reading the run
+or event stream until it settles; acceptance is a cancellation request, not
+proof that active model or tool work has already stopped.
+
+## Current MVP limitations
+
+- Agent creation always publishes version 1. There are no draft, rename,
+  description-edit, archive, or delete routes.
+- Versions are append-only and content-addressed. Identical content cannot be
+  published twice for one agent.
+- The console can edit instructions, model preset, sandbox provider, sandbox
+  capabilities, network policy, and timeout while creating an agent and on its
+  latest version. It cannot author caller/platform tools.
+- Model presets can be added and linked, but not deprecated or deleted. Preset
+  rows are append-only by design.
+- Sessions never float to a newer version, and only one unsettled run is
+  allowed per session.
+- The console exposes cancellation but not API run resume or branch replay.
+- `maxTurns` is fixed at `32`. The console caps `timeoutMs` at one hour, while
+  the API publication schema currently enforces only the 1,000 ms minimum. Stay
+  within one hour for parity with the current Flue durability configuration.
+- Automated tests may inject deterministic provider doubles at adapter
+  boundaries, but those providers cannot be selected through the API or
+  console and are not runtime deployment options.
+- `restricted` sandbox networking uses the selected project connection's
+  mutable egress allowlist; the agent version records the policy mode and
+  provider key, not a copy of that allowlist.
+- API keys can be created and listed in the console. The plaintext secret is
+  available only in the acknowledgement dialog immediately after creation.
+- The console fetches up to 100 agents or sessions and then applies search,
+  status, date, and ten-row pagination locally. Use API cursors for complete
+  large collections.

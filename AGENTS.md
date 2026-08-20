@@ -11,9 +11,10 @@
 
 - Use TypeScript, ESM, Node.js 22.19+, pnpm, and Turbo.
 - Keep domain packages independent from Hono, React, Flue, Railway, WorkOS, Daytona, and OpenRouter implementation types.
-- Add migrations rather than editing an already-applied migration.
 - Every tenant-owned database relation repeats organization/project identity in keys and foreign keys.
-- Never expose raw reasoning, secrets, authorization headers, or unredacted tool payloads in logs, traces, list views, or SSE events.
+- Never expose secrets, authorization headers in logs, traces, list views, or SSE events.
+- Every feature addition, behavior change, or feature removal must update the corresponding Mintlify documentation under `docs/` in the same change. Feature work is not complete until setup guides, examples, API/event contracts, limitations, and navigation accurately reflect the implemented behavior.
+- Before finishing a documentation-affecting change, run `mint validate`, `mint broken-links`, and `mint a11y` from `docs/`, in addition to the relevant repository checks. When an authorized commit, upload, or PR includes a feature change, include its Mintlify documentation updates in that same change; do not leave documentation for a later follow-up.
 - Run the relevant package tests, typecheck, lint, and build before finishing work.
 - Do not commit generated secrets or local `.env` files.
 

@@ -1,0 +1,204 @@
+/*
+ * Base layer: reset, document typography, focus, and shared utilities.
+ * Everything here is element-level; component classes live in components.css.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--canvas);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: var(--canvas);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.6;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+h1 {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.15;
+}
+h2 {
+  font-size: 17px;
+  font-weight: 700;
+}
+h3 {
+  font-size: 14px;
+  font-weight: 600;
+}
+h4 {
+  font-size: 13px;
+  font-weight: 600;
+}
+p {
+  margin: 0 0 var(--sp-3);
+}
+p:last-child {
+  margin-bottom: 0;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+button {
+  cursor: pointer;
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--font-mono);
+}
+code {
+  font-size: 12px;
+  color: var(--text-2);
+}
+pre {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+dl,
+dd {
+  margin: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-1);
+}
+
+::selection {
+  background: var(--green-200);
+  color: var(--ink-900);
+}
+:root[data-theme="dark"] ::selection {
+  background: var(--green-800);
+  color: #fff;
+}
+
+img {
+  max-width: 100%;
+}
+
+/* Brand artwork ships as black-on-transparent; invert it on dark canvases. */
+.invert-dark {
+  filter: none;
+}
+:root[data-theme="dark"] .invert-dark {
+  filter: invert(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---------- Utilities ---------- */
+
+.sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  left: var(--sp-3);
+  top: -48px;
+  z-index: 100;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface);
+  border: var(--bw) solid var(--border-strong);
+  border-radius: var(--radius-1);
+  transition: top var(--dur-1) var(--ease);
+}
+.skip-link:focus {
+  top: var(--sp-3);
+}
+
+.muted {
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.eyebrow {
+  display: block;
+  margin: 0 0 var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.stack {
+  display: grid;
+  gap: var(--sp-4);
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* Collapses supporting label text on narrow viewports without removing it
+   from the accessibility tree (controls keep an explicit aria-label). */
+.hide-sm {
+  display: inline;
+}
+@media (max-width: 960px) {
+  .hide-sm {
+    display: none;
+  }
+}

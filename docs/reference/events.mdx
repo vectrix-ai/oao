@@ -1,0 +1,76 @@
+---
+title: Real-time events
+description: Consume the durable, redacted PostgreSQL event feed with resumable Server-Sent Events.
+---
+
+OAO exposes one ordered Server-Sent Events feed per project:
+
+```http
+GET /v1/projects/{projectId}/events
+Accept: text/event-stream
+Authorization: Bearer oao_your_secret
+Last-Event-ID: 142
+```
+
+Each frame's SSE `event` is the product-event kind, such as
+`run.state_changed` or `tool_call.requested`. Its SSE `id` is the committed
+project position and its JSON body has this shape:
+
+```ts
+interface ProductEvent {
+  id: string;
+  organizationId: string;
+  projectId: string;
+  aggregateType: string;
+  aggregateId: string;
+  aggregateSequence: number;
+  projectPosition: string;
+  kind: string;
+  publicPayload: Record<string, unknown>;
+  occurredAt: string;
+}
+```
+
+## Resume correctly
+
+1. Persist the last event ID only after your application has applied that
+   event successfully.
+2. Reconnect with `Last-Event-ID` after a network error or process restart.
+3. Treat duplicate events as normal and deduplicate by event `id` or by
+   `(aggregateType, aggregateId, aggregateSequence)`.
+4. Refresh the affected resource with a normal API read when your application
+   does not understand a new event kind.
+
+The cursor is backed by committed PostgreSQL state. `LISTEN/NOTIFY` is only a
+latency optimization inside OAO, so missed notifications do not create gaps.
+
+## Filter in the client
+
+The server feed is project-wide. A session UI normally stores its cursor, then
+filters frames whose `aggregateId` equals a known run, thread, tool call,
+approval, or sandbox ID. On relevant events, re-fetch
+`GET /sessions/{sessionId}` to obtain the current transcript and debug view.
+
+<Note>
+  Event bodies contain public state and identifiers, not raw model reasoning,
+  credentials, authorization headers, or unredacted tool payloads.
+</Note>
+
+## TypeScript SDK
+
+The workspace SDK reconnects automatically unless disabled:
+
+```ts
+for await (const frame of client.streamProjectEvents(projectId, {
+  lastEventId: savedCursor,
+  reconnect: true,
+  signal: abortController.signal,
+})) {
+  await applyEvent(frame.data);
+  await saveCursor(frame.id);
+}
+```
+
+Abort the supplied signal during application shutdown. For a browser using the
+WorkOS cookie, configure the client with `credentials: "include"`; for a
+server-side integration, provide `apiKey`.

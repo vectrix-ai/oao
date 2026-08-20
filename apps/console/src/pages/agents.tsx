@@ -1,38 +1,122 @@
-import { ArrowLeft, Bot, Check, Plus, Save, ShieldCheck } from "lucide-react";
+import { Bot, Plus, Save, Wrench } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../api/context";
-import type { AgentVersionConfig } from "../api/types";
+import type {
+  AgentVersionConfig,
+  ModelPreset,
+  ProjectSandboxProvider,
+  SandboxSnapshotEntry,
+} from "../api/types";
+import { describePresetRouting } from "../model-presets";
+import type { ComboboxOption } from "../components/ui";
 import {
+  Alert,
+  Button,
+  Chip,
+  CheckboxRow,
+  Combobox,
+  Dialog,
   EmptyState,
+  EntityCell,
   ErrorState,
   Field,
+  FieldRow,
+  FilterBar,
+  FormError,
+  Input,
   LoadingState,
-  Modal,
+  Page,
   PageHeader,
   Pagination,
+  Panel,
   SearchField,
-  StatusPill,
+  Select,
+  StatusChip,
+  Switch,
+  TableCard,
+  Textarea,
+  ValidationPanel,
   formatDate,
+  useToast,
 } from "../components/ui";
 
 const agentStatuses = ["", "published", "draft", "archived"];
+type SandboxCapability = AgentVersionConfig["sandbox"]["capabilities"][number];
 
-function initialAgentConfig(name: string): AgentVersionConfig {
+const sandboxCapabilityOptions = [
+  [
+    "filesystem_read",
+    "Read files",
+    "Adds read. Shell also adds grep and glob.",
+  ],
+  ["filesystem_write", "Write files", "Adds write and edit."],
+  ["shell", "Shell and search", "Adds bash, grep, and glob."],
+  [
+    "browser",
+    "Browser session",
+    "Adds navigate, accessibility snapshot, screenshot, and interaction tools.",
+  ],
+] as const satisfies readonly (readonly [SandboxCapability, string, string])[];
+
+/**
+ * Presets are append-only, so the list only ever grows: it is searched rather
+ * than scrolled, and an unavailable preset stays visible but unselectable.
+ */
+function presetOptions(
+  presets: readonly ModelPreset[],
+): readonly ComboboxOption[] {
+  return presets.map((preset) => ({
+    value: preset.key,
+    label: preset.displayName,
+    description: preset.key,
+    keywords: preset.model,
+    hint: preset.available
+      ? preset.origin === "deployment"
+        ? "deployment"
+        : "project"
+      : "unavailable",
+    ...(preset.available ? {} : { disabled: true }),
+  }));
+}
+
+function snapshotLabel(snapshot: SandboxSnapshotEntry): string {
+  const resources = `${snapshot.cpu} CPU · ${snapshot.memoryGiB} GiB · ${snapshot.diskGiB} GiB disk`;
+  return `${snapshot.name} · ${resources}${snapshot.available ? "" : ` · ${snapshot.state}`}`;
+}
+
+function initialAgentConfig(
+  name: string,
+  modelPreset: string,
+  sandboxProvider: string,
+): AgentVersionConfig {
   return {
     systemPrompt: `You are ${name}, a helpful managed agent. Complete the user's request carefully and do not expose secrets or internal reasoning.`,
-    modelPreset: "local-default",
+    modelPreset,
     tools: [],
-    sandbox: { enabled: false, network: "none" },
+    sandbox: {
+      enabled: false,
+      provider: sandboxProvider,
+      network: "none",
+      capabilities: ["filesystem_read", "filesystem_write", "shell"],
+    },
     limits: { maxTurns: 32, timeoutMs: 60_000 },
   };
+}
+
+interface CreateAgentInput {
+  readonly name: string;
+  readonly description: string;
+  readonly modelPreset: string;
+  readonly sandbox: AgentVersionConfig["sandbox"];
 }
 
 export function AgentsPage() {
   const api = useApi();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const notify = useToast();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [date, setDate] = useState("");
@@ -42,32 +126,54 @@ export function AgentsPage() {
     queryKey: ["agents", { search, status, date, page }],
     queryFn: () => api.listAgents({ search, status, date, page }),
   });
+  const modelPresets = useQuery({
+    queryKey: ["model-presets"],
+    queryFn: () => api.listModelPresets(),
+  });
+  const sandboxProviders = useQuery({
+    queryKey: ["sandbox-providers"],
+    queryFn: () => api.listSandboxProviders(),
+  });
   const create = useMutation({
-    mutationFn: (input: { name: string; description: string }) =>
-      api.createAgent({
-        ...input,
-        initialConfig: initialAgentConfig(input.name),
-      }),
+    mutationFn: (input: CreateAgentInput) => {
+      const config = initialAgentConfig(
+        input.name,
+        input.modelPreset,
+        input.sandbox.provider,
+      );
+      return api.createAgent({
+        name: input.name,
+        description: input.description,
+        initialConfig: { ...config, sandbox: input.sandbox },
+      });
+    },
     onSuccess: async (agent) => {
       await queryClient.invalidateQueries({ queryKey: ["agents"] });
       setCreating(false);
+      notify("Agent created.");
       navigate(`/agents/${agent.id}`);
     },
   });
+  const filtered = Boolean(search || status || date);
+  const openCreate = () => setCreating(true);
+
   return (
-    <div className="page">
+    <Page>
       <PageHeader
         eyebrow="Build"
         title="Agents"
         description="Versioned agent definitions, approved models, tools, and sandbox policies."
         actions={
-          <button className="button" onClick={() => setCreating(true)}>
-            <Plus size={16} />
+          <Button
+            variant="primary"
+            icon={<Plus size={15} />}
+            onClick={openCreate}
+          >
             Create agent
-          </button>
+          </Button>
         }
       />
-      <section className="filter-bar" aria-label="Agent filters">
+      <FilterBar label="Agent filters">
         <SearchField
           value={search}
           onChange={(value) => {
@@ -76,9 +182,8 @@ export function AgentsPage() {
           }}
           label="Search agents"
         />
-        <label>
-          Status
-          <select
+        <Field label="Status">
+          <Select
             value={status}
             onChange={(event) => {
               setStatus(event.target.value);
@@ -92,11 +197,10 @@ export function AgentsPage() {
                   : "All statuses"}
               </option>
             ))}
-          </select>
-        </label>
-        <label>
-          Created on
-          <input
+          </Select>
+        </Field>
+        <Field label="Created on">
+          <Input
             type="date"
             value={date}
             onChange={(event) => {
@@ -104,149 +208,397 @@ export function AgentsPage() {
               setPage(1);
             }}
           />
-        </label>
-      </section>
+        </Field>
+        {filtered ? (
+          <Button
+            className="filter-reset"
+            size="sm"
+            onClick={() => {
+              setSearch("");
+              setStatus("");
+              setDate("");
+              setPage(1);
+            }}
+          >
+            Clear filters
+          </Button>
+        ) : null}
+      </FilterBar>
       {query.isPending ? (
         <LoadingState label="Loading agents" />
       ) : query.isError ? (
         <ErrorState error={query.error} retry={() => void query.refetch()} />
       ) : query.data.data.length === 0 ? (
         <EmptyState
-          title={
-            search || status || date ? "No matching agents" : "No agents yet"
-          }
+          title={filtered ? "No matching agents" : "No agents yet"}
           description={
-            search || status || date
+            filtered
               ? "Try clearing one or more filters."
-              : "Create an agent to define its instructions, tools, and runtime policy."
+              : "An agent is a durable runtime with a versioned prompt, approved model, and tool policy."
           }
           action={
-            !search && !status && !date ? (
-              <button className="button" onClick={() => setCreating(true)}>
+            filtered ? undefined : (
+              <Button variant="primary" size="sm" onClick={openCreate}>
                 Create agent
-              </button>
-            ) : undefined
+              </Button>
+            )
           }
         />
       ) : (
-        <section className="table-card">
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Model</th>
-                  <th>Status</th>
-                  <th>Version</th>
-                  <th>Created</th>
-                  <th>Updated</th>
-                </tr>
-              </thead>
-              <tbody>
-                {query.data.data.map((agent) => (
-                  <tr key={agent.id}>
-                    <td>
-                      <Link className="entity-link" to={`/agents/${agent.id}`}>
-                        <span className="entity-icon">
-                          <Bot size={16} />
-                        </span>
-                        <span>
-                          <strong>{agent.name}</strong>
-                          <small>{agent.key}</small>
-                        </span>
-                      </Link>
-                    </td>
-                    <td>{agent.model}</td>
-                    <td>
-                      <StatusPill value={agent.status} />
-                    </td>
-                    <td>v{agent.version}</td>
-                    <td>{formatDate(agent.createdAt)}</td>
-                    <td>{formatDate(agent.updatedAt)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <Pagination
-            page={query.data.page}
-            pageSize={query.data.pageSize}
-            total={query.data.total}
-            onChange={setPage}
-          />
-        </section>
+        <TableCard
+          label="Agents table"
+          caption="Agents in this project"
+          footer={
+            <Pagination
+              page={query.data.page}
+              pageSize={query.data.pageSize}
+              total={query.data.total}
+              onChange={setPage}
+            />
+          }
+        >
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Model</th>
+              <th>Status</th>
+              <th>Version</th>
+              <th>Created</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {query.data.data.map((agent) => (
+              <tr key={agent.id}>
+                <td>
+                  <Link to={`/agents/${agent.id}`}>
+                    <EntityCell
+                      icon={<Bot size={15} />}
+                      name={agent.name}
+                      meta={agent.key}
+                    />
+                  </Link>
+                </td>
+                <td className="mono">{agent.model}</td>
+                <td>
+                  <StatusChip value={agent.status} />
+                </td>
+                <td className="mono">v{agent.version}</td>
+                <td>{formatDate(agent.createdAt)}</td>
+                <td>{formatDate(agent.updatedAt)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </TableCard>
       )}
       {creating ? (
-        <CreateAgentModal
+        <CreateAgentDialog
           pending={create.isPending}
           error={create.error}
+          modelPresets={modelPresets.data?.data ?? []}
+          modelPresetsPending={modelPresets.isPending}
+          modelPresetsError={modelPresets.error}
+          sandboxProviders={sandboxProviders.data?.data ?? []}
+          sandboxProvidersPending={sandboxProviders.isPending}
+          sandboxProvidersError={sandboxProviders.error}
           onClose={() => setCreating(false)}
           onSubmit={(input) => create.mutate(input)}
         />
       ) : null}
-    </div>
+    </Page>
   );
 }
 
-function CreateAgentModal({
+function CreateAgentDialog({
   pending,
   error,
+  modelPresets,
+  modelPresetsPending,
+  modelPresetsError,
+  sandboxProviders,
+  sandboxProvidersPending,
+  sandboxProvidersError,
   onClose,
   onSubmit,
 }: {
   readonly pending: boolean;
   readonly error: Error | null;
+  readonly modelPresets: readonly ModelPreset[];
+  readonly modelPresetsPending: boolean;
+  readonly modelPresetsError: Error | null;
+  readonly sandboxProviders: readonly ProjectSandboxProvider[];
+  readonly sandboxProvidersPending: boolean;
+  readonly sandboxProvidersError: Error | null;
   readonly onClose: () => void;
-  readonly onSubmit: (input: { name: string; description: string }) => void;
+  readonly onSubmit: (input: CreateAgentInput) => void;
 }) {
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    onSubmit({
-      name: String(data.get("name") ?? ""),
-      description: String(data.get("description") ?? ""),
-    });
-  };
+  const [modelPreset, setModelPreset] = useState("");
+  const [sandboxEnabled, setSandboxEnabled] = useState(false);
+  const [sandboxProvider, setSandboxProvider] = useState("");
+  const [snapshotId, setSnapshotId] = useState("");
+  const [network, setNetwork] = useState<"none" | "restricted">("none");
+  const [sandboxCapabilities, setSandboxCapabilities] = useState<
+    readonly SandboxCapability[]
+  >(["filesystem_read", "filesystem_write", "shell"]);
+  const selectedPreset = modelPresets.find(
+    (preset) => preset.key === modelPreset,
+  );
+  const availablePresets = modelPresets.filter((preset) => preset.available);
+  const selectedSandboxProvider = sandboxProviders.find(
+    (provider) => provider.key === sandboxProvider,
+  );
+  const api = useApi();
+  const snapshots = useQuery({
+    queryKey: ["sandbox-snapshots", selectedSandboxProvider?.id],
+    queryFn: () => api.listSandboxSnapshots(selectedSandboxProvider!.id),
+    enabled: sandboxEnabled && Boolean(selectedSandboxProvider),
+  });
+  useEffect(() => {
+    if (!availablePresets.some((preset) => preset.key === modelPreset))
+      setModelPreset(availablePresets[0]?.key ?? "");
+  }, [availablePresets, modelPreset]);
+  useEffect(() => {
+    if (!sandboxProviders.some((provider) => provider.key === sandboxProvider))
+      setSandboxProvider(sandboxProviders[0]?.key ?? "");
+  }, [sandboxProvider, sandboxProviders]);
+  const canSubmit =
+    !pending &&
+    !modelPresetsPending &&
+    !modelPresetsError &&
+    availablePresets.some((preset) => preset.key === modelPreset) &&
+    !sandboxProvidersPending &&
+    !sandboxProvidersError &&
+    sandboxProviders.some((provider) => provider.key === sandboxProvider);
+
   return (
-    <Modal title="Create agent" onClose={onClose}>
-      <form className="form-stack" onSubmit={submit}>
-        <p>Create the definition with a valid immutable first version.</p>
-        <Field label="Name">
-          <input
-            name="name"
-            required
-            minLength={2}
-            autoFocus
-            placeholder="e.g. Support operator"
-          />
-        </Field>
-        <Field label="Description">
-          <textarea
-            name="description"
-            rows={3}
-            maxLength={2000}
-            placeholder="What should this agent do?"
-          />
-        </Field>
-        {error ? (
-          <p className="form-error" role="alert">
-            {error.message}
-          </p>
-        ) : null}
-        <div className="modal-actions">
-          <button
-            type="button"
-            className="button button--secondary"
-            onClick={onClose}
+    <Dialog
+      title="Create agent"
+      description="Creates the definition together with a valid, immutable first version."
+      wide
+      onClose={onClose}
+      onSubmit={(event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        const data = new FormData(event.currentTarget);
+        onSubmit({
+          name: String(data.get("name") ?? ""),
+          description: String(data.get("description") ?? ""),
+          modelPreset: String(data.get("modelPreset") ?? ""),
+          sandbox: {
+            enabled: sandboxEnabled,
+            provider: sandboxProvider,
+            ...(snapshotId ? { snapshotId } : {}),
+            network,
+            capabilities: sandboxCapabilities,
+          },
+        });
+      }}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button
+            variant="primary"
+            type="submit"
+            loading={pending}
+            disabled={!canSubmit}
           >
-            Cancel
-          </button>
-          <button className="button" disabled={pending}>
             {pending ? "Creating…" : "Create agent"}
-          </button>
+          </Button>
+        </>
+      }
+    >
+      <Field label="Name">
+        <Input
+          name="name"
+          required
+          minLength={2}
+          autoFocus
+          placeholder="e.g. Support operator"
+        />
+      </Field>
+      <Field label="Description">
+        <Textarea
+          name="description"
+          rows={3}
+          maxLength={2000}
+          placeholder="What should this agent do?"
+        />
+      </Field>
+      <Field
+        label="Approved model preset"
+        hint="The first immutable version will be published with this preset."
+      >
+        <Combobox
+          label="Approved model preset"
+          name="modelPreset"
+          value={modelPreset}
+          options={presetOptions(modelPresets)}
+          onChange={setModelPreset}
+          disabled={
+            pending || modelPresetsPending || Boolean(modelPresetsError)
+          }
+          loading={modelPresetsPending}
+          {...(modelPresetsError
+            ? { errorMessage: modelPresetsError.message }
+            : {})}
+          emptyMessage="No approved preset matches this search"
+          placeholder="Search approved presets…"
+        />
+      </Field>
+      <Alert
+        tone={modelPresetsError ? "danger" : "info"}
+        role={modelPresetsError ? "alert" : "status"}
+      >
+        {modelPresetsError ? (
+          <>
+            <strong>Model presets could not be loaded.</strong>
+            <span>{modelPresetsError.message}</span>
+          </>
+        ) : modelPresetsPending ? (
+          <>
+            <strong>Loading approved model presets</strong>
+            <span>
+              The agent can be created after the project catalog loads.
+            </span>
+          </>
+        ) : selectedPreset ? (
+          <>
+            <strong>
+              {selectedPreset.displayName} · {selectedPreset.model}
+            </strong>
+            <span>
+              {selectedPreset.origin === "deployment"
+                ? "Deployment preset"
+                : "Project preset"}{" "}
+              · {describePresetRouting(selectedPreset)}{" "}
+              <Link to="/models">Manage models</Link>
+            </span>
+          </>
+        ) : (
+          <>
+            <strong>Select an approved model preset</strong>
+            <span>
+              Add or repair project presets from{" "}
+              <Link to="/models">Models</Link>.
+            </span>
+          </>
+        )}
+      </Alert>
+      <div className="stack">
+        <Switch
+          label="Enable sandbox"
+          checked={sandboxEnabled}
+          disabled={pending}
+          onChange={setSandboxEnabled}
+        />
+        <FieldRow>
+          <Field
+            label="Sandbox provider"
+            hint="Choose a project-scoped Daytona connection."
+          >
+            <Select
+              value={sandboxProvider}
+              disabled={pending}
+              onChange={(event) => {
+                setSandboxProvider(event.target.value);
+                setSnapshotId("");
+              }}
+            >
+              {sandboxProviders.map((provider) => (
+                <option key={provider.id} value={provider.key}>
+                  {provider.displayName} · {provider.providerType}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field
+            label="Daytona snapshot"
+            hint="Use an active snapshot, or keep OAO's default image."
+          >
+            <Select
+              value={snapshotId}
+              disabled={
+                pending ||
+                !sandboxEnabled ||
+                !selectedSandboxProvider ||
+                snapshots.isPending ||
+                snapshots.isError
+              }
+              onChange={(event) => setSnapshotId(event.target.value)}
+            >
+              <option value="">OAO default image · debian:12.9</option>
+              {(snapshots.data?.data ?? []).map((snapshot) => (
+                <option
+                  key={snapshot.id}
+                  value={snapshot.id}
+                  disabled={!snapshot.available}
+                >
+                  {snapshotLabel(snapshot)}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Network policy">
+            <Select
+              value={network}
+              disabled={pending || !sandboxEnabled}
+              onChange={(event) =>
+                setNetwork(event.target.value as "none" | "restricted")
+              }
+            >
+              <option value="none">No network</option>
+              <option value="restricted">Restricted</option>
+            </Select>
+          </Field>
+        </FieldRow>
+        {snapshots.isError ? (
+          <Alert tone="danger" role="alert">
+            <strong>Daytona snapshots could not be loaded.</strong>
+            <span>{snapshots.error.message}</span>
+          </Alert>
+        ) : snapshots.isPending && sandboxEnabled ? (
+          <Alert tone="info" role="status">
+            <strong>Loading Daytona snapshots</strong>
+          </Alert>
+        ) : null}
+        {sandboxProvidersError ? (
+          <Alert tone="danger" role="alert">
+            <strong>Sandbox providers could not be loaded.</strong>
+            <span>{sandboxProvidersError.message}</span>
+          </Alert>
+        ) : sandboxProvidersPending ? (
+          <Alert tone="info" role="status">
+            <strong>Loading sandbox providers</strong>
+          </Alert>
+        ) : sandboxProviders.length === 0 ? (
+          <Alert tone="info" role="status">
+            <strong>No Daytona sandbox provider configured.</strong>
+            <span>
+              Add a connection in{" "}
+              <Link to="/sandbox-providers">Sandbox providers</Link>.
+            </span>
+          </Alert>
+        ) : null}
+        <div className="field-row">
+          {sandboxCapabilityOptions.map(([capability, label, description]) => (
+            <CheckboxRow
+              key={capability}
+              label={label}
+              description={description}
+              checked={sandboxCapabilities.includes(capability)}
+              disabled={pending || !sandboxEnabled}
+              onChange={(event) =>
+                setSandboxCapabilities((current) =>
+                  event.target.checked
+                    ? [...current, capability]
+                    : current.filter((entry) => entry !== capability),
+                )
+              }
+            />
+          ))}
         </div>
-      </form>
-    </Modal>
+      </div>
+      {error ? <FormError>{error.message}</FormError> : null}
+    </Dialog>
   );
 }
 
@@ -254,13 +606,18 @@ export function AgentDetailPage() {
   const { agentId = "" } = useParams();
   const api = useApi();
   const queryClient = useQueryClient();
+  const notify = useToast();
   const query = useQuery({
     queryKey: ["agent", agentId],
     queryFn: () => api.getAgent(agentId),
   });
-  const context = useQuery({
-    queryKey: ["context"],
-    queryFn: () => api.getContext(),
+  const modelPresets = useQuery({
+    queryKey: ["model-presets"],
+    queryFn: () => api.listModelPresets(),
+  });
+  const sandboxProviders = useQuery({
+    queryKey: ["sandbox-providers"],
+    queryFn: () => api.listSandboxProviders(),
   });
   const publish = useMutation({
     mutationFn: (config: AgentVersionConfig) =>
@@ -268,19 +625,20 @@ export function AgentDetailPage() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["agent", agentId] });
       await queryClient.invalidateQueries({ queryKey: ["agents"] });
+      notify("New agent version published.");
     },
   });
   if (query.isPending)
     return (
-      <div className="page">
-        <LoadingState label="Loading agent" />
-      </div>
+      <Page>
+        <LoadingState label="Loading agent" rows={7} />
+      </Page>
     );
   if (query.isError)
     return (
-      <div className="page">
+      <Page>
         <ErrorState error={query.error} retry={() => void query.refetch()} />
-      </div>
+      </Page>
     );
   return (
     <AgentEditor
@@ -289,7 +647,9 @@ export function AgentDetailPage() {
       publishing={publish.isPending}
       publishError={publish.error}
       onPublish={(config) => publish.mutate(config)}
-      modelPresets={context.data?.activeModelPresets ?? ["local-default"]}
+      modelPresets={modelPresets.data?.data ?? []}
+      sandboxProviders={sandboxProviders.data?.data ?? []}
+      sandboxProvidersError={sandboxProviders.error}
     />
   );
 }
@@ -300,25 +660,47 @@ function AgentEditor({
   publishError,
   onPublish,
   modelPresets,
+  sandboxProviders,
+  sandboxProvidersError,
 }: {
   readonly agent: Awaited<ReturnType<ReturnType<typeof useApi>["getAgent"]>>;
   readonly publishing: boolean;
   readonly publishError: Error | null;
   readonly onPublish: (config: AgentVersionConfig) => void;
-  readonly modelPresets: readonly string[];
+  readonly modelPresets: readonly ModelPreset[];
+  readonly sandboxProviders: readonly ProjectSandboxProvider[];
+  readonly sandboxProvidersError: Error | null;
 }) {
+  const api = useApi();
   const [selectedVersion, setSelectedVersion] = useState(agent.version);
   const selected =
     agent.versions.find((version) => version.version === selectedVersion) ??
     agent.versions[0];
-  const baseConfig = selected?.config ?? initialAgentConfig(agent.name);
+  const baseConfig = selected?.config ?? initialAgentConfig(agent.name, "", "");
   const [instructions, setInstructions] = useState(baseConfig.systemPrompt);
   const [modelPreset, setModelPreset] = useState(baseConfig.modelPreset);
   const [sandboxEnabled, setSandboxEnabled] = useState(
     baseConfig.sandbox.enabled,
   );
   const [network, setNetwork] = useState(baseConfig.sandbox.network);
+  const [sandboxProvider, setSandboxProvider] = useState(
+    baseConfig.sandbox.provider,
+  );
+  const [snapshotId, setSnapshotId] = useState(
+    baseConfig.sandbox.snapshotId ?? "",
+  );
+  const [sandboxCapabilities, setSandboxCapabilities] = useState(
+    baseConfig.sandbox.capabilities,
+  );
   const [timeout, setTimeoutValue] = useState(baseConfig.limits.timeoutMs);
+  const selectedSandboxProvider = sandboxProviders.find(
+    (provider) => provider.key === sandboxProvider,
+  );
+  const snapshots = useQuery({
+    queryKey: ["sandbox-snapshots", selectedSandboxProvider?.id],
+    queryFn: () => api.listSandboxSnapshots(selectedSandboxProvider!.id),
+    enabled: Boolean(selectedSandboxProvider),
+  });
   const isLatest = !selected || selectedVersion === agent.version;
   const validation = useMemo(() => {
     const errors: string[] = [];
@@ -327,8 +709,55 @@ function AgentEditor({
     if (timeout < 1_000 || timeout > 3_600_000)
       errors.push("Run timeout must be between 1,000 and 3,600,000 ms.");
     if (!modelPreset) errors.push("An approved model preset is required.");
+    else if (
+      modelPresets.length > 0 &&
+      !modelPresets.some((preset) => preset.key === modelPreset)
+    )
+      errors.push(
+        `${modelPreset} is not an approved model preset for this project.`,
+      );
+    else if (
+      modelPresets.some(
+        (preset) => preset.key === modelPreset && !preset.available,
+      )
+    )
+      errors.push(`${modelPreset} is not available in this deployment.`);
+    if (!sandboxProviders.some((provider) => provider.key === sandboxProvider))
+      errors.push(
+        `${sandboxProvider} is not a configured Daytona connection for this project.`,
+      );
+    if (sandboxProvidersError)
+      errors.push("Sandbox connections could not be verified.");
+    if (sandboxEnabled && snapshotId) {
+      if (snapshots.isError)
+        errors.push("The selected Daytona snapshot could not be verified.");
+      else if (
+        snapshots.data &&
+        !snapshots.data.data.some(
+          (snapshot) => snapshot.id === snapshotId && snapshot.available,
+        )
+      )
+        errors.push(
+          `${snapshotId} is not an active snapshot for this Daytona connection.`,
+        );
+    }
     return errors;
-  }, [instructions, modelPreset, timeout]);
+  }, [
+    instructions,
+    modelPreset,
+    modelPresets,
+    sandboxEnabled,
+    sandboxProvider,
+    sandboxProviders,
+    sandboxProvidersError,
+    snapshotId,
+    snapshots.data,
+    snapshots.isError,
+    timeout,
+  ]);
+  const selectedPreset = modelPresets.find(
+    (preset) => preset.key === modelPreset,
+  );
   const chooseVersion = (version: number) => {
     const next = agent.versions.find((item) => item.version === version);
     if (!next) return;
@@ -336,7 +765,10 @@ function AgentEditor({
     setInstructions(next.config.systemPrompt);
     setModelPreset(next.config.modelPreset);
     setSandboxEnabled(next.config.sandbox.enabled);
+    setSandboxProvider(next.config.sandbox.provider);
+    setSnapshotId(next.config.sandbox.snapshotId ?? "");
     setNetwork(next.config.sandbox.network);
+    setSandboxCapabilities(next.config.sandbox.capabilities);
     setTimeoutValue(next.config.limits.timeoutMs);
   };
   const config: AgentVersionConfig = {
@@ -344,112 +776,124 @@ function AgentEditor({
     systemPrompt: instructions,
     modelPreset,
     sandbox: {
-      ...baseConfig.sandbox,
       enabled: sandboxEnabled,
+      provider: sandboxProvider,
+      ...(snapshotId ? { snapshotId } : {}),
       network,
+      capabilities: sandboxCapabilities,
     },
     limits: { maxTurns: 32, timeoutMs: timeout },
   };
+
   return (
-    <div className="page">
-      <Link className="back-link" to="/agents">
-        <ArrowLeft size={16} />
-        Agents
-      </Link>
+    <Page>
       <PageHeader
+        breadcrumbs={[
+          { label: "Agents", to: "/agents" },
+          { label: agent.name },
+        ]}
         eyebrow={`${agent.key} · v${agent.version}`}
         title={agent.name}
         description={agent.description}
         actions={
           <>
-            <StatusPill value={agent.status} />
-            <button
-              className="button"
-              disabled={publishing || validation.length > 0 || !isLatest}
+            <StatusChip value={agent.status} />
+            <Button
+              variant="primary"
+              icon={<Save size={15} />}
+              disabled={validation.length > 0 || !isLatest}
+              loading={publishing}
               onClick={() => onPublish(config)}
             >
-              <Save size={16} />
               {publishing ? "Publishing…" : "Publish new version"}
-            </button>
+            </Button>
           </>
         }
       />
       <div className="detail-grid">
         <aside className="version-rail">
-          <div className="section-heading">
-            <div>
-              <h2>Versions</h2>
-              <p>Immutable history</p>
-            </div>
-          </div>
+          <h2 className="eyebrow">Versions · immutable</h2>
           {agent.versions.length === 0 ? (
             <p className="muted">
-              No versions yet. Publish the default draft below.
+              No versions yet. Publish the default draft to create version 1.
             </p>
-          ) : null}
-          {agent.versions.map((version) => (
-            <button
-              key={version.id}
-              className={
-                version.version === selectedVersion
-                  ? "version-item version-item--active"
-                  : "version-item"
-              }
-              onClick={() => chooseVersion(version.version)}
-            >
-              <span>
-                <strong>Version {version.version}</strong>
-                {version.version === agent.version ? <em>Latest</em> : null}
-              </span>
-              <small>{formatDate(version.createdAt)}</small>
-              <code>{version.contentHash}</code>
-            </button>
-          ))}
+          ) : (
+            <div className="version-list">
+              {agent.versions.map((version) => (
+                <button
+                  type="button"
+                  key={version.id}
+                  aria-current={version.version === selectedVersion}
+                  className={
+                    version.version === selectedVersion
+                      ? "version-item version-item--active"
+                      : "version-item"
+                  }
+                  onClick={() => chooseVersion(version.version)}
+                >
+                  <span className="title">
+                    <strong>Version {version.version}</strong>
+                    {version.version === agent.version ? (
+                      <Chip tone="info">latest</Chip>
+                    ) : null}
+                  </span>
+                  <time dateTime={version.createdAt}>
+                    {formatDate(version.createdAt)}
+                  </time>
+                  <code>{version.contentHash}</code>
+                </button>
+              ))}
+            </div>
+          )}
         </aside>
         <div className="editor-stack">
           {!isLatest ? (
-            <div className="notice">
-              <ShieldCheck size={18} />
-              <div>
-                <strong>Viewing an immutable version</strong>
-                <span>Select the latest version to prepare a new publish.</span>
-              </div>
-            </div>
+            <Alert
+              tone="info"
+              title="Viewing an immutable version"
+              role="status"
+            >
+              Published versions can never change. Select the latest version to
+              prepare a new publish.
+            </Alert>
           ) : null}
-          <section className="panel">
-            <div className="section-heading">
-              <div>
-                <h2>Agent definition</h2>
-                <p>Changes become immutable when published.</p>
-              </div>
-            </div>
-            <div className="form-grid">
+          <Panel
+            title="Agent definition"
+            description="Changes become immutable when published."
+          >
+            <div className="stack">
               <Field
                 label="Approved model preset"
-                hint="Provider routing remains behind the model adapter."
+                hint="Publishing links this immutable version to the selected preset. Provider routing stays behind the model adapter."
               >
-                <select
+                <Combobox
+                  label="Approved model preset"
                   value={modelPreset}
-                  onChange={(event) => setModelPreset(event.target.value)}
+                  options={presetOptions(modelPresets)}
+                  onChange={setModelPreset}
                   disabled={!isLatest}
-                >
-                  {!modelPresets.includes(modelPreset) ? (
-                    <option value={modelPreset}>{modelPreset}</option>
-                  ) : null}
-                  {modelPresets.map((preset) => (
-                    <option key={preset} value={preset}>
-                      {preset === "local-default"
-                        ? "Local deterministic"
-                        : preset}
-                    </option>
-                  ))}
-                </select>
+                  emptyMessage="No approved preset matches this search"
+                  placeholder="Search approved presets…"
+                />
               </Field>
+              <Alert tone="info" role="status">
+                <strong>
+                  {selectedPreset
+                    ? `${selectedPreset.displayName} · ${selectedPreset.model}`
+                    : "Select an approved model preset"}
+                </strong>
+                <span>
+                  {selectedPreset
+                    ? `${selectedPreset.origin === "deployment" ? "Deployment preset" : "Project preset"} · ${describePresetRouting(selectedPreset)}`
+                    : "Only presets approved for this project can be published."}{" "}
+                  <Link to="/models">Manage models</Link>
+                </span>
+              </Alert>
               <Field
                 label="System instructions"
-                hint="Raw reasoning is never included in console events or traces."
+                hint="Provider reasoning is shown only in the authorized session transcript; credentials and authorization headers remain excluded."
               >
-                <textarea
+                <Textarea
                   rows={9}
                   value={instructions}
                   onChange={(event) => setInstructions(event.target.value)}
@@ -457,73 +901,124 @@ function AgentEditor({
                 />
               </Field>
             </div>
-          </section>
-          <section className="panel">
-            <div className="section-heading">
-              <div>
-                <h2>Tools</h2>
-                <p>Public schemas, execution owner, and approval policy.</p>
-              </div>
-              <button className="button button--secondary" disabled={!isLatest}>
-                <Plus size={15} />
+          </Panel>
+          <Panel
+            title="Tools"
+            description="Public schemas, execution owner, and approval policy."
+            actions={
+              <Button size="sm" icon={<Plus size={14} />} disabled={!isLatest}>
                 Add tool
-              </button>
-            </div>
-            <div className="tool-list">
-              {baseConfig.tools.length === 0 ? (
-                <EmptyState
-                  title="No tools configured"
-                  description="This version can only use model capabilities."
-                />
-              ) : (
-                baseConfig.tools.map((tool) => (
+              </Button>
+            }
+          >
+            {baseConfig.tools.length === 0 ? (
+              <EmptyState
+                icon="⌥"
+                title="No tools configured"
+                description="No caller or platform tools are configured. Enabled sandbox tools are selected below."
+              />
+            ) : (
+              <div className="tool-list">
+                {baseConfig.tools.map((tool) => (
                   <article className="tool-card" key={tool.name}>
-                    <div>
-                      <code>{tool.name}</code>
-                      <p>{tool.description}</p>
-                    </div>
-                    <dl>
-                      <div>
-                        <dt>Owner</dt>
-                        <dd>{tool.owner}</dd>
-                      </div>
-                      <div>
-                        <dt>Approval</dt>
-                        <dd>{tool.approval}</dd>
-                      </div>
-                    </dl>
+                    <header>
+                      <span className="row">
+                        <Wrench size={14} aria-hidden="true" />
+                        <code>{tool.name}</code>
+                      </span>
+                      <span className="row">
+                        <StatusChip value={tool.owner} />
+                        <span className="mono">approval: {tool.approval}</span>
+                      </span>
+                    </header>
+                    <p>{tool.description}</p>
                     <details>
                       <summary>Input schema</summary>
-                      <pre>{JSON.stringify(tool.inputSchema, null, 2)}</pre>
+                      <pre className="code-block">
+                        {JSON.stringify(tool.inputSchema, null, 2)}
+                      </pre>
                     </details>
                     <details>
                       <summary>Output schema</summary>
-                      <pre>{JSON.stringify(tool.outputSchema, null, 2)}</pre>
+                      <pre className="code-block">
+                        {JSON.stringify(tool.outputSchema, null, 2)}
+                      </pre>
                     </details>
                   </article>
-                ))
-              )}
-            </div>
-          </section>
-          <section className="panel">
-            <div className="section-heading">
-              <div>
-                <h2>Sandbox policy</h2>
-                <p>Execution settings are adapter-neutral and versioned.</p>
+                ))}
               </div>
-              <label className="toggle">
-                <input
-                  type="checkbox"
-                  checked={sandboxEnabled}
-                  onChange={(event) => setSandboxEnabled(event.target.checked)}
+            )}
+          </Panel>
+          <Panel
+            title="Sandbox policy"
+            description="Execution settings are adapter-neutral and versioned."
+            actions={
+              <Switch
+                label="Sandbox enabled"
+                checked={sandboxEnabled}
+                disabled={!isLatest}
+                onChange={setSandboxEnabled}
+              />
+            }
+          >
+            <FieldRow>
+              <Field
+                label="Sandbox provider"
+                hint="Connections are project-scoped; keys are encrypted and never copied into an agent version."
+              >
+                <Select
+                  value={sandboxProvider}
+                  onChange={(event) => {
+                    setSandboxProvider(event.target.value);
+                    setSnapshotId("");
+                  }}
                   disabled={!isLatest}
-                />
-                <span>Enabled</span>
-              </label>
-            </div>
-            <div className="inline-fields">
+                >
+                  {sandboxProviders.map((provider) => (
+                    <option key={provider.id} value={provider.key}>
+                      {provider.displayName} · Daytona
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field
+                label="Daytona snapshot"
+                hint="Snapshot identity is frozen into the new agent version."
+              >
+                <Select
+                  value={snapshotId}
+                  onChange={(event) => setSnapshotId(event.target.value)}
+                  disabled={
+                    !isLatest ||
+                    !sandboxEnabled ||
+                    !selectedSandboxProvider ||
+                    snapshots.isPending ||
+                    snapshots.isError
+                  }
+                >
+                  <option value="">OAO default image · debian:12.9</option>
+                  {snapshotId &&
+                  snapshots.data &&
+                  !snapshots.data.data.some(
+                    (snapshot) => snapshot.id === snapshotId,
+                  ) ? (
+                    <option value={snapshotId} disabled>
+                      Unavailable snapshot · {snapshotId}
+                    </option>
+                  ) : null}
+                  {(snapshots.data?.data ?? []).map((snapshot) => (
+                    <option
+                      key={snapshot.id}
+                      value={snapshot.id}
+                      disabled={!snapshot.available}
+                    >
+                      {snapshotLabel(snapshot)}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
               <Field label="Network policy">
-                <select
+                <Select
                   value={network}
                   onChange={(event) =>
                     setNetwork(event.target.value as "none" | "restricted")
@@ -532,10 +1027,10 @@ function AgentEditor({
                 >
                   <option value="none">No network</option>
                   <option value="restricted">Restricted</option>
-                </select>
+                </Select>
               </Field>
               <Field label="Run timeout (ms)">
-                <input
+                <Input
                   type="number"
                   min={1000}
                   max={3600000}
@@ -547,34 +1042,46 @@ function AgentEditor({
                 />
               </Field>
               <Field label="Maximum turns">
-                <input type="number" value={32} disabled />
+                <Input type="number" value={32} disabled readOnly />
               </Field>
-            </div>
-          </section>
-          <section className="validation-panel" aria-live="polite">
-            <h2>
-              <Check size={17} />
-              Validation
-            </h2>
-            {validation.length === 0 ? (
-              <p className="valid">Ready to publish a new immutable version.</p>
-            ) : (
-              <ul>
-                {validation.map((error) => (
-                  <li key={error}>{error}</li>
-                ))}
-              </ul>
-            )}
-            {publishError ? (
-              <p className="form-error" role="alert">
-                {publishError.message}
+            </FieldRow>
+            <div className="stack">
+              <p className="muted">
+                Model-facing sandbox tools are derived from these immutable
+                capabilities. Manage provider credentials and network policy in{" "}
+                <Link to="/sandbox-providers">Sandbox providers</Link>.
               </p>
-            ) : null}
-          </section>
+              <div className="field-row">
+                {sandboxCapabilityOptions.map(
+                  ([capability, label, description]) => (
+                    <CheckboxRow
+                      key={capability}
+                      label={label}
+                      description={description}
+                      checked={sandboxCapabilities.includes(capability)}
+                      disabled={!isLatest || !sandboxEnabled}
+                      onChange={(event) =>
+                        setSandboxCapabilities((current) =>
+                          event.target.checked
+                            ? [...current, capability]
+                            : current.filter((entry) => entry !== capability),
+                        )
+                      }
+                    />
+                  ),
+                )}
+              </div>
+            </div>
+          </Panel>
+          <ValidationPanel
+            errors={validation}
+            readyMessage="Ready to publish a new immutable version."
+          />
+          {publishError ? <FormError>{publishError.message}</FormError> : null}
           <RecentAgentSessions agentId={agent.id} />
         </div>
       </div>
-    </div>
+    </Page>
   );
 }
 
@@ -589,29 +1096,29 @@ function RecentAgentSessions({ agentId }: { readonly agentId: string }) {
       .filter((session) => session.agentId === agentId)
       .slice(0, 4) ?? [];
   return (
-    <section className="panel">
-      <div className="section-heading">
-        <div>
-          <h2>Recent sessions</h2>
-          <p>Runs pinned to immutable agent versions.</p>
-        </div>
-        <Link to={`/sessions?agent=${agentId}`}>View all</Link>
-      </div>
+    <Panel
+      title="Recent sessions"
+      description="Runs pinned to immutable agent versions."
+      actions={<Link to={`/sessions?agent=${agentId}`}>View all</Link>}
+      flush
+    >
       {sessions.length === 0 ? (
-        <p className="muted">No sessions yet.</p>
+        <p className="muted" style={{ padding: "var(--sp-5)" }}>
+          No sessions yet.
+        </p>
       ) : (
         <div className="compact-list">
           {sessions.map((session) => (
             <Link key={session.id} to={`/sessions/${session.id}`}>
-              <span>
+              <span className="who">
                 <strong>{session.title}</strong>
                 <small>{formatDate(session.lastActivityAt)}</small>
               </span>
-              <StatusPill value={session.status} />
+              <StatusChip value={session.status} />
             </Link>
           ))}
         </div>
       )}
-    </section>
+    </Panel>
   );
 }

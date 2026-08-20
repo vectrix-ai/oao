@@ -3,21 +3,35 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Link } from "react-router";
 import { useApi } from "../api/context";
+import type { PendingWork } from "../api/types";
 import {
+  Button,
+  ConfirmDialog,
   EmptyState,
   ErrorState,
+  Field,
+  FormError,
   LoadingState,
+  MetaGrid,
+  Page,
   PageHeader,
-  StatusPill,
+  StatusChip,
+  Textarea,
   formatDate,
   shortId,
+  useToast,
 } from "../components/ui";
+
+const RESULT_TEMPLATE =
+  '{\n  "quote_id": "quote_demo",\n  "amount": 425,\n  "currency": "EUR"\n}';
 
 export function PendingWorkPage() {
   const api = useApi();
   const queryClient = useQueryClient();
+  const notify = useToast();
   const [resultFor, setResultFor] = useState<string | null>(null);
   const [resultError, setResultError] = useState<string | null>(null);
+  const [denying, setDenying] = useState<PendingWork | null>(null);
   const query = useQuery({
     queryKey: ["pending-work"],
     queryFn: () => api.listPendingWork(),
@@ -26,7 +40,10 @@ export function PendingWorkPage() {
     queryClient.invalidateQueries({ queryKey: ["pending-work"] });
   const claim = useMutation({
     mutationFn: (id: string) => api.claimTool(id),
-    onSuccess: refresh,
+    onSuccess: async () => {
+      await refresh();
+      notify("Tool call claimed.");
+    },
   });
   const submit = useMutation({
     mutationFn: ({
@@ -46,6 +63,7 @@ export function PendingWorkPage() {
     onSuccess: async () => {
       setResultFor(null);
       await refresh();
+      notify("Immutable tool result recorded.");
     },
   });
   const decide = useMutation({
@@ -56,7 +74,13 @@ export function PendingWorkPage() {
       id: string;
       decision: "approved" | "denied";
     }) => api.decideApproval(id, decision),
-    onSuccess: refresh,
+    onSuccess: async (_result, { decision }) => {
+      setDenying(null);
+      await refresh();
+      notify(
+        decision === "approved" ? "Approval granted." : "Approval denied.",
+      );
+    },
   });
   const submitResult = (event: FormEvent<HTMLFormElement>, id: string) => {
     event.preventDefault();
@@ -73,91 +97,105 @@ export function PendingWorkPage() {
       setResultError(error instanceof Error ? error.message : "Invalid JSON");
     }
   };
+
   return (
-    <div className="page">
+    <Page>
       <PageHeader
         eyebrow="Human and caller handoff"
         title="Pending Work"
         description="Durable caller-owned tool calls and approval gates waiting for an authorized response."
       />
       {query.isPending ? (
-        <LoadingState label="Loading pending work" />
+        <LoadingState label="Loading pending work" rows={4} />
       ) : query.isError ? (
         <ErrorState error={query.error} retry={() => void query.refetch()} />
       ) : query.data.length === 0 ? (
         <EmptyState
+          icon="✓"
           title="Nothing needs attention"
-          description="Pending caller tool calls and approvals will appear here."
+          description="Caller tool calls and approval gates appear here the moment a run waits on a human."
         />
       ) : (
         <div className="work-list">
           {query.data.map((work) => (
-            <article className="work-card" key={work.id}>
+            <article
+              className={`work-card work-card--${work.kind === "tool" ? "tool" : "approval"}`}
+              key={work.id}
+            >
               <header>
-                <span className={`work-icon work-icon--${work.kind}`}>
-                  {work.kind === "tool" ? <Hand /> : <ShieldQuestion />}
+                <span
+                  className={`work-icon work-icon--${work.kind}`}
+                  aria-hidden="true"
+                >
+                  {work.kind === "tool" ? (
+                    <Hand size={16} />
+                  ) : (
+                    <ShieldQuestion size={16} />
+                  )}
                 </span>
                 <div>
-                  <p className="eyebrow">
+                  <span className="eyebrow">
                     {work.kind === "tool" ? "Caller tool call" : "Approval"}
-                  </p>
+                  </span>
                   <h2>{work.kind === "tool" ? work.toolName : work.summary}</h2>
                   <Link to={`/sessions/${work.sessionId}`}>
                     {work.title} · {shortId(work.runId)}
                   </Link>
                 </div>
-                <StatusPill
+                <StatusChip
                   value={work.kind === "tool" ? work.stage : work.status}
                 />
               </header>
-              <dl className="work-meta">
-                <div>
-                  <dt>Created</dt>
-                  <dd>{formatDate(work.createdAt)}</dd>
-                </div>
-                <div>
-                  <dt>Expires</dt>
-                  <dd>{formatDate(work.expiresAt)}</dd>
-                </div>
-                {work.kind === "tool" ? (
-                  <>
-                    <div>
-                      <dt>Claimed by</dt>
-                      <dd>{work.claimedBy ?? "Unclaimed"}</dd>
-                    </div>
-                    <div>
-                      <dt>Claim fence</dt>
-                      <dd>{work.claimFence}</dd>
-                    </div>
-                  </>
-                ) : null}
-              </dl>
+              <MetaGrid
+                columns={work.kind === "tool" ? 4 : 2}
+                items={[
+                  { label: "Created", value: formatDate(work.createdAt) },
+                  { label: "Expires", value: formatDate(work.expiresAt) },
+                  ...(work.kind === "tool"
+                    ? [
+                        {
+                          label: "Claimed by",
+                          value: work.claimedBy ?? "Unclaimed",
+                        },
+                        {
+                          label: "Claim fence",
+                          value: (
+                            <span className="mono">{work.claimFence}</span>
+                          ),
+                        },
+                      ]
+                    : []),
+                ]}
+              />
               {work.kind === "tool" ? (
                 <>
                   <div className="safe-arguments">
                     <h3>Safe arguments</h3>
-                    <pre>{JSON.stringify(work.safeArguments, null, 2)}</pre>
+                    <pre className="code-block">
+                      {JSON.stringify(work.safeArguments, null, 2)}
+                    </pre>
                   </div>
                   <div className="work-actions">
                     {work.stage === "caller_pending" ? (
-                      <button
-                        className="button"
-                        disabled={claim.isPending}
+                      <Button
+                        variant="primary"
+                        icon={<ClipboardCheck size={15} />}
+                        loading={claim.isPending}
                         onClick={() => claim.mutate(work.id)}
                       >
-                        <ClipboardCheck size={16} />
                         Claim request
-                      </button>
+                      </Button>
                     ) : (
-                      <button
-                        className="button"
+                      <Button
+                        variant="primary"
+                        icon={<Check size={15} />}
+                        aria-expanded={resultFor === work.id}
                         onClick={() =>
                           setResultFor(resultFor === work.id ? null : work.id)
                         }
                       >
-                        <Check size={16} />
                         Submit result
-                      </button>
+                      </Button>
                     )}
                   </div>
                   {resultFor === work.id ? (
@@ -165,55 +203,78 @@ export function PendingWorkPage() {
                       className="result-form"
                       onSubmit={(event) => submitResult(event, work.id)}
                     >
-                      <label>
-                        Result JSON
-                        <textarea
+                      <Field
+                        label="Result JSON"
+                        hint="Stored immutably against the claim fence above."
+                      >
+                        <Textarea
                           name="result"
-                          rows={5}
-                          defaultValue={
-                            '{\n  "quote_id": "quote_demo",\n  "amount": 425,\n  "currency": "EUR"\n}'
-                          }
+                          rows={6}
+                          className="input--mono"
+                          defaultValue={RESULT_TEMPLATE}
                         />
-                      </label>
+                      </Field>
                       {resultError ? (
-                        <p className="form-error" role="alert">
-                          {resultError}
-                        </p>
+                        <FormError>{resultError}</FormError>
                       ) : null}
-                      <button className="button" disabled={submit.isPending}>
-                        Submit immutable result
-                      </button>
+                      <div className="form-actions">
+                        <Button
+                          onClick={() => setResultFor(null)}
+                          disabled={submit.isPending}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          variant="primary"
+                          type="submit"
+                          loading={submit.isPending}
+                        >
+                          Submit immutable result
+                        </Button>
+                      </div>
                     </form>
                   ) : null}
                 </>
               ) : (
                 <div className="work-actions">
-                  <button
-                    className="button"
+                  <Button
+                    variant="primary"
+                    icon={<Check size={15} />}
                     disabled={decide.isPending}
                     onClick={() =>
                       decide.mutate({ id: work.id, decision: "approved" })
                     }
                   >
-                    <Check size={16} />
                     Approve
-                  </button>
-                  <button
-                    className="button button--danger"
+                  </Button>
+                  <Button
+                    variant="danger"
+                    icon={<X size={15} />}
                     disabled={decide.isPending}
-                    onClick={() =>
-                      decide.mutate({ id: work.id, decision: "denied" })
-                    }
+                    onClick={() => setDenying(work)}
                   >
-                    <X size={16} />
                     Deny
-                  </button>
+                  </Button>
                 </div>
               )}
             </article>
           ))}
         </div>
       )}
-    </div>
+      {denying && denying.kind === "approval" ? (
+        <ConfirmDialog
+          title="Deny this approval?"
+          description={`“${denying.summary}” will not run. The agent continues with a denial recorded on the run, and this decision cannot be taken back.`}
+          confirmLabel="Deny approval"
+          cancelLabel="Keep pending"
+          pending={decide.isPending}
+          error={decide.error?.message ?? null}
+          onClose={() => setDenying(null)}
+          onConfirm={() =>
+            decide.mutate({ id: denying.id, decision: "denied" })
+          }
+        />
+      ) : null}
+    </Page>
   );
 }

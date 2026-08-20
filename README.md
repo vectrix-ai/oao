@@ -2,7 +2,7 @@
 
 OAO is an open, self-hostable managed-agent platform built around Flue and PostgreSQL.
 
-The first implementation target is a fully functional local environment. Railway, OpenRouter, Daytona, WorkOS, S3-compatible storage, and OTLP are adapters for later hosted operation; none is required to run the default local test suite.
+The first implementation target is a fully functional local environment. Runtime execution uses project-scoped OpenRouter/OpenAI and Daytona connections; deterministic provider doubles are confined to automated tests.
 
 ## Workspace
 
@@ -20,7 +20,7 @@ The implemented local profile runs:
 - Hono REST/SSE API
 - Flue runtime worker
 - PostgreSQL canonical/control/read-model storage and wake queue
-- Deterministic fake model, sandbox, and identity adapters
+- Development identity plus real project-scoped model and Daytona adapters
 
 See [docs/architecture.md](docs/architecture.md) for boundaries and implementation order.
 
@@ -30,7 +30,8 @@ Node.js 22.19 or newer and pnpm 10.27 are required.
 
 ```sh
 pnpm install
-cp .env.example .env # optional; the checked-in local defaults work as-is
+cp .env.example .env
+# Set OAO_CREDENTIAL_ENCRYPTION_KEY, then add model and Daytona connections in the console.
 pnpm dev:local
 ```
 
@@ -41,10 +42,10 @@ development tenant, and launches the API on port 3000, runtime worker on 8788,
 and console on 5173. Open <http://127.0.0.1:5173>. Ctrl-C stops every child and
 stops the PostgreSQL container only when this invocation started it.
 
-The default profile explicitly uses `local-default` plus the fake sandbox and
-does not need OpenRouter or Daytona credentials. `.env.example` documents the
-separate opt-ins for hosted providers; `DAYTONA_TARGET` is optional and is not a
-residency guarantee.
+There is no runnable fake model or sandbox profile. `.env.example` documents
+the platform encryption key used for project-scoped model and Daytona
+credentials. Add both connections in the console and publish immutable agent
+versions against those provider-backed presets and sandbox policies.
 
 ## Verification
 
@@ -63,3 +64,11 @@ it. See [infra/compose/README.md](infra/compose/README.md) for lifecycle details
 See [apps/api/README.md](apps/api/README.md) for the runnable API commands,
 development/Vite proxy setup, exact authentication environment contract, WorkOS
 callback/webhook URLs, and operator identity provisioning.
+
+## Documentation
+
+The Mintlify source lives in [`docs`](docs). From that directory, run
+`mint dev --port 3333` to preview it alongside the local OAO API, or use
+`mint validate`, `mint broken-links`, and `mint a11y` before publishing. Start at
+[`docs/index.mdx`](docs/index.mdx) for the local setup, agent configuration,
+model preset, API, SSE, and codebase-integration guides.

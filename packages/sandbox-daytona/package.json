@@ -22,8 +22,12 @@
   },
   "dependencies": {
     "@daytona/sdk": "0.205.0",
+    "@earendil-works/pi-ai": "0.83.0",
     "@flue/runtime": "2.0.3",
+    "@oao/artifact-s3": "workspace:*",
+    "@oao/contracts": "workspace:*",
     "@oao/db-postgres": "workspace:*",
-    "@oao/domain": "workspace:*"
+    "@oao/domain": "workspace:*",
+    "@oao/provider-credentials": "workspace:*"
   }
 }

@@ -2,16 +2,33 @@ import type {
   AgentDetail,
   AgentSummary,
   ConsoleApi,
+  CreateApiKeyInput,
+  CreateModelProviderInput,
+  CreateModelPresetInput,
+  CreateSandboxProviderInput,
+  CreateStorageProviderInput,
+  CreatedApiKey,
   EventConnection,
   ListFilters,
+  ModelCatalogEntry,
+  ModelCatalogList,
+  ModelPreset,
+  ModelPresetList,
   PageResult,
   PendingWork,
   ProjectContext,
+  ProjectModelProvider,
+  ProjectSandboxProvider,
+  ProjectStorageProvider,
+  SandboxProviderList,
+  SandboxSnapshotList,
+  StorageProviderList,
   SessionDetail,
   SessionSummary,
   SettingsData,
   TimelineEvent,
   TimelineKind,
+  UpdateSandboxProviderConfigurationInput,
 } from "./types";
 import { parseProductEvent, parseSseFrames } from "./sse";
 
@@ -55,6 +72,31 @@ class HttpConsoleError extends Error {
 }
 
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * Debug collections that describe work the agent did, so they read as
+ * transcript activity. Everything else is platform telemetry, which the
+ * transcript drops and only the debug timeline shows.
+ */
+const CALLER_VISIBLE_DEBUG = new Set([
+  "toolCalls",
+  "approvals",
+  "sandboxCommands",
+  "sandboxes",
+]);
+
+/**
+ * Event kinds the transcript keeps. A run envelope or a model invocation is
+ * bookkeeping about the turn, not part of the story of the turn, so it is
+ * telemetry however the read model happens to label it.
+ */
+const TRANSCRIPT_KINDS = new Set<TimelineKind>([
+  "tool",
+  "approval",
+  "error",
+  "retry",
+  "recovery",
+]);
 
 function idempotencyKey(): string {
   return (
@@ -104,6 +146,7 @@ function numeric(value: unknown): number {
 
 function timelineKind(value: unknown): TimelineKind {
   const kind = text(value).toLowerCase();
+  if (kind.includes("reasoning")) return "reasoning";
   if (kind.includes("approval")) return "approval";
   if (kind.includes("tool") || kind.includes("sandbox")) return "tool";
   if (kind.includes("retry")) return "retry";
@@ -128,6 +171,16 @@ function safePayload(
     redacted: true,
     redactionReason:
       "Only public, redacted metadata is available in this view.",
+  };
+}
+
+function visiblePayload(
+  rendered: Readonly<Record<string, unknown>>,
+): NonNullable<TimelineEvent["payload"]> {
+  return {
+    rendered,
+    raw: JSON.stringify(rendered, null, 2),
+    redacted: false,
   };
 }
 
@@ -158,29 +211,118 @@ function sessionSummary(
   };
 }
 
+const FILE_ARGUMENT_KEYS = new Set([
+  "path",
+  "file",
+  "filePath",
+  "filename",
+  "outputPath",
+  "destination",
+]);
+const SHELL_FILE_PATH =
+  /(?:^|[\s"'=])((?:\/|\.{1,2}\/)[^\s"'`|;&<>]+\.[a-z0-9][a-z0-9._-]*)/giu;
+
+function workspacePath(
+  value: string,
+): { readonly name: string; readonly path: string } | null {
+  const path = value.trim().replace(/[),:]+$/u, "");
+  if (!path || path.includes("\0") || path.includes("\n") || path.endsWith("/"))
+    return null;
+  const name = path.split("/").filter(Boolean).at(-1);
+  if (!name || name === "." || name === "..") return null;
+  return { name, path };
+}
+
+function commandFilePaths(command: string): readonly string[] {
+  return [...command.matchAll(SHELL_FILE_PATH)]
+    .map((match) => match[1])
+    .filter((path): path is string => Boolean(path));
+}
+
+function argumentFilePaths(value: unknown, key = ""): readonly string[] {
+  if (typeof value === "string") {
+    if (key === "command") return commandFilePaths(value);
+    return FILE_ARGUMENT_KEYS.has(key) ? [value] : [];
+  }
+  if (Array.isArray(value))
+    return value.flatMap((item) => argumentFilePaths(item, key));
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value as Readonly<Record<string, unknown>>).flatMap(
+    ([nestedKey, nested]) => argumentFilePaths(nested, nestedKey),
+  );
+}
+
+function workspaceFiles(
+  debug: Readonly<Record<string, unknown>>,
+): SessionDetail["workspaceFiles"] {
+  const backups = (
+    Array.isArray(debug.workspaceBackups) ? debug.workspaceBackups : []
+  )
+    .map(record)
+    .map((backup) => text(backup.backedUpAt))
+    .filter(Boolean)
+    .sort();
+  const files = new Map<string, SessionDetail["workspaceFiles"][number]>();
+  const commands = Array.isArray(debug.sandboxCommands)
+    ? debug.sandboxCommands
+    : [];
+  for (const item of commands) {
+    const command = record(item);
+    if (text(command.state) !== "completed") continue;
+    const safeCommand = record(command.safeCommand);
+    const completedAt = text(
+      command.completedAt ?? command.startedAt ?? command.createdAt,
+    );
+    const backedUpAt = backups.find((timestamp) => timestamp >= completedAt);
+    const candidates = argumentFilePaths(safeCommand.arguments ?? safeCommand);
+    for (const candidate of candidates) {
+      const file = workspacePath(candidate);
+      if (!file) continue;
+      const existing = files.get(file.path);
+      files.set(file.path, {
+        ...file,
+        backedUp: Boolean(backedUpAt) || Boolean(existing?.backedUp),
+        ...(backedUpAt
+          ? { backedUpAt }
+          : existing?.backedUpAt
+            ? { backedUpAt: existing.backedUpAt }
+            : {}),
+      });
+    }
+  }
+  return [...files.values()].sort((left, right) =>
+    left.name.localeCompare(right.name),
+  );
+}
+
 function sessionDetail(
   value: Readonly<Record<string, unknown>>,
 ): SessionDetail {
   const summary = sessionSummary(value);
   const runs = Array.isArray(value.runs) ? value.runs.map(record) : [];
+  const transcriptRecords = Array.isArray(value.transcript)
+    ? value.transcript.map(record)
+    : [];
+  const debug = record(value.debug);
   const latestRunId = text(value.latestRunId ?? value.runId ?? runs.at(-1)?.id);
   const latestRun =
     runs.find((run) => text(run.id) === latestRunId) ?? runs.at(-1) ?? {};
-  const transcript: TimelineEvent[] = (
-    Array.isArray(value.transcript) ? value.transcript : []
-  ).map((item, index) => {
-    const message = record(item);
-    const role = text(message.role, "assistant");
-    return {
-      id: text(message.id, `message-${index}`),
-      kind: timelineKind(role),
-      title: role === "user" ? "User" : role === "tool" ? "Tool" : "Assistant",
-      summary: text(message.redactedContent, "Redacted message"),
-      createdAt: text(message.createdAt, summary.createdAt),
-      durationMs: null,
-      status: "success",
-    };
-  });
+  const transcript: TimelineEvent[] = transcriptRecords.map(
+    (message, index) => {
+      const role = text(message.role, "assistant");
+      return {
+        id: text(message.id, `message-${index}`),
+        kind: timelineKind(role),
+        source: "message",
+        title:
+          role === "user" ? "User" : role === "tool" ? "Tool" : "Assistant",
+        summary: text(message.redactedContent, "Redacted message"),
+        createdAt: text(message.createdAt, summary.createdAt),
+        durationMs: null,
+        status: "success",
+      };
+    },
+  );
   const timeline: TimelineEvent[] = (
     Array.isArray(value.timeline) ? value.timeline : []
   ).map((item, index) => {
@@ -191,8 +333,12 @@ function sessionDetail(
     return {
       id: `${text(entry.runId, latestRunId)}:timeline:${text(entry.entrySequence, String(index))}`,
       kind: timelineKind(type),
+      source: TRANSCRIPT_KINDS.has(timelineKind(type)) ? "activity" : "runtime",
       title: type.replaceAll("_", " "),
-      summary: text(detail.summary ?? detail.message, "Safe runtime metadata"),
+      summary: text(
+        detail.summary ?? detail.message ?? detail.model ?? detail.status,
+        "Safe runtime metadata",
+      ),
       createdAt: text(entry.startedAt, summary.createdAt),
       durationMs: durationMs(entry.startedAt, completedAt),
       status:
@@ -204,32 +350,158 @@ function sessionDetail(
       payload: safePayload(detail),
     };
   });
-  const debug = record(value.debug);
+  const reasoningTiming = (
+    detail: Readonly<Record<string, unknown>>,
+  ): { readonly createdAt: string; readonly durationMs: number | null } => {
+    const rawStart = text(detail.startedAt, summary.createdAt);
+    const rawDuration = durationMs(detail.startedAt, detail.completedAt);
+    if (rawDuration !== null && rawDuration > 0)
+      return { createdAt: rawStart, durationMs: rawDuration };
+    const completed = Date.parse(text(detail.completedAt));
+    const runId = text(detail.runId);
+    if (!Number.isFinite(completed) || !runId)
+      return { createdAt: rawStart, durationMs: rawDuration };
+    const boundaries: number[] = [];
+    const addBoundary = (candidate: unknown) => {
+      const parsed = Date.parse(text(candidate));
+      if (Number.isFinite(parsed) && parsed < completed)
+        boundaries.push(parsed);
+    };
+    for (const run of runs)
+      if (text(run.id) === runId) addBoundary(run.createdAt);
+    for (const message of transcriptRecords)
+      if (text(message.runId) === runId) addBoundary(message.createdAt);
+    for (const collection of [
+      "sandboxCommands",
+      "toolCalls",
+      "approvals",
+      "modelInvocations",
+    ]) {
+      const records = debug[collection];
+      if (!Array.isArray(records)) continue;
+      for (const candidateValue of records) {
+        const candidate = record(candidateValue);
+        if (
+          text(candidate.runId) !== runId ||
+          text(candidate.id) === text(detail.id)
+        )
+          continue;
+        addBoundary(
+          candidate.completedAt ??
+            candidate.resolvedAt ??
+            candidate.updatedAt ??
+            candidate.createdAt,
+        );
+      }
+    }
+    const inferredStart = Math.max(...boundaries);
+    if (!Number.isFinite(inferredStart))
+      return { createdAt: rawStart, durationMs: rawDuration };
+    return {
+      createdAt: new Date(inferredStart).toISOString(),
+      durationMs: completed - inferredStart,
+    };
+  };
   const debugEvents: TimelineEvent[] = [];
   for (const [collection, items] of Object.entries(debug)) {
     if (!Array.isArray(items)) continue;
     items.forEach((item, index) => {
       const detail = record(item);
+      if (collection === "modelInvocations") {
+        const response = record(detail.safeResponse);
+        const timing = reasoningTiming(detail);
+        const thinking = text(response.thinking);
+        const rendered = {
+          ...(thinking ? { thinking } : {}),
+          model: text(detail.modelKey),
+          attempt: numeric(detail.attempt),
+          finishReason: text(response.finishReason, "unknown"),
+        };
+        const state = text(detail.status, "completed");
+        debugEvents.push({
+          id: `debug:${collection}:${text(detail.id, String(index))}`,
+          kind: "reasoning",
+          source: "activity",
+          title: "Reasoning",
+          summary: thinking || "Model reasoning",
+          createdAt: timing.createdAt,
+          durationMs: timing.durationMs,
+          status: state.includes("fail")
+            ? "error"
+            : state === "completed"
+              ? "success"
+              : "pending",
+          tokens: {
+            input: numeric(detail.inputTokens),
+            output: numeric(detail.outputTokens),
+          },
+          ...(detail.costMicrounits !== undefined
+            ? { costUsd: numeric(detail.costMicrounits) / 1_000_000 }
+            : {}),
+          payload: visiblePayload(rendered),
+        });
+        return;
+      }
       const type = text(
-        detail.eventKind ?? detail.toolName ?? detail.status ?? collection,
+        detail.eventKind ??
+          detail.toolName ??
+          detail.commandName ??
+          detail.status ??
+          collection,
         collection,
       );
+      const state = text(detail.state ?? detail.status, "");
       const createdAt =
         detail.occurredAt ??
         detail.startedAt ??
         detail.createdAt ??
         summary.createdAt;
+      const command = record(detail.safeCommand);
+      const result = record(detail.safeResult);
+      const arguments_ = command.arguments ?? command;
+      const toolPayload = {
+        arguments: arguments_,
+        ...(result.output !== undefined
+          ? { result: result.output }
+          : result.redactedOutput !== undefined
+            ? { result: result.redactedOutput }
+            : {}),
+        ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+      };
+      const argumentsRecord = record(arguments_);
       debugEvents.push({
         id: `debug:${collection}:${text(detail.id, String(index))}`,
         kind: timelineKind(`${collection} ${type}`),
+        source: CALLER_VISIBLE_DEBUG.has(collection) ? "activity" : "runtime",
         title: type.replaceAll("_", " "),
-        summary: `${collection.replaceAll(/([A-Z])/gu, " $1").toLowerCase()} metadata`,
+        summary: text(
+          detail.path ??
+            detail.commandName ??
+            detail.origin ??
+            detail.action ??
+            argumentsRecord.path ??
+            argumentsRecord.command ??
+            argumentsRecord.url ??
+            argumentsRecord.action ??
+            detail.summary ??
+            detail.message ??
+            detail.modelKey ??
+            detail.toolName,
+          `${collection.replaceAll(/([A-Z])/gu, " $1").toLowerCase()} metadata`,
+        ),
         createdAt: text(createdAt),
         durationMs: durationMs(
           detail.startedAt ?? detail.createdAt,
           detail.completedAt ?? detail.updatedAt,
         ),
-        status: type.includes("fail") ? "error" : "info",
+        status:
+          state.includes("fail") || type.includes("fail")
+            ? "error"
+            : ["reserved", "running"].includes(state)
+              ? "pending"
+              : state === "completed"
+                ? "success"
+                : "info",
         ...(detail.inputTokens !== undefined ||
         detail.outputTokens !== undefined
           ? {
@@ -242,7 +514,10 @@ function sessionDetail(
         ...(detail.costMicrounits !== undefined
           ? { costUsd: numeric(detail.costMicrounits) / 1_000_000 }
           : {}),
-        payload: safePayload(detail),
+        payload:
+          collection === "sandboxCommands"
+            ? visiblePayload(toolPayload)
+            : safePayload(detail),
       });
     });
   }
@@ -252,6 +527,7 @@ function sessionDetail(
   return {
     ...summary,
     runId: latestRunId,
+    ...(value.model ? { model: text(value.model) } : {}),
     agentVersion: numeric(value.agentVersion),
     startedAt: text(value.startedAt ?? latestRun.createdAt, summary.createdAt),
     completedAt: value.completedAt
@@ -270,15 +546,14 @@ function sessionDetail(
     events: [...transcript, ...timeline, ...debugEvents].sort((left, right) =>
       left.createdAt.localeCompare(right.createdAt),
     ),
+    workspaceFiles: workspaceFiles(debug),
     capabilities: {
       canCancel: !settled,
       canResume: false,
       canBranchReplay: false,
     },
     runs,
-    transcript: Array.isArray(value.transcript)
-      ? value.transcript.map(record)
-      : [],
+    transcript: transcriptRecords,
     pendingWork: Array.isArray(value.pendingWork)
       ? value.pendingWork.map(record)
       : [],
@@ -640,6 +915,171 @@ export class HttpConsoleApi implements ConsoleApi {
         body: JSON.stringify({ status: decision }),
       },
     );
+  };
+
+  listModelPresets = async (): Promise<ModelPresetList> => {
+    const response = await this.#projectRequest<
+      CursorPage<ModelPreset> & {
+        readonly credentialEncryptionConfigured?: boolean;
+      }
+    >("/model-presets?limit=200");
+    return {
+      data: response.data,
+      credentialEncryptionConfigured:
+        response.credentialEncryptionConfigured === true,
+    };
+  };
+
+  listModelProviders = async (): Promise<readonly ProjectModelProvider[]> => {
+    const response = await this.#projectRequest<
+      CursorPage<ProjectModelProvider>
+    >("/model-providers?limit=200");
+    return response.data;
+  };
+
+  createModelProvider = async (
+    input: CreateModelProviderInput,
+  ): Promise<ProjectModelProvider> =>
+    this.#projectRequest<ProjectModelProvider>("/model-providers", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+
+  rotateModelProviderCredential = async (
+    providerId: string,
+    apiKey: string,
+  ): Promise<ProjectModelProvider> =>
+    this.#projectRequest<ProjectModelProvider>(
+      `/model-providers/${encodeURIComponent(providerId)}/credential`,
+      { method: "PUT", body: JSON.stringify({ apiKey }) },
+    );
+
+  listSandboxProviders = async (): Promise<SandboxProviderList> => {
+    const response = await this.#projectRequest<
+      CursorPage<ProjectSandboxProvider> & {
+        readonly credentialEncryptionConfigured?: boolean;
+      }
+    >("/sandbox-providers?limit=200");
+    return {
+      data: response.data,
+      credentialEncryptionConfigured:
+        response.credentialEncryptionConfigured === true,
+    };
+  };
+
+  listSandboxSnapshots = async (
+    providerId: string,
+  ): Promise<SandboxSnapshotList> =>
+    this.#projectRequest<SandboxSnapshotList>(
+      `/sandbox-providers/${encodeURIComponent(providerId)}/snapshots`,
+    );
+
+  createSandboxProvider = async (
+    input: CreateSandboxProviderInput,
+  ): Promise<ProjectSandboxProvider> =>
+    this.#projectRequest<ProjectSandboxProvider>("/sandbox-providers", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+
+  rotateSandboxProviderCredential = async (
+    providerId: string,
+    apiKey: string,
+  ): Promise<ProjectSandboxProvider> =>
+    this.#projectRequest<ProjectSandboxProvider>(
+      `/sandbox-providers/${encodeURIComponent(providerId)}/credential`,
+      { method: "PUT", body: JSON.stringify({ apiKey }) },
+    );
+
+  updateSandboxProviderConfiguration = async (
+    providerId: string,
+    input: UpdateSandboxProviderConfigurationInput,
+  ): Promise<ProjectSandboxProvider> =>
+    this.#projectRequest<ProjectSandboxProvider>(
+      `/sandbox-providers/${encodeURIComponent(providerId)}/configuration`,
+      { method: "PUT", body: JSON.stringify(input) },
+    );
+
+  listStorageProviders = async (): Promise<StorageProviderList> =>
+    this.#projectRequest<StorageProviderList>("/storage-providers");
+
+  createStorageProvider = async (
+    input: CreateStorageProviderInput,
+  ): Promise<ProjectStorageProvider> =>
+    this.#projectRequest<ProjectStorageProvider>("/storage-providers", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+
+  rotateStorageProviderCredential = async (
+    providerId: string,
+    credential: Pick<
+      CreateStorageProviderInput,
+      "accessKeyId" | "secretAccessKey" | "sessionToken"
+    >,
+  ): Promise<ProjectStorageProvider> =>
+    this.#projectRequest<ProjectStorageProvider>(
+      `/storage-providers/${encodeURIComponent(providerId)}/credential`,
+      { method: "PUT", body: JSON.stringify(credential) },
+    );
+
+  setDefaultStorageProvider = async (
+    providerId: string,
+  ): Promise<ProjectStorageProvider> =>
+    this.#projectRequest<ProjectStorageProvider>(
+      `/storage-providers/${encodeURIComponent(providerId)}/default`,
+      { method: "PUT", body: JSON.stringify({}) },
+    );
+
+  listModelCatalog = async (
+    providerId: string,
+    search?: string,
+  ): Promise<ModelCatalogList> => {
+    const query = search?.trim()
+      ? `&search=${encodeURIComponent(search.trim())}`
+      : "";
+    const response = await this.#projectRequest<
+      CursorPage<ModelCatalogEntry> & {
+        readonly providerId: string;
+        readonly providerType: "openrouter" | "openai";
+      }
+    >(
+      `/model-catalog?limit=200&providerId=${encodeURIComponent(providerId)}${query}`,
+    );
+    return {
+      data: response.data,
+      providerId: response.providerId,
+      providerType: response.providerType,
+    };
+  };
+
+  createModelPreset = async (
+    input: CreateModelPresetInput,
+  ): Promise<ModelPreset> =>
+    this.#projectRequest<ModelPreset>("/model-presets", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+
+  createApiKey = async (input: CreateApiKeyInput): Promise<CreatedApiKey> => {
+    const response = await this.#projectRequest<Record<string, unknown>>(
+      "/api-keys",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    );
+    const common = {
+      id: text(response.id),
+      name: text(response.name),
+      prefix: text(response.prefix),
+      scopes: Array.isArray(response.scopes) ? response.scopes.map(String) : [],
+      lastUsedAt: null,
+    };
+    if (response.shown !== true) return { ...common, shown: false };
+    if (typeof response.secret !== "string" || response.secret.length === 0)
+      throw new Error("The API created the key without returning its secret.");
+    return { ...common, shown: true, secret: response.secret };
   };
 
   getSettings = async (): Promise<SettingsData> => {

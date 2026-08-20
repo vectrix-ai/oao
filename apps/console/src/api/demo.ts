@@ -3,23 +3,38 @@ import type {
   AgentDetail,
   AgentSummary,
   AgentVersionConfig,
+  ApiKeySummary,
   ConsoleApi,
+  CreateApiKeyInput,
+  CreateModelProviderInput,
+  CreateModelPresetInput,
+  CreateSandboxProviderInput,
+  CreateStorageProviderInput,
+  CreatedApiKey,
   EventConnection,
   ListFilters,
+  ModelCatalogEntry,
+  ModelPreset,
   PageResult,
   PendingWork,
+  ProjectModelProvider,
+  ProjectSandboxProvider,
+  ProjectStorageProvider,
   SessionDetail,
   SettingsData,
+  UpdateSandboxProviderConfigurationInput,
 } from "./types";
 
 const ORG_ID = "11111111-1111-4111-8111-111111111111";
 const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
 const principalId = "33333333-3333-4333-8333-333333333333";
+const OPENROUTER_PROVIDER_ID = "55555555-5555-4555-8555-555555555555";
+const DAYTONA_PROVIDER_ID = "66666666-6666-4666-8666-666666666666";
 
 const supportConfig: AgentVersionConfig = {
   systemPrompt:
     "You are a careful support operations agent. Verify the customer and summarize only the information needed to resolve the request. Never disclose secrets or internal reasoning.",
-  modelPreset: "local-default",
+  modelPreset: "claude-sonnet-4-6-zdr-v1",
   tools: [
     {
       name: "lookup_customer",
@@ -60,7 +75,9 @@ const supportConfig: AgentVersionConfig = {
   ],
   sandbox: {
     enabled: true,
+    provider: "daytona-primary",
     network: "restricted",
+    capabilities: ["filesystem_read", "filesystem_write", "shell", "browser"],
   },
   limits: { maxTurns: 32, timeoutMs: 300_000 },
 };
@@ -125,7 +142,7 @@ const agentsSeed: AgentDetail[] = [
           ...supportConfig,
           systemPrompt:
             "Extract verifiable facts from provided documents. Cite the source page. Do not infer missing values.",
-          modelPreset: "local-default",
+          modelPreset: "claude-sonnet-4-6-zdr-v1",
           tools: [],
         },
       },
@@ -152,7 +169,7 @@ const agentsSeed: AgentDetail[] = [
           ...supportConfig,
           systemPrompt:
             "Classify incoming orders into standard, exception, or needs review.",
-          modelPreset: "local-default",
+          modelPreset: "claude-sonnet-4-6-zdr-v1",
         },
       },
     ],
@@ -173,15 +190,18 @@ const sessionsSeed: SessionDetail[] = [
     createdAt: "2026-08-20T07:02:10.000Z",
     lastActivityAt: "2026-08-20T07:05:44.000Z",
     runId: "run_01J5QV1FPZ19TR2D7QXG8B0N6K",
+    model: "hosted-sonnet",
     agentVersion: 3,
     startedAt: "2026-08-20T07:02:11.000Z",
     completedAt: null,
     attempt: 1,
+    workspaceFiles: [],
     capabilities: { canCancel: true, canResume: false, canBranchReplay: false },
     events: [
       {
         id: "event-user-1",
         kind: "user",
+        source: "message",
         title: "User",
         summary:
           "Customer Northwind #4831 says the expedited shipment was charged twice. Verify the account and prepare the appropriate refund.",
@@ -190,8 +210,36 @@ const sessionsSeed: SessionDetail[] = [
         status: "success",
       },
       {
+        id: "event-runtime-1",
+        kind: "assistant",
+        source: "runtime",
+        title: "run.created",
+        summary: "Run queued on the durable thread.",
+        createdAt: "2026-08-20T07:02:11.400Z",
+        durationMs: null,
+        status: "info",
+      },
+      {
+        id: "event-runtime-2",
+        kind: "assistant",
+        source: "runtime",
+        title: "runtime.dispatch admitted",
+        summary: "Admitted to the dispatcher under the run admission key.",
+        createdAt: "2026-08-20T07:02:11.800Z",
+        durationMs: 41,
+        status: "info",
+        payload: {
+          rendered: { admission_key: "run:01J5QV1FPZ19TR2D7QXG8B0N6K" },
+          raw: null,
+          redacted: true,
+          redactionReason:
+            "Dispatcher internals are reduced to a safe public key.",
+        },
+      },
+      {
         id: "event-model-1",
         kind: "assistant",
+        source: "message",
         title: "Assistant",
         summary:
           "I’ll verify the customer and the duplicate charge before preparing a refund request.",
@@ -211,11 +259,13 @@ const sessionsSeed: SessionDetail[] = [
         status: "success",
         payload: {
           rendered: {
-            customer_ref: "NW-4831",
-            result: "2 matching charges",
-            account_status: "active",
+            arguments: { customer_ref: "NW-4831" },
+            result: {
+              matches: 2,
+              account_status: "active",
+            },
           },
-          raw: '{"customer_ref":"NW-4831","result":"2 matching charges","account_status":"active"}',
+          raw: '{"arguments":{"customer_ref":"NW-4831"},"result":{"matches":2,"account_status":"active"}}',
           redacted: false,
         },
       },
@@ -284,15 +334,18 @@ const sessionsSeed: SessionDetail[] = [
     createdAt: "2026-08-19T14:20:00.000Z",
     lastActivityAt: "2026-08-19T14:24:38.000Z",
     runId: "run_01J5PDS4BR20P60BMSAT00W8PV",
+    model: "hosted-sonnet",
     agentVersion: 5,
     startedAt: "2026-08-19T14:20:01.000Z",
     completedAt: "2026-08-19T14:24:38.000Z",
     attempt: 1,
+    workspaceFiles: [],
     capabilities: { canCancel: false, canResume: false, canBranchReplay: true },
     events: [
       {
         id: "event-user-2",
         kind: "user",
+        source: "message",
         title: "User",
         summary:
           "Extract renewal dates, notice periods, and contracting entities from the uploaded Q3 agreements.",
@@ -319,6 +372,7 @@ const sessionsSeed: SessionDetail[] = [
       {
         id: "event-assistant-2",
         kind: "assistant",
+        source: "message",
         title: "Assistant",
         summary:
           "Extracted 14 agreements. Two renewal dates require human review because the source scans are ambiguous.",
@@ -343,10 +397,12 @@ const sessionsSeed: SessionDetail[] = [
     createdAt: "2026-08-18T11:08:00.000Z",
     lastActivityAt: "2026-08-18T11:08:15.000Z",
     runId: "run_01J5NZAD4Z3HDBN4P8WCFJ7TQS",
+    model: "claude-sonnet-4-6-zdr-v1",
     agentVersion: 1,
     startedAt: "2026-08-18T11:08:01.000Z",
     completedAt: "2026-08-18T11:08:15.000Z",
     attempt: 3,
+    workspaceFiles: [],
     capabilities: { canCancel: false, canResume: true, canBranchReplay: true },
     events: [
       {
@@ -472,6 +528,112 @@ const settingsSeed: SettingsData = {
   ],
 };
 
+/**
+ * Deterministic stand-in for the provider catalog. It carries only public
+ * metadata; the demo adapter never holds a provider credential.
+ */
+const modelCatalogSeed: readonly ModelCatalogEntry[] = [
+  {
+    providerType: "openrouter",
+    model: "openrouter/anthropic/claude-sonnet-4.6",
+    catalogId: "anthropic/claude-sonnet-4.6",
+    name: "Claude Sonnet 4.6",
+    contextWindow: 200_000,
+    maxOutputTokens: 64_000,
+    reasoning: true,
+  },
+  {
+    providerType: "openrouter",
+    model: "openrouter/openai/gpt-5.1",
+    catalogId: "openai/gpt-5.1",
+    name: "GPT-5.1",
+    contextWindow: 400_000,
+    maxOutputTokens: 128_000,
+    reasoning: true,
+  },
+  {
+    providerType: "openrouter",
+    model: "openrouter/meta-llama/llama-4-maverick",
+    catalogId: "meta-llama/llama-4-maverick",
+    name: "Llama 4 Maverick",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 16_384,
+    reasoning: false,
+  },
+  {
+    providerType: "openai",
+    model: "openai/gpt-5.1",
+    catalogId: "gpt-5.1",
+    name: "GPT-5.1",
+    contextWindow: 400_000,
+    maxOutputTokens: 128_000,
+    reasoning: true,
+  },
+];
+
+const modelProvidersSeed: readonly ProjectModelProvider[] = [
+  {
+    id: OPENROUTER_PROVIDER_ID,
+    organizationId: ORG_ID,
+    projectId: PROJECT_ID,
+    key: "openrouter-primary",
+    displayName: "OpenRouter primary",
+    providerType: "openrouter",
+    credentialConfigured: true,
+    credentialFingerprint: "a1b2c3d4e5f6",
+    credentialVersion: 1,
+    createdByPrincipalId: principalId,
+    createdAt: "2026-08-18T11:00:00.000Z",
+    updatedAt: "2026-08-18T11:00:00.000Z",
+  },
+];
+
+const sandboxProvidersSeed: readonly ProjectSandboxProvider[] = [
+  {
+    id: DAYTONA_PROVIDER_ID,
+    organizationId: ORG_ID,
+    projectId: PROJECT_ID,
+    key: "daytona-primary",
+    displayName: "Daytona primary",
+    providerType: "daytona",
+    credentialConfigured: true,
+    credentialFingerprint: "b2c3d4e5f6a1",
+    credentialVersion: 1,
+    target: null,
+    restrictedEgress: {
+      allowedDomains: ["*.example.com"],
+      allowedCidrs: [],
+    },
+    createdByPrincipalId: principalId,
+    createdAt: "2026-08-18T11:10:00.000Z",
+    updatedAt: "2026-08-18T11:10:00.000Z",
+  },
+];
+
+const modelPresetsSeed: readonly ModelPreset[] = [
+  {
+    id: "44444444-4444-4444-8444-444444444444",
+    organizationId: ORG_ID,
+    projectId: PROJECT_ID,
+    key: "claude-sonnet-4-6-zdr-v1",
+    displayName: "Claude Sonnet 4.6 (zero retention)",
+    origin: "project",
+    providerId: OPENROUTER_PROVIDER_ID,
+    providerType: "openrouter",
+    model: "openrouter/anthropic/claude-sonnet-4.6",
+    routing: {
+      zeroDataRetention: true,
+      dataCollection: "deny",
+      allowFallbacks: false,
+      providerAllowlist: ["anthropic"],
+    },
+    hosted: true,
+    available: true,
+    createdByPrincipalId: principalId,
+    createdAt: "2026-08-18T11:20:00.000Z",
+  },
+];
+
 export interface DemoApiOptions {
   readonly scenario?: "default" | "empty" | "error";
   readonly eventDelayMs?: number;
@@ -479,6 +641,15 @@ export interface DemoApiOptions {
 
 export class DemoConsoleApi implements ConsoleApi {
   #agents = structuredClone(agentsSeed);
+  #apiKeys = structuredClone(settingsSeed.apiKeys) as ApiKeySummary[];
+  #modelPresets = structuredClone(modelPresetsSeed) as ModelPreset[];
+  #modelProviders = structuredClone(
+    modelProvidersSeed,
+  ) as ProjectModelProvider[];
+  #sandboxProviders = structuredClone(
+    sandboxProvidersSeed,
+  ) as ProjectSandboxProvider[];
+  #storageProviders: ProjectStorageProvider[] = [];
   #sessions = structuredClone(sessionsSeed);
   #pending = structuredClone(pendingSeed);
   #counter = 0;
@@ -558,11 +729,19 @@ export class DemoConsoleApi implements ConsoleApi {
     return structuredClone(value);
   }
 
+  #assertApprovedPreset(key: string): void {
+    if (!this.#modelPresets.some((preset) => preset.key === key))
+      throw new Error(
+        `${key} is not an approved model preset for this project.`,
+      );
+  }
+
   async createAgent(input: {
     readonly name: string;
     readonly description: string;
     readonly initialConfig: AgentVersionConfig;
   }): Promise<AgentSummary> {
+    this.#assertApprovedPreset(input.initialConfig.modelPreset);
     this.#counter += 1;
     const now = new Date().toISOString();
     const id = `dddddddd-dddd-4ddd-8ddd-${String(this.#counter).padStart(12, "0")}`;
@@ -598,6 +777,7 @@ export class DemoConsoleApi implements ConsoleApi {
   async publishAgentVersion(id: string, config: AgentVersionConfig) {
     const agent = this.#agents.find((item) => item.id === id);
     if (!agent) throw new Error("Agent not found");
+    this.#assertApprovedPreset(config.modelPreset);
     const version = agent.version + 1;
     const now = new Date().toISOString();
     const updated: AgentDetail = {
@@ -670,6 +850,7 @@ export class DemoConsoleApi implements ConsoleApi {
       startedAt: now,
       completedAt: null,
       attempt: 1,
+      workspaceFiles: [],
       events: [
         {
           id: `message_demo_${this.#counter}`,
@@ -779,9 +960,338 @@ export class DemoConsoleApi implements ConsoleApi {
     this.#pending = this.#pending.filter((work) => work.id !== id);
   }
 
+  async listModelPresets() {
+    this.#guard();
+    return {
+      data: structuredClone(this.#modelPresets),
+      credentialEncryptionConfigured: true,
+    };
+  }
+
+  async listModelProviders() {
+    this.#guard();
+    return structuredClone(this.#modelProviders);
+  }
+
+  async createModelProvider(
+    input: CreateModelProviderInput,
+  ): Promise<ProjectModelProvider> {
+    this.#guard();
+    this.#counter += 1;
+    const created: ProjectModelProvider = {
+      id: `55555555-5555-4555-8555-${String(this.#counter).padStart(12, "0")}`,
+      organizationId: ORG_ID,
+      projectId: PROJECT_ID,
+      key: input.key,
+      displayName: input.displayName,
+      providerType: input.providerType,
+      credentialConfigured: true,
+      credentialFingerprint: "d4e5f6a1b2c3",
+      credentialVersion: 1,
+      createdByPrincipalId: principalId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    this.#modelProviders = [...this.#modelProviders, created];
+    return structuredClone(created);
+  }
+
+  async rotateModelProviderCredential(
+    providerId: string,
+    apiKey: string,
+  ): Promise<ProjectModelProvider> {
+    this.#guard();
+    void apiKey;
+    const current = this.#modelProviders.find(
+      (entry) => entry.id === providerId,
+    );
+    if (!current) throw new Error("Model provider not found.");
+    const updated = {
+      ...current,
+      credentialVersion: current.credentialVersion + 1,
+      credentialFingerprint: "f6a1b2c3d4e5",
+      updatedAt: new Date().toISOString(),
+    };
+    this.#modelProviders = this.#modelProviders.map((entry) =>
+      entry.id === providerId ? updated : entry,
+    );
+    return structuredClone(updated);
+  }
+
+  async listSandboxProviders() {
+    this.#guard();
+    return {
+      data: structuredClone(this.#sandboxProviders),
+      credentialEncryptionConfigured: true,
+    };
+  }
+
+  async listSandboxSnapshots(providerId: string) {
+    this.#guard();
+    const provider = this.#sandboxProviders.find(
+      (entry) => entry.id === providerId,
+    );
+    if (!provider) throw new Error("Sandbox provider not found.");
+    return {
+      data: [
+        {
+          id: "77777777-7777-4777-8777-777777777777",
+          providerType: "daytona" as const,
+          name: "daytona-small",
+          state: "active",
+          available: true,
+          imageName: "daytonaio/sandbox:0.9.0",
+          general: true,
+          cpu: 1,
+          gpu: 0,
+          memoryGiB: 1,
+          diskGiB: 3,
+          regionIds: ["eu", "us"],
+          sandboxClass: "container",
+          createdAt: "2026-07-28T14:58:11.540Z",
+          updatedAt: "2026-08-20T15:26:23.838Z",
+          lastUsedAt: "2026-08-20T15:26:23.827Z",
+        },
+      ],
+      providerId,
+      providerType: "daytona" as const,
+    };
+  }
+
+  async createSandboxProvider(
+    input: CreateSandboxProviderInput,
+  ): Promise<ProjectSandboxProvider> {
+    this.#guard();
+    this.#counter += 1;
+    const now = new Date().toISOString();
+    const created: ProjectSandboxProvider = {
+      id: `66666666-6666-4666-8666-${String(this.#counter).padStart(12, "0")}`,
+      organizationId: ORG_ID,
+      projectId: PROJECT_ID,
+      key: input.key,
+      displayName: input.displayName,
+      providerType: "daytona",
+      credentialConfigured: true,
+      credentialFingerprint: "c3d4e5f6a1b2",
+      credentialVersion: 1,
+      target: input.target,
+      restrictedEgress: {
+        allowedDomains: [...input.restrictedEgress.allowedDomains],
+        allowedCidrs: [...input.restrictedEgress.allowedCidrs],
+      },
+      createdByPrincipalId: principalId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.#sandboxProviders = [...this.#sandboxProviders, created];
+    return structuredClone(created);
+  }
+
+  async rotateSandboxProviderCredential(
+    providerId: string,
+    apiKey: string,
+  ): Promise<ProjectSandboxProvider> {
+    this.#guard();
+    void apiKey;
+    const current = this.#sandboxProviders.find(
+      (entry) => entry.id === providerId,
+    );
+    if (!current) throw new Error("Sandbox provider not found.");
+    const updated = {
+      ...current,
+      credentialVersion: current.credentialVersion + 1,
+      credentialFingerprint: "e5f6a1b2c3d4",
+      updatedAt: new Date().toISOString(),
+    };
+    this.#sandboxProviders = this.#sandboxProviders.map((entry) =>
+      entry.id === providerId ? updated : entry,
+    );
+    return structuredClone(updated);
+  }
+
+  async updateSandboxProviderConfiguration(
+    providerId: string,
+    input: UpdateSandboxProviderConfigurationInput,
+  ): Promise<ProjectSandboxProvider> {
+    this.#guard();
+    const current = this.#sandboxProviders.find(
+      (entry) => entry.id === providerId,
+    );
+    if (!current) throw new Error("Sandbox provider not found.");
+    const updated = {
+      ...current,
+      target: input.target,
+      restrictedEgress: {
+        allowedDomains: [...input.restrictedEgress.allowedDomains],
+        allowedCidrs: [...input.restrictedEgress.allowedCidrs],
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    this.#sandboxProviders = this.#sandboxProviders.map((entry) =>
+      entry.id === providerId ? updated : entry,
+    );
+    return structuredClone(updated);
+  }
+
+  async listStorageProviders() {
+    this.#guard();
+    return {
+      data: structuredClone(this.#storageProviders),
+      credentialEncryptionConfigured: true,
+    };
+  }
+
+  async createStorageProvider(
+    input: CreateStorageProviderInput,
+  ): Promise<ProjectStorageProvider> {
+    this.#guard();
+    this.#counter += 1;
+    const now = new Date().toISOString();
+    const makeDefault = input.setDefault || this.#storageProviders.length === 0;
+    if (makeDefault)
+      this.#storageProviders = this.#storageProviders.map((provider) => ({
+        ...provider,
+        default: false,
+      }));
+    const created: ProjectStorageProvider = {
+      id: `88888888-8888-4888-8888-${String(this.#counter).padStart(12, "0")}`,
+      organizationId: ORG_ID,
+      projectId: PROJECT_ID,
+      key: input.key,
+      displayName: input.displayName,
+      providerType: "s3",
+      endpoint: input.endpoint,
+      region: input.region,
+      bucket: input.bucket,
+      prefix: input.prefix,
+      forcePathStyle: input.forcePathStyle,
+      default: makeDefault,
+      credentialConfigured: true,
+      credentialFingerprint: "a1b2c3d4e5f6",
+      credentialVersion: 1,
+      createdByPrincipalId: principalId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.#storageProviders = [...this.#storageProviders, created];
+    return structuredClone(created);
+  }
+
+  async rotateStorageProviderCredential(
+    providerId: string,
+    credential: Pick<
+      CreateStorageProviderInput,
+      "accessKeyId" | "secretAccessKey" | "sessionToken"
+    >,
+  ): Promise<ProjectStorageProvider> {
+    this.#guard();
+    void credential;
+    const current = this.#storageProviders.find(
+      (provider) => provider.id === providerId,
+    );
+    if (!current) throw new Error("Storage provider not found.");
+    const updated = {
+      ...current,
+      credentialVersion: current.credentialVersion + 1,
+      credentialFingerprint: "b2c3d4e5f6a1",
+      updatedAt: new Date().toISOString(),
+    };
+    this.#storageProviders = this.#storageProviders.map((provider) =>
+      provider.id === providerId ? updated : provider,
+    );
+    return structuredClone(updated);
+  }
+
+  async setDefaultStorageProvider(
+    providerId: string,
+  ): Promise<ProjectStorageProvider> {
+    this.#guard();
+    if (!this.#storageProviders.some((provider) => provider.id === providerId))
+      throw new Error("Storage provider not found.");
+    this.#storageProviders = this.#storageProviders.map((provider) => ({
+      ...provider,
+      default: provider.id === providerId,
+      updatedAt:
+        provider.id === providerId
+          ? new Date().toISOString()
+          : provider.updatedAt,
+    }));
+    return structuredClone(
+      this.#storageProviders.find((provider) => provider.id === providerId)!,
+    );
+  }
+
+  async listModelCatalog(providerId: string, search?: string) {
+    this.#guard();
+    const provider = this.#modelProviders.find(
+      (entry) => entry.id === providerId,
+    );
+    if (!provider) throw new Error("Model provider not found.");
+    const term = search?.trim().toLowerCase();
+    return {
+      data: structuredClone(modelCatalogSeed).filter(
+        (entry) =>
+          entry.providerType === provider.providerType &&
+          (!term ||
+            entry.catalogId.toLowerCase().includes(term ?? "") ||
+            entry.name.toLowerCase().includes(term ?? "")),
+      ),
+      providerId,
+      providerType: provider.providerType,
+    };
+  }
+
+  async createModelPreset(input: CreateModelPresetInput): Promise<ModelPreset> {
+    this.#guard();
+    if (this.#modelPresets.some((preset) => preset.key === input.key))
+      throw new Error("Model preset key already exists in this project.");
+    if (!modelCatalogSeed.some((entry) => entry.model === input.model))
+      throw new Error("model is not present in the provider catalog.");
+    this.#counter += 1;
+    const created: ModelPreset = {
+      id: `44444444-4444-4444-8444-${String(this.#counter).padStart(12, "0")}`,
+      organizationId: ORG_ID,
+      projectId: PROJECT_ID,
+      key: input.key,
+      displayName: input.displayName,
+      origin: "project",
+      providerId: input.providerId,
+      providerType:
+        this.#modelProviders.find((entry) => entry.id === input.providerId)
+          ?.providerType ?? null,
+      model: input.model,
+      routing: input.routing,
+      hosted: true,
+      available: true,
+      createdByPrincipalId: principalId,
+      createdAt: new Date().toISOString(),
+    };
+    this.#modelPresets = [...this.#modelPresets, created];
+    return structuredClone(created);
+  }
+
   async getSettings() {
     this.#guard();
-    return structuredClone(settingsSeed);
+    return structuredClone({ ...settingsSeed, apiKeys: this.#apiKeys });
+  }
+
+  async createApiKey(input: CreateApiKeyInput): Promise<CreatedApiKey> {
+    this.#guard();
+    this.#counter += 1;
+    const suffix = String(this.#counter).padStart(10, "0");
+    const key: ApiKeySummary = {
+      id: `key_demo_${suffix}`,
+      name: input.name,
+      prefix: `demo${suffix}`,
+      scopes: [...input.scopes],
+      lastUsedAt: null,
+    };
+    this.#apiKeys = [key, ...this.#apiKeys];
+    return {
+      ...structuredClone(key),
+      shown: true,
+      secret: `oao_demo${suffix}_demo-only-secret-value-${suffix}`,
+    };
   }
 
   connectEvents(

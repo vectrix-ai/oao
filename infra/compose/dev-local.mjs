@@ -215,8 +215,6 @@ async function main() {
   startChild("runtime worker", ["--filter", "@oao/runtime-worker", "dev"], {
     DATABASE_URL: databaseUrl,
     PORT: runtimePort,
-    OAO_ENABLE_HOSTED_MODELS: process.env.OAO_ENABLE_HOSTED_MODELS ?? "false",
-    OAO_SANDBOX_PROVIDER: process.env.OAO_SANDBOX_PROVIDER ?? "fake",
   });
   startChild(
     "console",

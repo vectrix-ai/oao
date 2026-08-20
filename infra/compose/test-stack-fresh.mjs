@@ -175,8 +175,6 @@ async function main() {
   const runtimeOrigin = `http://127.0.0.1:${runtimePort}`;
   const commonEnvironment = {
     DATABASE_URL: databaseUrl,
-    OAO_ENABLE_HOSTED_MODELS: "false",
-    OAO_SANDBOX_PROVIDER: "fake",
   };
 
   run("pnpm", ["--filter", "@oao/db-postgres", "migrate"], {

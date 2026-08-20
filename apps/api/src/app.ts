@@ -2,9 +2,24 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { AuthSession, AuthTenantAdapter } from "@oao/auth-core";
 import { readCookie } from "@oao/auth-core";
 import {
-  PLATFORM_MAX_TURNS,
+  parseCreateProjectSandboxProviderInput,
+  parseCreateProjectStorageProviderInput,
+  parseCreateProjectModelProviderInput,
+  parseCreateModelPresetInput,
   parseManagedAgentSnapshotForPublication,
+  parseRotateProjectModelProviderCredentialInput,
+  parseRotateProjectSandboxProviderCredentialInput,
+  parseRotateProjectStorageProviderCredentialInput,
+  parseUpdateProjectSandboxProviderConfigurationInput,
+  type CreateProjectSandboxProviderInput,
+  type CreateProjectStorageProviderInput,
+  type CreateModelPresetInput,
+  type CreateProjectModelProviderInput,
   type ManagedAgentPublicationConfig,
+  type ModelCatalogEntry,
+  type ModelProviderType,
+  type SandboxSnapshotEntry,
+  type UpdateProjectSandboxProviderConfigurationInput,
 } from "@oao/contracts";
 import type { ArtifactPort, Principal, PublicValue } from "@oao/domain";
 import { assertPublicPayload, AUTHORIZATION_ACTIONS } from "@oao/domain";
@@ -13,6 +28,8 @@ import type { WakeOnlyNotifier } from "@oao/events";
 import { Hono } from "hono";
 import type { Context, MiddlewareHandler } from "hono";
 import { streamSSE } from "hono/streaming";
+import type { PgClient } from "@oao/db-postgres";
+import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import type { PostgresApiStore } from "./store.js";
 import type { RuntimeCommandPort } from "./runtime-commands.js";
 import { errorEnvelope, HttpApiError } from "./errors.js";
@@ -37,6 +54,42 @@ export interface WebhookAuthenticationAdapter extends AuthTenantAdapter {
   }): Promise<{ readonly status: string; readonly eventId: string }>;
 }
 
+/**
+ * Adapter seam for the pinned provider catalogs. Provider credentials are
+ * handled separately and are never returned through this port.
+ */
+export interface ModelCatalogPort {
+  readonly deploymentPresets: readonly {
+    readonly key: string;
+    readonly model: string;
+  }[];
+  listCatalog(input?: {
+    readonly providerType?: ModelProviderType;
+    readonly apiKey?: string;
+    readonly search?: string;
+    readonly limit?: number;
+  }): Promise<readonly ModelCatalogEntry[]> | readonly ModelCatalogEntry[];
+  isApprovedModel(
+    model: string,
+    providerType?: ModelProviderType,
+    input?: { readonly apiKey?: string },
+  ): Promise<boolean> | boolean;
+}
+
+/** Provider adapter for credential-scoped sandbox snapshot discovery. */
+export interface SandboxSnapshotCatalogPort {
+  listSnapshots(input: {
+    readonly apiKey: string;
+    readonly target?: string;
+  }): Promise<readonly SandboxSnapshotEntry[]>;
+}
+
+const EMPTY_MODEL_CATALOG: ModelCatalogPort = Object.freeze({
+  deploymentPresets: Object.freeze([]),
+  listCatalog: () => [],
+  isApprovedModel: () => false,
+});
+
 export interface ApiDependencies {
   readonly store: PostgresApiStore;
   readonly auth: RequestAuthenticator;
@@ -44,7 +97,10 @@ export interface ApiDependencies {
   readonly artifacts?: ArtifactPort;
   readonly notifier?: WakeOnlyNotifier;
   readonly runtimeCommands: RuntimeCommandPort;
+  readonly credentialCipher?: ProviderCredentialCipher;
   readonly activeModelPresetKeys?: ReadonlySet<string>;
+  readonly modelCatalog?: ModelCatalogPort;
+  readonly sandboxSnapshotCatalog?: SandboxSnapshotCatalogPort;
   readonly authConfiguration?: ApiAuthConfiguration;
   readonly onError?: (input: {
     readonly requestId: string;
@@ -149,10 +205,7 @@ function parseFence(value: unknown): bigint {
   return BigInt(value);
 }
 
-function parseAgentConfig(
-  value: unknown,
-  activeModelPresetKeys: ReadonlySet<string>,
-): ManagedAgentPublicationConfig {
+function parseAgentConfig(value: unknown): ManagedAgentPublicationConfig {
   let config: ManagedAgentPublicationConfig;
   try {
     config = parseManagedAgentSnapshotForPublication(value);
@@ -162,23 +215,93 @@ function parseAgentConfig(
       "config must match the managed-agent publication contract",
     );
   }
-  if (!activeModelPresetKeys.has(config.modelPreset))
-    throw new HttpApiError(
-      "bad_request",
-      "config.modelPreset is not active in this deployment",
-    );
   assertPublicPayload(config as Readonly<Record<string, PublicValue>>);
   return config;
 }
 
-function defaultAgentConfig(name: string): ManagedAgentPublicationConfig {
-  return {
-    systemPrompt: `You are ${name}, a helpful managed agent.`,
-    modelPreset: "local-default",
-    tools: [],
-    sandbox: { enabled: false, network: "none" },
-    limits: { maxTurns: PLATFORM_MAX_TURNS, timeoutMs: 60_000 },
-  };
+/** Publication may only name a durable preset scoped to the caller's project. */
+async function assertModelPresetApproved(
+  transaction: PgClient,
+  actor: Principal,
+  presetKey: string,
+  activeModelPresetKeys: ReadonlySet<string>,
+  projectModelsEnabled: boolean,
+): Promise<void> {
+  if (activeModelPresetKeys.has(presetKey)) return;
+  const result = await transaction.query(
+    `SELECT 1 FROM oao.project_model_presets p
+     JOIN oao.project_model_providers c
+       ON c.organization_id=p.organization_id
+      AND c.project_id=p.project_id
+      AND c.id=p.provider_id
+     WHERE p.organization_id=$1 AND p.project_id=$2 AND p.preset_key=$3`,
+    [actor.organizationId, actor.projectId, presetKey],
+  );
+  if (!result.rowCount)
+    throw new HttpApiError(
+      "bad_request",
+      "config.modelPreset is not an approved model preset for this project",
+    );
+  if (!projectModelsEnabled)
+    throw new HttpApiError(
+      "bad_request",
+      "config.modelPreset is not available until credential encryption is configured",
+    );
+}
+
+async function listProjectModelPresetKeys(
+  transaction: PgClient,
+  actor: Principal,
+): Promise<string[]> {
+  const result = await transaction.query<{ preset_key: string }>(
+    `SELECT p.preset_key FROM oao.project_model_presets p
+     JOIN oao.project_model_providers c
+       ON c.organization_id=p.organization_id
+      AND c.project_id=p.project_id
+      AND c.id=p.provider_id
+     WHERE p.organization_id=$1 AND p.project_id=$2 ORDER BY p.preset_key`,
+    [actor.organizationId, actor.projectId],
+  );
+  return result.rows.map((row) => row.preset_key);
+}
+
+async function assertSandboxProviderApproved(
+  transaction: PgClient,
+  actor: Principal,
+  config: ManagedAgentPublicationConfig["sandbox"],
+  projectProvidersEnabled: boolean,
+): Promise<void> {
+  if (!config.enabled) return;
+  if (!projectProvidersEnabled)
+    throw new HttpApiError(
+      "bad_request",
+      "config.sandbox.provider is not available until credential encryption is configured",
+    );
+  const result = await transaction.query<{
+    restricted_egress: {
+      allowedDomains?: readonly string[];
+      allowedCidrs?: readonly string[];
+    };
+  }>(
+    `SELECT restricted_egress FROM oao.project_sandbox_providers
+     WHERE organization_id=$1 AND project_id=$2 AND provider_key=$3`,
+    [actor.organizationId, actor.projectId, config.provider],
+  );
+  const provider = result.rows[0];
+  if (!provider)
+    throw new HttpApiError(
+      "bad_request",
+      "config.sandbox.provider is not configured for this project",
+    );
+  if (
+    config.network === "restricted" &&
+    !provider.restricted_egress.allowedDomains?.length &&
+    !provider.restricted_egress.allowedCidrs?.length
+  )
+    throw new HttpApiError(
+      "bad_request",
+      "Restricted sandbox networking requires a provider allowlist",
+    );
 }
 
 function defaultAgentKey(name: string): string {
@@ -198,7 +321,7 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   const authConfiguration =
     dependencies.authConfiguration ?? DEFAULT_AUTH_CONFIGURATION;
   const activeModelPresetKeys =
-    dependencies.activeModelPresetKeys ?? new Set(["local-default"]);
+    dependencies.activeModelPresetKeys ?? new Set<string>();
 
   app.use("*", async (c, next) => {
     const incoming = c.req.header("x-request-id");
@@ -393,7 +516,8 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
 
   app.use("/v1/projects/*", authenticate);
   app.use("/v1/projects", authenticate);
-  app.use("/v1/organizations*", authenticate);
+  app.use("/v1/organizations", authenticate);
+  app.use("/v1/organizations/*", authenticate);
   app.use("/v1/context", authenticate);
 
   app.get("/v1/context", async (c) => {
@@ -420,7 +544,14 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
         project,
         organizations: [organization],
         projects: [project],
-        activeModelPresets: [...activeModelPresetKeys].sort(),
+        activeModelPresets: [
+          ...new Set([
+            ...activeModelPresetKeys,
+            ...(dependencies.credentialCipher
+              ? await listProjectModelPresetKeys(tx, actor)
+              : []),
+          ]),
+        ].sort(),
         authProvider: authConfiguration.provider,
       });
     });
@@ -826,6 +957,9 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     );
   });
 
+  registerModelPresetRoutes(app, dependencies);
+  registerSandboxProviderRoutes(app, dependencies);
+  registerStorageProviderRoutes(app, dependencies);
   registerAgentRoutes(app, dependencies);
   registerRunRoutes(app, dependencies);
   registerEventRoutes(app, dependencies);
@@ -933,12 +1067,1133 @@ function safeStringEqual(left: string, right: string): boolean {
   );
 }
 
+function registerSandboxProviderRoutes(
+  app: Hono<{ Variables: Variables }>,
+  dependencies: ApiDependencies,
+): void {
+  const providerViewSql = `id,organization_id,project_id,provider_key AS key,
+    display_name,provider_type,true AS credential_configured,
+    left(credential_fingerprint,12) AS credential_fingerprint,
+    encryption_key_version AS credential_version,target,restricted_egress,
+    created_by_principal_id,created_at,updated_at`;
+
+  app.get(
+    "/v1/projects/:projectId/sandbox-providers/:providerId/snapshots",
+    async (c) => {
+      const actor = assertProject(c);
+      if (!dependencies.credentialCipher)
+        throw new HttpApiError(
+          "internal_error",
+          "Provider credential encryption is not configured",
+        );
+      if (!dependencies.sandboxSnapshotCatalog)
+        throw new HttpApiError(
+          "internal_error",
+          "Sandbox snapshot discovery is not configured",
+        );
+      return dependencies.store.transaction(actor, "agent:read", async (tx) => {
+        const result = await tx.query<{
+          readonly id: string;
+          readonly provider_type: "daytona";
+          readonly encrypted_api_key: Buffer;
+          readonly encryption_nonce: Buffer;
+          readonly encryption_tag: Buffer;
+          readonly encryption_key_version: number;
+          readonly target: string | null;
+        }>(
+          `SELECT id,provider_type,encrypted_api_key,encryption_nonce,
+                  encryption_tag,encryption_key_version,target
+             FROM oao.project_sandbox_providers
+            WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+          [actor.organizationId, actor.projectId, c.req.param("providerId")],
+        );
+        const provider = result.rows[0];
+        if (!provider)
+          throw new HttpApiError("not_found", "Sandbox provider not found");
+        const apiKey = dependencies.credentialCipher!.decrypt(
+          {
+            ciphertext: provider.encrypted_api_key,
+            nonce: provider.encryption_nonce,
+            tag: provider.encryption_tag,
+            keyVersion: provider.encryption_key_version,
+          },
+          {
+            organizationId: actor.organizationId,
+            projectId: actor.projectId,
+            providerId: provider.id,
+            providerType: provider.provider_type,
+          },
+        );
+        const snapshots =
+          await dependencies.sandboxSnapshotCatalog!.listSnapshots({
+            apiKey,
+            ...(provider.target ? { target: provider.target } : {}),
+          });
+        return c.json({
+          data: snapshots,
+          providerId: provider.id,
+          providerType: provider.provider_type,
+        });
+      });
+    },
+  );
+
+  app.get("/v1/projects/:projectId/sandbox-providers", async (c) => {
+    const actor = assertProject(c);
+    const limit = parseLimit(c.req.query("limit"));
+    const cursor = decodeListCursor(c.req.query("cursor"));
+    return dependencies.store.transaction(actor, "agent:read", async (tx) => {
+      const condition = dependencies.store.cursorCondition(
+        cursor,
+        "p.created_at",
+        4,
+        "p.id",
+      );
+      const result = await tx.query(
+        `SELECT ${providerViewSql}
+         FROM oao.project_sandbox_providers p
+         WHERE organization_id=$1 AND project_id=$2${condition.sql}
+         ORDER BY created_at DESC,id DESC LIMIT $${3 + condition.values.length}`,
+        [actor.organizationId, actor.projectId, ...condition.values, limit + 1],
+      );
+      return c.json({
+        ...pagination(rows(result), limit, "createdAt"),
+        credentialEncryptionConfigured:
+          dependencies.credentialCipher !== undefined,
+      });
+    });
+  });
+
+  app.post("/v1/projects/:projectId/sandbox-providers", async (c) => {
+    const actor = assertProject(c);
+    if (!dependencies.credentialCipher)
+      throw new HttpApiError(
+        "internal_error",
+        "Provider credential encryption is not configured",
+      );
+    const body = await readJsonObject(c.req.raw);
+    const idem = idempotencyKey(c.req.raw);
+    let input: CreateProjectSandboxProviderInput;
+    try {
+      input = parseCreateProjectSandboxProviderInput(body);
+    } catch {
+      throw new HttpApiError(
+        "bad_request",
+        "Request must contain a Daytona key, display name, API key, target, and restricted egress policy",
+      );
+    }
+    if (input.key === "local-fake")
+      throw new HttpApiError(
+        "bad_request",
+        "local-fake is a reserved provider key",
+      );
+    const providerId = randomUUID();
+    const encrypted = dependencies.credentialCipher.encrypt(input.apiKey, {
+      organizationId: actor.organizationId,
+      projectId: actor.projectId,
+      providerId,
+      providerType: "daytona",
+      keyVersion: 1,
+    });
+    return dependencies.store.transaction(
+      actor,
+      "project:admin",
+      async (tx) => {
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: "POST:/sandbox-providers",
+          key: idem,
+          hash: requestHash(body),
+          status: 201,
+          execute: async () => {
+            const result = await tx.query(
+              `INSERT INTO oao.project_sandbox_providers
+                 (organization_id,project_id,id,provider_key,display_name,provider_type,
+                  encrypted_api_key,encryption_nonce,encryption_tag,encryption_key_version,
+                  credential_fingerprint,target,restricted_egress,created_by_principal_id)
+               VALUES ($1,$2,$3,$4,$5,'daytona',$6,$7,$8,$9,$10,$11,$12,$13)
+               RETURNING ${providerViewSql}`,
+              [
+                actor.organizationId,
+                actor.projectId,
+                providerId,
+                input.key,
+                input.displayName,
+                encrypted.ciphertext,
+                encrypted.nonce,
+                encrypted.tag,
+                encrypted.keyVersion,
+                encrypted.fingerprint,
+                input.target,
+                input.restrictedEgress,
+                actor.id,
+              ],
+            );
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "sandbox_provider.created",
+              resourceType: "sandbox_provider",
+              resourceId: providerId,
+              detail: {
+                key: input.key,
+                providerType: "daytona",
+                credentialFingerprint: encrypted.fingerprint.slice(0, 12),
+              },
+            });
+            return publicValue(result.rows[0]) as Readonly<
+              Record<string, unknown>
+            >;
+          },
+        });
+        c.header("idempotency-replayed", String(response.replayed));
+        return c.json(response.body, 201);
+      },
+    );
+  });
+
+  app.put(
+    "/v1/projects/:projectId/sandbox-providers/:providerId/credential",
+    async (c) => {
+      const actor = assertProject(c);
+      if (!dependencies.credentialCipher)
+        throw new HttpApiError(
+          "internal_error",
+          "Provider credential encryption is not configured",
+        );
+      const body = await readJsonObject(c.req.raw);
+      const idem = idempotencyKey(c.req.raw);
+      let apiKey: string;
+      try {
+        apiKey = parseRotateProjectSandboxProviderCredentialInput(body).apiKey;
+      } catch {
+        throw new HttpApiError(
+          "bad_request",
+          "Request must contain an API key",
+        );
+      }
+      return dependencies.store.transaction(
+        actor,
+        "project:admin",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `PUT:/sandbox-providers/${c.req.param("providerId")}/credential`,
+            key: idem,
+            hash: requestHash(body),
+            status: 200,
+            execute: async () => {
+              const current = await tx.query<{
+                encryption_key_version: number;
+              }>(
+                `SELECT encryption_key_version FROM oao.project_sandbox_providers
+                 WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  c.req.param("providerId"),
+                ],
+              );
+              const provider = current.rows[0];
+              if (!provider)
+                throw new HttpApiError(
+                  "not_found",
+                  "Sandbox provider not found",
+                );
+              const encrypted = dependencies.credentialCipher!.encrypt(apiKey, {
+                organizationId: actor.organizationId,
+                projectId: actor.projectId,
+                providerId: c.req.param("providerId"),
+                providerType: "daytona",
+                keyVersion: provider.encryption_key_version + 1,
+              });
+              const result = await tx.query(
+                `UPDATE oao.project_sandbox_providers
+                 SET encrypted_api_key=$4,encryption_nonce=$5,encryption_tag=$6,
+                     encryption_key_version=$7,credential_fingerprint=$8
+                 WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                 RETURNING ${providerViewSql}`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  c.req.param("providerId"),
+                  encrypted.ciphertext,
+                  encrypted.nonce,
+                  encrypted.tag,
+                  encrypted.keyVersion,
+                  encrypted.fingerprint,
+                ],
+              );
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "sandbox_provider.credential_rotated",
+                resourceType: "sandbox_provider",
+                resourceId: c.req.param("providerId"),
+                detail: {
+                  providerType: "daytona",
+                  credentialVersion: encrypted.keyVersion,
+                  credentialFingerprint: encrypted.fingerprint.slice(0, 12),
+                },
+              });
+              return publicValue(result.rows[0]) as Readonly<
+                Record<string, unknown>
+              >;
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body);
+        },
+      );
+    },
+  );
+
+  app.put(
+    "/v1/projects/:projectId/sandbox-providers/:providerId/configuration",
+    async (c) => {
+      const actor = assertProject(c);
+      const body = await readJsonObject(c.req.raw);
+      const idem = idempotencyKey(c.req.raw);
+      let input: UpdateProjectSandboxProviderConfigurationInput;
+      try {
+        input = parseUpdateProjectSandboxProviderConfigurationInput(body);
+      } catch {
+        throw new HttpApiError(
+          "bad_request",
+          "Request must contain a target and restricted egress policy",
+        );
+      }
+      return dependencies.store.transaction(
+        actor,
+        "project:admin",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `PUT:/sandbox-providers/${c.req.param("providerId")}/configuration`,
+            key: idem,
+            hash: requestHash(body),
+            status: 200,
+            execute: async () => {
+              const result = await tx.query(
+                `UPDATE oao.project_sandbox_providers
+                 SET target=$4,restricted_egress=$5
+                 WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                 RETURNING ${providerViewSql}`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  c.req.param("providerId"),
+                  input.target,
+                  input.restrictedEgress,
+                ],
+              );
+              if (!result.rowCount)
+                throw new HttpApiError(
+                  "not_found",
+                  "Sandbox provider not found",
+                );
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "sandbox_provider.configuration_updated",
+                resourceType: "sandbox_provider",
+                resourceId: c.req.param("providerId"),
+                detail: {
+                  targetConfigured: input.target !== null,
+                  allowedDomainCount:
+                    input.restrictedEgress.allowedDomains.length,
+                  allowedCidrCount: input.restrictedEgress.allowedCidrs.length,
+                },
+              });
+              return publicValue(result.rows[0]) as Readonly<
+                Record<string, unknown>
+              >;
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body);
+        },
+      );
+    },
+  );
+}
+
+function registerStorageProviderRoutes(
+  app: Hono<{ Variables: Variables }>,
+  dependencies: ApiDependencies,
+): void {
+  const providerViewSql = `id,organization_id,project_id,provider_key AS key,
+    display_name,provider_type,endpoint,region,bucket,object_prefix AS prefix,
+    force_path_style,is_default AS "default",true AS credential_configured,
+    left(credential_fingerprint,12) AS credential_fingerprint,
+    encryption_key_version AS credential_version,created_by_principal_id,
+    created_at,updated_at`;
+
+  app.get("/v1/projects/:projectId/storage-providers", async (c) => {
+    const actor = assertProject(c);
+    return dependencies.store.transaction(actor, "agent:read", async (tx) => {
+      const result = await tx.query(
+        `SELECT ${providerViewSql} FROM oao.project_storage_providers
+          WHERE organization_id=$1 AND project_id=$2
+          ORDER BY is_default DESC,created_at DESC,id DESC`,
+        [actor.organizationId, actor.projectId],
+      );
+      return c.json({
+        data: rows(result),
+        credentialEncryptionConfigured:
+          dependencies.credentialCipher !== undefined,
+      });
+    });
+  });
+
+  app.post("/v1/projects/:projectId/storage-providers", async (c) => {
+    const actor = assertProject(c);
+    if (!dependencies.credentialCipher)
+      throw new HttpApiError(
+        "internal_error",
+        "Provider credential encryption is not configured",
+      );
+    const body = await readJsonObject(c.req.raw);
+    const idem = idempotencyKey(c.req.raw);
+    let input: CreateProjectStorageProviderInput;
+    try {
+      input = parseCreateProjectStorageProviderInput(body);
+    } catch {
+      throw new HttpApiError(
+        "bad_request",
+        "Request must contain valid S3-compatible storage configuration and credentials",
+      );
+    }
+    const providerId = randomUUID();
+    const encrypted = dependencies.credentialCipher.encrypt(
+      JSON.stringify({
+        accessKeyId: input.accessKeyId,
+        secretAccessKey: input.secretAccessKey,
+        ...(input.sessionToken ? { sessionToken: input.sessionToken } : {}),
+      }),
+      {
+        organizationId: actor.organizationId,
+        projectId: actor.projectId,
+        providerId,
+        providerType: "s3",
+        keyVersion: 1,
+      },
+    );
+    return dependencies.store.transaction(
+      actor,
+      "project:admin",
+      async (tx) => {
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: "POST:/storage-providers",
+          key: idem,
+          hash: requestHash(body),
+          status: 201,
+          execute: async () => {
+            const existingDefault = await tx.query(
+              `SELECT 1 FROM oao.project_storage_providers
+                WHERE organization_id=$1 AND project_id=$2 AND is_default`,
+              [actor.organizationId, actor.projectId],
+            );
+            const makeDefault = input.setDefault || !existingDefault.rowCount;
+            if (makeDefault)
+              await tx.query(
+                `UPDATE oao.project_storage_providers SET is_default=false
+                  WHERE organization_id=$1 AND project_id=$2 AND is_default`,
+                [actor.organizationId, actor.projectId],
+              );
+            const result = await tx.query(
+              `INSERT INTO oao.project_storage_providers (
+                 organization_id,project_id,id,provider_key,display_name,provider_type,
+                 endpoint,region,bucket,object_prefix,force_path_style,is_default,
+                 encrypted_credential,encryption_nonce,encryption_tag,
+                 encryption_key_version,credential_fingerprint,created_by_principal_id
+               ) VALUES ($1,$2,$3,$4,$5,'s3',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+               RETURNING ${providerViewSql}`,
+              [
+                actor.organizationId,
+                actor.projectId,
+                providerId,
+                input.key,
+                input.displayName,
+                input.endpoint,
+                input.region,
+                input.bucket,
+                input.prefix,
+                input.forcePathStyle,
+                makeDefault,
+                encrypted.ciphertext,
+                encrypted.nonce,
+                encrypted.tag,
+                encrypted.keyVersion,
+                encrypted.fingerprint,
+                actor.id,
+              ],
+            );
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "storage_provider.created",
+              resourceType: "storage_provider",
+              resourceId: providerId,
+              detail: {
+                key: input.key,
+                providerType: "s3",
+                bucket: input.bucket,
+                default: makeDefault,
+                credentialFingerprint: encrypted.fingerprint.slice(0, 12),
+              },
+            });
+            return publicValue(result.rows[0]) as Readonly<
+              Record<string, unknown>
+            >;
+          },
+        });
+        c.header("idempotency-replayed", String(response.replayed));
+        return c.json(response.body, 201);
+      },
+    );
+  });
+
+  app.put(
+    "/v1/projects/:projectId/storage-providers/:providerId/credential",
+    async (c) => {
+      const actor = assertProject(c);
+      if (!dependencies.credentialCipher)
+        throw new HttpApiError(
+          "internal_error",
+          "Provider credential encryption is not configured",
+        );
+      const body = await readJsonObject(c.req.raw);
+      const idem = idempotencyKey(c.req.raw);
+      let credential: ReturnType<
+        typeof parseRotateProjectStorageProviderCredentialInput
+      >;
+      try {
+        credential = parseRotateProjectStorageProviderCredentialInput(body);
+      } catch {
+        throw new HttpApiError(
+          "bad_request",
+          "Request must contain valid S3-compatible credentials",
+        );
+      }
+      return dependencies.store.transaction(
+        actor,
+        "project:admin",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `PUT:/storage-providers/${c.req.param("providerId")}/credential`,
+            key: idem,
+            hash: requestHash(body),
+            status: 200,
+            execute: async () => {
+              const current = await tx.query<{
+                encryption_key_version: number;
+              }>(
+                `SELECT encryption_key_version FROM oao.project_storage_providers
+                  WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  c.req.param("providerId"),
+                ],
+              );
+              const provider = current.rows[0];
+              if (!provider)
+                throw new HttpApiError(
+                  "not_found",
+                  "Storage provider not found",
+                );
+              const encrypted = dependencies.credentialCipher!.encrypt(
+                JSON.stringify(credential),
+                {
+                  organizationId: actor.organizationId,
+                  projectId: actor.projectId,
+                  providerId: c.req.param("providerId"),
+                  providerType: "s3",
+                  keyVersion: provider.encryption_key_version + 1,
+                },
+              );
+              const result = await tx.query(
+                `UPDATE oao.project_storage_providers
+                    SET encrypted_credential=$4,encryption_nonce=$5,encryption_tag=$6,
+                        encryption_key_version=$7,credential_fingerprint=$8
+                  WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                  RETURNING ${providerViewSql}`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  c.req.param("providerId"),
+                  encrypted.ciphertext,
+                  encrypted.nonce,
+                  encrypted.tag,
+                  encrypted.keyVersion,
+                  encrypted.fingerprint,
+                ],
+              );
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "storage_provider.credential_rotated",
+                resourceType: "storage_provider",
+                resourceId: c.req.param("providerId"),
+                detail: {
+                  credentialVersion: encrypted.keyVersion,
+                  credentialFingerprint: encrypted.fingerprint.slice(0, 12),
+                },
+              });
+              return publicValue(result.rows[0]) as Readonly<
+                Record<string, unknown>
+              >;
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body);
+        },
+      );
+    },
+  );
+
+  app.put(
+    "/v1/projects/:projectId/storage-providers/:providerId/default",
+    async (c) => {
+      const actor = assertProject(c);
+      const body = await readJsonObject(c.req.raw);
+      const idem = idempotencyKey(c.req.raw);
+      if (Object.keys(body).length !== 0)
+        throw new HttpApiError("bad_request", "Request body must be empty");
+      return dependencies.store.transaction(
+        actor,
+        "project:admin",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `PUT:/storage-providers/${c.req.param("providerId")}/default`,
+            key: idem,
+            hash: requestHash(body),
+            status: 200,
+            execute: async () => {
+              const exists = await tx.query(
+                `SELECT 1 FROM oao.project_storage_providers
+                  WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  c.req.param("providerId"),
+                ],
+              );
+              if (!exists.rowCount)
+                throw new HttpApiError(
+                  "not_found",
+                  "Storage provider not found",
+                );
+              await tx.query(
+                `UPDATE oao.project_storage_providers SET is_default=false
+                  WHERE organization_id=$1 AND project_id=$2 AND is_default`,
+                [actor.organizationId, actor.projectId],
+              );
+              const result = await tx.query(
+                `UPDATE oao.project_storage_providers SET is_default=true
+                  WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                  RETURNING ${providerViewSql}`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  c.req.param("providerId"),
+                ],
+              );
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "storage_provider.default_changed",
+                resourceType: "storage_provider",
+                resourceId: c.req.param("providerId"),
+                detail: { default: true },
+              });
+              return publicValue(result.rows[0]) as Readonly<
+                Record<string, unknown>
+              >;
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body);
+        },
+      );
+    },
+  );
+}
+
+function registerModelPresetRoutes(
+  app: Hono<{ Variables: Variables }>,
+  dependencies: ApiDependencies,
+): void {
+  const catalog = dependencies.modelCatalog ?? EMPTY_MODEL_CATALOG;
+  const deploymentPresets = new Map(
+    catalog.deploymentPresets.map((preset) => [preset.key, preset.model]),
+  );
+  const activeModelPresetKeys =
+    dependencies.activeModelPresetKeys ?? new Set(deploymentPresets.keys());
+
+  const deploymentPresetViews = () =>
+    [...activeModelPresetKeys].sort().map((key) => {
+      const model = deploymentPresets.get(key);
+      if (!model) throw new Error(`Deployment preset is unavailable: ${key}`);
+      return {
+        id: null,
+        organizationId: null,
+        projectId: null,
+        key,
+        displayName: key,
+        origin: "deployment" as const,
+        providerId: null,
+        providerType: null,
+        model,
+        routing: {},
+        hosted: true,
+        available: true,
+        createdByPrincipalId: null,
+        createdAt: null,
+      };
+    });
+
+  const providerViewSql = `id,organization_id,project_id,provider_key AS key,
+    display_name,provider_type,true AS credential_configured,
+    left(credential_fingerprint,12) AS credential_fingerprint,
+    encryption_key_version AS credential_version,
+    created_by_principal_id,created_at,updated_at`;
+  type ProviderCredentialRow = {
+    readonly id: string;
+    readonly provider_type: ModelProviderType;
+    readonly encrypted_api_key: Buffer;
+    readonly encryption_nonce: Buffer;
+    readonly encryption_tag: Buffer;
+    readonly encryption_key_version: number;
+  };
+  const providerApiKey = (
+    actor: Principal,
+    provider: ProviderCredentialRow,
+  ): string | undefined => {
+    if (provider.provider_type !== "openrouter") return undefined;
+    if (
+      !Buffer.isBuffer(provider.encrypted_api_key) ||
+      !Buffer.isBuffer(provider.encryption_nonce) ||
+      !Buffer.isBuffer(provider.encryption_tag)
+    )
+      return undefined;
+    if (!dependencies.credentialCipher)
+      throw new HttpApiError(
+        "internal_error",
+        "Provider credential encryption is not configured",
+      );
+    return dependencies.credentialCipher.decrypt(
+      {
+        ciphertext: provider.encrypted_api_key,
+        nonce: provider.encryption_nonce,
+        tag: provider.encryption_tag,
+        keyVersion: provider.encryption_key_version,
+      },
+      {
+        organizationId: actor.organizationId,
+        projectId: actor.projectId,
+        providerId: provider.id,
+        providerType: provider.provider_type,
+      },
+    );
+  };
+
+  app.get("/v1/projects/:projectId/model-providers", async (c) => {
+    const actor = assertProject(c);
+    const limit = parseLimit(c.req.query("limit"));
+    const cursor = decodeListCursor(c.req.query("cursor"));
+    return dependencies.store.transaction(actor, "agent:read", async (tx) => {
+      const condition = dependencies.store.cursorCondition(
+        cursor,
+        "p.created_at",
+        4,
+        "p.id",
+      );
+      const result = await tx.query(
+        `SELECT ${providerViewSql}
+         FROM oao.project_model_providers
+         WHERE organization_id=$1 AND project_id=$2${condition.sql}
+         ORDER BY created_at DESC,id DESC LIMIT $${3 + condition.values.length}`,
+        [actor.organizationId, actor.projectId, ...condition.values, limit + 1],
+      );
+      return c.json(pagination(rows(result), limit, "createdAt"));
+    });
+  });
+
+  app.post("/v1/projects/:projectId/model-providers", async (c) => {
+    const actor = assertProject(c);
+    if (!dependencies.credentialCipher)
+      throw new HttpApiError(
+        "internal_error",
+        "Provider credential encryption is not configured",
+      );
+    const body = await readJsonObject(c.req.raw);
+    const idem = idempotencyKey(c.req.raw);
+    let input: CreateProjectModelProviderInput;
+    try {
+      input = parseCreateProjectModelProviderInput(body);
+    } catch {
+      throw new HttpApiError(
+        "bad_request",
+        "Request must contain a key, display name, supported provider type, and API key",
+      );
+    }
+    const providerId = randomUUID();
+    const encrypted = dependencies.credentialCipher.encrypt(input.apiKey, {
+      organizationId: actor.organizationId,
+      projectId: actor.projectId,
+      providerId,
+      providerType: input.providerType,
+      keyVersion: 1,
+    });
+    return dependencies.store.transaction(
+      actor,
+      "project:admin",
+      async (tx) => {
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: "POST:/model-providers",
+          key: idem,
+          hash: requestHash(body),
+          status: 201,
+          execute: async () => {
+            const result = await tx.query(
+              `INSERT INTO oao.project_model_providers
+                 (organization_id,project_id,id,provider_key,display_name,provider_type,
+                  encrypted_api_key,encryption_nonce,encryption_tag,encryption_key_version,
+                  credential_fingerprint,created_by_principal_id)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+               RETURNING ${providerViewSql}`,
+              [
+                actor.organizationId,
+                actor.projectId,
+                providerId,
+                input.key,
+                input.displayName,
+                input.providerType,
+                encrypted.ciphertext,
+                encrypted.nonce,
+                encrypted.tag,
+                encrypted.keyVersion,
+                encrypted.fingerprint,
+                actor.id,
+              ],
+            );
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "model_provider.created",
+              resourceType: "model_provider",
+              resourceId: providerId,
+              detail: {
+                key: input.key,
+                providerType: input.providerType,
+                credentialFingerprint: encrypted.fingerprint.slice(0, 12),
+              },
+            });
+            return publicValue(result.rows[0]) as Readonly<
+              Record<string, unknown>
+            >;
+          },
+        });
+        c.header("idempotency-replayed", String(response.replayed));
+        return c.json(response.body, 201);
+      },
+    );
+  });
+
+  app.put(
+    "/v1/projects/:projectId/model-providers/:providerId/credential",
+    async (c) => {
+      const actor = assertProject(c);
+      if (!dependencies.credentialCipher)
+        throw new HttpApiError(
+          "internal_error",
+          "Provider credential encryption is not configured",
+        );
+      const body = await readJsonObject(c.req.raw);
+      const idem = idempotencyKey(c.req.raw);
+      let apiKey: string;
+      try {
+        apiKey = parseRotateProjectModelProviderCredentialInput(body).apiKey;
+      } catch {
+        throw new HttpApiError(
+          "bad_request",
+          "Request must contain an API key",
+        );
+      }
+      return dependencies.store.transaction(
+        actor,
+        "project:admin",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `PUT:/model-providers/${c.req.param("providerId")}/credential`,
+            key: idem,
+            hash: requestHash(body),
+            status: 200,
+            execute: async () => {
+              const current = await tx.query<{
+                provider_type: ModelProviderType;
+                encryption_key_version: number;
+              }>(
+                `SELECT provider_type,encryption_key_version
+                 FROM oao.project_model_providers
+                 WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                 FOR UPDATE`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  c.req.param("providerId"),
+                ],
+              );
+              const provider = current.rows[0];
+              if (!provider)
+                throw new HttpApiError("not_found", "Model provider not found");
+              const encrypted = dependencies.credentialCipher!.encrypt(apiKey, {
+                organizationId: actor.organizationId,
+                projectId: actor.projectId,
+                providerId: c.req.param("providerId"),
+                providerType: provider.provider_type,
+                keyVersion: provider.encryption_key_version + 1,
+              });
+              const result = await tx.query(
+                `UPDATE oao.project_model_providers
+                 SET encrypted_api_key=$4,encryption_nonce=$5,encryption_tag=$6,
+                     encryption_key_version=$7,credential_fingerprint=$8
+                 WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                 RETURNING ${providerViewSql}`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  c.req.param("providerId"),
+                  encrypted.ciphertext,
+                  encrypted.nonce,
+                  encrypted.tag,
+                  encrypted.keyVersion,
+                  encrypted.fingerprint,
+                ],
+              );
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "model_provider.credential_rotated",
+                resourceType: "model_provider",
+                resourceId: c.req.param("providerId"),
+                detail: {
+                  providerType: provider.provider_type,
+                  credentialVersion: encrypted.keyVersion,
+                  credentialFingerprint: encrypted.fingerprint.slice(0, 12),
+                },
+              });
+              return publicValue(result.rows[0]) as Readonly<
+                Record<string, unknown>
+              >;
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body);
+        },
+      );
+    },
+  );
+
+  app.get("/v1/projects/:projectId/model-catalog", async (c) => {
+    const actor = assertProject(c);
+    const limit = parseLimit(c.req.query("limit"));
+    const search = (c.req.query("search") ?? "").trim().toLowerCase();
+    const providerId = requiredString(c.req.query("providerId"), "providerId");
+    return dependencies.store.transaction(actor, "agent:read", async (tx) => {
+      const providerResult = await tx.query<ProviderCredentialRow>(
+        `SELECT id,provider_type,encrypted_api_key,encryption_nonce,
+                encryption_tag,encryption_key_version
+         FROM oao.project_model_providers
+         WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+        [actor.organizationId, actor.projectId, providerId],
+      );
+      const provider = providerResult.rows[0];
+      if (!provider)
+        throw new HttpApiError("not_found", "Model provider not found");
+      const providerType = provider.provider_type;
+      const apiKey = providerApiKey(actor, provider);
+      const entries = (
+        await catalog.listCatalog({
+          providerType,
+          ...(apiKey ? { apiKey } : {}),
+          search,
+          limit,
+        })
+      ).filter(
+        (entry) =>
+          !search ||
+          entry.catalogId.toLowerCase().includes(search) ||
+          entry.name.toLowerCase().includes(search),
+      );
+      return c.json({
+        data: entries.slice(0, limit),
+        pageInfo: { hasMore: entries.length > limit, nextCursor: null },
+        providerId,
+        providerType,
+      });
+    });
+  });
+
+  app.get("/v1/projects/:projectId/model-presets", async (c) => {
+    const actor = assertProject(c);
+    const limit = parseLimit(c.req.query("limit"));
+    const cursor = decodeListCursor(c.req.query("cursor"));
+    return dependencies.store.transaction(actor, "agent:read", async (tx) => {
+      const condition = dependencies.store.cursorCondition(
+        cursor,
+        "created_at",
+        3,
+      );
+      const result = await tx.query(
+        `SELECT p.id,p.organization_id,p.project_id,p.preset_key AS key,p.display_name,
+                'project'::text AS origin,p.provider_id,c.provider_type,p.model,p.routing,
+                true AS hosted,(c.id IS NOT NULL AND $3::boolean) AS available,
+                p.created_by_principal_id,p.created_at
+         FROM oao.project_model_presets p
+         LEFT JOIN oao.project_model_providers c
+           ON c.organization_id=p.organization_id
+          AND c.project_id=p.project_id
+          AND c.id=p.provider_id
+         WHERE p.organization_id=$1 AND p.project_id=$2${condition.sql}
+         ORDER BY p.created_at DESC,p.id DESC LIMIT $${4 + condition.values.length}`,
+        [
+          actor.organizationId,
+          actor.projectId,
+          dependencies.credentialCipher !== undefined,
+          ...condition.values,
+          limit + 1,
+        ],
+      );
+      const project = rows(result) as Readonly<Record<string, unknown>>[];
+      const page = pagination(project, limit, "createdAt");
+      const projectKeys = new Set(await listProjectModelPresetKeys(tx, actor));
+      return c.json({
+        ...page,
+        data: cursor
+          ? page.data
+          : [
+              ...deploymentPresetViews().filter(
+                (preset) => !projectKeys.has(preset.key),
+              ),
+              ...page.data,
+            ],
+        credentialEncryptionConfigured:
+          dependencies.credentialCipher !== undefined,
+      });
+    });
+  });
+
+  app.post("/v1/projects/:projectId/model-presets", async (c) => {
+    const actor = assertProject(c);
+    const body = await readJsonObject(c.req.raw);
+    const idem = idempotencyKey(c.req.raw);
+    let input: CreateModelPresetInput;
+    try {
+      input = parseCreateModelPresetInput(body);
+    } catch {
+      throw new HttpApiError(
+        "bad_request",
+        "Request must contain a versioned key, display name, approved model, and supported routing policy",
+      );
+    }
+    if (activeModelPresetKeys.has(input.key))
+      throw new HttpApiError(
+        "conflict",
+        "Model preset key is already used by a deployment preset",
+      );
+    if (!dependencies.credentialCipher)
+      throw new HttpApiError(
+        "internal_error",
+        "Provider credential encryption is not configured",
+      );
+    return dependencies.store.transaction(
+      actor,
+      "project:admin",
+      async (tx) => {
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: "POST:/model-presets",
+          key: idem,
+          hash: requestHash(body),
+          status: 201,
+          execute: async () => {
+            const presetId = randomUUID();
+            const providerResult = await tx.query<ProviderCredentialRow>(
+              `SELECT id,provider_type,encrypted_api_key,encryption_nonce,
+                      encryption_tag,encryption_key_version
+               FROM oao.project_model_providers
+               WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+              [actor.organizationId, actor.projectId, input.providerId],
+            );
+            const provider = providerResult.rows[0];
+            if (!provider)
+              throw new HttpApiError("not_found", "Model provider not found");
+            const providerType = provider.provider_type;
+            const apiKey = providerApiKey(actor, provider);
+            if (
+              !(await catalog.isApprovedModel(input.model, providerType, {
+                ...(apiKey ? { apiKey } : {}),
+              }))
+            )
+              throw new HttpApiError(
+                "bad_request",
+                "model is not present in the provider catalog",
+              );
+            if (
+              providerType === "openai" &&
+              Object.keys(input.routing).length > 0
+            )
+              throw new HttpApiError(
+                "bad_request",
+                "OpenAI model presets do not support OpenRouter routing policy",
+              );
+            assertPublicPayload({
+              key: input.key,
+              displayName: input.displayName,
+              providerId: input.providerId,
+              model: input.model,
+              routing: input.routing,
+            } as Readonly<Record<string, PublicValue>>);
+            const existing = await tx.query(
+              `SELECT 1 FROM oao.project_model_presets
+               WHERE organization_id=$1 AND project_id=$2 AND preset_key=$3`,
+              [actor.organizationId, actor.projectId, input.key],
+            );
+            if (existing.rowCount)
+              throw new HttpApiError(
+                "conflict",
+                "Model preset key already exists in this project",
+              );
+            const result = await tx.query(
+              `INSERT INTO oao.project_model_presets
+                 (organization_id,project_id,id,preset_key,display_name,provider_id,model,routing,created_by_principal_id)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+               RETURNING id,organization_id,project_id,preset_key AS key,display_name,
+                         'project'::text AS origin,provider_id,$10::text AS provider_type,
+                         model,routing,true AS hosted,true AS available,
+                         created_by_principal_id,created_at`,
+              [
+                actor.organizationId,
+                actor.projectId,
+                presetId,
+                input.key,
+                input.displayName,
+                input.providerId,
+                input.model,
+                input.routing,
+                actor.id,
+                providerType,
+              ],
+            );
+            const preset = publicValue(result.rows[0]) as Readonly<
+              Record<string, unknown>
+            >;
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "model_preset.created",
+              resourceType: "model_preset",
+              resourceId: presetId,
+              detail: { key: input.key, model: input.model },
+            });
+            return preset;
+          },
+        });
+        c.header("idempotency-replayed", String(response.replayed));
+        return c.json(response.body, 201);
+      },
+    );
+  });
+}
+
 function registerAgentRoutes(
   app: Hono<{ Variables: Variables }>,
   dependencies: ApiDependencies,
 ): void {
   const activeModelPresetKeys =
-    dependencies.activeModelPresetKeys ?? new Set(["local-default"]);
+    dependencies.activeModelPresetKeys ?? new Set<string>();
+  const projectModelsEnabled = dependencies.credentialCipher !== undefined;
   app.get("/v1/projects/:projectId/agents", async (c) => {
     const actor = assertProject(c);
     const limit = parseLimit(c.req.query("limit"));
@@ -979,11 +2234,21 @@ function registerAgentRoutes(
       body.description === ""
         ? undefined
         : optionalString(body.description, "description");
-    const config = parseAgentConfig(
-      body.initialConfig ?? body.config ?? defaultAgentConfig(name),
-      activeModelPresetKeys,
-    );
+    const config = parseAgentConfig(body.initialConfig ?? body.config);
     return dependencies.store.transaction(actor, "agent:write", async (tx) => {
+      await assertModelPresetApproved(
+        tx,
+        actor,
+        config.modelPreset,
+        activeModelPresetKeys,
+        projectModelsEnabled,
+      );
+      await assertSandboxProviderApproved(
+        tx,
+        actor,
+        config.sandbox,
+        projectModelsEnabled,
+      );
       const response = await dependencies.store.idempotent(tx, actor, {
         scope: "POST:/agents",
         key: idem,
@@ -1135,8 +2400,21 @@ function registerAgentRoutes(
     const actor = assertProject(c);
     const body = await readJsonObject(c.req.raw);
     const idem = idempotencyKey(c.req.raw);
-    const config = parseAgentConfig(body.config ?? body, activeModelPresetKeys);
+    const config = parseAgentConfig(body.config ?? body);
     return dependencies.store.transaction(actor, "agent:write", async (tx) => {
+      await assertModelPresetApproved(
+        tx,
+        actor,
+        config.modelPreset,
+        activeModelPresetKeys,
+        projectModelsEnabled,
+      );
+      await assertSandboxProviderApproved(
+        tx,
+        actor,
+        config.sandbox,
+        projectModelsEnabled,
+      );
       const response = await dependencies.store.idempotent(tx, actor, {
         scope: `POST:/agents/${c.req.param("agentId")}/versions`,
         key: idem,
@@ -1417,7 +2695,9 @@ function registerRunRoutes(
         events,
         toolCalls,
         approvals,
+        sandboxCommands,
         sandboxes,
+        workspaceBackups,
       ] = await Promise.all([
         tx.query(
           `SELECT id,thread_id,session_id,agent_version_id,state,cancellation_requested_at,
@@ -1481,10 +2761,36 @@ function registerRunRoutes(
           values,
         ),
         tx.query(
-          `SELECT id,run_id,thread_id,session_id,provider,provider_ref,target_preference,
+          `SELECT c.id,c.run_id,c.state,
+                    c.safe_command->>'toolName' AS tool_name,
+                    NULLIF(c.safe_command->>'path','') AS path,
+                    NULLIF(c.safe_command->>'commandName','') AS command_name,
+                    NULLIF(c.safe_command->>'origin','') AS origin,
+                    NULLIF(c.safe_command->>'action','') AS action,
+                    c.safe_command,c.safe_result,
+                    c.created_at,c.started_at,c.completed_at
+             FROM oao.sandbox_commands c JOIN oao.runs r
+               ON r.organization_id=c.organization_id AND r.project_id=c.project_id AND r.id=c.run_id
+             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+             ORDER BY c.created_at,c.id`,
+          values,
+        ),
+        tx.query(
+          `SELECT id,run_id,thread_id,session_id,provider,provider_ref,target_preference,provider_target,
                     state,egress_policy,safe_error,created_at,updated_at,stopped_at
              FROM oao.sandbox_instances WHERE organization_id=$1 AND project_id=$2 AND session_id=$3
              ORDER BY created_at,id`,
+          values,
+        ),
+        tx.query(
+          `SELECT b.thread_id,b.session_id,b.last_run_id,p.provider_key,p.display_name,
+                  p.provider_type,p.bucket,b.object_key,b.content_length,b.generation,
+                  b.backed_up_at,b.last_restored_at
+             FROM oao.thread_workspace_backups b
+             JOIN oao.project_storage_providers p
+               ON p.organization_id=b.organization_id AND p.project_id=b.project_id
+              AND p.id=b.storage_provider_id
+            WHERE b.organization_id=$1 AND b.project_id=$2 AND b.session_id=$3`,
           values,
         ),
       ]);
@@ -1511,7 +2817,9 @@ function registerRunRoutes(
           modelInvocations: rows(invocations),
           toolCalls: rows(toolCalls),
           approvals: rows(approvals),
+          sandboxCommands: rows(sandboxCommands),
           sandboxes: rows(sandboxes),
+          workspaceBackups: rows(workspaceBackups),
         },
       });
     });
@@ -1745,7 +3053,7 @@ function registerRunRoutes(
         3,
       );
       const result = await tx.query(
-        `SELECT id,organization_id,project_id,thread_id,session_id,agent_version_id,created_by_principal_id,state,cancellation_requested_at,admitted_at,created_at,updated_at
+        `SELECT id,organization_id,project_id,thread_id,session_id,agent_version_id,created_by_principal_id,state,cancellation_requested_at,admitted_at,settled_at,created_at,updated_at
          FROM oao.runs WHERE organization_id=$1 AND project_id=$2${condition.sql}
          ORDER BY created_at DESC,id DESC LIMIT $${3 + condition.values.length}`,
         [actor.organizationId, actor.projectId, ...condition.values, limit + 1],
@@ -1758,7 +3066,7 @@ function registerRunRoutes(
     const actor = assertProject(c);
     return dependencies.store.transaction(actor, "run:read", async (tx) => {
       const result = await tx.query(
-        `SELECT id,organization_id,project_id,thread_id,session_id,agent_version_id,created_by_principal_id,state,cancellation_requested_at,admitted_at,created_at,updated_at
+        `SELECT id,organization_id,project_id,thread_id,session_id,agent_version_id,created_by_principal_id,state,cancellation_requested_at,admitted_at,settled_at,created_at,updated_at
          FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
         [actor.organizationId, actor.projectId, c.req.param("runId")],
       );

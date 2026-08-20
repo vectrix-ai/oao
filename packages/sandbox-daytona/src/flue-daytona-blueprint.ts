@@ -22,6 +22,7 @@ import type { Sandbox as DaytonaSandbox } from "@daytona/sdk";
 
 const STATE_POLL_MS = 5_000;
 const PROBE_SILENCE_MS = 10_000;
+const DEFAULT_DAYTONA_WORKDIR = "/home/daytona";
 
 const DEAD_STATES: ReadonlySet<string> = new Set([
   "destroyed",
@@ -209,11 +210,24 @@ class DaytonaSandboxDriver implements SandboxDriver {
 export function daytona(sandbox: DaytonaSandbox): SandboxFactory {
   return {
     async createSandbox(): Promise<Sandbox> {
-      const sandboxCwd =
-        (await raceSandboxDeath(sandbox, "getWorkDir", sandbox.getWorkDir())) ??
-        "/home/daytona";
+      const sandboxCwd = await resolveDaytonaWorkspaceDirectory(sandbox);
       const driver = new DaytonaSandboxDriver(sandbox);
       return sandboxFromDriver(driver, sandboxCwd);
     },
   };
+}
+
+export async function resolveDaytonaWorkspaceDirectory(
+  sandbox: Pick<DaytonaSandbox, "getWorkDir">,
+): Promise<string> {
+  const workspaceDirectory =
+    (await sandbox.getWorkDir()) ?? DEFAULT_DAYTONA_WORKDIR;
+  if (
+    !workspaceDirectory.startsWith("/") ||
+    workspaceDirectory.includes("\0") ||
+    workspaceDirectory.includes("\n") ||
+    workspaceDirectory.includes("\r")
+  )
+    throw new Error("Daytona returned an invalid workspace directory");
+  return workspaceDirectory;
 }

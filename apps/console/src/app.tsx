@@ -4,7 +4,9 @@ import { Navigate, Route, Routes } from "react-router";
 import type { ConsoleApi } from "./api/types";
 import { ConsoleApiProvider } from "./api/context";
 import { AppLayout } from "./components/layout";
+import { ToastProvider } from "./components/feedback";
 import { AgentDetailPage, AgentsPage } from "./pages/agents";
+import { ModelsPage } from "./pages/models";
 import { PendingWorkPage } from "./pages/pending-work";
 import { SessionDetailPage, SessionsPage } from "./pages/sessions";
 import { SettingsPage } from "./pages/settings";
@@ -29,6 +31,7 @@ export function ConsoleApp({
         <Route index element={<Navigate to="/agents" replace />} />
         <Route path="agents" element={<AgentsPage />} />
         <Route path="agents/:agentId" element={<AgentDetailPage />} />
+        <Route path="models" element={<ModelsPage />} />
         <Route path="sessions" element={<SessionsPage />} />
         <Route path="sessions/:sessionId" element={<SessionDetailPage />} />
         <Route path="pending-work" element={<PendingWorkPage />} />
@@ -36,18 +39,21 @@ export function ConsoleApp({
         <Route path="projects" element={<SettingsPage />} />
         <Route path="members" element={<SettingsPage />} />
         <Route path="api-keys" element={<SettingsPage />} />
+        <Route path="sandbox-providers" element={<SettingsPage />} />
+        <Route path="storage-providers" element={<SettingsPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="settings/hosting" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/agents" replace />} />
       </Route>
     </Routes>
   );
+  const shell = <ToastProvider>{routes}</ToastProvider>;
   return (
     <QueryClientProvider client={client}>
       {api ? (
-        <ConsoleApiProvider api={api}>{routes}</ConsoleApiProvider>
+        <ConsoleApiProvider api={api}>{shell}</ConsoleApiProvider>
       ) : (
-        <ConsoleApiProvider>{routes}</ConsoleApiProvider>
+        <ConsoleApiProvider>{shell}</ConsoleApiProvider>
       )}
     </QueryClientProvider>
   );

@@ -1,6 +1,12 @@
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { createProvider } from "@earendil-works/pi-ai";
-import type { OpenRouterRouting, Provider } from "@earendil-works/pi-ai";
+import type {
+  ApiKeyAuth,
+  Model,
+  OpenRouterRouting,
+  Provider,
+} from "@earendil-works/pi-ai";
 import {
   fauxAssistantMessage,
   fauxProvider,
@@ -13,10 +19,21 @@ export {
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import type {
+  ModelCatalogEntry,
+  ModelProviderType,
+  ModelRoutingPolicy,
+} from "@oao/contracts";
 import * as v from "valibot";
 
 const OPENROUTER_MODEL_IDS = new Set(
   openrouterProvider()
+    .getModels()
+    .map((model) => model.id),
+);
+const OPENAI_MODEL_IDS = new Set(
+  openaiProvider()
     .getModels()
     .map((model) => model.id),
 );
@@ -280,9 +297,551 @@ export function createDeterministicModelProvider(
   return handle;
 }
 
+/** Test-only deterministic preset. Runnable OAO processes do not load it. */
 export const DEFAULT_LOCAL_PRESETS = deepFreeze([
   { key: "local-default", model: "fake/deterministic" },
 ]);
+
+const OPENROUTER_PREFIX = "openrouter/";
+const OPENROUTER_PRESET_PREFIX = "openrouter/@preset/";
+const OPENROUTER_CATALOG_URL = "https://openrouter.ai/api/v1";
+const OPENROUTER_PAGE_SIZE = 1_000;
+
+type Fetcher = typeof fetch;
+
+interface OpenRouterModelResponse {
+  readonly data?: readonly unknown[];
+  readonly total_count?: unknown;
+  readonly links?: { readonly next?: unknown };
+}
+
+function record(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return value !== null && typeof value === "object"
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function stringArray(value: unknown): readonly string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+async function openRouterJson(
+  path: string,
+  apiKey: string,
+  fetcher: Fetcher,
+): Promise<OpenRouterModelResponse> {
+  const response = await fetcher(`${OPENROUTER_CATALOG_URL}${path}`, {
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${apiKey}`,
+    },
+  });
+  if (!response.ok)
+    throw new Error(
+      `OpenRouter catalog request failed with ${response.status}`,
+    );
+  const json = record(await response.json());
+  if (!json || !Array.isArray(json.data))
+    throw new Error("OpenRouter catalog response was not a list");
+  return json as OpenRouterModelResponse;
+}
+
+async function openRouterPages(
+  path: string,
+  apiKey: string,
+  fetcher: Fetcher,
+  pageSize: number,
+): Promise<readonly unknown[]> {
+  const data: unknown[] = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const separator = path.includes("?") ? "&" : "?";
+    const page = await openRouterJson(
+      `${path}${separator}offset=${offset}&limit=${pageSize}`,
+      apiKey,
+      fetcher,
+    );
+    data.push(...(page.data ?? []));
+    const next = record(page.links)?.next;
+    const total = numberValue(page.total_count);
+    if (typeof next !== "string" || next.length === 0) {
+      if (total === undefined || data.length >= total) break;
+    }
+    if ((page.data ?? []).length === 0 || data.length >= 10_000) break;
+  }
+  return data;
+}
+
+function openRouterModelEntry(input: unknown): ModelCatalogEntry | undefined {
+  const model = record(input);
+  if (!model) return undefined;
+  const catalogId = stringValue(model.id);
+  const name = stringValue(model.name);
+  if (!catalogId || !name) return undefined;
+  const architecture = record(model.architecture);
+  const topProvider = record(model.top_provider);
+  const output = stringArray(architecture?.output_modalities);
+  if (output.length > 0 && !output.includes("text")) return undefined;
+  return {
+    providerType: "openrouter",
+    model: `${OPENROUTER_PREFIX}${catalogId}`,
+    catalogId,
+    name,
+    contextWindow:
+      positiveInteger(model.context_length) ??
+      positiveInteger(topProvider?.context_length),
+    maxOutputTokens: positiveInteger(topProvider?.max_completion_tokens),
+    reasoning: stringArray(model.supported_parameters).includes("reasoning"),
+  };
+}
+
+function openRouterPresetEntry(input: unknown): ModelCatalogEntry | undefined {
+  const preset = record(input);
+  if (!preset) return undefined;
+  const slug = stringValue(preset.slug);
+  const name = stringValue(preset.name) ?? slug;
+  if (!slug) return undefined;
+  return {
+    providerType: "openrouter",
+    model: `${OPENROUTER_PRESET_PREFIX}${slug}`,
+    catalogId: `@preset/${slug}`,
+    name: `Preset: ${name}`,
+    contextWindow: null,
+    maxOutputTokens: null,
+    reasoning: false,
+  };
+}
+
+function catalogMatches(
+  entry: ModelCatalogEntry,
+  search: string | undefined,
+): boolean {
+  const term = search?.trim().toLowerCase();
+  if (!term) return true;
+  return (
+    entry.catalogId.toLowerCase().includes(term) ||
+    entry.name.toLowerCase().includes(term) ||
+    entry.model.toLowerCase().includes(term)
+  );
+}
+
+export async function listOpenRouterModelCatalog(input: {
+  readonly apiKey: string;
+  readonly search?: string;
+  readonly limit?: number;
+  readonly fetcher?: Fetcher;
+}): Promise<readonly ModelCatalogEntry[]> {
+  const fetcher = input.fetcher ?? fetch;
+  const [models, presets] = await Promise.all([
+    openRouterPages(
+      "/models?output_modalities=text",
+      input.apiKey,
+      fetcher,
+      OPENROUTER_PAGE_SIZE,
+    ),
+    openRouterPages("/presets", input.apiKey, fetcher, 100).catch(() => []),
+  ]);
+  const entries = [
+    ...models.flatMap((item) => {
+      const entry = openRouterModelEntry(item);
+      return entry ? [entry] : [];
+    }),
+    ...presets.flatMap((item) => {
+      const entry = openRouterPresetEntry(item);
+      return entry ? [entry] : [];
+    }),
+  ]
+    .filter((entry) => catalogMatches(entry, input.search))
+    .sort((left, right) => left.catalogId.localeCompare(right.catalogId));
+  return entries.slice(0, input.limit ?? entries.length);
+}
+
+function openRouterCatalogId(model: string): string | undefined {
+  return model.startsWith(OPENROUTER_PREFIX)
+    ? model.slice(OPENROUTER_PREFIX.length)
+    : undefined;
+}
+
+function isValidOpenRouterCatalogId(value: string | undefined): boolean {
+  return (
+    value !== undefined &&
+    /^(?:@preset\/)?[A-Za-z0-9~][A-Za-z0-9._:~/-]*$/u.test(value)
+  );
+}
+
+function positiveInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+/**
+ * Safe, credential-free projection of the deployment OpenRouter/OpenAI catalog.
+ * Live OpenRouter project connections use `listOpenRouterModelCatalog`.
+ */
+export function listApprovedModelCatalog(
+  providerType?: ModelProviderType,
+): readonly ModelCatalogEntry[] {
+  const providers = [
+    ...(providerType === undefined || providerType === "openrouter"
+      ? [
+          {
+            type: "openrouter" as const,
+            prefix: "openrouter/",
+            provider: openrouterProvider(),
+          },
+        ]
+      : []),
+    ...(providerType === undefined || providerType === "openai"
+      ? [
+          {
+            type: "openai" as const,
+            prefix: "openai/",
+            provider: openaiProvider(),
+          },
+        ]
+      : []),
+  ];
+  return providers
+    .flatMap(({ type, prefix, provider }) =>
+      provider.getModels().map((model) => ({
+        providerType: type,
+        model: `${prefix}${model.id}`,
+        catalogId: model.id,
+        name: model.name,
+        contextWindow: positiveInteger(model.contextWindow),
+        maxOutputTokens: positiveInteger(model.maxTokens),
+        reasoning: model.reasoning === true,
+      })),
+    )
+    .sort((left, right) => left.catalogId.localeCompare(right.catalogId));
+}
+
+/** True when `model` is an entry of the matching pinned provider catalog. */
+export function isApprovedCatalogModel(
+  model: string,
+  providerType?: ModelProviderType,
+): boolean {
+  const catalogId = openRouterCatalogId(model);
+  if (
+    (providerType === undefined || providerType === "openrouter") &&
+    catalogId !== undefined &&
+    (OPENROUTER_MODEL_IDS.has(catalogId) ||
+      isValidOpenRouterCatalogId(catalogId))
+  )
+    return true;
+  const openAiId = model.startsWith("openai/")
+    ? model.slice("openai/".length)
+    : undefined;
+  return (
+    (providerType === undefined || providerType === "openai") &&
+    openAiId !== undefined &&
+    OPENAI_MODEL_IDS.has(openAiId)
+  );
+}
+
+/**
+ * Translates the provider-neutral public policy into OpenRouter's wire shape.
+ * Keeping the mapping here is what lets the API, SDK, and console stay free of
+ * provider-specific routing names.
+ */
+export function toOpenRouterRouting(
+  policy: ModelRoutingPolicy,
+): OpenRouterRouting | undefined {
+  const routing: Record<string, unknown> = {};
+  if (policy.allowFallbacks !== undefined)
+    routing.allow_fallbacks = policy.allowFallbacks;
+  if (policy.requireParameters !== undefined)
+    routing.require_parameters = policy.requireParameters;
+  if (policy.dataCollection !== undefined)
+    routing.data_collection = policy.dataCollection;
+  if (policy.zeroDataRetention !== undefined)
+    routing.zdr = policy.zeroDataRetention;
+  if (policy.providerOrder) routing.order = [...policy.providerOrder];
+  if (policy.providerAllowlist) routing.only = [...policy.providerAllowlist];
+  if (policy.providerDenylist) routing.ignore = [...policy.providerDenylist];
+  if (policy.sort) routing.sort = policy.sort;
+  const maxPrice: Record<string, number> = {};
+  if (policy.maxPromptPriceUsdPerMillion !== undefined)
+    maxPrice.prompt = policy.maxPromptPriceUsdPerMillion;
+  if (policy.maxCompletionPriceUsdPerMillion !== undefined)
+    maxPrice.completion = policy.maxCompletionPriceUsdPerMillion;
+  if (Object.keys(maxPrice).length > 0) routing.max_price = maxPrice;
+  if (Object.keys(routing).length === 0) return undefined;
+  return v.parse(OpenRouterRoutingSchema, routing) as OpenRouterRouting;
+}
+
+export interface ModelPresetTenant {
+  readonly organizationId: string;
+  readonly projectId: string;
+}
+
+export interface ProjectModelPresetInput extends ModelPresetTenant {
+  readonly key: string;
+  readonly providerId: string;
+  readonly providerType: ModelProviderType;
+  readonly apiKey: string;
+  readonly credentialVersion: number;
+  readonly model: string;
+  readonly routing: ModelRoutingPolicy;
+}
+
+export interface ResolvedModelPreset {
+  readonly key: string;
+  /** Runtime model identifier, namespaced by the preset's provider identity. */
+  readonly model: string;
+  /** Approved catalog identifier the preset was created from. */
+  readonly approvedModel: string;
+  readonly origin: "deployment" | "project";
+}
+
+function projectPresetProviderId(input: ProjectModelPresetInput): string {
+  return `project-model-${createHash("sha256")
+    .update(
+      [input.organizationId, input.projectId, input.providerId, input.key]
+        .map((part) => `${part.length}:${part}`)
+        .join("|"),
+    )
+    .digest("hex")
+    .slice(0, 24)}`;
+}
+
+function presetFingerprint(input: ProjectModelPresetInput): string {
+  return JSON.stringify({
+    providerId: input.providerId,
+    providerType: input.providerType,
+    model: input.model,
+    routing: Object.fromEntries(
+      Object.entries(input.routing).sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    ),
+  });
+}
+
+/**
+ * Bounded, tenant-scoped approved catalog for the runtime process.
+ *
+ * Flue resolves `useModel(...)` synchronously against providers registered in
+ * the process, while durable project presets live in PostgreSQL. The
+ * orchestrator therefore activates the preset a run needs *before* dispatch:
+ * activation re-validates the model against the provider catalog, registers one
+ * provider identity per (organization, project, key), and caches the mapping.
+ *
+ * Activation is append-only in memory. Re-activating a key whose stored model
+ * or routing differs from the already active definition throws instead of
+ * silently changing what an older immutable agent version means.
+ */
+export class ProjectModelPresetRegistry {
+  readonly #deployment: ImmutableModelPresetRegistry;
+  readonly #registerProvider: (provider: Provider) => void;
+  readonly #active = new Map<
+    string,
+    {
+      readonly resolved: ResolvedModelPreset;
+      readonly fingerprint: string;
+      readonly credentialVersion: number;
+    }
+  >();
+
+  constructor(options: {
+    readonly deployment: ImmutableModelPresetRegistry;
+    readonly registerProvider: (provider: Provider) => void;
+  }) {
+    this.#deployment = options.deployment;
+    this.#registerProvider = options.registerProvider;
+  }
+
+  static #cacheKey(tenant: ModelPresetTenant, key: string): string {
+    return `${tenant.organizationId}/${tenant.projectId}/${key}`;
+  }
+
+  #isDeploymentKey(key: string): boolean {
+    return this.#deployment.list().some((preset) => preset.key === key);
+  }
+
+  /** Registers a durable project preset so a synchronous resolve can find it. */
+  activate(input: ProjectModelPresetInput): ResolvedModelPreset {
+    if (!isApprovedCatalogModel(input.model, input.providerType))
+      throw new Error(
+        `Model is not present in the pinned ${input.providerType} catalog: ${input.model}`,
+      );
+    if (
+      input.providerType === "openai" &&
+      Object.keys(input.routing).length > 0
+    )
+      throw new Error("OpenAI model presets do not support routing policy");
+    const cacheKey = ProjectModelPresetRegistry.#cacheKey(input, input.key);
+    const fingerprint = presetFingerprint(input);
+    const existing = this.#active.get(cacheKey);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint)
+        throw new Error(
+          `Model preset definition changed after activation: ${input.key}`,
+        );
+      if (existing.credentialVersion >= input.credentialVersion)
+        return existing.resolved;
+    }
+    const providerId = projectPresetProviderId(input);
+    const catalogId = input.model.slice(input.providerType.length + 1);
+    this.#registerProvider(
+      createProjectPresetProvider({
+        providerId,
+        providerType: input.providerType,
+        catalogId,
+        label: input.key,
+        apiKey: input.apiKey,
+        routing: toOpenRouterRouting(input.routing),
+      }),
+    );
+    const resolved: ResolvedModelPreset = deepFreeze({
+      key: input.key,
+      model: `${providerId}/${catalogId}`,
+      approvedModel: input.model,
+      origin: "project",
+    });
+    this.#active.set(cacheKey, {
+      resolved,
+      fingerprint,
+      credentialVersion: input.credentialVersion,
+    });
+    return resolved;
+  }
+
+  /** Synchronous resolution used by the agent render. */
+  resolve(key: string, tenant: ModelPresetTenant): ResolvedModelPreset {
+    // A durable project preset wins if a deployment later introduces the same
+    // key. New collisions are rejected by the API, but preserving an existing
+    // row here prevents a configuration change from silently repointing an
+    // already-published agent version after a restart.
+    const active = this.#active.get(
+      ProjectModelPresetRegistry.#cacheKey(tenant, key),
+    );
+    if (active) return active.resolved;
+    if (this.#isDeploymentKey(key)) {
+      const preset = this.#deployment.resolve(key);
+      return {
+        key: preset.key,
+        model: preset.model,
+        approvedModel: preset.approvedModel,
+        origin: "deployment",
+      };
+    }
+    throw new Error(`Model preset is not approved: ${key}`);
+  }
+}
+
+function credentialAuth(
+  providerType: ModelProviderType,
+  apiKey: string,
+): { readonly apiKey: ApiKeyAuth } {
+  return {
+    apiKey: {
+      name: `${providerType} project API key`,
+      check: async () => ({
+        type: "api_key",
+        source: "encrypted project credential",
+      }),
+      resolve: async () => ({
+        auth: { apiKey },
+        source: "encrypted project credential",
+      }),
+    },
+  };
+}
+
+function dynamicOpenRouterModel(input: {
+  readonly providerId: string;
+  readonly catalogId: string;
+  readonly routing: OpenRouterRouting | undefined;
+}): Model<"openai-completions"> {
+  const native = openrouterProvider();
+  const staticModel = native
+    .getModels()
+    .find((model) => model.id === input.catalogId);
+  const model: Model<"openai-completions"> = staticModel
+    ? { ...staticModel, provider: input.providerId }
+    : {
+        id: input.catalogId,
+        name: input.catalogId.startsWith("@preset/")
+          ? `OpenRouter ${input.catalogId}`
+          : input.catalogId,
+        api: "openai-completions",
+        provider: input.providerId,
+        baseUrl: native.baseUrl ?? OPENROUTER_CATALOG_URL,
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128_000,
+        maxTokens: 4_096,
+        compat: {
+          supportsDeveloperRole: false,
+          thinkingFormat: "openrouter",
+        },
+      };
+  return deepFreeze({
+    ...model,
+    compat: {
+      ...model.compat,
+      ...(input.routing
+        ? { openRouterRouting: structuredClone(input.routing) }
+        : {}),
+    },
+  });
+}
+
+function createProjectPresetProvider(input: {
+  readonly providerId: string;
+  readonly providerType: ModelProviderType;
+  readonly catalogId: string;
+  readonly label: string;
+  readonly apiKey: string;
+  readonly routing: OpenRouterRouting | undefined;
+}): Provider {
+  const native =
+    input.providerType === "openrouter"
+      ? openrouterProvider()
+      : openaiProvider();
+  const nativeModel =
+    input.providerType === "openrouter"
+      ? dynamicOpenRouterModel({
+          providerId: input.providerId,
+          catalogId: input.catalogId,
+          routing: input.routing,
+        })
+      : native.getModels().find((model) => model.id === input.catalogId);
+  if (!nativeModel)
+    throw new TypeError(
+      `Model is not present in the pinned ${input.providerType} catalog: ${input.catalogId}`,
+    );
+  const model =
+    input.providerType === "openrouter"
+      ? nativeModel
+      : deepFreeze({ ...nativeModel, provider: input.providerId });
+  return createProvider({
+    id: input.providerId,
+    name: `${native.name} (${input.label})`,
+    ...(native.baseUrl ? { baseUrl: native.baseUrl } : {}),
+    ...(native.headers ? { headers: native.headers } : {}),
+    auth: credentialAuth(input.providerType, input.apiKey),
+    models: [model],
+    api:
+      input.providerType === "openrouter"
+        ? openAICompletionsApi()
+        : openAIResponsesApi(),
+  });
+}
 
 export interface ModelPresetConfiguration {
   readonly hostedEnabled: boolean;
@@ -292,28 +851,16 @@ export interface ModelPresetConfiguration {
 }
 
 /**
- * Loads the one model-preset catalog shared by publication and execution.
- * Hosted presets are deliberately unavailable unless the operator opts in;
- * constructing the registry also verifies every OpenRouter model against the
- * catalog pinned by the runtime's Pi dependency.
+ * Runnable processes have no deployment-local model. Provider-backed project
+ * presets are activated from PostgreSQL before dispatch.
  */
 export function loadModelPresetConfiguration(
   environment: Readonly<Record<string, string | undefined>>,
 ): ModelPresetConfiguration {
-  const hostedEnabled = environment.OAO_ENABLE_HOSTED_MODELS === "true";
-  if (hostedEnabled && !environment.OAO_OPENROUTER_PRESETS_JSON)
-    throw new Error(
-      "OAO_OPENROUTER_PRESETS_JSON is required when hosted models are enabled",
-    );
-  const hostedPresets = hostedEnabled
-    ? parseApprovedModelPresets(
-        JSON.parse(environment.OAO_OPENROUTER_PRESETS_JSON ?? "[]") as unknown,
-      )
-    : [];
-  const presets = [
-    ...(DEFAULT_LOCAL_PRESETS as readonly ApprovedModelPreset[]),
-    ...hostedPresets,
-  ];
+  void environment;
+  const hostedEnabled = false;
+  const hostedPresets: readonly ApprovedModelPreset[] = [];
+  const presets: readonly ApprovedModelPreset[] = [];
   return {
     hostedEnabled,
     hostedPresets,

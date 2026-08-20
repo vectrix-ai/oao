@@ -20,20 +20,42 @@ import type {
   AuditEntry,
   AuditExport,
   AuthSession,
+  CreateAgentInput,
+  CreatedSession,
+  CreateSessionInput,
   CreatedPlatformApiKey,
+  CreateModelPresetInput,
+  CreateProjectModelProviderInput,
+  CreateProjectSandboxProviderInput,
+  CreateProjectStorageProviderInput,
   HealthStatus,
   Member,
+  ModelCatalogPage,
+  ModelPreset,
+  ModelPresetPage,
   PaginationOptions,
   PlatformApiKey,
+  ProjectModelProvider,
+  ProjectSandboxProvider,
+  ProjectStorageProvider,
   ProjectEventFrame,
   ProjectEventStreamOptions,
   PublishAgentVersionInput,
+  RotateProjectModelProviderCredentialInput,
+  RotateProjectSandboxProviderCredentialInput,
+  RotateProjectStorageProviderCredentialInput,
   ReadinessStatus,
   RequestOptions,
+  RunInput,
   RunTimelineEntry,
   SandboxPolicyInput,
+  SandboxProviderPage,
+  SandboxSnapshotList,
+  StorageProviderList,
   ToolClaim,
+  ToolResultEnvelope,
   ToolResultSubmission,
+  UpdateProjectSandboxProviderConfigurationInput,
   WriteOptions,
 } from "./types.js";
 
@@ -51,7 +73,7 @@ export interface OaoClientOptions {
 }
 
 interface InternalRequestOptions extends RequestOptions {
-  readonly method?: "GET" | "POST" | "PATCH" | "DELETE";
+  readonly method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   readonly body?: unknown;
   readonly idempotencyKey?: string;
   readonly headers?: Readonly<Record<string, string>>;
@@ -246,6 +268,195 @@ export class OaoClient {
     );
   }
 
+  /** Lists deployment and project model presets an agent version may name. */
+  listModelPresets(
+    projectId: string,
+    pagination: PaginationOptions = {},
+    options?: RequestOptions,
+  ): Promise<ModelPresetPage> {
+    return this.#request(
+      this.#path(this.routes.modelPresets(projectId), pagination),
+      options,
+    );
+  }
+
+  /** Lists the pinned model catalog a project provider preset may be built on. */
+  listModelCatalog(
+    projectId: string,
+    query: {
+      readonly providerId: string;
+      readonly search?: string;
+      readonly limit?: number;
+    },
+    options?: RequestOptions,
+  ): Promise<ModelCatalogPage> {
+    return this.#request(
+      this.#path(this.routes.modelCatalog(projectId), query),
+      options,
+    );
+  }
+
+  listModelProviders(
+    projectId: string,
+    pagination: PaginationOptions = {},
+    options?: RequestOptions,
+  ): Promise<Page<ProjectModelProvider>> {
+    return this.#request(
+      this.#path(this.routes.modelProviders(projectId), pagination),
+      options,
+    );
+  }
+
+  createModelProvider(
+    projectId: string,
+    input: CreateProjectModelProviderInput,
+    options: WriteOptions,
+  ): Promise<ProjectModelProvider> {
+    return this.#write(
+      this.routes.modelProviders(projectId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
+  rotateModelProviderCredential(
+    projectId: string,
+    providerId: string,
+    input: RotateProjectModelProviderCredentialInput,
+    options: WriteOptions,
+  ): Promise<ProjectModelProvider> {
+    return this.#write(
+      this.routes.modelProviderCredential(projectId, providerId),
+      "PUT",
+      input,
+      options,
+    );
+  }
+
+  listSandboxProviders(
+    projectId: string,
+    pagination: PaginationOptions = {},
+    options?: RequestOptions,
+  ): Promise<SandboxProviderPage> {
+    return this.#request(
+      this.#path(this.routes.sandboxProviders(projectId), pagination),
+      options,
+    );
+  }
+
+  listSandboxSnapshots(
+    projectId: string,
+    providerId: string,
+    options?: RequestOptions,
+  ): Promise<SandboxSnapshotList> {
+    return this.#request(
+      this.routes.sandboxProviderSnapshots(projectId, providerId),
+      options,
+    );
+  }
+
+  createSandboxProvider(
+    projectId: string,
+    input: CreateProjectSandboxProviderInput,
+    options: WriteOptions,
+  ): Promise<ProjectSandboxProvider> {
+    return this.#write(
+      this.routes.sandboxProviders(projectId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
+  rotateSandboxProviderCredential(
+    projectId: string,
+    providerId: string,
+    input: RotateProjectSandboxProviderCredentialInput,
+    options: WriteOptions,
+  ): Promise<ProjectSandboxProvider> {
+    return this.#write(
+      this.routes.sandboxProviderCredential(projectId, providerId),
+      "PUT",
+      input,
+      options,
+    );
+  }
+
+  listStorageProviders(
+    projectId: string,
+    options?: RequestOptions,
+  ): Promise<StorageProviderList> {
+    return this.#request(this.routes.storageProviders(projectId), options);
+  }
+
+  createStorageProvider(
+    projectId: string,
+    input: CreateProjectStorageProviderInput,
+    options: WriteOptions,
+  ): Promise<ProjectStorageProvider> {
+    return this.#write(
+      this.routes.storageProviders(projectId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
+  rotateStorageProviderCredential(
+    projectId: string,
+    providerId: string,
+    input: RotateProjectStorageProviderCredentialInput,
+    options: WriteOptions,
+  ): Promise<ProjectStorageProvider> {
+    return this.#write(
+      this.routes.storageProviderCredential(projectId, providerId),
+      "PUT",
+      input,
+      options,
+    );
+  }
+
+  setDefaultStorageProvider(
+    projectId: string,
+    providerId: string,
+    options: WriteOptions,
+  ): Promise<ProjectStorageProvider> {
+    return this.#write(
+      this.routes.defaultStorageProvider(projectId, providerId),
+      "PUT",
+      {},
+      options,
+    );
+  }
+
+  updateSandboxProviderConfiguration(
+    projectId: string,
+    providerId: string,
+    input: UpdateProjectSandboxProviderConfigurationInput,
+    options: WriteOptions,
+  ): Promise<ProjectSandboxProvider> {
+    return this.#write(
+      this.routes.sandboxProviderConfiguration(projectId, providerId),
+      "PUT",
+      input,
+      options,
+    );
+  }
+
+  createModelPreset(
+    projectId: string,
+    input: CreateModelPresetInput,
+    options: WriteOptions,
+  ): Promise<ModelPreset> {
+    return this.#write(
+      this.routes.modelPresets(projectId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
   listAgents(
     projectId: string,
     pagination: PaginationOptions = {},
@@ -259,11 +470,7 @@ export class OaoClient {
 
   createAgent(
     projectId: string,
-    input: {
-      readonly key: string;
-      readonly name: string;
-      readonly description?: string;
-    },
+    input: CreateAgentInput,
     options: WriteOptions,
   ): Promise<AgentDefinition> {
     return this.#write(this.routes.agents(projectId), "POST", input, options);
@@ -328,9 +535,9 @@ export class OaoClient {
 
   createSession(
     projectId: string,
-    input: { readonly agentVersionId: string; readonly title?: string },
+    input: CreateSessionInput,
     options: WriteOptions,
-  ): Promise<Session> {
+  ): Promise<CreatedSession> {
     return this.#write(this.routes.sessions(projectId), "POST", input, options);
   }
 
@@ -375,7 +582,7 @@ export class OaoClient {
   submitRun(
     projectId: string,
     sessionId: string,
-    input: { readonly redactedInput: string },
+    input: RunInput,
     options: WriteOptions,
   ): Promise<Run> {
     return this.#write(
@@ -389,7 +596,7 @@ export class OaoClient {
   resumeRun(
     projectId: string,
     runId: string,
-    input: { readonly redactedInput: string },
+    input: RunInput,
     options: WriteOptions,
   ): Promise<Run> {
     return this.#write(
@@ -503,7 +710,7 @@ export class OaoClient {
     toolCallId: string,
     input: {
       readonly fence: string;
-      readonly safeResult: Readonly<Record<string, unknown>>;
+      readonly safeResult: ToolResultEnvelope;
     },
     options: WriteOptions,
   ): Promise<ToolResultSubmission> {
@@ -619,7 +826,7 @@ export class OaoClient {
 
   async #write<T>(
     path: string,
-    method: "POST" | "PATCH" | "DELETE",
+    method: "POST" | "PUT" | "PATCH" | "DELETE",
     body: unknown,
     options: WriteOptions,
   ): Promise<T> {

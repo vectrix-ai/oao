@@ -1,0 +1,120 @@
+---
+title: Workspace backups
+description: Persist Daytona session files in project-scoped S3-compatible storage and restore deleted sandboxes.
+---
+
+OAO can copy each Daytona thread workspace to S3-compatible object storage.
+This is separate from Daytona's own sandbox lifecycle: if Daytona no longer has
+the sandbox, OAO creates a replacement and restores the latest verified archive
+before the agent receives any sandbox tools.
+
+## Add a storage provider
+
+1. Configure the same `OAO_CREDENTIAL_ENCRYPTION_KEY` for the API and runtime.
+2. Open **Storage providers** in the console.
+3. Select **Add storage provider**.
+4. Enter the region, bucket, optional HTTP(S) endpoint and object prefix, URL
+   style, and write-only S3 credentials.
+5. Keep **Make default** selected, or make the connection the project default
+   later.
+
+AWS S3 works with an empty endpoint. Other compatible services can provide an
+endpoint and enable path-style URLs when required. Connection coordinates are
+immutable after creation so a thread's existing archive remains addressable.
+Credentials can be rotated, and the project default can be changed.
+
+<Warning>
+  OAO encrypts the S3 credential in PostgreSQL, but it does not add a second
+  encryption layer to archive objects. Restrict bucket access and configure the
+  storage provider's server-side encryption, retention, versioning, and deletion
+  policy for your requirements.
+</Warning>
+
+## Backup lifecycle
+
+The first successful backup binds a thread to the selected storage provider.
+Later default changes affect new threads; existing backed-up threads continue
+using their original provider.
+
+At each awaited agent-finish seam, OAO:
+
+1. asks Daytona for the sandbox workdir used by the agent and creates a
+   gzip-compressed tar archive of that directory inside the sandbox;
+2. uploads it to the thread's deterministic tenant-scoped object key;
+3. stores the byte length, SHA-256 digest, latest run, timestamp, and generation
+   in PostgreSQL; and
+4. overwrites the previous latest archive for that thread.
+
+The finish hook is at least once. Repeating it is safe because the object key is
+stable and PostgreSQL advances the recorded generation. A backup failure fails
+the run instead of reporting durable completion while the newest files are
+missing.
+
+The compressed archive limit is 512 MiB, and restoration rejects archives whose
+expanded tar stream exceeds 2 GiB. OAO deletes its temporary archive in the
+sandbox after upload or restore.
+
+## Restore lifecycle
+
+When another run uses the thread, OAO first asks Daytona for the recorded
+sandbox. A running or restartable sandbox is reused normally. If the recorded
+sandbox is gone, OAO creates a replacement with the agent version's selected
+snapshot or default image, then:
+
+1. downloads the latest thread archive;
+2. verifies tenant metadata, byte length, and SHA-256 against PostgreSQL;
+3. validates the tar listing;
+4. asks the replacement sandbox for its workdir and extracts the archive there;
+5. records the restore timestamp before exposing tools to the model.
+
+If a recorded object is missing, exceeds the limit, is corrupt, or cannot be
+extracted, restoration fails closed and the replacement sandbox is marked
+failed. OAO does not silently start the agent with an empty workspace.
+
+The session detail response exposes safe backup diagnostics under
+`debug.workspaceBackups`, including provider key, bucket, object key, byte
+length, generation, backup time, and last restore time. Credentials and archive
+contents are never returned.
+
+The console session panel also lists filenames observed in completed sandbox
+tool arguments. A file is marked **Backed up** when the thread workspace backup
+was recorded after that tool completed. The panel exposes the audited path and
+backup state only; it does not read or return archive contents.
+
+## API example
+
+```bash
+curl --fail-with-body \
+  --request POST \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: workspace-primary-1' \
+  --data '{
+    "key":"workspace-primary",
+    "displayName":"Workspace primary",
+    "providerType":"s3",
+    "endpoint":null,
+    "region":"eu-central-1",
+    "bucket":"oao-workspaces",
+    "prefix":"production/oao",
+    "forcePathStyle":false,
+    "setDefault":true,
+    "accessKeyId":"write-only-access-key",
+    "secretAccessKey":"write-only-secret-key"
+  }' \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/storage-providers"
+```
+
+See [HTTP API](/reference/http-api) for list, credential rotation, and default
+selection routes.
+
+## Current boundaries
+
+- One latest archive is retained per thread. Historical generations depend on
+  bucket versioning; OAO does not expose a generation browser or rollback API.
+- Backup is automatic for Daytona-enabled threads when a default storage
+  provider exists. There is no per-agent or per-session storage selector.
+- OAO does not test bucket connectivity during connection creation. The first
+  backup is the first live write.
+- Removing remote objects or changing bucket policy outside OAO can make a
+  recorded backup unrestorable.

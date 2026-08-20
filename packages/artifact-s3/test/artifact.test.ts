@@ -123,3 +123,23 @@ test("S3 reads fail closed when stored tenant metadata disagrees", async () => {
     /tenant metadata does not match/u,
   );
 });
+
+test("S3 reads fail closed when tenant metadata is missing", async () => {
+  const client: S3ObjectClient = {
+    async putObject() {
+      return {};
+    },
+    async getObject() {
+      return { body: new Uint8Array([1]) };
+    },
+    async headObject() {
+      return undefined;
+    },
+    async deleteObject() {},
+  };
+  const store = new S3ArtifactAdapter({ bucket: "artifacts", client });
+  await assert.rejects(
+    store.get({ tenant, key: "result.txt" }),
+    /tenant metadata does not match/u,
+  );
+});

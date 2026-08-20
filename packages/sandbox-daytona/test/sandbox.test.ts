@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type {
   OrganizationId,
@@ -11,14 +12,151 @@ import type {
 import type { SandboxRepository } from "../src/index.js";
 import {
   DAYTONA_TARGET_POSTURE,
+  DEFAULT_DAYTONA_IMAGE,
+  DaytonaManagedProvider,
   FakeSandboxProvider,
   ManagedSandboxLifecycle,
+  createFakeFlueSandbox,
+  daytonaSandboxRecoveryAction,
+  safeSandboxToolCommand,
 } from "../src/index.js";
 
 const tenant = {
   organizationId: "00000000-0000-4000-8000-000000000001" as OrganizationId,
   projectId: "00000000-0000-4000-8000-000000000002" as ProjectId,
 } as const;
+
+test("project Daytona credentials use the encrypted provider schema", async () => {
+  const source = await readFile(
+    new URL("../src/index.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /SELECT id,provider_type,encrypted_api_key,encryption_nonce,\s+encryption_tag,encryption_key_version,target,restricted_egress/u,
+  );
+  assert.doesNotMatch(
+    source,
+    /credential_(?:ciphertext|nonce|tag|key_version)/u,
+  );
+  assert.equal(DEFAULT_DAYTONA_IMAGE, "debian:12.9");
+  assert.doesNotMatch(source, /flue-daytona:2\.0\.3/u);
+});
+
+test("dead Daytona builds are never reused during recovery", () => {
+  assert.equal(daytonaSandboxRecoveryAction("build_failed"), "skip");
+  assert.equal(daytonaSandboxRecoveryAction("destroyed"), "skip");
+  assert.equal(daytonaSandboxRecoveryAction("error"), "recover");
+  assert.equal(daytonaSandboxRecoveryAction("stopped"), "start");
+  assert.equal(daytonaSandboxRecoveryAction("started"), "reuse");
+});
+
+test("sandbox tool transcript keeps content while masking credentials", () => {
+  const write = safeSandboxToolCommand("write", {
+    path: "/root/test.csv",
+    content: "customer,secret\nAlice,do-not-store",
+  });
+  assert.deepEqual(write, {
+    toolName: "write",
+    arguments: {
+      path: "/root/test.csv",
+      content: "customer,secret\nAlice,do-not-store",
+    },
+  });
+
+  const edit = safeSandboxToolCommand("edit", {
+    path: "/root/test.csv",
+    oldText: "Alice",
+    newText: "Bob",
+  });
+  assert.deepEqual(edit, {
+    toolName: "edit",
+    arguments: {
+      path: "/root/test.csv",
+      oldText: "Alice",
+      newText: "Bob",
+    },
+  });
+
+  assert.deepEqual(
+    safeSandboxToolCommand("bash", { command: "/usr/bin/python report.py" }),
+    {
+      toolName: "bash",
+      arguments: { command: "/usr/bin/python report.py" },
+    },
+  );
+  const secretCommand = safeSandboxToolCommand("bash", {
+    command: "API_KEY=do-not-store curl https://example.test/private",
+  });
+  assert.deepEqual(secretCommand, {
+    toolName: "bash",
+    arguments: {
+      command: "API_KEY=[REDACTED] curl https://example.test/private",
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(secretCommand), /do-not-store/u);
+
+  const navigation = safeSandboxToolCommand("browser_navigate", {
+    url: "https://user:password@example.test/private?token=do-not-store",
+  });
+  assert.deepEqual(navigation, {
+    toolName: "browser_navigate",
+    arguments: {
+      url: "https://[REDACTED]@example.test/private?token=[REDACTED]",
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(navigation), /password|do-not-store/u);
+});
+
+test("workspace backup and restore use Daytona's model-facing workdir", async () => {
+  const commands: { readonly command: string; readonly cwd?: string }[] = [];
+  const uploads: { readonly path: string; readonly bytes: Buffer }[] = [];
+  const native = {
+    getWorkDir: async () => "/root",
+    process: {
+      executeCommand: async (command: string, cwd?: string) => {
+        commands.push({ command, ...(cwd ? { cwd } : {}) });
+        return { exitCode: 0, result: "" };
+      },
+    },
+    fs: {
+      downloadFile: async () => Buffer.from([31, 139, 8, 0]),
+      uploadFile: async (bytes: Buffer, path: string) => {
+        uploads.push({ path, bytes: Buffer.from(bytes) });
+      },
+    },
+  };
+  const handle = {
+    providerRef: "sandbox-workdir-test",
+    target: "test",
+    native,
+  };
+  const provider = new DaytonaManagedProvider({ apiKey: "test-key" });
+
+  assert.deepEqual(
+    await provider.captureWorkspace(handle),
+    new Uint8Array([31, 139, 8, 0]),
+  );
+  const capture = commands.find((entry) =>
+    entry.command.startsWith("tar --exclude="),
+  );
+  assert.equal(capture?.cwd, "/root");
+  assert.doesNotMatch(capture?.command ?? "", /home\/daytona/u);
+
+  commands.length = 0;
+  await provider.restoreWorkspace(handle, new Uint8Array([31, 139, 8, 0]));
+  const restore = commands.find((entry) =>
+    entry.command.includes("tar --no-same-owner"),
+  );
+  assert.equal(restore?.cwd, "/root");
+  assert.doesNotMatch(restore?.command ?? "", /home\/daytona/u);
+  assert.deepEqual(uploads, [
+    {
+      path: "/tmp/oao-workspace-restore.tar.gz",
+      bytes: Buffer.from([31, 139, 8, 0]),
+    },
+  ]);
+});
 
 test("fake sandbox creation, recovery and command results are fenced", async () => {
   let instanceState: "creating" | "running" | "stopped" = "creating";
@@ -119,4 +257,41 @@ test("fake sandbox creation, recovery and command results are fenced", async () 
     sha256: createHash("sha256").update("safe").digest(),
   });
   assert.equal(DAYTONA_TARGET_POSTURE.strictResidencyEnforced, false);
+});
+
+test("sandbox capabilities map to the exact model-facing tool set", async () => {
+  const fileFactory = createFakeFlueSandbox([
+    "filesystem_read",
+    "filesystem_write",
+  ]);
+  const fileSandbox = await fileFactory.createSandbox({ id: "files" });
+  assert.deepEqual(
+    fileFactory
+      .tools?.(fileSandbox, { subagents: {} })
+      .map((tool) => tool.name),
+    ["read", "write", "edit"],
+  );
+
+  const browserFactory = createFakeFlueSandbox(["browser"]);
+  const browserSandbox = await browserFactory.createSandbox({ id: "browser" });
+  const browserTools = browserFactory.tools?.(browserSandbox, {
+    subagents: {},
+  });
+  assert.deepEqual(
+    browserTools?.map((tool) => tool.name),
+    ["browser_navigate", "browser_snapshot", "browser_interact"],
+  );
+  const navigate = browserTools?.find(
+    (tool) => tool.name === "browser_navigate",
+  );
+  const snapshot = browserTools?.find(
+    (tool) => tool.name === "browser_snapshot",
+  );
+  assert.ok(navigate && snapshot);
+  await navigate.execute("call-1", { url: "https://example.test/path" });
+  const result = await snapshot.execute("call-2", {});
+  assert.match(
+    result.content.find((entry) => entry.type === "text")?.text ?? "",
+    /https:\/\/example\.test\/path/u,
+  );
 });

@@ -24,6 +24,7 @@
     "@oao/db-postgres": "workspace:*",
     "@oao/domain": "workspace:*",
     "@oao/models-openrouter": "workspace:*",
+    "@oao/provider-credentials": "workspace:*",
     "@oao/queue-postgres": "workspace:*",
     "@oao/tool-broker": "workspace:*",
     "@opentelemetry/api": "1.9.1",

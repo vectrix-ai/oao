@@ -187,7 +187,7 @@ test(
     try {
       await t.test("migration applies cleanly and is idempotent", async () => {
         const first = await migrate(pool);
-        assert.equal(first.applied.length + first.alreadyApplied.length, 5);
+        assert.equal(first.applied.length + first.alreadyApplied.length, 15);
         const second = await migrate(pool);
         assert.deepEqual(second.alreadyApplied, [
           "0001_foundation.sql",
@@ -195,6 +195,16 @@ test(
           "0003_api_auth.sql",
           "0004_runtime.sql",
           "0005_mvp_integration.sql",
+          "0006_model_presets.sql",
+          "0007_project_model_providers.sql",
+          "0008_openrouter_presets.sql",
+          "0009_sandbox_providers.sql",
+          "0010_real_providers_only.sql",
+          "0011_rebind_real_provider_validation.sql",
+          "0012_preserve_publication_guards.sql",
+          "0013_sandbox_provider_target.sql",
+          "0014_agent_sandbox_snapshot.sql",
+          "0015_workspace_storage.sql",
         ]);
         await seed(pool);
       });

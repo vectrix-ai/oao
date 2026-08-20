@@ -1,0 +1,380 @@
+---
+title: "Local development"
+description: "Install, start, verify, stop, and troubleshoot the complete OAO development stack."
+---
+
+OAO's default development profile runs the console, API, runtime worker, and PostgreSQL on your machine. It uses deterministic model, sandbox, and authentication adapters, so the first start does not require hosted-provider credentials.
+
+<Info>
+  PostgreSQL is the only application database in the local profile. OpenRouter,
+  Daytona, WorkOS, S3-compatible storage, and an OTLP collector are not required
+  for the default startup path.
+</Info>
+
+## Prerequisites
+
+Install the following before starting OAO:
+
+- Node.js 22.19.0 or newer
+- pnpm 10.27.0, which is the version pinned by the workspace
+- The Docker CLI and a running Docker-compatible daemon
+- `curl` for health checks and `jq` for the API walkthroughs in these docs
+
+Check the installed versions from the repository root:
+
+```bash
+node --version
+pnpm --version
+docker --version
+docker info
+```
+
+`docker info` must reach the Docker daemon. The local scripts use Docker Compose when it is available, fall back to the legacy `docker-compose` command, and otherwise manage the PostgreSQL container with the Docker CLI directly. A Compose plugin is therefore helpful but not required.
+
+On macOS, start Docker Desktop, Colima, or another Docker-compatible daemon before running OAO. For example, if Colima is installed:
+
+```bash
+colima start
+docker context ls
+docker info
+```
+
+If more than one Docker context exists and the active context does not reach Colima, select it and check again:
+
+```bash
+docker context use colima
+docker info
+```
+
+OAO does not start or stop Docker Desktop or Colima. The current launcher invokes the `docker` CLI; Apple Container is not implemented as a local runtime for these scripts.
+
+## First start
+
+From the repository root, install dependencies:
+
+```bash
+pnpm install
+```
+
+The checked-in defaults are enough for local development. Copy the environment template only if you want a visible file to edit:
+
+```bash
+cp .env.example .env
+```
+
+Do not commit `.env`; it is for local values and may contain provider credentials.
+
+Start the complete stack:
+
+```bash
+pnpm dev:local
+```
+
+On every start, the launcher:
+
+1. Starts PostgreSQL 17 if it is not already running.
+2. Builds the workspace packages required by the source watchers.
+3. Applies all PostgreSQL migrations.
+4. Idempotently seeds the development organization, project, and principal.
+5. Starts the API, runtime worker, and Vite console.
+6. Waits up to 30 seconds for the API, worker, and console to become ready.
+
+Wait for this message before opening the application:
+
+```text
+OAO is ready at http://127.0.0.1:5173
+Press Ctrl-C to stop.
+```
+
+The default services are:
+
+| Service        | Address                 | Purpose                                                     |
+| -------------- | ----------------------- | ----------------------------------------------------------- |
+| Console        | `http://127.0.0.1:5173` | React management and debugging UI                           |
+| API            | `http://127.0.0.1:3000` | REST, authentication, and SSE endpoints                     |
+| Runtime worker | `http://127.0.0.1:8788` | Durable run execution and readiness endpoint                |
+| PostgreSQL     | `127.0.0.1:5432`        | Canonical state, control state, read models, and wake queue |
+
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173) in a browser.
+
+<Warning>
+  Development authentication trusts local requests and seeds a deterministic
+  principal with full local permissions. Use this profile only in a trusted
+  development environment; it is not a production authentication mode.
+</Warning>
+
+## Normal start and stop
+
+After the first installation, use the same command for normal development:
+
+```bash
+pnpm dev:local
+```
+
+Use <kbd>Ctrl</kbd>+<kbd>C</kbd> in that terminal to stop. The launcher terminates the console, API, and runtime worker. Its PostgreSQL behavior depends on who started the database:
+
+- If this `dev:local` invocation started PostgreSQL, it stops and removes the PostgreSQL container during shutdown.
+- If PostgreSQL was already running, it leaves PostgreSQL running.
+- In both cases, the named data volume remains intact.
+
+To manage the persistent database separately:
+
+```bash
+pnpm db:up
+pnpm db:migrate
+pnpm db:down
+```
+
+For example, run `pnpm db:up` before `pnpm dev:local` when you want PostgreSQL to remain running after you stop the application processes. `pnpm db:down` stops and removes the OAO PostgreSQL container but does not delete its data volume.
+
+Use `pnpm dev:local`, rather than the generic `pnpm dev`, when you need the complete local environment. The local launcher owns database startup, migration, seeding, dependency builds, readiness checks, and coordinated shutdown.
+
+## Verify the stack
+
+The browser should load the console without a WorkOS sign-in. The console uses the HTTP API through the Vite `/v1` proxy and the deterministic development identity.
+
+The console starts in its light appearance. Use **Use dark appearance** in the
+top bar to switch themes; the choice is stored only in the browser and does not
+affect project or organization data. Both appearances preserve the same OAO
+green action and status palette.
+
+Check the services directly:
+
+```bash
+curl -fsS http://127.0.0.1:3000/healthz
+curl -fsS http://127.0.0.1:3000/readyz
+curl -fsS http://127.0.0.1:8788/healthz
+curl -fsS http://127.0.0.1:8788/readyz
+curl -fsSI http://127.0.0.1:5173/
+```
+
+A healthy default stack returns:
+
+```json
+{"status":"ok"}
+{"status":"ready"}
+{"status":"ok"}
+{"status":"ready","profile":"project-providers","sandbox":"daytona"}
+```
+
+The final console request should return an HTTP `200` response. `/healthz` reports process liveness. `/readyz` additionally checks whether the service can use the required PostgreSQL state; the runtime response also identifies the active model profile and sandbox adapter.
+
+For repository-wide validation, use:
+
+```bash
+pnpm check
+pnpm test:postgres:fresh
+pnpm test:stack:fresh
+```
+
+`test:postgres:fresh` creates a PostgreSQL container on a random host port,
+applies migrations twice, and runs the database and runtime integration suites.
+Automated tests use explicit provider doubles at adapter boundaries; those
+doubles are never selectable in the runnable API or console. Both fresh checks
+remove their temporary container after success, failure, or interruption and do
+not use the persistent `oao-postgres-data` volume.
+
+## Persistent local data
+
+Both the Compose path and the Docker CLI fallback store PostgreSQL data in the named Docker volume `oao-postgres-data`. Agents, sessions, transcripts, and debugging history therefore survive `dev:local` stop/start cycles and `pnpm db:down`.
+
+Inspect the volume without changing it:
+
+```bash
+docker volume inspect oao-postgres-data
+```
+
+To deliberately reset all local OAO data, first stop the stack, then remove the named volume:
+
+```bash
+pnpm db:down
+docker volume rm oao-postgres-data
+```
+
+<Warning>
+  Removing `oao-postgres-data` permanently deletes the local database. The next
+  `pnpm dev:local` creates a fresh volume, reapplies migrations, and reseeds
+  only the deterministic development tenant.
+</Warning>
+
+## Change local ports
+
+The launcher reads `.env` when it exists. Keep dependent values aligned when changing ports. This example moves all four services:
+
+```dotenv
+OAO_POSTGRES_PORT=55432
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/oao
+
+OAO_API_PORT=3100
+API_ORIGIN=http://127.0.0.1:3100
+VITE_OAO_API_PROXY_TARGET=http://127.0.0.1:3100
+
+OAO_RUNTIME_PORT=8790
+
+OAO_CONSOLE_PORT=5174
+APP_ORIGIN=http://127.0.0.1:5174
+```
+
+Restart `pnpm dev:local` after editing `.env`. The console uses Vite's strict-port mode, so it exits instead of silently choosing a different port when the configured port is occupied.
+
+## Configure runtime providers
+
+Runtime execution requires project-scoped model and Daytona providers. There is
+no credential-free fake execution profile.
+
+### OpenRouter and OpenAI models
+
+Generate one platform encryption key and set it for both the API and runtime:
+
+```bash
+openssl rand -base64 32
+```
+
+```dotenv
+OAO_CREDENTIAL_ENCRYPTION_KEY=replace-with-generated-base64-value
+```
+
+Restart the API and runtime, then add an OpenRouter or OpenAI provider on the
+console **Models** page. Enter provider API keys there; OAO encrypts them before
+storing them in PostgreSQL for the current organization and project. Add a
+model preset linked to that connection. No process restart is needed for later
+provider or preset additions.
+
+<Warning>
+  Do not set `OPENROUTER_API_KEY` or `OPENAI_API_KEY` in `.env`. Provider keys
+  are write-only console/API inputs and are never returned after encryption.
+</Warning>
+
+### Daytona sandboxes
+
+Use the same platform encryption key configured for hosted model providers,
+restart the API and runtime, then open **Sandbox providers** in the console.
+Select **Add sandbox provider**, choose **Daytona**, and add the API key, an
+optional target preference, and the domain/CIDR allowlist agents may use with
+`network: "restricted"`. The key is a write-only input encrypted in PostgreSQL
+for the current project.
+
+Choose the connection, an active Daytona snapshot (or OAO's default image),
+network policy, and exact sandbox capabilities while creating an agent or
+before publishing a later version. No process restart is needed for later
+connection, credential, target, or allowlist changes.
+
+The connection's optional target is only a provider placement preference. OAO
+does not verify residency or treat the target as a residency guarantee. A
+restricted egress policy must contain at least one allowed domain or CIDR;
+`network: "none"` blocks sandbox network access.
+
+See [Daytona sandboxes](/sandboxes/daytona) for the API and tool-capability
+contracts.
+
+### S3-compatible workspace backups
+
+To preserve Daytona files after a sandbox is deleted, open **Storage
+providers** and add a project-scoped S3-compatible connection. The API and
+runtime use the same `OAO_CREDENTIAL_ENCRYPTION_KEY` to protect its write-only
+credentials. The first connection becomes the project default automatically;
+you can explicitly select another default later.
+
+OAO asks Daytona for the thread sandbox's active workdir, archives that directory
+after each completed agent run, and restores the latest verified archive into a
+new replacement sandbox's workdir. No restart is required after adding or
+rotating a storage connection. See
+[Workspace backups](/storage/workspace-backups) for retention, encryption, size,
+and failure behavior.
+
+### OTLP telemetry
+
+To export vendor-neutral telemetry, set the collector endpoint:
+
+```dotenv
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+```
+
+Leave it empty when no collector is running.
+
+<Note>
+  `pnpm dev:local` always starts the API with `AUTH_PROVIDER=development` and
+  `NODE_ENV=development`, even if `.env` contains WorkOS values. WorkOS is a
+  separate production-oriented API mode that requires HTTPS-compatible origin,
+  callback, cookie, webhook, pepper, and operator-provisioning configuration. It
+  is not a credential switch for the local launcher.
+</Note>
+
+## Troubleshooting
+
+### Cannot connect to the Docker daemon
+
+Symptoms include `Cannot connect to the Docker daemon`, a missing socket, a Docker context error, or `pnpm db:up` failing before PostgreSQL starts.
+
+1. Check the selected context and daemon:
+
+   ```bash
+   docker context show
+   docker context ls
+   docker info
+   ```
+
+2. Start Docker Desktop or, when using Colima, run:
+
+   ```bash
+   colima start
+   docker context use colima
+   docker info
+   ```
+
+3. Run `pnpm dev:local` again only after `docker info` succeeds.
+
+Starting OAO does not start the daemon for you. If a `colima` context is missing, starting Colima normally creates or restores it; then recheck the active Docker context.
+
+### `pnpm install` reports ignored build scripts
+
+pnpm 10 may finish successfully while warning that dependency lifecycle scripts were ignored. In this checkout, the warning can name `@google/genai`, `esbuild`, and `protobufjs`. The warning by itself is not a failed installation; `pnpm dev:local` immediately runs the workspace build, which is the relevant functional check.
+
+Do not approve an unfamiliar dependency automatically. If startup later fails specifically because a reviewed dependency's build script did not run, use pnpm's interactive approval flow and reinstall:
+
+```bash
+pnpm approve-builds
+pnpm install
+pnpm dev:local
+```
+
+Select only dependencies whose install scripts you have reviewed and intend to trust. The approval can update tracked pnpm policy files, so inspect `git diff` before committing any result.
+
+### A port is already in use
+
+The default ports are `5432`, `3000`, `8788`, and `5173`. Find the process holding a port:
+
+```bash
+lsof -nP -iTCP:5173 -sTCP:LISTEN
+```
+
+Stop the conflicting process or change the corresponding values in `.env`. For PostgreSQL, change both `OAO_POSTGRES_PORT` and `DATABASE_URL`. For the API, keep `OAO_API_PORT`, `API_ORIGIN`, and `VITE_OAO_API_PROXY_TARGET` aligned. For the console, keep `OAO_CONSOLE_PORT` and `APP_ORIGIN` aligned.
+
+### PostgreSQL does not become healthy
+
+Inspect the container and its health output:
+
+```bash
+docker ps -a
+docker logs oao-postgres-local
+docker volume inspect oao-postgres-data
+```
+
+When Compose is active, its generated container name may differ from `oao-postgres-local`; use the PostgreSQL container name shown by `docker ps -a` with `docker logs`.
+
+Check that the host port in `DATABASE_URL` matches `OAO_POSTGRES_PORT`. Do not delete the volume as a first troubleshooting step, because it contains all persistent local OAO data.
+
+### A service never becomes ready
+
+The launcher stops the stack if the API, runtime worker, or console does not become ready within 30 seconds. Read the first service error printed above the timeout, then check:
+
+- PostgreSQL is healthy and reachable through `DATABASE_URL`.
+- No other process is using an application port.
+- API and runtime use the same canonical 32-byte
+  `OAO_CREDENTIAL_ENCRYPTION_KEY`.
+- The project has a configured model provider, an approved model preset, and a
+  Daytona connection.
+- The selected immutable agent version references those project provider keys.
+
+Correct the provider configuration, restart `pnpm dev:local` if the platform
+encryption key changed, and rerun the health checks.

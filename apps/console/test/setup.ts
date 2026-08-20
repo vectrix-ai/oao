@@ -5,4 +5,6 @@ import { afterEach } from "vitest";
 afterEach(() => {
   cleanup();
   sessionStorage.clear();
+  localStorage.clear();
+  delete document.documentElement.dataset.theme;
 });

@@ -1,39 +1,74 @@
 import {
-  Activity,
   Boxes,
   CircleGauge,
   Database,
   KeyRound,
   Layers3,
   Plus,
-  Settings,
+  RefreshCw,
+  Settings2,
 } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState, type FormEvent } from "react";
 import { Link, useLocation } from "react-router";
 import { useApi } from "../api/context";
+import type {
+  CreateApiKeyInput,
+  CreateSandboxProviderInput,
+  CreateStorageProviderInput,
+  CreatedApiKey,
+  ProjectSandboxProvider,
+  ProjectStorageProvider,
+  SettingsData,
+  UpdateSandboxProviderConfigurationInput,
+} from "../api/types";
 import {
+  Alert,
+  Button,
+  CheckboxRow,
+  Dialog,
   EmptyState,
   ErrorState,
+  Field,
+  FieldRow,
+  FormError,
+  Input,
   LoadingState,
+  MetaGrid,
+  Page,
   PageHeader,
-  StatusPill,
+  Panel,
+  Select,
+  StatusChip,
+  Switch,
+  TableCard,
+  Textarea,
   formatDate,
+  initials,
+  useToast,
 } from "../components/ui";
 
 type SettingsRoute =
-  "organization" | "projects" | "members" | "api-keys" | "settings" | "hosting";
+  | "organization"
+  | "projects"
+  | "members"
+  | "api-keys"
+  | "sandbox-providers"
+  | "storage-providers"
+  | "settings"
+  | "hosting";
 
 const copy: Record<
   SettingsRoute,
   { eyebrow: string; title: string; description: string }
 > = {
   organization: {
-    eyebrow: "Manage",
+    eyebrow: "Configure",
     title: "Organization",
     description: "Identity and tenancy details for this organization.",
   },
   projects: {
-    eyebrow: "Manage",
+    eyebrow: "Configure",
     title: "Projects",
     description: "Isolated agent environments within the organization.",
   },
@@ -48,8 +83,20 @@ const copy: Record<
     description:
       "Scoped project credentials. Secret values are shown only once at creation.",
   },
+  "sandbox-providers": {
+    eyebrow: "Configure",
+    title: "Sandbox providers",
+    description:
+      "Project connections used to run agent tools in isolated environments.",
+  },
+  "storage-providers": {
+    eyebrow: "Configure",
+    title: "Storage providers",
+    description:
+      "S3-compatible project storage for durable per-thread workspace backups.",
+  },
   settings: {
-    eyebrow: "Manage",
+    eyebrow: "Configure",
     title: "Settings",
     description: "Console preferences and public data-handling behavior.",
   },
@@ -60,9 +107,21 @@ const copy: Record<
   },
 };
 
+const createLabel: Partial<Record<SettingsRoute, string>> = {
+  projects: "New project",
+  members: "Invite member",
+  "api-keys": "Create API key",
+};
+
 export function SettingsPage() {
   const api = useApi();
+  const queryClient = useQueryClient();
+  const notify = useToast();
   const location = useLocation();
+  const [creatingApiKey, setCreatingApiKey] = useState(false);
+  const [createdApiKey, setCreatedApiKey] = useState<CreatedApiKey | null>(
+    null,
+  );
   const route = (
     location.pathname === "/settings/hosting"
       ? "hosting"
@@ -72,203 +131,243 @@ export function SettingsPage() {
     queryKey: ["settings"],
     queryFn: () => api.getSettings(),
   });
+  const createApiKey = useMutation({
+    mutationFn: (input: CreateApiKeyInput) => api.createApiKey(input),
+    onSuccess: (key) => {
+      setCreatingApiKey(false);
+      setCreatedApiKey(key);
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      notify("API key created.");
+    },
+  });
   const heading = copy[route] ?? copy.settings;
+  const action = createLabel[route];
   if (query.isPending)
     return (
-      <div className="page">
+      <Page>
         <LoadingState label={`Loading ${heading.title.toLowerCase()}`} />
-      </div>
+      </Page>
     );
   if (query.isError)
     return (
-      <div className="page">
+      <Page>
         <ErrorState error={query.error} retry={() => void query.refetch()} />
-      </div>
+      </Page>
     );
   return (
-    <div className="page">
+    <Page>
       <PageHeader
         {...heading}
+        {...(route === "hosting"
+          ? {
+              breadcrumbs: [
+                { label: "Settings", to: "/settings" },
+                { label: "Hosting diagnostics" },
+              ],
+            }
+          : {})}
         actions={
-          route === "projects" ||
-          route === "members" ||
-          route === "api-keys" ? (
-            <button className="button">
-              <Plus size={16} />
-              {route === "projects"
-                ? "New project"
-                : route === "members"
-                  ? "Invite member"
-                  : "Create API key"}
-            </button>
+          action ? (
+            <Button
+              variant="primary"
+              icon={<Plus size={15} />}
+              onClick={
+                route === "api-keys"
+                  ? () => {
+                      createApiKey.reset();
+                      setCreatingApiKey(true);
+                    }
+                  : undefined
+              }
+            >
+              {action}
+            </Button>
           ) : undefined
         }
       />
-      {renderSettings(route, query.data)}
-    </div>
+      <SettingsBody route={route} data={query.data} />
+      {creatingApiKey ? (
+        <CreateApiKeyDialog
+          pending={createApiKey.isPending}
+          error={createApiKey.error}
+          onClose={() => {
+            createApiKey.reset();
+            setCreatingApiKey(false);
+          }}
+          onSubmit={(input) => createApiKey.mutate(input)}
+        />
+      ) : null}
+      {createdApiKey ? (
+        <CreatedApiKeyDialog
+          apiKey={createdApiKey}
+          onClose={() => {
+            createApiKey.reset();
+            setCreatedApiKey(null);
+          }}
+        />
+      ) : null}
+    </Page>
   );
 }
 
-function renderSettings(
-  route: SettingsRoute,
-  data: Awaited<ReturnType<ReturnType<typeof useApi>["getSettings"]>>,
-) {
+function SettingsBody({
+  route,
+  data,
+}: {
+  readonly route: SettingsRoute;
+  readonly data: SettingsData;
+}) {
   if (route === "organization")
     return (
-      <section className="panel settings-form">
-        <div className="section-heading">
-          <div>
-            <h2>Organization details</h2>
-            <p>Stable identity repeated across tenant-owned resources.</p>
-          </div>
-          <Boxes />
-        </div>
-        <dl className="definition-grid">
-          <div>
-            <dt>Name</dt>
-            <dd>{data.organization.name}</dd>
-          </div>
-          <div>
-            <dt>Slug</dt>
-            <dd>
-              <code>{data.organization.slug}</code>
-            </dd>
-          </div>
-          <div>
-            <dt>Created</dt>
-            <dd>{formatDate(data.organization.createdAt)}</dd>
-          </div>
-        </dl>
-      </section>
+      <Panel
+        title="Organization details"
+        description="Stable identity repeated across every tenant-owned resource."
+        actions={<Boxes size={18} aria-hidden="true" />}
+      >
+        <MetaGrid
+          columns={3}
+          items={[
+            { label: "Name", value: data.organization.name },
+            {
+              label: "Slug",
+              value: <code>{data.organization.slug}</code>,
+            },
+            {
+              label: "Created",
+              value: formatDate(data.organization.createdAt),
+            },
+          ]}
+        />
+      </Panel>
     );
+
   if (route === "projects")
     return (
       <section className="cards-grid">
         {data.projects.map((project) => (
           <article className="resource-card" key={project.id}>
-            <Layers3 />
+            <span className="service-icon" aria-hidden="true">
+              <Layers3 size={16} />
+            </span>
             <div>
               <h2>{project.name}</h2>
               <code>{project.slug}</code>
             </div>
-            <Link to="/agents">Open project</Link>
+            <div>
+              <Link className="btn btn--sm" to="/agents">
+                Open project
+              </Link>
+            </div>
           </article>
         ))}
       </section>
     );
+
   if (route === "members")
     return (
-      <section className="table-card">
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Member</th>
-                <th>Email</th>
-                <th>Role</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.members.map((member) => (
-                <tr key={member.id}>
-                  <td>
-                    <span className="member-cell">
-                      <span className="avatar">
-                        {member.name
-                          .split(" ")
-                          .map((part) => part[0])
-                          .join("")
-                          .slice(0, 2)}
-                      </span>
-                      <strong>{member.name}</strong>
-                    </span>
-                  </td>
-                  <td>{member.email}</td>
-                  <td>
-                    <StatusPill value={member.role} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      <TableCard label="Members table" caption="Members of this organization">
+        <thead>
+          <tr>
+            <th>Member</th>
+            <th>Email</th>
+            <th>Role</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.members.map((member) => (
+            <tr key={member.id}>
+              <td>
+                <span className="member-cell">
+                  <span className="avatar" aria-hidden="true">
+                    {initials(member.name)}
+                  </span>
+                  <strong>{member.name}</strong>
+                </span>
+              </td>
+              <td>{member.email}</td>
+              <td>
+                <StatusChip value={member.role} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </TableCard>
     );
+
   if (route === "api-keys")
     return data.apiKeys.length === 0 ? (
       <EmptyState
+        icon="⚿"
         title="No API keys"
-        description="Create a scoped key for a project integration."
+        description="An API key is a scoped project credential for an integration or CI job."
       />
     ) : (
-      <section className="table-card">
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Prefix</th>
-                <th>Scopes</th>
-                <th>Last used</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.apiKeys.map((key) => (
-                <tr key={key.id}>
-                  <td>
-                    <span className="member-cell">
-                      <KeyRound size={16} />
-                      <strong>{key.name}</strong>
-                    </span>
-                  </td>
-                  <td>
-                    <code>{key.prefix}</code>
-                  </td>
-                  <td>
-                    {key.scopes.map((scope) => (
-                      <span className="scope" key={scope}>
-                        {scope}
-                      </span>
-                    ))}
-                  </td>
-                  <td>
-                    {key.lastUsedAt ? formatDate(key.lastUsedAt) : "Never"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      <TableCard label="API keys table" caption="Scoped project API keys">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Prefix</th>
+            <th>Scopes</th>
+            <th>Last used</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.apiKeys.map((key) => (
+            <tr key={key.id}>
+              <td>
+                <span className="member-cell">
+                  <span className="entity-icon" aria-hidden="true">
+                    <KeyRound size={15} />
+                  </span>
+                  <strong>{key.name}</strong>
+                </span>
+              </td>
+              <td>
+                <span className="key-mask">{key.prefix}</span>
+              </td>
+              <td>
+                {key.scopes.map((scope) => (
+                  <span className="scope" key={scope}>
+                    {scope}
+                  </span>
+                ))}
+              </td>
+              <td>{key.lastUsedAt ? formatDate(key.lastUsedAt) : "Never"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </TableCard>
     );
+
+  if (route === "sandbox-providers") return <SandboxConnections />;
+  if (route === "storage-providers") return <StorageConnections />;
+
   if (route === "hosting")
     return (
       <>
-        <div className="notice notice--warning">
-          <Activity size={18} />
-          <div>
-            <strong>Operational diagnostics only</strong>
-            <span>
-              Regions below are adapter configuration and health observations.
-              They are not a data-residency or compliance claim.
-            </span>
-          </div>
-        </div>
-        <section className="hosting-grid">
+        <Alert
+          tone="warning"
+          role="status"
+          title="Operational diagnostics only"
+        >
+          Regions below are adapter configuration and health observations. They
+          are not a data-residency or compliance claim.
+        </Alert>
+        <section className="cards-grid">
           {data.hosting.map((service) => (
             <article className="service-card" key={service.service}>
               <header>
-                <span className="service-icon">
+                <span className="service-icon" aria-hidden="true">
                   {service.service === "PostgreSQL" ? (
-                    <Database />
+                    <Database size={16} />
                   ) : (
-                    <CircleGauge />
+                    <CircleGauge size={16} />
                   )}
                 </span>
                 <div>
                   <h2>{service.service}</h2>
-                  <StatusPill value={service.status} />
                 </div>
+                <StatusChip value={service.status} />
               </header>
               <dl>
                 <div>
@@ -277,7 +376,7 @@ function renderSettings(
                 </div>
                 <div>
                   <dt>Latency</dt>
-                  <dd>
+                  <dd className="mono">
                     {service.latencyMs === null
                       ? "Unavailable"
                       : `${service.latencyMs} ms`}
@@ -293,48 +392,1069 @@ function renderSettings(
         </section>
       </>
     );
+
+  return <ConsolePreferences />;
+}
+
+type SandboxConnectionAction =
+  | { readonly mode: "create" }
+  | { readonly mode: "rotate"; readonly provider: ProjectSandboxProvider }
+  | { readonly mode: "configure"; readonly provider: ProjectSandboxProvider };
+
+type SandboxConnectionMutation =
+  | {
+      readonly mode: "create";
+      readonly key: string;
+      readonly displayName: string;
+      readonly providerType: CreateSandboxProviderInput["providerType"];
+      readonly apiKey: string;
+      readonly target: string | null;
+      readonly configuration: UpdateSandboxProviderConfigurationInput;
+    }
+  | {
+      readonly mode: "rotate";
+      readonly providerId: string;
+      readonly apiKey: string;
+    }
+  | {
+      readonly mode: "configure";
+      readonly providerId: string;
+      readonly configuration: UpdateSandboxProviderConfigurationInput;
+    };
+
+function SandboxConnections() {
+  const api = useApi();
+  const queryClient = useQueryClient();
+  const notify = useToast();
+  const [action, setAction] = useState<SandboxConnectionAction | null>(null);
+  const query = useQuery({
+    queryKey: ["sandbox-providers"],
+    queryFn: () => api.listSandboxProviders(),
+  });
+  const save = useMutation({
+    mutationFn: (input: SandboxConnectionMutation) => {
+      switch (input.mode) {
+        case "create":
+          return api.createSandboxProvider({
+            key: input.key,
+            displayName: input.displayName,
+            providerType: input.providerType,
+            apiKey: input.apiKey,
+            target: input.target,
+            restrictedEgress: input.configuration.restrictedEgress,
+          });
+        case "rotate":
+          return api.rotateSandboxProviderCredential(
+            input.providerId,
+            input.apiKey,
+          );
+        case "configure":
+          return api.updateSandboxProviderConfiguration(
+            input.providerId,
+            input.configuration,
+          );
+      }
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["sandbox-providers"] });
+      setAction(null);
+      notify("Sandbox provider saved.");
+    },
+  });
+  return (
+    <Panel
+      title="Provider connections"
+      description="Project-scoped sandbox credentials and network configuration. Daytona is the supported provider today."
+      actions={
+        <Button
+          variant="primary"
+          size="sm"
+          icon={<Plus size={14} />}
+          disabled={
+            query.isPending ||
+            query.isError ||
+            query.data?.credentialEncryptionConfigured !== true
+          }
+          onClick={() => {
+            save.reset();
+            setAction({ mode: "create" });
+          }}
+        >
+          Add sandbox provider
+        </Button>
+      }
+    >
+      {query.isPending ? (
+        <LoadingState label="Loading sandbox connections" rows={2} />
+      ) : query.isError ? (
+        <ErrorState error={query.error} retry={() => void query.refetch()} />
+      ) : (
+        <div className="stack">
+          {!query.data.credentialEncryptionConfigured ? (
+            <Alert tone="danger" role="alert" title="Encryption key required">
+              Configure OAO_CREDENTIAL_ENCRYPTION_KEY before saving a sandbox
+              provider credential.
+            </Alert>
+          ) : null}
+          {query.data.data.length === 0 ? (
+            <EmptyState
+              icon="▣"
+              title="No sandbox providers"
+              description="Add an encrypted provider connection before selecting it on an agent."
+            />
+          ) : (
+            <TableCard
+              label="Sandbox providers table"
+              caption="Configured project sandbox providers"
+            >
+              <thead>
+                <tr>
+                  <th>Connection</th>
+                  <th>Provider</th>
+                  <th>Credential</th>
+                  <th>Target</th>
+                  <th>Restricted egress</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {query.data.data.map((provider) => (
+                  <tr key={provider.id}>
+                    <td>
+                      <strong>{provider.displayName}</strong>
+                      <br />
+                      <code>{provider.key}</code>
+                    </td>
+                    <td>{sandboxProviderTypeLabel(provider.providerType)}</td>
+                    <td>
+                      <span className="key-mask">
+                        ••••{provider.credentialFingerprint.slice(-6)}
+                      </span>
+                      <br />
+                      <small>version {provider.credentialVersion}</small>
+                    </td>
+                    <td>{provider.target ?? "Provider default"}</td>
+                    <td>
+                      {provider.restrictedEgress.allowedDomains.length} domains
+                      · {provider.restrictedEgress.allowedCidrs.length} CIDRs
+                    </td>
+                    <td>
+                      <span className="row">
+                        <Button
+                          size="sm"
+                          icon={<Settings2 size={13} />}
+                          onClick={() => {
+                            save.reset();
+                            setAction({ mode: "configure", provider });
+                          }}
+                        >
+                          Configure
+                        </Button>
+                        <Button
+                          size="sm"
+                          icon={<RefreshCw size={13} />}
+                          onClick={() => {
+                            save.reset();
+                            setAction({ mode: "rotate", provider });
+                          }}
+                        >
+                          Rotate key
+                        </Button>
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </TableCard>
+          )}
+        </div>
+      )}
+      {action ? (
+        <SandboxConnectionDialog
+          key={`${action.mode}:${"provider" in action ? action.provider.id : "new"}`}
+          action={action}
+          pending={save.isPending}
+          error={save.error}
+          onClose={() => {
+            save.reset();
+            setAction(null);
+          }}
+          onSubmit={(input) => save.mutate(input)}
+        />
+      ) : null}
+    </Panel>
+  );
+}
+
+function splitAllowlist(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(/[\s,]+/u)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function sandboxProviderTypeLabel(
+  providerType: ProjectSandboxProvider["providerType"],
+): string {
+  switch (providerType) {
+    case "daytona":
+      return "Daytona";
+  }
+}
+
+function SandboxConnectionDialog({
+  action,
+  pending,
+  error,
+  onClose,
+  onSubmit,
+}: {
+  readonly action: SandboxConnectionAction;
+  readonly pending: boolean;
+  readonly error: Error | null;
+  readonly onClose: () => void;
+  readonly onSubmit: (input: SandboxConnectionMutation) => void;
+}) {
+  const provider = "provider" in action ? action.provider : undefined;
+  const [providerType, setProviderType] =
+    useState<CreateSandboxProviderInput["providerType"]>("daytona");
+  const [key, setKey] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [target, setTarget] = useState(provider?.target ?? "");
+  const [domains, setDomains] = useState(
+    provider?.restrictedEgress.allowedDomains.join("\n") ?? "",
+  );
+  const [cidrs, setCidrs] = useState(
+    provider?.restrictedEgress.allowedCidrs.join("\n") ?? "",
+  );
+  const isCredential = action.mode === "create" || action.mode === "rotate";
+  const keyError =
+    action.mode === "create"
+      ? key === "local-fake"
+        ? "local-fake is reserved."
+        : !/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/u.test(key)
+          ? "Use a lowercase, hyphen-separated key."
+          : undefined
+      : undefined;
+  const displayNameError =
+    action.mode === "create" && displayName.trim().length === 0
+      ? "Display name is required."
+      : undefined;
+  const apiKeyError =
+    isCredential && apiKey.length < 8
+      ? `${sandboxProviderTypeLabel(provider?.providerType ?? providerType)} API key must contain at least 8 characters.`
+      : undefined;
+  const invalid = Boolean(keyError || displayNameError || apiKeyError);
+  const configuration = (): UpdateSandboxProviderConfigurationInput => ({
+    target: target.trim() || null,
+    restrictedEgress: {
+      allowedDomains: splitAllowlist(domains),
+      allowedCidrs: splitAllowlist(cidrs),
+    },
+  });
+  return (
+    <Dialog
+      title={
+        action.mode === "create"
+          ? "Add sandbox provider"
+          : action.mode === "rotate"
+            ? `Rotate ${provider?.displayName ?? "provider"} key`
+            : `Configure ${provider?.displayName ?? "provider"}`
+      }
+      description="Secrets are encrypted at rest and are never returned by the API or console."
+      wide
+      onClose={onClose}
+      onSubmit={(event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        if (invalid) return;
+        if (action.mode === "create")
+          onSubmit({
+            mode: "create",
+            key,
+            displayName: displayName.trim(),
+            providerType,
+            apiKey,
+            target: target.trim() || null,
+            configuration: configuration(),
+          });
+        else if (action.mode === "rotate")
+          onSubmit({ mode: "rotate", providerId: action.provider.id, apiKey });
+        else
+          onSubmit({
+            mode: "configure",
+            providerId: action.provider.id,
+            configuration: configuration(),
+          });
+      }}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            type="submit"
+            loading={pending}
+            disabled={invalid}
+          >
+            {pending
+              ? "Saving…"
+              : action.mode === "create"
+                ? "Add provider"
+                : "Save changes"}
+          </Button>
+        </>
+      }
+    >
+      {action.mode === "create" ? (
+        <>
+          <Field label="Provider">
+            <Select
+              autoFocus
+              value={providerType}
+              onChange={(event) =>
+                setProviderType(
+                  event.target
+                    .value as CreateSandboxProviderInput["providerType"],
+                )
+              }
+            >
+              <option value="daytona">Daytona</option>
+            </Select>
+          </Field>
+          <FieldRow>
+            <Field
+              label="Connection key"
+              {...(key && keyError ? { error: keyError } : {})}
+            >
+              <Input
+                value={key}
+                placeholder="daytona-primary"
+                onChange={(event) => setKey(event.target.value)}
+              />
+            </Field>
+            <Field
+              label="Display name"
+              {...(displayName && displayNameError
+                ? { error: displayNameError }
+                : {})}
+            >
+              <Input
+                value={displayName}
+                placeholder="Daytona primary"
+                onChange={(event) => setDisplayName(event.target.value)}
+              />
+            </Field>
+          </FieldRow>
+        </>
+      ) : null}
+      {isCredential ? (
+        <Field
+          label={`${sandboxProviderTypeLabel(provider?.providerType ?? providerType)} API key`}
+          hint="The credential is sent only in this request and is never returned."
+          {...(apiKey && apiKeyError ? { error: apiKeyError } : {})}
+        >
+          <Input
+            type="password"
+            autoComplete="new-password"
+            value={apiKey}
+            onChange={(event) => setApiKey(event.target.value)}
+          />
+        </Field>
+      ) : null}
+      {action.mode !== "rotate" ? (
+        <>
+          <Field
+            label="Target preference"
+            hint="Optional Daytona target. This is an adapter preference, not a residency guarantee."
+          >
+            <Input
+              value={target}
+              placeholder="Provider default"
+              onChange={(event) => setTarget(event.target.value)}
+            />
+          </Field>
+          <FieldRow>
+            <Field
+              label="Allowed domains"
+              hint="One hostname or wildcard hostname per line."
+            >
+              <Textarea
+                rows={5}
+                value={domains}
+                placeholder={"api.example.com\n*.example.net"}
+                onChange={(event) => setDomains(event.target.value)}
+              />
+            </Field>
+            <Field label="Allowed CIDRs" hint="One IPv4 or IPv6 CIDR per line.">
+              <Textarea
+                rows={5}
+                value={cidrs}
+                placeholder={"203.0.113.0/24\n2001:db8::/32"}
+                onChange={(event) => setCidrs(event.target.value)}
+              />
+            </Field>
+          </FieldRow>
+        </>
+      ) : null}
+      {error ? <FormError>{error.message}</FormError> : null}
+    </Dialog>
+  );
+}
+
+type StorageConnectionAction =
+  | { readonly mode: "create" }
+  | { readonly mode: "rotate"; readonly provider: ProjectStorageProvider };
+
+function StorageConnections() {
+  const api = useApi();
+  const queryClient = useQueryClient();
+  const notify = useToast();
+  const [action, setAction] = useState<StorageConnectionAction | null>(null);
+  const query = useQuery({
+    queryKey: ["storage-providers"],
+    queryFn: () => api.listStorageProviders(),
+  });
+  const save = useMutation({
+    mutationFn: (
+      input:
+        | {
+            readonly mode: "create";
+            readonly value: CreateStorageProviderInput;
+          }
+        | {
+            readonly mode: "rotate";
+            readonly providerId: string;
+            readonly value: Pick<
+              CreateStorageProviderInput,
+              "accessKeyId" | "secretAccessKey" | "sessionToken"
+            >;
+          },
+    ) =>
+      input.mode === "create"
+        ? api.createStorageProvider(input.value)
+        : api.rotateStorageProviderCredential(input.providerId, input.value),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["storage-providers"] });
+      setAction(null);
+      notify("Storage provider saved.");
+    },
+  });
+  const makeDefault = useMutation({
+    mutationFn: (providerId: string) =>
+      api.setDefaultStorageProvider(providerId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["storage-providers"] });
+      notify("Default storage provider updated.");
+    },
+  });
+  return (
+    <Panel
+      title="Workspace storage"
+      description="The default S3-compatible connection automatically receives a compressed workspace backup after every completed agent run."
+      actions={
+        <Button
+          variant="primary"
+          size="sm"
+          icon={<Plus size={14} />}
+          disabled={
+            query.isPending ||
+            query.isError ||
+            query.data?.credentialEncryptionConfigured !== true
+          }
+          onClick={() => {
+            save.reset();
+            setAction({ mode: "create" });
+          }}
+        >
+          Add storage provider
+        </Button>
+      }
+    >
+      {query.isPending ? (
+        <LoadingState label="Loading storage connections" rows={2} />
+      ) : query.isError ? (
+        <ErrorState error={query.error} retry={() => void query.refetch()} />
+      ) : (
+        <div className="stack">
+          {!query.data.credentialEncryptionConfigured ? (
+            <Alert tone="danger" role="alert" title="Encryption key required">
+              Configure OAO_CREDENTIAL_ENCRYPTION_KEY before saving storage
+              credentials.
+            </Alert>
+          ) : null}
+          <Alert tone="warning" role="status" title="Private workspace data">
+            Workspace archives may contain user files and generated secrets.
+            Restrict bucket access and enable server-side encryption and
+            retention controls on the storage provider.
+          </Alert>
+          {query.data.data.length === 0 ? (
+            <EmptyState
+              icon="▤"
+              title="No storage providers"
+              description="Without a default storage provider, Daytona filesystem changes are not recoverable after sandbox deletion."
+            />
+          ) : (
+            <TableCard
+              label="Storage providers table"
+              caption="Configured S3-compatible workspace storage"
+            >
+              <thead>
+                <tr>
+                  <th>Connection</th>
+                  <th>Bucket</th>
+                  <th>Endpoint</th>
+                  <th>Credential</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {query.data.data.map((provider) => (
+                  <tr key={provider.id}>
+                    <td>
+                      <strong>{provider.displayName}</strong>{" "}
+                      {provider.default ? <StatusChip value="default" /> : null}
+                      <br />
+                      <code>{provider.key}</code>
+                    </td>
+                    <td>
+                      <code>{provider.bucket}</code>
+                      <br />
+                      <small>
+                        {provider.region}
+                        {provider.prefix ? ` · ${provider.prefix}` : ""}
+                      </small>
+                    </td>
+                    <td>{provider.endpoint ?? "AWS default"}</td>
+                    <td>
+                      <span className="key-mask">
+                        ••••{provider.credentialFingerprint.slice(-6)}
+                      </span>
+                      <br />
+                      <small>version {provider.credentialVersion}</small>
+                    </td>
+                    <td>
+                      <span className="row">
+                        {!provider.default ? (
+                          <Button
+                            size="sm"
+                            disabled={makeDefault.isPending}
+                            onClick={() => makeDefault.mutate(provider.id)}
+                          >
+                            Make default
+                          </Button>
+                        ) : null}
+                        <Button
+                          size="sm"
+                          icon={<RefreshCw size={13} />}
+                          onClick={() => {
+                            save.reset();
+                            setAction({ mode: "rotate", provider });
+                          }}
+                        >
+                          Rotate credentials
+                        </Button>
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </TableCard>
+          )}
+          {makeDefault.error ? (
+            <FormError>{makeDefault.error.message}</FormError>
+          ) : null}
+        </div>
+      )}
+      {action ? (
+        <StorageConnectionDialog
+          key={`${action.mode}:${"provider" in action ? action.provider.id : "new"}`}
+          action={action}
+          pending={save.isPending}
+          error={save.error}
+          onClose={() => {
+            save.reset();
+            setAction(null);
+          }}
+          onSubmit={(input) => save.mutate(input)}
+        />
+      ) : null}
+    </Panel>
+  );
+}
+
+function StorageConnectionDialog({
+  action,
+  pending,
+  error,
+  onClose,
+  onSubmit,
+}: {
+  readonly action: StorageConnectionAction;
+  readonly pending: boolean;
+  readonly error: Error | null;
+  readonly onClose: () => void;
+  readonly onSubmit: (
+    input:
+      | { readonly mode: "create"; readonly value: CreateStorageProviderInput }
+      | {
+          readonly mode: "rotate";
+          readonly providerId: string;
+          readonly value: Pick<
+            CreateStorageProviderInput,
+            "accessKeyId" | "secretAccessKey" | "sessionToken"
+          >;
+        },
+  ) => void;
+}) {
+  const provider = "provider" in action ? action.provider : undefined;
+  const [key, setKey] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [endpoint, setEndpoint] = useState("");
+  const [region, setRegion] = useState("us-east-1");
+  const [bucket, setBucket] = useState("");
+  const [prefix, setPrefix] = useState("oao");
+  const [forcePathStyle, setForcePathStyle] = useState(false);
+  const [setDefault, setSetDefault] = useState(true);
+  const [accessKeyId, setAccessKeyId] = useState("");
+  const [secretAccessKey, setSecretAccessKey] = useState("");
+  const [sessionToken, setSessionToken] = useState("");
+  const create = action.mode === "create";
+  const keyError =
+    create && !/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/u.test(key)
+      ? "Use a lowercase, hyphen-separated key."
+      : undefined;
+  const endpointError = (() => {
+    if (!create || !endpoint) return undefined;
+    try {
+      const url = new URL(endpoint);
+      return url.protocol === "http:" || url.protocol === "https:"
+        ? undefined
+        : "Endpoint must use HTTP or HTTPS.";
+    } catch {
+      return "Enter an absolute HTTP(S) endpoint.";
+    }
+  })();
+  const prefixError = (() => {
+    if (!create || !prefix.trim()) return undefined;
+    const value = prefix.trim();
+    return value.startsWith("/") ||
+      value.endsWith("/") ||
+      value.includes("\\") ||
+      value
+        .split("/")
+        .some((segment) => !segment || segment === "." || segment === "..")
+      ? "Use a relative path without empty, dot, or parent segments."
+      : undefined;
+  })();
+  const invalid = Boolean(
+    (create && (!displayName.trim() || !region.trim() || !bucket.trim())) ||
+    keyError ||
+    endpointError ||
+    prefixError ||
+    accessKeyId.length < 3 ||
+    secretAccessKey.length < 8,
+  );
+  const credential = {
+    accessKeyId,
+    secretAccessKey,
+    ...(sessionToken ? { sessionToken } : {}),
+  };
+  return (
+    <Dialog
+      title={
+        create ? "Add storage provider" : `Rotate ${provider?.displayName}`
+      }
+      description="Credentials are encrypted at rest and never returned by the API. Connection configuration is immutable so existing workspace backups remain addressable."
+      wide
+      onClose={onClose}
+      onSubmit={(event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        if (invalid) return;
+        onSubmit(
+          create
+            ? {
+                mode: "create",
+                value: {
+                  key,
+                  displayName: displayName.trim(),
+                  providerType: "s3",
+                  endpoint: endpoint.trim() || null,
+                  region: region.trim(),
+                  bucket: bucket.trim(),
+                  prefix: prefix.trim() || null,
+                  forcePathStyle,
+                  setDefault,
+                  ...credential,
+                },
+              }
+            : {
+                mode: "rotate",
+                providerId: provider!.id,
+                value: credential,
+              },
+        );
+      }}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            type="submit"
+            loading={pending}
+            disabled={invalid}
+          >
+            {pending
+              ? "Saving…"
+              : create
+                ? "Add provider"
+                : "Rotate credentials"}
+          </Button>
+        </>
+      }
+    >
+      {create ? (
+        <>
+          <FieldRow>
+            <Field
+              label="Connection key"
+              {...(key && keyError ? { error: keyError } : {})}
+            >
+              <Input
+                autoFocus
+                value={key}
+                placeholder="workspace-primary"
+                onChange={(event) => setKey(event.target.value)}
+              />
+            </Field>
+            <Field label="Display name">
+              <Input
+                value={displayName}
+                placeholder="Workspace storage"
+                onChange={(event) => setDisplayName(event.target.value)}
+              />
+            </Field>
+          </FieldRow>
+          <Field
+            label="S3-compatible endpoint"
+            hint="Leave empty for the AWS S3 regional endpoint."
+            {...(endpointError ? { error: endpointError } : {})}
+          >
+            <Input
+              value={endpoint}
+              placeholder="https://s3.example.com"
+              onChange={(event) => setEndpoint(event.target.value)}
+            />
+          </Field>
+          <FieldRow>
+            <Field label="Region">
+              <Input
+                value={region}
+                onChange={(event) => setRegion(event.target.value)}
+              />
+            </Field>
+            <Field label="Bucket">
+              <Input
+                value={bucket}
+                placeholder="oao-workspaces"
+                onChange={(event) => setBucket(event.target.value)}
+              />
+            </Field>
+          </FieldRow>
+          <Field
+            label="Object prefix"
+            hint="Optional safe path prepended inside the bucket."
+            {...(prefixError ? { error: prefixError } : {})}
+          >
+            <Input
+              value={prefix}
+              placeholder="oao"
+              onChange={(event) => setPrefix(event.target.value)}
+            />
+          </Field>
+          <FieldRow>
+            <CheckboxRow
+              label="Force path-style URLs"
+              description="Required by some MinIO, R2, and private S3-compatible endpoints."
+              checked={forcePathStyle}
+              onChange={(event) => setForcePathStyle(event.target.checked)}
+            />
+            <CheckboxRow
+              label="Make default"
+              description="New session workspaces automatically use the default connection."
+              checked={setDefault}
+              onChange={(event) => setSetDefault(event.target.checked)}
+            />
+          </FieldRow>
+        </>
+      ) : null}
+      <FieldRow>
+        <Field label="Access key ID">
+          <Input
+            type="password"
+            autoComplete="new-password"
+            value={accessKeyId}
+            onChange={(event) => setAccessKeyId(event.target.value)}
+          />
+        </Field>
+        <Field label="Secret access key">
+          <Input
+            type="password"
+            autoComplete="new-password"
+            value={secretAccessKey}
+            onChange={(event) => setSecretAccessKey(event.target.value)}
+          />
+        </Field>
+      </FieldRow>
+      <Field label="Session token" hint="Optional for temporary credentials.">
+        <Textarea
+          rows={3}
+          value={sessionToken}
+          onChange={(event) => setSessionToken(event.target.value)}
+        />
+      </Field>
+      {error ? <FormError>{error.message}</FormError> : null}
+    </Dialog>
+  );
+}
+
+const API_KEY_SCOPES = [
+  ["agent:read", "Read agents and immutable versions."],
+  ["agent:write", "Create agents and publish versions."],
+  ["session:read", "Read sessions and their public transcripts."],
+  ["session:write", "Create sessions."],
+  ["run:create", "Start initial and follow-up runs."],
+  ["run:read", "Read runs and connect to project events."],
+  ["run:cancel", "Request run cancellation."],
+  ["tool_call:claim", "Claim and renew caller-owned tool work."],
+  ["tool_call:submit", "Submit caller-owned tool results."],
+  ["approval:resolve", "Approve or deny pending approvals."],
+  ["audit:read", "Read and export the project audit log."],
+  ["project:admin", "Manage members, providers, presets, and API keys."],
+] as const;
+
+const DEFAULT_API_KEY_SCOPES = new Set([
+  "agent:read",
+  "session:read",
+  "session:write",
+  "run:create",
+  "run:read",
+]);
+
+function CreateApiKeyDialog({
+  pending,
+  error,
+  onClose,
+  onSubmit,
+}: {
+  readonly pending: boolean;
+  readonly error: Error | null;
+  readonly onClose: () => void;
+  readonly onSubmit: (input: CreateApiKeyInput) => void;
+}) {
+  const [name, setName] = useState("");
+  const [scopes, setScopes] = useState(
+    () => new Set<string>(DEFAULT_API_KEY_SCOPES),
+  );
+  const nameError =
+    name.trim().length === 0
+      ? "Name is required."
+      : name.trim().length > 200
+        ? "Name must contain at most 200 characters."
+        : undefined;
+  const scopesError =
+    scopes.size === 0 ? "Select at least one project scope." : undefined;
+  return (
+    <Dialog
+      title="Create API key"
+      description="Choose the least privilege this server-side integration needs. The secret is shown once after creation."
+      wide
+      onClose={onClose}
+      onSubmit={(event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        if (!nameError && !scopesError)
+          onSubmit({ name: name.trim(), scopes: [...scopes] });
+      }}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            type="submit"
+            loading={pending}
+            disabled={Boolean(nameError || scopesError)}
+          >
+            {pending ? "Creating…" : "Create API key"}
+          </Button>
+        </>
+      }
+    >
+      <Field
+        label="Name"
+        {...(name.length > 0 && nameError ? { error: nameError } : {})}
+      >
+        <Input
+          autoFocus
+          value={name}
+          maxLength={200}
+          placeholder="Production integration"
+          onChange={(event) => setName(event.target.value)}
+        />
+      </Field>
+      <fieldset className="scope-picker">
+        <legend>Project scopes</legend>
+        <span className="hint">
+          Scopes can be narrowed by replacing the key.
+        </span>
+        <div className="scope-picker-grid">
+          {API_KEY_SCOPES.map(([scope, description]) => (
+            <CheckboxRow
+              key={scope}
+              label={scope}
+              description={description}
+              checked={scopes.has(scope)}
+              onChange={(event) => {
+                setScopes((current) => {
+                  const next = new Set(current);
+                  if (event.target.checked) next.add(scope);
+                  else next.delete(scope);
+                  return next;
+                });
+              }}
+            />
+          ))}
+        </div>
+        {scopesError ? <FormError>{scopesError}</FormError> : null}
+      </fieldset>
+      {error ? <FormError>{error.message}</FormError> : null}
+    </Dialog>
+  );
+}
+
+function CreatedApiKeyDialog({
+  apiKey,
+  onClose,
+}: {
+  readonly apiKey: CreatedApiKey;
+  readonly onClose: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  return (
+    <Dialog
+      title="Save API key"
+      description={`OAO stored ${apiKey.name} as a keyed hash.`}
+      onClose={onClose}
+      footer={
+        <>
+          {apiKey.shown ? (
+            <Button
+              onClick={() => {
+                setCopyError(null);
+                const clipboard = navigator.clipboard;
+                if (!clipboard) {
+                  setCopyError(
+                    "Copy is unavailable. Select and copy the secret manually.",
+                  );
+                  return;
+                }
+                void clipboard
+                  .writeText(apiKey.secret)
+                  .then(() => setCopied(true))
+                  .catch(() =>
+                    setCopyError(
+                      "Copy failed. Select and copy the secret manually.",
+                    ),
+                  );
+              }}
+            >
+              {copied ? "Copied" : "Copy secret"}
+            </Button>
+          ) : null}
+          <Button variant="primary" onClick={onClose}>
+            I’ve saved it
+          </Button>
+        </>
+      }
+    >
+      {apiKey.shown ? (
+        <>
+          <Alert tone="warning" role="alert" title="Shown only once">
+            Save this secret now. Closing this dialog permanently removes it
+            from the console.
+          </Alert>
+          <Field label="API key secret">
+            <Input
+              className="input--mono"
+              readOnly
+              spellCheck={false}
+              value={apiKey.secret}
+              onFocus={(event) => event.currentTarget.select()}
+            />
+          </Field>
+          {copyError ? <FormError>{copyError}</FormError> : null}
+        </>
+      ) : (
+        <Alert tone="danger" role="alert" title="Secret is no longer available">
+          This creation request was replayed after the secret had already been
+          shown. Revoke this key and create another before using the
+          integration.
+        </Alert>
+      )}
+    </Dialog>
+  );
+}
+
+function ConsolePreferences() {
+  const [absoluteTimestamps, setAbsoluteTimestamps] = useState(false);
   return (
     <div className="settings-layout">
-      <section className="panel">
-        <div className="section-heading">
-          <div>
-            <h2>Console behavior</h2>
-            <p>Operator-facing display and safety settings.</p>
-          </div>
-          <Settings />
-        </div>
-        <label className="setting-row">
-          <span>
+      <Panel
+        title="Console behavior"
+        description="Operator-facing display and safety settings."
+      >
+        <div className="setting-row">
+          <span className="who">
             <strong>Safe event projection</strong>
             <small>
               Display only public event payloads in lists, transcript, and debug
-              views.
+              views. Enforced by the platform.
             </small>
           </span>
-          <input type="checkbox" checked readOnly />
-        </label>
-        <label className="setting-row">
-          <span>
-            <strong>Relative timestamps</strong>
+          <Switch label="Enabled" checked disabled onChange={() => undefined} />
+        </div>
+        <div className="setting-row">
+          <span className="who">
+            <strong>Absolute timestamps</strong>
             <small>
               Show locale-aware absolute timestamps for audit clarity.
             </small>
           </span>
-          <input type="checkbox" />
-        </label>
-      </section>
-      <section className="panel">
-        <div className="section-heading">
-          <div>
-            <h2>Data boundaries</h2>
-            <p>
-              These controls are enforced by the platform, not a display
-              preference.
-            </p>
-          </div>
+          <Switch
+            label="Enabled"
+            checked={absoluteTimestamps}
+            onChange={setAbsoluteTimestamps}
+          />
         </div>
+      </Panel>
+      <Panel
+        title="Data boundaries"
+        description="These are enforced by the platform, not a display preference."
+      >
         <ul className="safety-list">
-          <li>Raw chain-of-thought is never returned to the console.</li>
+          <li>
+            Model reasoning and tool input/output are returned in authorized
+            session transcripts.
+          </li>
           <li>
             Authorization headers and secrets are removed from product events.
           </li>
@@ -343,7 +1463,7 @@ function renderSettings(
           </li>
           <li>API access tokens are sent in headers, never URLs.</li>
         </ul>
-      </section>
+      </Panel>
     </div>
   );
 }

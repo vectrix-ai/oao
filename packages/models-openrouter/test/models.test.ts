@@ -1,17 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { Provider } from "@earendil-works/pi-ai";
 import {
   DEFAULT_LOCAL_PRESETS,
   ImmutableModelPresetRegistry,
+  ProjectModelPresetRegistry,
   createDeterministicModelProvider,
   createOpenRouterProvider,
   createOpenRouterPresetProviders,
+  isApprovedCatalogModel,
+  listApprovedModelCatalog,
+  listOpenRouterModelCatalog,
   loadModelPresetConfiguration,
   parseApprovedModelPresets,
+  toOpenRouterRouting,
   withPlatformTurnLimit,
 } from "../src/index.js";
 
-test("local preset is immutable and resolves without hosted opt-in", () => {
+test("test-only deterministic preset remains available to isolated tests", () => {
   const registry = new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
     hostedEnabled: false,
   });
@@ -24,27 +30,20 @@ test("local preset is immutable and resolves without hosted opt-in", () => {
   );
 });
 
-test("publication and runtime load the same opt-in preset catalog", () => {
+test("runnable deployment configuration exposes no fake presets", () => {
   const local = loadModelPresetConfiguration({});
   assert.deepEqual(
     local.registry.list().map((preset) => preset.key),
-    ["local-default"],
+    [],
   );
   assert.equal(local.hostedEnabled, false);
 
-  assert.throws(
-    () => loadModelPresetConfiguration({ OAO_ENABLE_HOSTED_MODELS: "true" }),
-    /OAO_OPENROUTER_PRESETS_JSON/u,
-  );
-  assert.throws(
-    () =>
-      loadModelPresetConfiguration({
-        OAO_ENABLE_HOSTED_MODELS: "true",
-        OAO_OPENROUTER_PRESETS_JSON: JSON.stringify([
-          { key: "missing", model: "openrouter/not-a-real/model" },
-        ]),
-      }),
-    /pinned OpenRouter catalog/u,
+  assert.deepEqual(
+    loadModelPresetConfiguration({
+      OAO_ENABLE_HOSTED_MODELS: "true",
+      OPENROUTER_API_KEY: "ignored",
+    }).registry.list(),
+    local.registry.list(),
   );
 });
 
@@ -163,5 +162,324 @@ test("hosted preset JSON is validated and the platform guard runs pre-provider",
         },
       ],
     }),
+  );
+});
+
+test("the pinned catalog is exposed without provider credentials", () => {
+  const catalog = listApprovedModelCatalog();
+  assert.ok(catalog.length > 0);
+  const entry = catalog[0];
+  assert.ok(entry);
+  assert.deepEqual(Object.keys(entry).sort(), [
+    "catalogId",
+    "contextWindow",
+    "maxOutputTokens",
+    "model",
+    "name",
+    "providerType",
+    "reasoning",
+  ]);
+  assert.ok(
+    catalog.some((model) => model.providerType === "openrouter") &&
+      catalog.some((model) => model.providerType === "openai"),
+  );
+  assert.ok(entry.model.startsWith(`${entry.providerType}/`));
+  assert.equal(isApprovedCatalogModel(entry.model), true);
+  assert.equal(isApprovedCatalogModel("openrouter/not-a-real/model"), true);
+  assert.equal(isApprovedCatalogModel("openrouter/@preset/support"), true);
+  assert.equal(isApprovedCatalogModel("fake/deterministic"), false);
+  assert.ok(
+    listApprovedModelCatalog("openai").every(
+      (model) => model.providerType === "openai",
+    ),
+  );
+  assert.equal(
+    JSON.stringify(catalog).toLowerCase().includes("apikey") ||
+      JSON.stringify(catalog).toLowerCase().includes("authorization"),
+    false,
+  );
+});
+
+test("OpenRouter live catalog combines models and saved presets", async () => {
+  const requests: string[] = [];
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.includes("/models?")) {
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              id: "openai/gpt-5.4",
+              name: "GPT-5.4",
+              context_length: 1_048_576,
+              architecture: { output_modalities: ["text"] },
+              top_provider: { max_completion_tokens: 65_536 },
+              supported_parameters: ["temperature", "reasoning"],
+            },
+          ],
+          total_count: 1,
+          links: { next: null },
+        }),
+      );
+    }
+    if (url.includes("/presets?")) {
+      return new Response(
+        JSON.stringify({
+          data: [{ slug: "support-agent", name: "Support agent" }],
+          total_count: 1,
+        }),
+      );
+    }
+    throw new Error(`unexpected request ${url}`);
+  };
+  const catalog = await listOpenRouterModelCatalog({
+    apiKey: "sk-openrouter-test",
+    search: "support",
+    fetcher: fetcher as typeof fetch,
+  });
+  assert.deepEqual(
+    catalog.map((entry) => entry.model),
+    ["openrouter/@preset/support-agent"],
+  );
+  const all = await listOpenRouterModelCatalog({
+    apiKey: "sk-openrouter-test",
+    fetcher: fetcher as typeof fetch,
+  });
+  assert.deepEqual(all.map((entry) => entry.model).sort(), [
+    "openrouter/@preset/support-agent",
+    "openrouter/openai/gpt-5.4",
+  ]);
+  assert.ok(requests.every((url) => !url.includes("sk-openrouter-test")));
+});
+
+test("provider-neutral policy maps onto the OpenRouter routing contract", () => {
+  assert.equal(toOpenRouterRouting({}), undefined);
+  assert.deepEqual(
+    toOpenRouterRouting({
+      allowFallbacks: false,
+      requireParameters: true,
+      dataCollection: "deny",
+      zeroDataRetention: true,
+      providerOrder: ["anthropic", "google"],
+      providerAllowlist: ["anthropic"],
+      providerDenylist: ["novita"],
+      sort: "latency",
+      maxPromptPriceUsdPerMillion: 12.5,
+      maxCompletionPriceUsdPerMillion: 40,
+    }),
+    {
+      allow_fallbacks: false,
+      require_parameters: true,
+      data_collection: "deny",
+      zdr: true,
+      order: ["anthropic", "google"],
+      only: ["anthropic"],
+      ignore: ["novita"],
+      sort: "latency",
+      max_price: { prompt: 12.5, completion: 40 },
+    },
+  );
+});
+
+function projectRegistry() {
+  const registered: string[] = [];
+  const registry = new ProjectModelPresetRegistry({
+    deployment: new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
+      hostedEnabled: false,
+    }),
+    registerProvider: (provider) => registered.push(provider.id),
+  });
+  return { registered, registry };
+}
+
+const tenantA = {
+  organizationId: "00000000-0000-4000-8000-000000000001",
+  projectId: "00000000-0000-4000-8000-000000000002",
+  providerId: "00000000-0000-4000-8000-000000000003",
+  providerType: "openrouter" as const,
+  apiKey: "sk-openrouter-tenant-a",
+  credentialVersion: 1,
+};
+const tenantB = {
+  organizationId: "00000000-0000-4000-8000-000000000001",
+  projectId: "00000000-0000-4000-8000-000000000012",
+  providerId: "00000000-0000-4000-8000-000000000013",
+  providerType: "openrouter" as const,
+  apiKey: "sk-openrouter-tenant-b",
+  credentialVersion: 1,
+};
+
+test("project presets resolve only inside their own project", () => {
+  const { registered, registry } = projectRegistry();
+  registry.activate({
+    ...tenantA,
+    key: "claude-sonnet-4-6-zdr-v1",
+    model: "openrouter/anthropic/claude-sonnet-4.6",
+    routing: { zeroDataRetention: true, providerAllowlist: ["anthropic"] },
+  });
+  const resolved = registry.resolve("claude-sonnet-4-6-zdr-v1", tenantA);
+  assert.equal(resolved.origin, "project");
+  assert.equal(
+    resolved.approvedModel,
+    "openrouter/anthropic/claude-sonnet-4.6",
+  );
+  assert.match(resolved.model, /^project-model-[0-9a-f]{24}\//u);
+  assert.equal(registered.length, 1);
+  assert.throws(
+    () => registry.resolve("claude-sonnet-4-6-zdr-v1", tenantB),
+    /not approved/u,
+  );
+  assert.equal(
+    registry.resolve("local-default", tenantB).model,
+    "fake/deterministic",
+  );
+});
+
+test("two projects sharing a preset key keep separate provider identities", () => {
+  const { registered, registry } = projectRegistry();
+  const a = registry.activate({
+    ...tenantA,
+    key: "shared-key-v1",
+    model: "openrouter/anthropic/claude-sonnet-4.6",
+    routing: { zeroDataRetention: true },
+  });
+  const b = registry.activate({
+    ...tenantB,
+    key: "shared-key-v1",
+    model: "openrouter/anthropic/claude-sonnet-4.6",
+    routing: {},
+  });
+  assert.notEqual(a.model, b.model);
+  assert.equal(new Set(registered).size, 2);
+});
+
+test("activation is idempotent and append only", () => {
+  const { registered, registry } = projectRegistry();
+  const preset = {
+    ...tenantA,
+    key: "stable-v1",
+    model: "openrouter/anthropic/claude-sonnet-4.6",
+    routing: { zeroDataRetention: true },
+  };
+  assert.equal(
+    registry.activate(preset).model,
+    registry.activate({ ...preset, routing: { zeroDataRetention: true } })
+      .model,
+  );
+  assert.equal(registered.length, 1);
+  assert.throws(
+    () =>
+      registry.activate({ ...preset, routing: { zeroDataRetention: false } }),
+    /changed after activation/u,
+  );
+  assert.throws(
+    () => registry.activate({ ...preset, model: "openrouter/openai/gpt-5.1" }),
+    /changed after activation/u,
+  );
+});
+
+test("activation refuses mismatched provider models", () => {
+  const { registry } = projectRegistry();
+  assert.throws(
+    () =>
+      registry.activate({
+        ...tenantA,
+        key: "arbitrary-v1",
+        model: "some-provider/whatever",
+        routing: {},
+      }),
+    /pinned openrouter catalog/u,
+  );
+});
+
+test("OpenRouter project presets can use live model ids and saved preset references", () => {
+  const providers: Provider[] = [];
+  const registry = new ProjectModelPresetRegistry({
+    deployment: new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
+      hostedEnabled: false,
+    }),
+    registerProvider: (provider) => providers.push(provider),
+  });
+  const liveModel = registry.activate({
+    ...tenantA,
+    key: "live-openrouter-v1",
+    model: "openrouter/new-provider/new-model",
+    routing: {},
+  });
+  const savedPreset = registry.activate({
+    ...tenantA,
+    key: "openrouter-preset-v1",
+    model: "openrouter/@preset/support-agent",
+    routing: { allowFallbacks: false },
+  });
+  assert.equal(liveModel.approvedModel, "openrouter/new-provider/new-model");
+  assert.equal(savedPreset.approvedModel, "openrouter/@preset/support-agent");
+  assert.equal(providers.at(0)?.getModels()[0]?.id, "new-provider/new-model");
+  assert.equal(providers.at(1)?.getModels()[0]?.id, "@preset/support-agent");
+});
+
+test("an existing project preset wins over a later deployment key collision", () => {
+  const registered: string[] = [];
+  const registry = new ProjectModelPresetRegistry({
+    deployment: new ImmutableModelPresetRegistry(
+      [
+        ...DEFAULT_LOCAL_PRESETS,
+        {
+          key: "stable-v1",
+          model: "openrouter/openai/gpt-5.1",
+        },
+      ],
+      { hostedEnabled: true },
+    ),
+    registerProvider: (provider) => registered.push(provider.id),
+  });
+  const project = registry.activate({
+    ...tenantA,
+    key: "stable-v1",
+    model: "openrouter/anthropic/claude-sonnet-4.6",
+    routing: { zeroDataRetention: true },
+  });
+  assert.equal(registry.resolve("stable-v1", tenantA), project);
+  assert.equal(project.origin, "project");
+  assert.equal(project.approvedModel, "openrouter/anthropic/claude-sonnet-4.6");
+  assert.equal(registered.length, 1);
+  assert.equal(registry.resolve("stable-v1", tenantB).origin, "deployment");
+});
+
+test("OpenAI project presets use direct routing and credentials can rotate", async () => {
+  const providers: Provider[] = [];
+  const registry = new ProjectModelPresetRegistry({
+    deployment: new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
+      hostedEnabled: false,
+    }),
+    registerProvider: (provider) => providers.push(provider),
+  });
+  const input = {
+    ...tenantA,
+    providerType: "openai" as const,
+    apiKey: "sk-openai-first-key",
+    key: "gpt-direct-v1",
+    model: "openai/gpt-5.1",
+    routing: {},
+  };
+  const first = registry.activate(input);
+  const rotated = registry.activate({
+    ...input,
+    apiKey: "sk-openai-rotated-key",
+    credentialVersion: 2,
+  });
+  assert.equal(first.model, rotated.model);
+  assert.equal(providers.length, 2);
+  const auth = await providers.at(-1)?.auth.apiKey?.resolve({
+    ctx: {
+      env: async () => undefined,
+      fileExists: async () => false,
+    },
+  });
+  assert.equal(auth?.auth.apiKey, "sk-openai-rotated-key");
+  assert.throws(
+    () => registry.activate({ ...input, routing: { allowFallbacks: false } }),
+    /do not support routing policy/u,
   );
 });

@@ -41,6 +41,26 @@ export function createRoutes(apiPrefix = "/v1") {
     apiKeys: (projectId: string) => `${project(projectId)}/api-keys`,
     apiKey: (projectId: string, apiKeyId: string) =>
       `${project(projectId)}/api-keys/${segment(apiKeyId)}`,
+    modelPresets: (projectId: string) => `${project(projectId)}/model-presets`,
+    modelProviders: (projectId: string) =>
+      `${project(projectId)}/model-providers`,
+    modelProviderCredential: (projectId: string, providerId: string) =>
+      `${project(projectId)}/model-providers/${segment(providerId)}/credential`,
+    sandboxProviders: (projectId: string) =>
+      `${project(projectId)}/sandbox-providers`,
+    sandboxProviderCredential: (projectId: string, providerId: string) =>
+      `${project(projectId)}/sandbox-providers/${segment(providerId)}/credential`,
+    sandboxProviderConfiguration: (projectId: string, providerId: string) =>
+      `${project(projectId)}/sandbox-providers/${segment(providerId)}/configuration`,
+    sandboxProviderSnapshots: (projectId: string, providerId: string) =>
+      `${project(projectId)}/sandbox-providers/${segment(providerId)}/snapshots`,
+    storageProviders: (projectId: string) =>
+      `${project(projectId)}/storage-providers`,
+    storageProviderCredential: (projectId: string, providerId: string) =>
+      `${project(projectId)}/storage-providers/${segment(providerId)}/credential`,
+    defaultStorageProvider: (projectId: string, providerId: string) =>
+      `${project(projectId)}/storage-providers/${segment(providerId)}/default`,
+    modelCatalog: (projectId: string) => `${project(projectId)}/model-catalog`,
     agents: (projectId: string) => `${project(projectId)}/agents`,
     agent: (projectId: string, agentId: string) =>
       `${project(projectId)}/agents/${segment(agentId)}`,

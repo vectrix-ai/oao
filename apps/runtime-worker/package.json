@@ -6,7 +6,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "dev": "node --import tsx --watch src/main.ts",
-    "demo": "node --import tsx src/demo.ts",
     "lint": "eslint src test",
     "start": "node dist/main.js",
     "test": "node --import tsx --test test/**/*.test.ts",
@@ -14,9 +13,11 @@
   },
   "dependencies": {
     "@hono/node-server": "2.0.3",
+    "@oao/artifact-s3": "workspace:*",
     "@oao/db-postgres": "workspace:*",
     "@oao/domain": "workspace:*",
     "@oao/models-openrouter": "workspace:*",
+    "@oao/provider-credentials": "workspace:*",
     "@oao/queue-postgres": "workspace:*",
     "@oao/runtime-flue": "workspace:*",
     "@oao/sandbox-daytona": "workspace:*",

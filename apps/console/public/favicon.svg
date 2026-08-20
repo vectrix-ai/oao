@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="OAO">
+  <style>
+    .background { fill: #fff; }
+    .mark { fill: #000; }
+    @media (prefers-color-scheme: dark) {
+      .background { fill: #000; }
+      .mark { fill: #fff; }
+    }
+  </style>
+  <rect class="background" width="1024" height="1024"/>
+  <path class="mark" fill-rule="evenodd" d="M512 112c-221 0-400 179-400 400s179 400 400 400c108 0 206-43 278-113v113h122V512c0-221-179-400-400-400Zm0 230a170 170 0 1 1 0 340 170 170 0 0 1 0-340Z"/>
+</svg>

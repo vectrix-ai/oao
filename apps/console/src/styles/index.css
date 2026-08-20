@@ -1,0 +1,12 @@
+/*
+ * Single stylesheet entry point for the console.
+ *
+ * Layer order matters: tokens define the vocabulary, base styles the document,
+ * components the reusable primitives, app the shell and page surfaces.
+ * Change a colour, radius, or spacing step in tokens.css and it propagates
+ * everywhere — pages should never hard-code a hex value.
+ */
+@import "./tokens.css";
+@import "./base.css";
+@import "./components.css";
+@import "./app.css";

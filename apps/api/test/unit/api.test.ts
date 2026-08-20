@@ -86,6 +86,23 @@ test("route tenant scope is checked before database access", async () => {
   ]);
 });
 
+test("organization routes authenticate before reading principal context", async () => {
+  const app = createApiApp({
+    store: new PostgresApiStore(unusedPool, "unit-test-api-key-pepper"),
+    auth: new DevelopmentAuthAdapter({ bearerToken: "valid-session" }),
+    runtimeCommands: unusedRuntimeCommands,
+  });
+
+  for (const path of [
+    "/v1/organizations",
+    "/v1/organizations/00000000-0000-4000-8000-000000000001",
+  ]) {
+    const response = await app.request(path);
+    assert.equal(response.status, 401);
+    assert.equal((await response.json()).error.code, "unauthenticated");
+  }
+});
+
 test("error envelopes never return internal exception messages", async () => {
   const failingPool = {
     query: async () => {

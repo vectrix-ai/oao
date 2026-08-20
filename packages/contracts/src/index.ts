@@ -288,13 +288,60 @@ export const RuntimeToolSnapshotSchema = v.strictObject({
 
 export const PLATFORM_MAX_TURNS = 32;
 
+export const SandboxCapabilitySchema = v.picklist([
+  "filesystem_read",
+  "filesystem_write",
+  "shell",
+  "browser",
+]);
+
+export const DEFAULT_SANDBOX_CAPABILITIES = Object.freeze([
+  "filesystem_read",
+  "filesystem_write",
+  "shell",
+] as const);
+
+const LegacySandboxProviderKeySchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(120),
+  v.regex(
+    /^(?:local-fake|[a-z][a-z0-9]*(-[a-z0-9]+)*)$/u,
+    "provider must be local-fake or a lowercase project provider key",
+  ),
+);
+
+const ProjectSandboxProviderKeySchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(120),
+  v.regex(
+    /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/u,
+    "provider key must be lowercase and hyphen separated",
+  ),
+  v.check((value) => value !== "local-fake", "local-fake is reserved"),
+);
+
+const SandboxCapabilitiesSchema = v.pipe(
+  v.array(SandboxCapabilitySchema),
+  v.check(
+    (value) => new Set(value).size === value.length,
+    "sandbox capabilities must be unique",
+  ),
+);
+
 export const ManagedAgentPublicationConfigSchema = v.strictObject({
   systemPrompt: v.pipe(v.string(), v.minLength(1), v.maxLength(100_000)),
   modelPreset: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
   tools: v.array(RuntimeToolSnapshotSchema),
   sandbox: v.strictObject({
     enabled: v.boolean(),
+    provider: ProjectSandboxProviderKeySchema,
+    snapshotId: v.optional(IdSchema),
     network: v.picklist(["none", "restricted"]),
+    capabilities: v.optional(SandboxCapabilitiesSchema, [
+      ...DEFAULT_SANDBOX_CAPABILITIES,
+    ]),
   }),
   limits: v.strictObject({
     maxTurns: v.literal(PLATFORM_MAX_TURNS),
@@ -311,7 +358,19 @@ export function parseManagedAgentSnapshotForPublication(
 export const ManagedAgentSnapshotSchema = v.strictObject({
   agentVersionId: IdSchema,
   contentHash: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
-  ...ManagedAgentPublicationConfigSchema.entries,
+  systemPrompt: ManagedAgentPublicationConfigSchema.entries.systemPrompt,
+  modelPreset: ManagedAgentPublicationConfigSchema.entries.modelPreset,
+  tools: ManagedAgentPublicationConfigSchema.entries.tools,
+  sandbox: v.strictObject({
+    enabled: v.boolean(),
+    provider: v.optional(LegacySandboxProviderKeySchema, "local-fake"),
+    snapshotId: v.optional(IdSchema),
+    network: v.picklist(["none", "restricted"]),
+    capabilities: v.optional(SandboxCapabilitiesSchema, [
+      ...DEFAULT_SANDBOX_CAPABILITIES,
+    ]),
+  }),
+  limits: ManagedAgentPublicationConfigSchema.entries.limits,
 });
 
 export const ManagedAgentInstanceDataSchema = v.object({
@@ -429,6 +488,7 @@ export type ManagedAgentSnapshot = v.InferOutput<
 export type ManagedAgentPublicationConfig = v.InferOutput<
   typeof ManagedAgentPublicationConfigSchema
 >;
+export type SandboxCapability = v.InferOutput<typeof SandboxCapabilitySchema>;
 export type ManagedAgentInstanceData = v.InferOutput<
   typeof ManagedAgentInstanceDataSchema
 >;
@@ -440,3 +500,396 @@ export type Page<T> = {
   readonly data: readonly T[];
   readonly pageInfo: v.InferOutput<typeof PageInfoSchema>;
 };
+
+/**
+ * Model presets are the only way an agent version names a model. The key is
+ * stable and versioned so an already published, immutable agent version can
+ * never be silently repointed at a different model or routing policy.
+ */
+export const MODEL_PRESET_KEY_PATTERN =
+  /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-v[1-9][0-9]{0,4}$/u;
+
+const ProviderSlugSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(80),
+  v.regex(/^[a-z0-9][a-z0-9._-]*$/u),
+);
+const ProviderSlugListSchema = v.pipe(
+  v.array(ProviderSlugSchema),
+  v.minLength(1),
+  v.maxLength(16),
+  v.check(
+    (value: string[]) => new Set(value).size === value.length,
+    "Provider list entries must be unique",
+  ),
+);
+const PriceCapSchema = v.pipe(
+  v.number(),
+  v.finite(),
+  v.minValue(0),
+  v.maxValue(1_000_000),
+);
+
+/**
+ * Provider-neutral routing and data-handling policy. Provider specific wire
+ * names stay behind the model adapter; the public contract never carries a
+ * provider credential.
+ */
+export const ModelRoutingPolicySchema = v.strictObject({
+  allowFallbacks: v.optional(v.boolean()),
+  requireParameters: v.optional(v.boolean()),
+  dataCollection: v.optional(v.picklist(["deny", "allow"])),
+  zeroDataRetention: v.optional(v.boolean()),
+  providerOrder: v.optional(ProviderSlugListSchema),
+  providerAllowlist: v.optional(ProviderSlugListSchema),
+  providerDenylist: v.optional(ProviderSlugListSchema),
+  sort: v.optional(v.picklist(["price", "throughput", "latency"])),
+  maxPromptPriceUsdPerMillion: v.optional(PriceCapSchema),
+  maxCompletionPriceUsdPerMillion: v.optional(PriceCapSchema),
+});
+
+export const ModelPresetOriginSchema = v.picklist(["deployment", "project"]);
+export const ModelProviderTypeSchema = v.picklist(["openrouter", "openai"]);
+
+export const ProjectModelProviderSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  key: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  providerType: ModelProviderTypeSchema,
+  credentialConfigured: v.literal(true),
+  credentialFingerprint: v.pipe(v.string(), v.regex(/^[a-f0-9]{12}$/u)),
+  credentialVersion: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  createdByPrincipalId: IdSchema,
+  createdAt: TimestampSchema,
+  updatedAt: TimestampSchema,
+});
+
+const ModelProviderKeySchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(120),
+  v.regex(
+    /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/u,
+    "key must be lowercase and hyphen separated",
+  ),
+);
+
+export const CreateProjectModelProviderInputSchema = v.strictObject({
+  key: ModelProviderKeySchema,
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  providerType: ModelProviderTypeSchema,
+  apiKey: v.pipe(v.string(), v.minLength(8), v.maxLength(4096)),
+});
+
+export const RotateProjectModelProviderCredentialInputSchema = v.strictObject({
+  apiKey: v.pipe(v.string(), v.minLength(8), v.maxLength(4096)),
+});
+
+const SandboxDomainSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(253),
+  v.regex(
+    /^(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u,
+    "domain must be a hostname or wildcard hostname",
+  ),
+);
+
+const SandboxCidrSchema = v.pipe(
+  v.string(),
+  v.minLength(3),
+  v.maxLength(64),
+  v.regex(/^[0-9a-f:.]+\/[0-9]{1,3}$/u, "CIDR must include a prefix length"),
+);
+
+export const SandboxRestrictedEgressSchema = v.strictObject({
+  allowedDomains: v.optional(v.array(SandboxDomainSchema), []),
+  allowedCidrs: v.optional(v.array(SandboxCidrSchema), []),
+});
+
+export const ProjectSandboxProviderSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  key: ProjectSandboxProviderKeySchema,
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  providerType: v.literal("daytona"),
+  credentialConfigured: v.literal(true),
+  credentialFingerprint: v.pipe(v.string(), v.regex(/^[a-f0-9]{12}$/u)),
+  credentialVersion: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  target: v.nullable(v.pipe(v.string(), v.minLength(1), v.maxLength(200))),
+  restrictedEgress: SandboxRestrictedEgressSchema,
+  createdByPrincipalId: IdSchema,
+  createdAt: TimestampSchema,
+  updatedAt: TimestampSchema,
+});
+
+/** Safe, credential-free metadata for a Daytona snapshot. */
+export const SandboxSnapshotEntrySchema = v.object({
+  id: IdSchema,
+  providerType: v.literal("daytona"),
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(300)),
+  state: v.pipe(v.string(), v.minLength(1), v.maxLength(80)),
+  available: v.boolean(),
+  imageName: v.nullable(v.pipe(v.string(), v.maxLength(500))),
+  general: v.boolean(),
+  cpu: v.pipe(v.number(), v.minValue(0)),
+  gpu: v.pipe(v.number(), v.minValue(0)),
+  memoryGiB: v.pipe(v.number(), v.minValue(0)),
+  diskGiB: v.pipe(v.number(), v.minValue(0)),
+  regionIds: v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(200))),
+  sandboxClass: v.nullable(v.pipe(v.string(), v.minLength(1), v.maxLength(80))),
+  createdAt: TimestampSchema,
+  updatedAt: TimestampSchema,
+  lastUsedAt: v.nullable(TimestampSchema),
+});
+
+export const CreateProjectSandboxProviderInputSchema = v.strictObject({
+  key: ProjectSandboxProviderKeySchema,
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  providerType: v.literal("daytona"),
+  apiKey: v.pipe(v.string(), v.minLength(8), v.maxLength(4096)),
+  target: v.optional(
+    v.nullable(v.pipe(v.string(), v.minLength(1), v.maxLength(200))),
+    null,
+  ),
+  restrictedEgress: v.optional(SandboxRestrictedEgressSchema, {
+    allowedDomains: [],
+    allowedCidrs: [],
+  }),
+});
+
+export const RotateProjectSandboxProviderCredentialInputSchema = v.strictObject(
+  {
+    apiKey: v.pipe(v.string(), v.minLength(8), v.maxLength(4096)),
+  },
+);
+
+export const UpdateProjectSandboxProviderConfigurationInputSchema =
+  v.strictObject({
+    target: v.nullable(v.pipe(v.string(), v.minLength(1), v.maxLength(200))),
+    restrictedEgress: SandboxRestrictedEgressSchema,
+  });
+
+const S3EndpointSchema = v.pipe(
+  v.string(),
+  v.maxLength(2048),
+  v.url(),
+  v.check(
+    (value) => ["http:", "https:"].includes(new URL(value).protocol),
+    "endpoint must use HTTP or HTTPS",
+  ),
+);
+
+const S3ObjectPrefixSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(512),
+  v.check(
+    (value) =>
+      !value.startsWith("/") &&
+      !value.endsWith("/") &&
+      !value.includes("\\") &&
+      value
+        .split("/")
+        .every((segment) => segment && segment !== "." && segment !== ".."),
+    "object prefix must be a safe relative path",
+  ),
+);
+
+export const ProjectStorageProviderSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  key: ProjectSandboxProviderKeySchema,
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  providerType: v.literal("s3"),
+  endpoint: v.nullable(S3EndpointSchema),
+  region: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
+  bucket: v.pipe(v.string(), v.minLength(1), v.maxLength(255)),
+  prefix: v.nullable(S3ObjectPrefixSchema),
+  forcePathStyle: v.boolean(),
+  default: v.boolean(),
+  credentialConfigured: v.literal(true),
+  credentialFingerprint: v.pipe(v.string(), v.regex(/^[a-f0-9]{12}$/u)),
+  credentialVersion: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  createdByPrincipalId: IdSchema,
+  createdAt: TimestampSchema,
+  updatedAt: TimestampSchema,
+});
+
+const S3CredentialFields = {
+  accessKeyId: v.pipe(v.string(), v.minLength(3), v.maxLength(512)),
+  secretAccessKey: v.pipe(v.string(), v.minLength(8), v.maxLength(4096)),
+  sessionToken: v.optional(
+    v.pipe(v.string(), v.minLength(1), v.maxLength(8192)),
+  ),
+};
+
+export const CreateProjectStorageProviderInputSchema = v.strictObject({
+  key: ProjectSandboxProviderKeySchema,
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  providerType: v.literal("s3"),
+  endpoint: v.nullable(S3EndpointSchema),
+  region: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
+  bucket: v.pipe(v.string(), v.minLength(1), v.maxLength(255)),
+  prefix: v.nullable(S3ObjectPrefixSchema),
+  forcePathStyle: v.boolean(),
+  setDefault: v.optional(v.boolean(), true),
+  ...S3CredentialFields,
+});
+
+export const RotateProjectStorageProviderCredentialInputSchema =
+  v.strictObject(S3CredentialFields);
+
+export const ModelPresetSchema = v.object({
+  id: v.nullable(IdSchema),
+  organizationId: v.nullable(IdSchema),
+  projectId: v.nullable(IdSchema),
+  key: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  origin: ModelPresetOriginSchema,
+  providerId: v.nullable(IdSchema),
+  providerType: v.nullable(ModelProviderTypeSchema),
+  model: v.pipe(v.string(), v.minLength(1), v.maxLength(300)),
+  routing: ModelRoutingPolicySchema,
+  hosted: v.boolean(),
+  available: v.boolean(),
+  createdByPrincipalId: v.nullable(IdSchema),
+  createdAt: v.nullable(TimestampSchema),
+});
+
+export const CreateModelPresetInputSchema = v.strictObject({
+  key: v.pipe(
+    v.string(),
+    v.minLength(1),
+    v.maxLength(120),
+    v.regex(
+      MODEL_PRESET_KEY_PATTERN,
+      "key must be lowercase, hyphen separated, and end with a version suffix such as -v1",
+    ),
+  ),
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  providerId: IdSchema,
+  model: v.pipe(
+    v.string(),
+    v.minLength(1),
+    v.maxLength(300),
+    v.regex(
+      /^(?:openrouter\/(?:@preset\/)?[a-zA-Z0-9~][a-zA-Z0-9._:~/-]*|openai\/[a-z0-9~][a-z0-9._:~/-]*)$/u,
+      "model must be an approved OpenRouter/OpenAI model or OpenRouter preset reference",
+    ),
+  ),
+  routing: v.optional(ModelRoutingPolicySchema, {}),
+});
+
+/** Safe, credential-free metadata for one provider catalog model or preset. */
+export const ModelCatalogEntrySchema = v.object({
+  providerType: ModelProviderTypeSchema,
+  model: v.pipe(v.string(), v.minLength(1), v.maxLength(300)),
+  catalogId: v.pipe(v.string(), v.minLength(1), v.maxLength(300)),
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(300)),
+  contextWindow: v.nullable(v.pipe(v.number(), v.integer(), v.minValue(0))),
+  maxOutputTokens: v.nullable(v.pipe(v.number(), v.integer(), v.minValue(0))),
+  reasoning: v.boolean(),
+});
+
+export function parseCreateModelPresetInput(
+  input: unknown,
+): CreateModelPresetInput {
+  return v.parse(CreateModelPresetInputSchema, input);
+}
+
+export function parseCreateProjectModelProviderInput(
+  input: unknown,
+): CreateProjectModelProviderInput {
+  return v.parse(CreateProjectModelProviderInputSchema, input);
+}
+
+export function parseRotateProjectModelProviderCredentialInput(
+  input: unknown,
+): RotateProjectModelProviderCredentialInput {
+  return v.parse(RotateProjectModelProviderCredentialInputSchema, input);
+}
+
+export function parseCreateProjectSandboxProviderInput(
+  input: unknown,
+): CreateProjectSandboxProviderInput {
+  return v.parse(CreateProjectSandboxProviderInputSchema, input);
+}
+
+export function parseRotateProjectSandboxProviderCredentialInput(
+  input: unknown,
+): RotateProjectSandboxProviderCredentialInput {
+  return v.parse(RotateProjectSandboxProviderCredentialInputSchema, input);
+}
+
+export function parseUpdateProjectSandboxProviderConfigurationInput(
+  input: unknown,
+): UpdateProjectSandboxProviderConfigurationInput {
+  return v.parse(UpdateProjectSandboxProviderConfigurationInputSchema, input);
+}
+
+export function parseCreateProjectStorageProviderInput(
+  input: unknown,
+): CreateProjectStorageProviderInput {
+  return v.parse(CreateProjectStorageProviderInputSchema, input);
+}
+
+export function parseRotateProjectStorageProviderCredentialInput(
+  input: unknown,
+): RotateProjectStorageProviderCredentialInput {
+  return v.parse(RotateProjectStorageProviderCredentialInputSchema, input);
+}
+
+export function parseModelRoutingPolicy(input: unknown): ModelRoutingPolicy {
+  return v.parse(ModelRoutingPolicySchema, input);
+}
+
+export type ModelRoutingPolicy = v.InferOutput<typeof ModelRoutingPolicySchema>;
+export type ModelPresetOrigin = v.InferOutput<typeof ModelPresetOriginSchema>;
+export type ModelProviderType = v.InferOutput<typeof ModelProviderTypeSchema>;
+export type ProjectModelProvider = v.InferOutput<
+  typeof ProjectModelProviderSchema
+>;
+export type CreateProjectModelProviderInput = v.InferOutput<
+  typeof CreateProjectModelProviderInputSchema
+>;
+export type RotateProjectModelProviderCredentialInput = v.InferOutput<
+  typeof RotateProjectModelProviderCredentialInputSchema
+>;
+export type SandboxRestrictedEgress = v.InferOutput<
+  typeof SandboxRestrictedEgressSchema
+>;
+export type ProjectSandboxProvider = v.InferOutput<
+  typeof ProjectSandboxProviderSchema
+>;
+export type SandboxSnapshotEntry = v.InferOutput<
+  typeof SandboxSnapshotEntrySchema
+>;
+export type CreateProjectSandboxProviderInput = v.InferOutput<
+  typeof CreateProjectSandboxProviderInputSchema
+>;
+export type RotateProjectSandboxProviderCredentialInput = v.InferOutput<
+  typeof RotateProjectSandboxProviderCredentialInputSchema
+>;
+export type UpdateProjectSandboxProviderConfigurationInput = v.InferOutput<
+  typeof UpdateProjectSandboxProviderConfigurationInputSchema
+>;
+export type ProjectStorageProvider = v.InferOutput<
+  typeof ProjectStorageProviderSchema
+>;
+export type CreateProjectStorageProviderInput = v.InferOutput<
+  typeof CreateProjectStorageProviderInputSchema
+>;
+export type RotateProjectStorageProviderCredentialInput = v.InferOutput<
+  typeof RotateProjectStorageProviderCredentialInputSchema
+>;
+export type ModelPreset = v.InferOutput<typeof ModelPresetSchema>;
+export type CreateModelPresetInput = v.InferOutput<
+  typeof CreateModelPresetInputSchema
+>;
+export type ModelCatalogEntry = v.InferOutput<typeof ModelCatalogEntrySchema>;

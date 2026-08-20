@@ -1,13 +1,168 @@
 import { createHash } from "node:crypto";
-import { Daytona } from "@daytona/sdk";
+import { Daytona, SandboxState } from "@daytona/sdk";
 import type { Sandbox as DaytonaSandbox } from "@daytona/sdk";
-import { sandboxFromDriver } from "@flue/runtime";
-import type { FileStat, SandboxDriver, SandboxFactory } from "@flue/runtime";
+import { Type } from "@earendil-works/pi-ai";
+import {
+  createBashTool,
+  createEditTool,
+  createGlobTool,
+  createGrepTool,
+  createReadTool,
+  createWriteTool,
+  sandboxFromDriver,
+} from "@flue/runtime";
+import type {
+  FileStat,
+  Sandbox,
+  SandboxDriver,
+  SandboxFactory,
+} from "@flue/runtime";
+import type {
+  WorkspaceBackupIdentity,
+  WorkspaceBackupStore,
+} from "@oao/artifact-s3";
+import type { SandboxCapability, SandboxSnapshotEntry } from "@oao/contracts";
+import { DEFAULT_SANDBOX_CAPABILITIES } from "@oao/contracts";
 import type { PgPool, Queryable, TenantContext } from "@oao/db-postgres";
 import { withTenantTransaction } from "@oao/db-postgres";
 import type { PublicValue, RunId, SessionId, ThreadId } from "@oao/domain";
-import { assertPublicPayload } from "@oao/domain";
-import { daytona } from "./flue-daytona-blueprint.js";
+import { assertPublicPayload, isSensitivePublicKey } from "@oao/domain";
+import type { ProviderCredentialCipher } from "@oao/provider-credentials";
+import {
+  daytona,
+  resolveDaytonaWorkspaceDirectory,
+} from "./flue-daytona-blueprint.js";
+
+export const DEFAULT_DAYTONA_IMAGE = "debian:12.9";
+const MAX_WORKSPACE_ARCHIVE_BYTES = 512 * 1024 * 1024;
+const MAX_EXPANDED_WORKSPACE_BYTES = 2 * 1024 * 1024 * 1024;
+const workspacePersistenceBySandbox = new WeakMap<
+  Sandbox,
+  () => Promise<void>
+>();
+
+function safeText(value: unknown, maximumLength: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const sanitized = [...value]
+    .map((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 31 || codePoint === 127 ? " " : character;
+    })
+    .join("")
+    .trim();
+  return sanitized ? sanitized.slice(0, maximumLength) : undefined;
+}
+
+function safeCommandName(command: unknown): string {
+  const firstToken = safeText(command, 4_096)?.split(/\s+/u)[0];
+  if (!firstToken || firstToken.includes("=")) return "command";
+  const basename = firstToken.split("/").at(-1);
+  return basename && /^[a-zA-Z0-9_.:+-]{1,64}$/u.test(basename)
+    ? basename
+    : "command";
+}
+
+const CREDENTIAL_TEXT =
+  /((?:api[_-]?key|authorization|bearer|password|secret|token)\s*[=:]\s*)([^\s'"&,;]+)/giu;
+const BEARER_TEXT = /(bearer\s+)([a-z0-9._~+/-]+)/giu;
+const CREDENTIAL_QUERY =
+  /([?&](?:api[_-]?key|authorization|password|secret|token)=)([^&#\s]+)/giu;
+const URL_CREDENTIALS = /(https?:\/\/)[^/@:\s]+:[^/@\s]+@/giu;
+
+function redactCredentialText(value: string): string {
+  return value
+    .replace(URL_CREDENTIALS, "$1[REDACTED]@")
+    .replace(CREDENTIAL_QUERY, "$1[REDACTED]")
+    .replace(CREDENTIAL_TEXT, "$1[REDACTED]")
+    .replace(BEARER_TEXT, "$1[REDACTED]");
+}
+
+/** Preserve transcript content while still removing credential-bearing fields. */
+function transcriptValue(value: unknown): PublicValue {
+  if (value === null || typeof value === "boolean" || typeof value === "number")
+    return value;
+  if (typeof value === "string") return redactCredentialText(value);
+  if (Array.isArray(value)) return value.map(transcriptValue);
+  if (typeof value === "object") {
+    const safe: Record<string, PublicValue> = {};
+    const redactedFields: string[] = [];
+    for (const [key, nested] of Object.entries(
+      value as Record<string, unknown>,
+    )) {
+      if (isSensitivePublicKey(key)) redactedFields.push(key);
+      else safe[key] = transcriptValue(nested);
+    }
+    if (redactedFields.length > 0) safe.redactedFields = redactedFields;
+    return safe;
+  }
+  return String(value);
+}
+
+/** Persist model-facing tool arguments for the authorized session transcript. */
+export function safeSandboxToolCommand(
+  toolName: string,
+  params: unknown,
+): Readonly<Record<string, PublicValue>> {
+  const safe = { toolName, arguments: transcriptValue(params) } as const;
+  assertPublicPayload(safe);
+  return safe;
+}
+
+async function persistRegisteredWorkspace(sandbox: Sandbox): Promise<void> {
+  const persist = workspacePersistenceBySandbox.get(sandbox);
+  if (!persist) throw new Error("Sandbox workspace persistence is unavailable");
+  await persist();
+}
+
+export async function listDaytonaSnapshots(input: {
+  readonly apiKey: string;
+  readonly target?: string;
+}): Promise<readonly SandboxSnapshotEntry[]> {
+  const client = new Daytona({
+    apiKey: input.apiKey,
+    ...(input.target ? { target: input.target } : {}),
+  });
+  const snapshots: SandboxSnapshotEntry[] = [];
+  let page = 1;
+  for (;;) {
+    const result = await client.snapshot.list({ page, limit: 100 });
+    snapshots.push(
+      ...result.items.map((snapshot) => ({
+        id: snapshot.id,
+        providerType: "daytona" as const,
+        name: snapshot.name,
+        state: snapshot.state,
+        available: snapshot.state === "active",
+        imageName: snapshot.imageName ?? null,
+        general: snapshot.general,
+        cpu: snapshot.cpu,
+        gpu: snapshot.gpu,
+        memoryGiB: snapshot.mem,
+        diskGiB: snapshot.disk,
+        regionIds: snapshot.regionIds ?? [],
+        sandboxClass: snapshot.sandboxClass ?? null,
+        createdAt: new Date(snapshot.createdAt).toISOString(),
+        updatedAt: new Date(snapshot.updatedAt).toISOString(),
+        lastUsedAt: snapshot.lastUsedAt
+          ? new Date(snapshot.lastUsedAt).toISOString()
+          : null,
+      })),
+    );
+    if (page >= result.totalPages) break;
+    page += 1;
+  }
+  return snapshots;
+}
+
+export function daytonaSandboxRecoveryAction(
+  state: string | undefined,
+): "skip" | "recover" | "start" | "reuse" {
+  if (state === SandboxState.BUILD_FAILED || state === SandboxState.DESTROYED)
+    return "skip";
+  if (state === SandboxState.ERROR) return "recover";
+  if (state === SandboxState.STOPPED) return "start";
+  return "reuse";
+}
 
 export interface SandboxEgressPolicy {
   readonly mode: "none" | "restricted";
@@ -26,6 +181,7 @@ export interface SandboxProviderPort {
   create(input: {
     readonly creationKey: string;
     readonly image: string;
+    readonly snapshotId?: string;
     readonly targetPreference?: string;
     readonly egress: SandboxEgressPolicy;
   }): Promise<SandboxHandle>;
@@ -38,7 +194,15 @@ export interface SandboxProviderPort {
 }
 
 export interface FlueSandboxProviderPort extends SandboxProviderPort {
-  flueFactory(sandbox: SandboxHandle): SandboxFactory;
+  flueFactory(
+    sandbox: SandboxHandle,
+    options: {
+      readonly capabilities: readonly SandboxCapability[];
+      readonly egress: SandboxEgressPolicy;
+    },
+  ): SandboxFactory;
+  captureWorkspace?(sandbox: SandboxHandle): Promise<Uint8Array>;
+  restoreWorkspace?(sandbox: SandboxHandle, archive: Uint8Array): Promise<void>;
 }
 
 export interface InstanceRecord extends TenantContext {
@@ -62,6 +226,7 @@ export interface CommandRecord {
   readonly result?: {
     readonly exitCode: number;
     readonly redactedOutput: string;
+    readonly output?: PublicValue;
   };
 }
 
@@ -106,7 +271,11 @@ export interface SandboxRepository {
   completeCommand(
     input: InstanceRecord,
     command: CommandRecord,
-    result: { readonly exitCode: number; readonly redactedOutput: string },
+    result: {
+      readonly exitCode: number;
+      readonly redactedOutput: string;
+      readonly output?: PublicValue;
+    },
   ): Promise<CommandRecord>;
   failCommand(
     input: InstanceRecord,
@@ -185,23 +354,70 @@ export class PostgresSandboxRepository implements SandboxRepository {
       );
       const result = await transaction.query(
         `SELECT organization_id,project_id,id,run_id,thread_id,session_id,creation_key,
-          creation_fence,state,provider_ref,target_preference,egress_policy
+          creation_fence,state,provider_ref,target_preference,provider_target,egress_policy
           FROM oao.sandbox_instances
          WHERE organization_id=$1 AND project_id=$2 AND creation_key=$3 FOR UPDATE`,
         [input.organizationId, input.projectId, input.creationKey],
       );
-      const row = result.rows[0] as Record<string, unknown>;
+      let row = result.rows[0] as Record<string, unknown>;
+      const requestedTarget = input.targetPreference ?? "provider-default";
+      if (
+        row.provider_ref &&
+        row.provider_target == null &&
+        row.target_preference !== requestedTarget
+      ) {
+        const reconciled = await transaction.query(
+          `UPDATE oao.sandbox_instances
+              SET provider_target=target_preference,target_preference=$5,
+                  updated_at=clock_timestamp()
+            WHERE organization_id=$1 AND project_id=$2 AND id=$3
+              AND creation_fence=$4 AND provider_target IS NULL
+          RETURNING organization_id,project_id,id,run_id,thread_id,session_id,
+                    creation_key,creation_fence,state,provider_ref,
+                    target_preference,provider_target,egress_policy`,
+          [
+            input.organizationId,
+            input.projectId,
+            row.id,
+            String(row.creation_fence),
+            requestedTarget,
+          ],
+        );
+        if (!reconciled.rowCount)
+          throw new Error("Stale sandbox target reconciliation fence");
+        row = reconciled.rows[0] as Record<string, unknown>;
+      }
       if (
         row.thread_id !== input.threadId ||
         row.session_id !== input.sessionId ||
-        row.target_preference !==
-          (input.targetPreference ?? "provider-default") ||
+        row.target_preference !== requestedTarget ||
         Buffer.compare(
           Buffer.from(sha256(row.egress_policy)),
           Buffer.from(sha256(input.egress)),
         ) !== 0
       )
         throw new Error("Sandbox creation idempotency conflict");
+      if (row.state === "failed") {
+        const recovery = await transaction.query(
+          `UPDATE oao.sandbox_instances
+              SET state='recovering',creation_fence=creation_fence+1,
+                  provider_ref=NULL,provider_target=NULL,safe_error=NULL,
+                  updated_at=clock_timestamp()
+            WHERE organization_id=$1 AND project_id=$2 AND id=$3
+              AND creation_fence=$4 AND state='failed'
+          RETURNING organization_id,project_id,id,run_id,thread_id,session_id,
+                    creation_key,creation_fence,state,provider_ref,
+                    target_preference,provider_target,egress_policy`,
+          [
+            input.organizationId,
+            input.projectId,
+            row.id,
+            String(row.creation_fence),
+          ],
+        );
+        if (!recovery.rowCount) throw new Error("Stale sandbox recovery fence");
+        row = recovery.rows[0] as Record<string, unknown>;
+      }
       const instance = this.mapInstance(row, input.runId);
       if (instance.creatorRunId === input.runId)
         await appendSandboxEvent(
@@ -222,7 +438,7 @@ export class PostgresSandboxRepository implements SandboxRepository {
     return withTenantTransaction(this.pool, instance, async (transaction) => {
       const result = await transaction.query(
         `UPDATE oao.sandbox_instances SET state='running',provider_ref=$5,
-          target_preference=$6,updated_at=clock_timestamp()
+          provider_target=$6,updated_at=clock_timestamp()
          WHERE organization_id=$1 AND project_id=$2 AND id=$3
            AND creation_fence=$4 AND state IN ('creating','recovering','running') RETURNING *`,
         [
@@ -377,7 +593,11 @@ export class PostgresSandboxRepository implements SandboxRepository {
   async completeCommand(
     input: InstanceRecord,
     command: CommandRecord,
-    resultValue: { readonly exitCode: number; readonly redactedOutput: string },
+    resultValue: {
+      readonly exitCode: number;
+      readonly redactedOutput: string;
+      readonly output?: PublicValue;
+    },
   ): Promise<CommandRecord> {
     return withTenantTransaction(this.pool, input, async (transaction) => {
       const result = await transaction.query(
@@ -488,7 +708,7 @@ export class PostgresSandboxRepository implements SandboxRepository {
       fence: BigInt(row.creation_fence as string),
       state: row.state as InstanceRecord["state"],
       ...(row.provider_ref ? { providerRef: row.provider_ref as string } : {}),
-      target: row.target_preference as string,
+      target: (row.provider_target ?? row.target_preference) as string,
     };
   }
 
@@ -496,6 +716,7 @@ export class PostgresSandboxRepository implements SandboxRepository {
     const safeResult = row.safe_result as {
       exitCode: number;
       redactedOutput: string;
+      output?: PublicValue;
     } | null;
     return {
       id: row.id as string,
@@ -520,12 +741,14 @@ export class ManagedSandboxLifecycle {
       readonly sessionId: SessionId;
       readonly creationKey: string;
       readonly image: string;
+      readonly snapshotId?: string;
       readonly egress: SandboxEgressPolicy;
       readonly targetPreference?: string;
     },
   ): Promise<{
     readonly record: InstanceRecord;
     readonly handle: SandboxHandle;
+    readonly created: boolean;
   }> {
     this.validateEgress(input.egress);
     let record = await this.repository.reserveInstance({
@@ -533,23 +756,28 @@ export class ManagedSandboxLifecycle {
       ...input,
     });
     let handle: SandboxHandle;
+    let created = false;
     try {
-      handle =
-        (await this.provider.findByCreationKey(input.creationKey)) ??
-        (await this.provider.create({
+      const existing = await this.provider.findByCreationKey(input.creationKey);
+      if (existing) handle = existing;
+      else {
+        created = true;
+        handle = await this.provider.create({
           creationKey: input.creationKey,
           image: input.image,
+          ...(input.snapshotId ? { snapshotId: input.snapshotId } : {}),
           egress: input.egress,
           ...(input.targetPreference
             ? { targetPreference: input.targetPreference }
             : {}),
-        }));
+        });
+      }
     } catch {
       await this.repository.markFailed(record);
       throw new Error("Sandbox creation failed");
     }
     record = await this.repository.markRunning(record, handle);
-    return { record, handle };
+    return { record, handle, created };
   }
 
   async execute(
@@ -568,7 +796,7 @@ export class ManagedSandboxLifecycle {
       ...instance.record,
       commandId: input.commandId,
       commandKey: input.commandKey,
-      safeCommand: { commandName: input.command.split(/\s+/u)[0] ?? "command" },
+      safeCommand: { commandName: safeCommandName(input.command) },
     });
     if (command.state === "completed" && command.result) return command.result;
     command = await this.repository.markCommandRunning(
@@ -628,6 +856,379 @@ export class ManagedSandboxLifecycle {
   }
 }
 
+type SandboxTool = ReturnType<NonNullable<SandboxFactory["tools"]>>[number];
+
+interface BrowserSnapshot {
+  readonly accessibilityTree: unknown;
+  readonly screenshotBase64?: string;
+}
+
+type BrowserInteraction =
+  | { readonly action: "click"; readonly nodeId: string }
+  | {
+      readonly action: "set_value";
+      readonly nodeId: string;
+      readonly value: string;
+    }
+  | {
+      readonly action: "press";
+      readonly key: string;
+      readonly modifiers?: readonly string[];
+    }
+  | {
+      readonly action: "scroll";
+      readonly direction: "up" | "down";
+      readonly amount?: number;
+    };
+
+interface SandboxBrowserController {
+  navigate(url: string, signal?: AbortSignal): Promise<void>;
+  snapshot(signal?: AbortSignal): Promise<BrowserSnapshot>;
+  interact(input: BrowserInteraction, signal?: AbortSignal): Promise<void>;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw signal.reason ?? new Error("Operation aborted");
+}
+
+function isHostAllowed(hostname: string, policy: SandboxEgressPolicy): boolean {
+  const normalized = hostname.toLowerCase().replace(/\.$/u, "");
+  const loopback =
+    normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized === "[::1]" ||
+    normalized === "::1";
+  if (loopback) return true;
+  if (policy.mode === "none") return false;
+  if (
+    policy.allowedCidrs?.some(
+      (cidr) => cidr === `${normalized}/32` || cidr === `${normalized}/128`,
+    )
+  )
+    return true;
+  return Boolean(
+    policy.allowedDomains?.some((entry) => {
+      const allowed = entry.toLowerCase();
+      return allowed.startsWith("*.")
+        ? normalized.endsWith(allowed.slice(1)) &&
+            normalized !== allowed.slice(2)
+        : normalized === allowed;
+    }),
+  );
+}
+
+function validateBrowserUrl(value: string, policy: SandboxEgressPolicy): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new TypeError("Browser URL must be absolute");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:")
+    throw new TypeError("Browser URL must use http or https");
+  if (url.username || url.password)
+    throw new TypeError("Browser URL must not include credentials");
+  if (!isHostAllowed(url.hostname, policy))
+    throw new Error("Browser URL is outside the sandbox egress allowlist");
+  return url;
+}
+
+class DaytonaBrowserController implements SandboxBrowserController {
+  #ready: Promise<void> | undefined;
+
+  constructor(
+    private readonly sandbox: DaytonaSandbox,
+    private readonly egress: SandboxEgressPolicy,
+  ) {}
+
+  async navigate(value: string, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    const url = validateBrowserUrl(value, this.egress);
+    await this.ensureReady();
+    throwIfAborted(signal);
+    await this.sandbox.computerUse.keyboard.press("l", ["ctrl"]);
+    await this.sandbox.computerUse.keyboard.type(url.toString());
+    await this.sandbox.computerUse.keyboard.press("enter");
+  }
+
+  async snapshot(signal?: AbortSignal): Promise<BrowserSnapshot> {
+    throwIfAborted(signal);
+    await this.ensureReady();
+    const [accessibilityTree, screenshot] = await Promise.all([
+      this.sandbox.computerUse.accessibility.getTree({
+        scope: "all",
+        maxDepth: 8,
+      }),
+      this.sandbox.computerUse.screenshot.takeCompressed({
+        format: "jpeg",
+        quality: 70,
+        scale: 0.75,
+      }),
+    ]);
+    throwIfAborted(signal);
+    return {
+      accessibilityTree,
+      ...(screenshot.screenshot
+        ? { screenshotBase64: screenshot.screenshot }
+        : {}),
+    };
+  }
+
+  async interact(
+    input: BrowserInteraction,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    throwIfAborted(signal);
+    await this.ensureReady();
+    switch (input.action) {
+      case "click":
+        await this.sandbox.computerUse.accessibility.invokeNode(input.nodeId);
+        break;
+      case "set_value":
+        await this.sandbox.computerUse.accessibility.setNodeValue(
+          input.nodeId,
+          input.value,
+        );
+        break;
+      case "press":
+        await this.sandbox.computerUse.keyboard.press(
+          input.key,
+          input.modifiers ? [...input.modifiers] : undefined,
+        );
+        break;
+      case "scroll": {
+        const position = await this.sandbox.computerUse.mouse.getPosition();
+        await this.sandbox.computerUse.mouse.scroll(
+          position.x ?? 0,
+          position.y ?? 0,
+          input.direction,
+          input.amount,
+        );
+        break;
+      }
+    }
+    throwIfAborted(signal);
+  }
+
+  private ensureReady(): Promise<void> {
+    this.#ready ??= (async () => {
+      await this.sandbox.computerUse.start();
+      const executable = await this.sandbox.process.executeCommand(
+        "command -v chromium || command -v chromium-browser || command -v google-chrome",
+      );
+      const browser = executable.result?.trim().split(/\s+/u)[0];
+      if (!browser)
+        throw new Error("Daytona sandbox image does not include Chromium");
+      await this.sandbox.process.executeCommand(
+        `${browser} --no-sandbox --disable-dev-shm-usage --start-maximized about:blank >/tmp/oao-browser.log 2>&1 &`,
+      );
+    })();
+    return this.#ready;
+  }
+}
+
+class FakeBrowserController implements SandboxBrowserController {
+  #url = "about:blank";
+
+  async navigate(url: string, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    this.#url = url;
+  }
+
+  async snapshot(signal?: AbortSignal): Promise<BrowserSnapshot> {
+    throwIfAborted(signal);
+    return {
+      accessibilityTree: {
+        role: "document",
+        name: `Deterministic browser at ${this.#url}`,
+      },
+    };
+  }
+
+  async interact(
+    _input: BrowserInteraction,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    throwIfAborted(signal);
+  }
+}
+
+function composeSandboxTools(
+  sandbox: Sandbox,
+  capabilities: readonly SandboxCapability[],
+  browser: SandboxBrowserController,
+): SandboxTool[] {
+  const enabled = new Set(capabilities);
+  const tools: SandboxTool[] = [];
+  if (enabled.has("filesystem_read")) tools.push(createReadTool(sandbox));
+  if (enabled.has("filesystem_write"))
+    tools.push(createWriteTool(sandbox), createEditTool(sandbox));
+  if (enabled.has("shell"))
+    tools.push(
+      createBashTool(sandbox),
+      createGrepTool(sandbox),
+      createGlobTool(sandbox),
+    );
+  if (enabled.has("browser")) {
+    tools.push(
+      {
+        name: "browser_navigate",
+        label: "Navigate browser",
+        description:
+          "Navigate the sandbox browser to an allowed absolute HTTP(S) URL.",
+        parameters: Type.Object({ url: Type.String() }),
+        async execute(
+          _id: string,
+          params: { readonly url: string },
+          signal?: AbortSignal,
+        ) {
+          await browser.navigate(params.url, signal);
+          return {
+            content: [{ type: "text", text: `Navigated to ${params.url}` }],
+            details: { url: params.url },
+          };
+        },
+      } as SandboxTool,
+      {
+        name: "browser_snapshot",
+        label: "Inspect browser",
+        description:
+          "Return the browser accessibility tree and a compressed screenshot.",
+        parameters: Type.Object({}),
+        async execute(_id: string, _params: unknown, signal?: AbortSignal) {
+          const result = await browser.snapshot(signal);
+          const serialized = JSON.stringify(result.accessibilityTree);
+          const content: Array<
+            | { readonly type: "text"; readonly text: string }
+            | {
+                readonly type: "image";
+                readonly data: string;
+                readonly mimeType: string;
+              }
+          > = [
+            {
+              type: "text",
+              text:
+                serialized.length > 30_000
+                  ? `${serialized.slice(0, 30_000)}\n[truncated]`
+                  : serialized,
+            },
+          ];
+          if (result.screenshotBase64)
+            content.push({
+              type: "image",
+              data: result.screenshotBase64,
+              mimeType: "image/jpeg",
+            });
+          return {
+            content,
+            details: { screenshotIncluded: Boolean(result.screenshotBase64) },
+          };
+        },
+      } as SandboxTool,
+      {
+        name: "browser_interact",
+        label: "Interact with browser",
+        description:
+          "Click or fill an accessibility node, press a key, or scroll.",
+        parameters: Type.Union([
+          Type.Object({
+            action: Type.Literal("click"),
+            nodeId: Type.String(),
+          }),
+          Type.Object({
+            action: Type.Literal("set_value"),
+            nodeId: Type.String(),
+            value: Type.String(),
+          }),
+          Type.Object({
+            action: Type.Literal("press"),
+            key: Type.String(),
+            modifiers: Type.Optional(Type.Array(Type.String())),
+          }),
+          Type.Object({
+            action: Type.Literal("scroll"),
+            direction: Type.Union([Type.Literal("up"), Type.Literal("down")]),
+            amount: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })),
+          }),
+        ]),
+        executionMode: "sequential",
+        async execute(
+          _id: string,
+          params: BrowserInteraction,
+          signal?: AbortSignal,
+        ) {
+          await browser.interact(params, signal);
+          return {
+            content: [{ type: "text", text: `${params.action} completed` }],
+            details: { action: params.action },
+          };
+        },
+      } as SandboxTool,
+    );
+  }
+  return tools;
+}
+
+function withDurableToolAudit(
+  tools: readonly SandboxTool[],
+  repository: SandboxRepository,
+  instance: { readonly record: InstanceRecord },
+): SandboxTool[] {
+  return tools.map(
+    (tool) =>
+      ({
+        ...tool,
+        async execute(
+          toolCallId: string,
+          params: unknown,
+          signal?: AbortSignal,
+          onUpdate?: Parameters<SandboxTool["execute"]>[3],
+        ) {
+          let command = await repository.reserveCommand({
+            ...instance.record,
+            commandId: stableUuid(
+              `sandbox-tool:${instance.record.id}:${toolCallId}`,
+            ),
+            commandKey: `sandbox-tool:${instance.record.runId}:${toolCallId}`,
+            safeCommand: safeSandboxToolCommand(tool.name, params),
+          });
+          if (command.state === "completed")
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "Sandbox tool call was already completed.",
+                },
+              ],
+              details: { replayed: true, toolName: tool.name },
+            };
+          command = await repository.markCommandRunning(
+            instance.record,
+            command,
+          );
+          try {
+            const result = await tool.execute(
+              toolCallId,
+              params,
+              signal,
+              onUpdate,
+            );
+            await repository.completeCommand(instance.record, command, {
+              exitCode: 0,
+              redactedOutput: "Sandbox tool completed",
+              output: transcriptValue(result),
+            });
+            return result;
+          } catch (error) {
+            await repository.failCommand(instance.record, command);
+            throw error;
+          }
+        },
+      }) as SandboxTool,
+  );
+}
+
 export class DaytonaManagedProvider implements FlueSandboxProviderPort {
   readonly #client: Daytona;
 
@@ -644,19 +1245,31 @@ export class DaytonaManagedProvider implements FlueSandboxProviderPort {
   async findByCreationKey(key: string): Promise<SandboxHandle | undefined> {
     for await (const sandbox of this.#client.list({
       labels: { oaoCreationKey: key },
-    }))
+    })) {
+      const action = daytonaSandboxRecoveryAction(sandbox.state);
+      if (action === "skip") continue;
+      if (action === "recover") {
+        try {
+          await sandbox.recover();
+        } catch {
+          continue;
+        }
+      } else if (action === "start") {
+        await sandbox.start();
+      }
       return this.wrap(sandbox);
+    }
     return undefined;
   }
 
   async create(input: {
     readonly creationKey: string;
     readonly image: string;
+    readonly snapshotId?: string;
     readonly targetPreference?: string;
     readonly egress: SandboxEgressPolicy;
   }): Promise<SandboxHandle> {
-    const sandbox = await this.#client.create({
-      image: input.image,
+    const options = {
       labels: { oaoCreationKey: input.creationKey },
       networkBlockAll: input.egress.mode === "none",
       ...(input.egress.allowedDomains?.length
@@ -667,7 +1280,10 @@ export class DaytonaManagedProvider implements FlueSandboxProviderPort {
         : {}),
       autoStopInterval: 15,
       autoDeleteInterval: 60,
-    });
+    };
+    const sandbox = input.snapshotId
+      ? await this.#client.create({ ...options, snapshot: input.snapshotId })
+      : await this.#client.create({ ...options, image: input.image });
     return this.wrap(sandbox);
   }
 
@@ -693,8 +1309,79 @@ export class DaytonaManagedProvider implements FlueSandboxProviderPort {
     await this.native(sandbox).stop();
   }
 
-  flueFactory(sandbox: SandboxHandle) {
-    return daytona(this.native(sandbox));
+  async captureWorkspace(sandbox: SandboxHandle): Promise<Uint8Array> {
+    const native = this.native(sandbox);
+    const workspaceDirectory = await resolveDaytonaWorkspaceDirectory(native);
+    const archivePath = "/tmp/oao-workspace-backup.tar.gz";
+    try {
+      const result = await native.process.executeCommand(
+        `tar --exclude='./.oao-workspace-backup.tar.gz' -czf ${archivePath} .`,
+        workspaceDirectory,
+        undefined,
+        300,
+      );
+      if ((result.exitCode ?? 0) !== 0)
+        throw new Error("Workspace archive command failed");
+      const size = await native.process.executeCommand(
+        `test "$(stat -c%s ${archivePath})" -le ${MAX_WORKSPACE_ARCHIVE_BYTES}`,
+        undefined,
+        undefined,
+        30,
+      );
+      if ((size.exitCode ?? 0) !== 0)
+        throw new Error("Workspace archive exceeds the 512 MiB limit");
+      const bytes = await native.fs.downloadFile(archivePath);
+      if (bytes.byteLength > MAX_WORKSPACE_ARCHIVE_BYTES)
+        throw new Error("Workspace archive exceeds the 512 MiB limit");
+      return new Uint8Array(bytes);
+    } finally {
+      await native.process
+        .executeCommand(`rm -f ${archivePath}`, undefined, undefined, 30)
+        .catch(() => undefined);
+    }
+  }
+
+  async restoreWorkspace(
+    sandbox: SandboxHandle,
+    archive: Uint8Array,
+  ): Promise<void> {
+    if (archive.byteLength > MAX_WORKSPACE_ARCHIVE_BYTES)
+      throw new Error("Workspace archive exceeds the 512 MiB limit");
+    const native = this.native(sandbox);
+    const workspaceDirectory = await resolveDaytonaWorkspaceDirectory(native);
+    const archivePath = "/tmp/oao-workspace-restore.tar.gz";
+    try {
+      await native.fs.uploadFile(Buffer.from(archive), archivePath);
+      const result = await native.process.executeCommand(
+        `test "$(gzip -cd ${archivePath} | head -c ${MAX_EXPANDED_WORKSPACE_BYTES + 1} | wc -c)" -le ${MAX_EXPANDED_WORKSPACE_BYTES} && tar -tzf ${archivePath} >/dev/null && tar --no-same-owner --no-same-permissions -xzf ${archivePath} -C .`,
+        workspaceDirectory,
+        undefined,
+        300,
+      );
+      if ((result.exitCode ?? 0) !== 0)
+        throw new Error("Workspace restore command failed");
+    } finally {
+      await native.process
+        .executeCommand(`rm -f ${archivePath}`, undefined, undefined, 30)
+        .catch(() => undefined);
+    }
+  }
+
+  flueFactory(
+    sandbox: SandboxHandle,
+    options: {
+      readonly capabilities: readonly SandboxCapability[];
+      readonly egress: SandboxEgressPolicy;
+    },
+  ) {
+    const native = this.native(sandbox);
+    const base = daytona(native);
+    const browser = new DaytonaBrowserController(native, options.egress);
+    return {
+      ...base,
+      tools: (flueSandbox: Sandbox) =>
+        composeSandboxTools(flueSandbox, options.capabilities, browser),
+    };
   }
 
   private native(handle: SandboxHandle): DaytonaSandbox {
@@ -738,9 +1425,19 @@ export class FakeSandboxProvider implements FlueSandboxProviderPort {
     this.calls.push(`stop:${sandbox.providerRef}`);
   }
 
-  flueFactory(): SandboxFactory {
-    return createFakeFlueSandbox();
+  flueFactory(
+    _sandbox: SandboxHandle,
+    options: {
+      readonly capabilities: readonly SandboxCapability[];
+      readonly egress: SandboxEgressPolicy;
+    },
+  ): SandboxFactory {
+    return createFakeFlueSandbox(options.capabilities);
   }
+}
+
+export interface ManagedDaytonaSandboxFactory extends SandboxFactory {
+  persistWorkspace(sandbox: Sandbox): Promise<void>;
 }
 
 export function createManagedDaytonaFlueSandbox(input: {
@@ -752,13 +1449,30 @@ export function createManagedDaytonaFlueSandbox(input: {
   readonly threadId: ThreadId;
   readonly sessionId: SessionId;
   readonly image?: string;
+  readonly snapshotId?: string;
   readonly egress: SandboxEgressPolicy;
   readonly targetPreference?: string;
-}): SandboxFactory {
-  const lifecycle = new ManagedSandboxLifecycle(
-    new PostgresSandboxRepository(input.pool),
-    input.provider,
-  );
+  readonly capabilities?: readonly SandboxCapability[];
+  readonly workspaceBackupStore?: WorkspaceBackupStore;
+}): ManagedDaytonaSandboxFactory {
+  const repository = new PostgresSandboxRepository(input.pool);
+  const lifecycle = new ManagedSandboxLifecycle(repository, input.provider);
+  const capabilities = input.capabilities ?? DEFAULT_SANDBOX_CAPABILITIES;
+  let providerFactory: SandboxFactory | undefined;
+  let managedInstance:
+    | { readonly record: InstanceRecord; readonly handle: SandboxHandle }
+    | undefined;
+  const persistWorkspace = async () => {
+    if (!input.workspaceBackupStore) return;
+    if (!managedInstance)
+      throw new Error("Managed sandbox instance is unavailable");
+    if (!input.provider.captureWorkspace)
+      throw new Error("Sandbox provider cannot capture workspace backups");
+    const archive = await input.provider.captureWorkspace(
+      managedInstance.handle,
+    );
+    await input.workspaceBackupStore.save(archive);
+  };
   return {
     async createSandbox({ id }) {
       const lifecycleIdentity = [
@@ -775,18 +1489,180 @@ export function createManagedDaytonaFlueSandbox(input: {
         sessionId: input.sessionId,
         sandboxId: stableUuid(lifecycleIdentity),
         creationKey: lifecycleIdentity,
-        image: input.image ?? "flue-daytona:2.0.3",
+        image: input.image ?? DEFAULT_DAYTONA_IMAGE,
+        ...(input.snapshotId ? { snapshotId: input.snapshotId } : {}),
         egress: input.egress,
         ...(input.targetPreference
           ? { targetPreference: input.targetPreference }
           : {}),
       });
-      return input.provider.flueFactory(managed.handle).createSandbox({ id });
+      managedInstance = managed;
+      if (managed.created && input.workspaceBackupStore) {
+        try {
+          const archive = await input.workspaceBackupStore.load();
+          if (archive) {
+            if (!input.provider.restoreWorkspace)
+              throw new Error(
+                "Sandbox provider cannot restore workspace backups",
+              );
+            await input.provider.restoreWorkspace(managed.handle, archive);
+            await input.workspaceBackupStore.markRestored();
+          }
+        } catch {
+          await repository.markFailed(managed.record);
+          throw new Error("Workspace restoration failed");
+        }
+      }
+      providerFactory = input.provider.flueFactory(managed.handle, {
+        capabilities,
+        egress: input.egress,
+      });
+      try {
+        const sandbox = await providerFactory.createSandbox({ id });
+        workspacePersistenceBySandbox.set(sandbox, persistWorkspace);
+        return sandbox;
+      } catch {
+        await repository.markFailed(managed.record);
+        throw new Error("Sandbox initialization failed");
+      }
+    },
+    tools: (sandbox, options) => {
+      if (!providerFactory?.tools)
+        throw new Error("Sandbox tools requested before sandbox creation");
+      if (!managedInstance)
+        throw new Error("Managed sandbox instance is unavailable");
+      return withDurableToolAudit(
+        providerFactory.tools(sandbox, options),
+        repository,
+        managedInstance,
+      );
+    },
+    async persistWorkspace(sandbox) {
+      await persistRegisteredWorkspace(sandbox);
     },
   };
 }
 
-export function createFakeFlueSandbox(): SandboxFactory {
+export function createProjectDaytonaFlueSandbox(input: {
+  readonly pool: PgPool;
+  readonly credentialCipher: ProviderCredentialCipher;
+  readonly providerKey: string;
+  readonly organizationId: TenantContext["organizationId"];
+  readonly projectId: TenantContext["projectId"];
+  readonly runId: RunId;
+  readonly threadId: ThreadId;
+  readonly sessionId: SessionId;
+  readonly image?: string;
+  readonly snapshotId?: string;
+  readonly network: "none" | "restricted";
+  readonly capabilities: readonly SandboxCapability[];
+  readonly workspaceBackupResolver?: {
+    resolve(
+      identity: WorkspaceBackupIdentity,
+    ): Promise<WorkspaceBackupStore | undefined>;
+  };
+}): ManagedDaytonaSandboxFactory {
+  let resolved: ManagedDaytonaSandboxFactory | undefined;
+  return {
+    async createSandbox(options) {
+      const configuration = await withTenantTransaction(
+        input.pool,
+        input,
+        async (transaction) => {
+          const result = await transaction.query<{
+            readonly id: string;
+            readonly provider_type: string;
+            readonly encrypted_api_key: Buffer;
+            readonly encryption_nonce: Buffer;
+            readonly encryption_tag: Buffer;
+            readonly encryption_key_version: number;
+            readonly target: string | null;
+            readonly restricted_egress: {
+              readonly allowedDomains?: readonly string[];
+              readonly allowedCidrs?: readonly string[];
+            };
+          }>(
+            `SELECT id,provider_type,encrypted_api_key,encryption_nonce,
+                    encryption_tag,encryption_key_version,target,restricted_egress
+               FROM oao.project_sandbox_providers
+              WHERE organization_id=$1 AND project_id=$2 AND provider_key=$3`,
+            [input.organizationId, input.projectId, input.providerKey],
+          );
+          const row = result.rows[0];
+          if (!row)
+            throw new Error(
+              `Sandbox provider ${input.providerKey} is not configured for this project`,
+            );
+          return row;
+        },
+      );
+      if (configuration.provider_type !== "daytona")
+        throw new Error("Unsupported sandbox provider type");
+      const providerId = String(configuration.id);
+      const apiKey = input.credentialCipher.decrypt(
+        {
+          ciphertext: configuration.encrypted_api_key,
+          nonce: configuration.encryption_nonce,
+          tag: configuration.encryption_tag,
+          keyVersion: configuration.encryption_key_version,
+        },
+        {
+          organizationId: input.organizationId,
+          projectId: input.projectId,
+          providerId,
+          providerType: "daytona",
+        },
+      );
+      const restricted = configuration.restricted_egress;
+      const egress: SandboxEgressPolicy =
+        input.network === "none"
+          ? { mode: "none" }
+          : {
+              mode: "restricted",
+              allowedDomains: restricted.allowedDomains ?? [],
+              allowedCidrs: restricted.allowedCidrs ?? [],
+            };
+      const provider = new DaytonaManagedProvider({
+        apiKey,
+        ...(configuration.target
+          ? { target: String(configuration.target) }
+          : {}),
+      });
+      const workspaceBackupStore = await input.workspaceBackupResolver?.resolve(
+        {
+          organizationId: input.organizationId,
+          projectId: input.projectId,
+          threadId: input.threadId,
+          sessionId: input.sessionId,
+          runId: input.runId,
+        },
+      );
+      resolved = createManagedDaytonaFlueSandbox({
+        ...input,
+        provider,
+        egress,
+        ...(configuration.target
+          ? { targetPreference: String(configuration.target) }
+          : {}),
+        ...(workspaceBackupStore ? { workspaceBackupStore } : {}),
+      });
+      return resolved.createSandbox(options);
+    },
+    tools(sandbox, options) {
+      if (!resolved?.tools)
+        throw new Error("Sandbox tools requested before provider resolution");
+      return resolved.tools(sandbox, options);
+    },
+    async persistWorkspace(sandbox) {
+      await persistRegisteredWorkspace(sandbox);
+    },
+  };
+}
+
+export function createFakeFlueSandbox(
+  capabilities: readonly SandboxCapability[] = DEFAULT_SANDBOX_CAPABILITIES,
+): SandboxFactory {
+  const browser = new FakeBrowserController();
   return {
     async createSandbox() {
       const files = new Map<string, Uint8Array>();
@@ -841,6 +1717,7 @@ export function createFakeFlueSandbox(): SandboxFactory {
       };
       return sandboxFromDriver(driver, "/workspace");
     },
+    tools: (sandbox) => composeSandboxTools(sandbox, capabilities, browser),
   };
 }
 

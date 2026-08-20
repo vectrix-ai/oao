@@ -1,9 +1,103 @@
 import type {
+  ModelCatalogEntry,
+  ModelPreset,
+  ModelRoutingPolicy,
+  ProjectModelProvider,
+  ProjectSandboxProvider,
+  ProjectStorageProvider,
+  SandboxSnapshotEntry,
   ProductEvent,
   RunState,
   ToolOwner,
   ToolStage,
 } from "@oao/contracts";
+
+export type {
+  ModelCatalogEntry,
+  ModelPreset,
+  ModelRoutingPolicy,
+  ProjectModelProvider,
+  ProjectSandboxProvider,
+  ProjectStorageProvider,
+  SandboxSnapshotEntry,
+};
+
+export interface ModelPresetList {
+  readonly data: readonly ModelPreset[];
+  readonly credentialEncryptionConfigured: boolean;
+}
+
+export interface ModelCatalogList {
+  readonly data: readonly ModelCatalogEntry[];
+  readonly providerId: string;
+  readonly providerType: "openrouter" | "openai";
+}
+
+export interface CreateModelPresetInput {
+  readonly key: string;
+  readonly displayName: string;
+  readonly providerId: string;
+  readonly model: string;
+  readonly routing: ModelRoutingPolicy;
+}
+
+export interface CreateModelProviderInput {
+  readonly key: string;
+  readonly displayName: string;
+  readonly providerType: "openrouter" | "openai";
+  readonly apiKey: string;
+}
+
+export interface CreateSandboxProviderInput {
+  readonly key: string;
+  readonly displayName: string;
+  readonly providerType: "daytona";
+  readonly apiKey: string;
+  readonly target: string | null;
+  readonly restrictedEgress: {
+    readonly allowedDomains: readonly string[];
+    readonly allowedCidrs: readonly string[];
+  };
+}
+
+export interface UpdateSandboxProviderConfigurationInput {
+  readonly target: string | null;
+  readonly restrictedEgress: {
+    readonly allowedDomains: readonly string[];
+    readonly allowedCidrs: readonly string[];
+  };
+}
+
+export interface SandboxProviderList {
+  readonly data: readonly ProjectSandboxProvider[];
+  readonly credentialEncryptionConfigured: boolean;
+}
+
+export interface SandboxSnapshotList {
+  readonly data: readonly SandboxSnapshotEntry[];
+  readonly providerId: string;
+  readonly providerType: "daytona";
+}
+
+export interface CreateStorageProviderInput {
+  readonly key: string;
+  readonly displayName: string;
+  readonly providerType: "s3";
+  readonly endpoint: string | null;
+  readonly region: string;
+  readonly bucket: string;
+  readonly prefix: string | null;
+  readonly forcePathStyle: boolean;
+  readonly setDefault: boolean;
+  readonly accessKeyId: string;
+  readonly secretAccessKey: string;
+  readonly sessionToken?: string;
+}
+
+export interface StorageProviderList {
+  readonly data: readonly ProjectStorageProvider[];
+  readonly credentialEncryptionConfigured: boolean;
+}
 
 export type AgentStatus = "published" | "draft" | "archived";
 
@@ -34,7 +128,12 @@ export interface AgentVersionConfig {
   readonly tools: readonly ToolDefinition[];
   readonly sandbox: {
     readonly enabled: boolean;
+    readonly provider: string;
+    readonly snapshotId?: string;
     readonly network: "none" | "restricted";
+    readonly capabilities: readonly (
+      "filesystem_read" | "filesystem_write" | "shell" | "browser"
+    )[];
   };
   readonly limits: {
     readonly maxTurns: 32;
@@ -70,11 +169,28 @@ export interface SessionSummary {
 }
 
 export type TimelineKind =
-  "user" | "assistant" | "tool" | "approval" | "error" | "retry" | "recovery";
+  | "user"
+  | "assistant"
+  | "reasoning"
+  | "tool"
+  | "approval"
+  | "error"
+  | "retry"
+  | "recovery";
+
+/**
+ * Where an event belongs in the transcript.
+ *
+ * `message` is durable conversation, `activity` is work the agent did in
+ * service of a message, and `runtime` is low-level platform telemetry that
+ * stays collapsed so it cannot bury the conversation.
+ */
+export type TimelineSource = "message" | "activity" | "runtime";
 
 export interface TimelineEvent {
   readonly id: string;
   readonly kind: TimelineKind;
+  readonly source?: TimelineSource;
   readonly title: string;
   readonly summary: string;
   readonly createdAt: string;
@@ -92,11 +208,18 @@ export interface TimelineEvent {
 
 export interface SessionDetail extends SessionSummary {
   readonly runId: string;
+  readonly model?: string;
   readonly agentVersion: number;
   readonly startedAt: string;
   readonly completedAt: string | null;
   readonly attempt: number;
   readonly events: readonly TimelineEvent[];
+  readonly workspaceFiles: readonly {
+    readonly name: string;
+    readonly path: string;
+    readonly backedUp: boolean;
+    readonly backedUpAt?: string;
+  }[];
   readonly capabilities: {
     readonly canCancel: boolean;
     readonly canResume: boolean;
@@ -169,6 +292,25 @@ export interface ProjectContext {
   readonly authProvider?: "development" | "workos";
 }
 
+export interface ApiKeySummary {
+  readonly id: string;
+  readonly name: string;
+  readonly prefix: string;
+  readonly scopes: readonly string[];
+  readonly lastUsedAt: string | null;
+}
+
+export interface CreateApiKeyInput {
+  readonly name: string;
+  readonly scopes: readonly string[];
+}
+
+export type CreatedApiKey = ApiKeySummary &
+  (
+    | { readonly shown: true; readonly secret: string }
+    | { readonly shown: false; readonly secret?: never }
+  );
+
 export interface SettingsData {
   readonly organization: {
     readonly name: string;
@@ -186,13 +328,7 @@ export interface SettingsData {
     readonly email: string;
     readonly role: "owner" | "admin" | "member" | "operator" | "viewer";
   }[];
-  readonly apiKeys: readonly {
-    readonly id: string;
-    readonly name: string;
-    readonly prefix: string;
-    readonly scopes: readonly string[];
-    readonly lastUsedAt: string | null;
-  }[];
+  readonly apiKeys: readonly ApiKeySummary[];
   readonly hosting: readonly {
     readonly service: string;
     readonly status: "operational" | "degraded" | "offline";
@@ -239,7 +375,49 @@ export interface ConsoleApi {
     result: Readonly<Record<string, unknown>>,
   ): Promise<void>;
   decideApproval(id: string, decision: "approved" | "denied"): Promise<void>;
+  listModelPresets(): Promise<ModelPresetList>;
+  listModelProviders(): Promise<readonly ProjectModelProvider[]>;
+  createModelProvider(
+    input: CreateModelProviderInput,
+  ): Promise<ProjectModelProvider>;
+  rotateModelProviderCredential(
+    providerId: string,
+    apiKey: string,
+  ): Promise<ProjectModelProvider>;
+  listSandboxProviders(): Promise<SandboxProviderList>;
+  listSandboxSnapshots(providerId: string): Promise<SandboxSnapshotList>;
+  createSandboxProvider(
+    input: CreateSandboxProviderInput,
+  ): Promise<ProjectSandboxProvider>;
+  rotateSandboxProviderCredential(
+    providerId: string,
+    apiKey: string,
+  ): Promise<ProjectSandboxProvider>;
+  updateSandboxProviderConfiguration(
+    providerId: string,
+    input: UpdateSandboxProviderConfigurationInput,
+  ): Promise<ProjectSandboxProvider>;
+  listStorageProviders(): Promise<StorageProviderList>;
+  createStorageProvider(
+    input: CreateStorageProviderInput,
+  ): Promise<ProjectStorageProvider>;
+  rotateStorageProviderCredential(
+    providerId: string,
+    credential: Pick<
+      CreateStorageProviderInput,
+      "accessKeyId" | "secretAccessKey" | "sessionToken"
+    >,
+  ): Promise<ProjectStorageProvider>;
+  setDefaultStorageProvider(
+    providerId: string,
+  ): Promise<ProjectStorageProvider>;
+  listModelCatalog(
+    providerId: string,
+    search?: string,
+  ): Promise<ModelCatalogList>;
+  createModelPreset(input: CreateModelPresetInput): Promise<ModelPreset>;
   getSettings(): Promise<SettingsData>;
+  createApiKey(input: CreateApiKeyInput): Promise<CreatedApiKey>;
   connectEvents(input: {
     readonly after?: string;
     readonly signal?: AbortSignal;

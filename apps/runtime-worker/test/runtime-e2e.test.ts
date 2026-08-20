@@ -173,6 +173,7 @@ async function seedFixture(
     readonly existing?: Fixture;
     readonly timeoutMs?: number;
     readonly sandboxEnabled?: boolean;
+    readonly sandboxProvider?: string;
   } = {},
 ): Promise<Fixture> {
   const runId = uuid(`${label}:run`) as RunId;
@@ -186,7 +187,12 @@ async function seedFixture(
       systemPrompt: "Execute the deterministic scenario.",
       modelPreset: "local-default",
       tools,
-      sandbox: { enabled: options.sandboxEnabled ?? false, network: "none" },
+      sandbox: {
+        enabled: options.sandboxEnabled ?? false,
+        provider: options.sandboxProvider ?? "test-daytona",
+        network: "none",
+        capabilities: ["filesystem_read", "filesystem_write", "shell"],
+      },
       limits: { maxTurns: 32, timeoutMs: options.timeoutMs ?? 20_000 },
     };
     const encoded = JSON.stringify(config);
@@ -332,17 +338,6 @@ const platformTool = {
   owner: "platform",
 };
 
-test("selected Daytona mode fails before database startup without credentials", async () => {
-  await assert.rejects(
-    startRuntimeWorker({
-      databaseUrl: "postgresql://unused",
-      listen: false,
-      env: { OAO_SANDBOX_PROVIDER: "daytona" },
-    }),
-    /DAYTONA_API_KEY is required/u,
-  );
-});
-
 test(
   "thread continuity, fenced tool recovery, approvals, platform replay, deadline and transcript invariants",
   { skip: databaseUrl ? false : "DATABASE_URL is required", timeout: 180_000 },
@@ -372,7 +367,6 @@ test(
         env: {
           ...process.env,
           OAO_RUNTIME_SERVICE_PRINCIPAL_ID: service,
-          OAO_SANDBOX_PROVIDER: "fake",
         },
         fakeResponses,
         platformTools,
@@ -816,7 +810,6 @@ test(
         env: {
           ...process.env,
           OAO_RUNTIME_SERVICE_PRINCIPAL_ID: service,
-          OAO_SANDBOX_PROVIDER: "daytona",
         },
         daytonaProvider: fakeDaytona,
         fakeResponses,
@@ -827,7 +820,7 @@ test(
         "daytona-composition-one",
         "daytona exact one",
         [],
-        { sandboxEnabled: true },
+        { sandboxEnabled: true, sandboxProvider: "test-daytona" },
       );
       await enqueue(worker, daytona);
       await waitRun(admin, daytona.runId, "completed");
@@ -836,7 +829,11 @@ test(
         "daytona-composition-two",
         "daytona exact two",
         [],
-        { existing: daytona, sandboxEnabled: true },
+        {
+          existing: daytona,
+          sandboxEnabled: true,
+          sandboxProvider: "test-daytona",
+        },
       );
       await enqueue(worker, daytonaSecond);
       await waitRun(admin, daytonaSecond.runId, "completed");

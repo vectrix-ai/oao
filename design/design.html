@@ -1,0 +1,4227 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="OAO design prototype — component library and design-system reference. Not the production application."
+    />
+    <title>OAO — Design prototype · Component reference</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Manrope:wght@600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /* ============================================================
+   OAO DESIGN PROTOTYPE — v0.1
+   Light-first, squared geometry, no gradients.
+   Seed green: #6ebc91 (green-500). Actions use green-700/800.
+   ============================================================ */
+
+      :root {
+        color-scheme: light;
+
+        /* Primitive color scale — green (seed #6ebc91) */
+        --green-50: #f3faf6;
+        --green-100: #e4f4eb;
+        --green-200: #cae8d7;
+        --green-300: #a6d8bc;
+        --green-400: #82c8a1;
+        --green-500: #6ebc91;
+        --green-600: #4e9d74;
+        --green-700: #3d7c5c;
+        --green-800: #326349;
+        --green-900: #2a513e;
+        --green-950: #142d21;
+
+        /* Primitive color scale — ink (green-tinted neutrals) */
+        --ink-50: #f7f9f8;
+        --ink-100: #eef1ef;
+        --ink-200: #dde2de;
+        --ink-300: #c3cbc6;
+        --ink-400: #9aa59e;
+        --ink-500: #748079;
+        --ink-600: #52605a;
+        --ink-700: #34403a;
+        --ink-800: #202824;
+        --ink-900: #141a17;
+        --ink-950: #080c0a;
+
+        /* Primitive — signal hues */
+        --amber-600: #956114;
+        --amber-100: #fbf3e4;
+        --amber-300: #e3c68e;
+        --red-600: #b23c3c;
+        --red-100: #fdeeee;
+        --red-300: #eab3b3;
+        --blue-600: #2f6ea6;
+        --blue-100: #eaf2f9;
+        --blue-300: #a9c9e4;
+
+        /* Theme roles — light (default) */
+        --canvas: #f8faf9;
+        --surface: #ffffff;
+        --surface-2: #f2f5f3;
+        --surface-3: #eaefec;
+        --glass: rgba(255, 255, 255, 0.72);
+        --scrim: rgba(20, 26, 23, 0.42);
+        --text: #141a17;
+        --text-2: #52605a;
+        --text-3: #748079;
+        --border: #e2e7e3;
+        --border-strong: #c9d1cb;
+        --accent: #3d7c5c;
+        --accent-hover: #326349;
+        --accent-weak: #e4f4eb;
+        --accent-weak-border: #cae8d7;
+        --on-accent: #ffffff;
+        --focus: #6ebc91;
+        --live: #6ebc91;
+        --success-fg: #2f6a4c;
+        --success-bg: #e4f4eb;
+        --success-bd: #b7dfc8;
+        --warning-fg: #8a5a12;
+        --warning-bg: #fbf3e4;
+        --warning-bd: #e8cf9f;
+        --danger-fg: #a83636;
+        --danger-bg: #fdeeee;
+        --danger-bd: #efc0c0;
+        --info-fg: #2f6ea6;
+        --info-bg: #eaf2f9;
+        --info-bd: #bcd5ea;
+
+        /* Geometry — squared by default */
+        --radius-0: 0px;
+        --radius-1: 2px; /* controls: buttons, inputs, chips */
+        --radius-2: 4px; /* panels, cards, menus, dialogs */
+        --radius-pill: 999px; /* compact status chips ONLY */
+
+        /* Spacing — 4px base unit */
+        --sp-1: 4px;
+        --sp-2: 8px;
+        --sp-3: 12px;
+        --sp-4: 16px;
+        --sp-5: 20px;
+        --sp-6: 24px;
+        --sp-8: 32px;
+        --sp-10: 40px;
+        --sp-12: 48px;
+
+        /* Borders */
+        --bw: 1px;
+
+        /* Shadows — restrained; borders carry most separation */
+        --shadow-1: 0 1px 2px rgba(20, 26, 23, 0.05);
+        --shadow-2: 0 2px 8px rgba(20, 26, 23, 0.07);
+        --shadow-3: 0 12px 32px rgba(20, 26, 23, 0.16);
+
+        /* Type */
+        --font-ui: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+        --font-display: Manrope, Inter, ui-sans-serif, sans-serif;
+        --font-mono:
+          "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+        /* Motion */
+        --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+        --dur-1: 120ms;
+        --dur-2: 200ms;
+      }
+
+      [data-theme="dark"] {
+        color-scheme: dark;
+        --canvas: #0b100d;
+        --surface: #121814;
+        --surface-2: #181f1b;
+        --surface-3: #1f2822;
+        --glass: rgba(18, 24, 20, 0.72);
+        --scrim: rgba(4, 7, 5, 0.6);
+        --text: #f0f4f1;
+        --text-2: #a8b4ad;
+        --text-3: #7e8a83;
+        --border: #252e28;
+        --border-strong: #37423b;
+        --accent: #82c8a1;
+        --accent-hover: #a6d8bc;
+        --accent-weak: #16281f;
+        --accent-weak-border: #2a4a38;
+        --on-accent: #0b100d;
+        --focus: #6ebc91;
+        --live: #6ebc91;
+        --success-fg: #9bd6b4;
+        --success-bg: #142b1f;
+        --success-bd: #2a4a38;
+        --warning-fg: #e0b46a;
+        --warning-bg: #2a2113;
+        --warning-bd: #4d3d1e;
+        --danger-fg: #e59c9c;
+        --danger-bg: #2c1717;
+        --danger-bd: #523030;
+        --info-fg: #8fbfe6;
+        --info-bg: #142230;
+        --info-bd: #28405a;
+        --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+        --shadow-2: 0 2px 8px rgba(0, 0, 0, 0.35);
+        --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.55);
+      }
+
+      /* ---------- Base ---------- */
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background: var(--canvas);
+        color: var(--text);
+        font-family: var(--font-ui);
+        font-size: 14px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+      h1,
+      h2,
+      h3,
+      h4 {
+        font-family: var(--font-display);
+        letter-spacing: -0.02em;
+        margin: 0;
+      }
+      h1 {
+        font-size: 26px;
+        font-weight: 700;
+      }
+      h2 {
+        font-size: 19px;
+        font-weight: 700;
+      }
+      h3 {
+        font-size: 15px;
+        font-weight: 600;
+      }
+      h4 {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      p {
+        margin: 0 0 var(--sp-3);
+      }
+      a {
+        color: var(--accent);
+        text-underline-offset: 3px;
+        text-decoration-thickness: 1px;
+      }
+      code,
+      .mono {
+        font-family: var(--font-mono);
+        font-size: 12px;
+      }
+      :focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+        border-radius: var(--radius-1);
+      }
+      ::selection {
+        background: var(--green-200);
+        color: var(--ink-900);
+      }
+      [data-theme="dark"] ::selection {
+        background: var(--green-800);
+        color: #fff;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+      }
+      img {
+        max-width: 100%;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+
+      .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      .skip-link {
+        position: absolute;
+        left: 12px;
+        top: -48px;
+        z-index: 100;
+        background: var(--surface);
+        border: 1px solid var(--border-strong);
+        padding: 8px 12px;
+        border-radius: var(--radius-1);
+        transition: top var(--dur-1) var(--ease);
+      }
+      .skip-link:focus {
+        top: 12px;
+      }
+
+      /* ---------- Top bar (glass) ---------- */
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 40;
+        background: var(--glass);
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        border-bottom: var(--bw) solid var(--border);
+      }
+      .topbar-inner {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 0 var(--sp-6);
+        height: 52px;
+        display: flex;
+        align-items: center;
+        gap: var(--sp-4);
+      }
+      .topbar .brand {
+        display: flex;
+        align-items: center;
+        gap: var(--sp-3);
+        text-decoration: none;
+        color: var(--text);
+      }
+      .topbar .brand img {
+        height: 16px;
+        width: auto;
+        display: block;
+      }
+      [data-theme="dark"] .topbar .brand img,
+      [data-theme="dark"] .invert-dark {
+        filter: invert(1);
+      }
+      .proto-badge {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--warning-fg);
+        background: var(--warning-bg);
+        border: 1px solid var(--warning-bd);
+        padding: 3px 8px;
+        border-radius: var(--radius-1);
+        white-space: nowrap;
+      }
+      .topbar .spacer {
+        flex: 1;
+      }
+      .topbar .meta {
+        color: var(--text-3);
+        font-size: 12px;
+      }
+
+      /* ---------- Layout: index rail + content ---------- */
+      .layout {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 0 var(--sp-6);
+        display: grid;
+        grid-template-columns: 208px minmax(0, 1fr);
+        gap: var(--sp-10);
+        align-items: start;
+      }
+      .index-rail {
+        position: sticky;
+        top: 76px;
+        padding: var(--sp-6) 0 var(--sp-8);
+        max-height: calc(100vh - 90px);
+        overflow: auto;
+      }
+      .index-rail h2 {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        font-weight: 500;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        margin: 0 0 var(--sp-2);
+        padding-left: var(--sp-3);
+      }
+      .index-rail ol {
+        list-style: none;
+        margin: 0 0 var(--sp-5);
+        padding: 0;
+      }
+      .index-rail a {
+        display: block;
+        padding: 5px var(--sp-3);
+        font-size: 13px;
+        color: var(--text-2);
+        text-decoration: none;
+        border-left: 2px solid transparent;
+        border-radius: 0;
+      }
+      .index-rail a:hover {
+        color: var(--text);
+        background: var(--surface-2);
+      }
+      .index-rail a[aria-current="true"] {
+        color: var(--accent);
+        border-left-color: var(--accent);
+        background: var(--accent-weak);
+      }
+      .content {
+        padding: var(--sp-8) 0 var(--sp-12);
+        min-width: 0;
+      }
+
+      /* ---------- Section scaffolding ---------- */
+      .doc-section {
+        padding: var(--sp-8) 0;
+        border-bottom: var(--bw) solid var(--border);
+        scroll-margin-top: 72px;
+      }
+      .doc-section:last-child {
+        border-bottom: 0;
+      }
+      .sec-label {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent);
+        display: block;
+        margin-bottom: var(--sp-2);
+      }
+      .sec-intro {
+        color: var(--text-2);
+        max-width: 640px;
+        margin: var(--sp-2) 0 var(--sp-6);
+      }
+      .demo {
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-2);
+        background: var(--surface);
+        padding: var(--sp-6);
+        margin-bottom: var(--sp-4);
+      }
+      .demo + .demo {
+        margin-top: var(--sp-4);
+      }
+      .demo-title {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-3);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin: 0 0 var(--sp-4);
+      }
+      .demo-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--sp-3);
+        align-items: center;
+      }
+      .demo-row + .demo-title {
+        margin-top: var(--sp-6);
+      }
+      .rules {
+        border: var(--bw) solid var(--border);
+        border-left: 2px solid var(--accent);
+        background: var(--surface-2);
+        border-radius: var(--radius-1);
+        padding: var(--sp-4) var(--sp-5);
+        font-size: 13px;
+        color: var(--text-2);
+      }
+      .rules strong {
+        color: var(--text);
+      }
+      .rules ul {
+        margin: var(--sp-2) 0 0;
+        padding-left: 18px;
+      }
+      .rules li {
+        margin-bottom: 2px;
+      }
+      .rules li::marker {
+        color: var(--accent);
+      }
+
+      /* ---------- Buttons ---------- */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        height: 32px;
+        padding: 0 var(--sp-3);
+        border-radius: var(--radius-1);
+        border: var(--bw) solid var(--border-strong);
+        background: var(--surface);
+        color: var(--text);
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition:
+          background var(--dur-1) var(--ease),
+          border-color var(--dur-1) var(--ease);
+        text-decoration: none;
+        white-space: nowrap;
+      }
+      .btn:hover {
+        background: var(--surface-2);
+      }
+      .btn:active {
+        background: var(--surface-3);
+      }
+      .btn--primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: var(--on-accent);
+      }
+      .btn--primary:hover,
+      .btn--primary:active {
+        background: var(--accent-hover);
+        border-color: var(--accent-hover);
+      }
+      .btn--ghost {
+        border-color: transparent;
+        background: transparent;
+      }
+      .btn--ghost:hover {
+        background: var(--surface-2);
+      }
+      .btn--danger {
+        color: var(--danger-fg);
+        border-color: var(--danger-bd);
+        background: var(--surface);
+      }
+      .btn--danger:hover {
+        background: var(--danger-bg);
+      }
+      .btn--sm {
+        height: 26px;
+        padding: 0 var(--sp-2);
+        font-size: 12px;
+      }
+      .btn--lg {
+        height: 38px;
+        padding: 0 var(--sp-4);
+        font-size: 14px;
+      }
+      .btn[disabled],
+      .btn[aria-disabled="true"] {
+        opacity: 0.45;
+        cursor: not-allowed;
+        pointer-events: none;
+      }
+      .btn .spin {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        border: 2px solid currentColor;
+        border-top-color: transparent;
+        animation: spin 0.7s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .btn.demo-hover {
+        background: var(--surface-2);
+      }
+      .btn--primary.demo-hover {
+        background: var(--accent-hover);
+        border-color: var(--accent-hover);
+      }
+      .btn.demo-focus {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+      }
+      .kbd {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        padding: 1px 5px;
+        border: var(--bw) solid var(--border-strong);
+        border-bottom-width: 2px;
+        border-radius: var(--radius-1);
+        background: var(--surface-2);
+        color: var(--text-2);
+      }
+
+      /* ---------- Forms ---------- */
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        min-width: 0;
+      }
+      .field > label {
+        font-size: 13px;
+        font-weight: 500;
+      }
+      .field .hint {
+        font-size: 12px;
+        color: var(--text-3);
+      }
+      .field .error-msg {
+        font-size: 12px;
+        color: var(--danger-fg);
+        display: flex;
+        gap: 5px;
+        align-items: baseline;
+      }
+      .input,
+      .select,
+      .textarea {
+        width: 100%;
+        font: inherit;
+        font-size: 13px;
+        color: var(--text);
+        background: var(--surface);
+        border: var(--bw) solid var(--border-strong);
+        border-radius: var(--radius-1);
+        padding: 0 var(--sp-3);
+        height: 32px;
+        transition: border-color var(--dur-1) var(--ease);
+      }
+      .textarea {
+        height: auto;
+        min-height: 72px;
+        padding: var(--sp-2) var(--sp-3);
+        resize: vertical;
+      }
+      .input::placeholder,
+      .textarea::placeholder {
+        color: var(--text-3);
+      }
+      .input:hover,
+      .select:hover,
+      .textarea:hover {
+        border-color: var(--ink-400);
+      }
+      [data-theme="dark"] .input:hover,
+      [data-theme="dark"] .select:hover,
+      [data-theme="dark"] .textarea:hover {
+        border-color: var(--border-strong);
+      }
+      .input:focus-visible,
+      .select:focus-visible,
+      .textarea:focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 0;
+        border-color: var(--focus);
+      }
+      .input[disabled],
+      .select[disabled],
+      .textarea[disabled] {
+        background: var(--surface-2);
+        color: var(--text-3);
+        cursor: not-allowed;
+      }
+      .input[aria-invalid="true"],
+      .textarea[aria-invalid="true"] {
+        border-color: var(--danger-fg);
+      }
+      .input--ok {
+        border-color: var(--success-bd);
+      }
+      .select {
+        appearance: none;
+        -webkit-appearance: none;
+        padding-right: 30px;
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%2352605a' stroke-width='1.5'/></svg>");
+        background-repeat: no-repeat;
+        background-position: right 10px center;
+      }
+      [data-theme="dark"] .select {
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%23a8b4ad' stroke-width='1.5'/></svg>");
+      }
+      .check-row {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--sp-2);
+        font-size: 13px;
+      }
+      .check-row input {
+        width: 15px;
+        height: 15px;
+        margin-top: 2px;
+        accent-color: var(--accent);
+      }
+      .check-row .sub {
+        color: var(--text-3);
+        font-size: 12px;
+        display: block;
+      }
+      .switch {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        gap: var(--sp-2);
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .switch input {
+        position: absolute;
+        opacity: 0;
+        width: 34px;
+        height: 18px;
+        margin: 0;
+        cursor: pointer;
+      }
+      .switch .track {
+        width: 34px;
+        height: 18px;
+        border-radius: var(--radius-1);
+        background: var(--ink-300);
+        transition: background var(--dur-1) var(--ease);
+        position: relative;
+        flex: none;
+      }
+      [data-theme="dark"] .switch .track {
+        background: var(--ink-700);
+      }
+      .switch .track::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 14px;
+        height: 14px;
+        border-radius: var(--radius-1);
+        background: #fff;
+        box-shadow: var(--shadow-1);
+        transition: transform var(--dur-1) var(--ease);
+      }
+      .switch input:checked + .track {
+        background: var(--accent);
+      }
+      .switch input:checked + .track::after {
+        transform: translateX(16px);
+      }
+      .switch input:focus-visible + .track {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+      }
+      .switch input:disabled + .track {
+        opacity: 0.45;
+      }
+      .form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: var(--sp-4);
+      }
+      .form-grid .span-2 {
+        grid-column: 1 / -1;
+      }
+      .form-actions {
+        display: flex;
+        gap: var(--sp-2);
+        justify-content: flex-end;
+        margin-top: var(--sp-5);
+      }
+      .form-banner {
+        display: none;
+        margin-bottom: var(--sp-4);
+        padding: var(--sp-2) var(--sp-3);
+        border-radius: var(--radius-1);
+        font-size: 13px;
+        border: var(--bw) solid var(--success-bd);
+        background: var(--success-bg);
+        color: var(--success-fg);
+      }
+      .form-banner.show {
+        display: block;
+      }
+
+      /* Segmented control (model presets) */
+      .segmented {
+        display: inline-flex;
+        border: var(--bw) solid var(--border-strong);
+        border-radius: var(--radius-1);
+        background: var(--surface);
+        padding: 2px;
+        gap: 2px;
+      }
+      .segmented label {
+        position: relative;
+      }
+      .segmented input {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        margin: 0;
+        cursor: pointer;
+      }
+      .segmented .seg-btn {
+        display: inline-flex;
+        align-items: center;
+        height: 26px;
+        padding: 0 var(--sp-3);
+        border-radius: var(--radius-1);
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--text-2);
+        transition:
+          background var(--dur-1) var(--ease),
+          color var(--dur-1) var(--ease);
+      }
+      .segmented input:hover + .seg-btn {
+        color: var(--text);
+      }
+      .segmented input:checked + .seg-btn {
+        background: var(--accent-weak);
+        color: var(--accent);
+      }
+      [data-theme="dark"] .segmented input:checked + .seg-btn {
+        color: var(--accent);
+      }
+      .segmented input:focus-visible + .seg-btn {
+        outline: 2px solid var(--focus);
+        outline-offset: -1px;
+      }
+
+      /* Range */
+      .range {
+        accent-color: var(--accent);
+        width: 180px;
+      }
+
+      /* ---------- Status indicators ---------- */
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 20px;
+        padding: 0 8px;
+        font-size: 11px;
+        font-weight: 500;
+        border-radius: var(--radius-pill);
+        border: var(--bw) solid var(--border-strong);
+        background: var(--surface);
+        color: var(--text-2);
+        white-space: nowrap;
+      }
+      .chip .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--text-3);
+        flex: none;
+      }
+      .chip--success {
+        color: var(--success-fg);
+        background: var(--success-bg);
+        border-color: var(--success-bd);
+      }
+      .chip--success .dot {
+        background: var(--success-fg);
+      }
+      .chip--warning {
+        color: var(--warning-fg);
+        background: var(--warning-bg);
+        border-color: var(--warning-bd);
+      }
+      .chip--warning .dot {
+        background: var(--warning-fg);
+      }
+      .chip--danger {
+        color: var(--danger-fg);
+        background: var(--danger-bg);
+        border-color: var(--danger-bd);
+      }
+      .chip--danger .dot {
+        background: var(--danger-fg);
+      }
+      .chip--info {
+        color: var(--info-fg);
+        background: var(--info-bg);
+        border-color: var(--info-bd);
+      }
+      .chip--info .dot {
+        background: var(--info-fg);
+      }
+      .chip--live .dot {
+        background: var(--live);
+        box-shadow: 0 0 0 3px rgba(110, 188, 145, 0.22);
+        animation: pulse 2s var(--ease) infinite;
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+      }
+      .badge-count {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 18px;
+        height: 18px;
+        padding: 0 5px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        border-radius: var(--radius-1);
+        background: var(--accent-weak);
+        color: var(--accent);
+        border: 1px solid var(--accent-weak-border);
+      }
+      .progress {
+        width: 220px;
+        height: 4px;
+        background: var(--surface-3);
+        border-radius: var(--radius-1);
+        overflow: hidden;
+      }
+      .progress > span {
+        display: block;
+        height: 100%;
+        background: var(--accent);
+        border-radius: var(--radius-1);
+      }
+      .meter-line {
+        display: flex;
+        align-items: center;
+        gap: var(--sp-3);
+        font-size: 12px;
+        color: var(--text-2);
+      }
+
+      /* ---------- Dropdown / menu ---------- */
+      .menu-wrap {
+        position: relative;
+        display: inline-block;
+      }
+      .menu {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        z-index: 30;
+        min-width: 200px;
+        background: var(--surface);
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-2);
+        box-shadow: var(--shadow-3);
+        padding: var(--sp-1);
+        margin: 0;
+        list-style: none;
+        display: none;
+      }
+      .menu.open {
+        display: block;
+      }
+      .menu [role="menuitem"] {
+        display: flex;
+        width: 100%;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--sp-4);
+        padding: 7px var(--sp-3);
+        font-size: 13px;
+        text-align: left;
+        background: none;
+        border: 0;
+        border-radius: var(--radius-1);
+        cursor: pointer;
+        color: var(--text);
+      }
+      .menu [role="menuitem"]:hover,
+      .menu [role="menuitem"]:focus-visible {
+        background: var(--surface-2);
+        outline: none;
+      }
+      .menu [role="menuitem"][aria-disabled="true"] {
+        color: var(--text-3);
+        cursor: not-allowed;
+      }
+      .menu [role="menuitem"][aria-disabled="true"]:hover {
+        background: none;
+      }
+      .menu [role="menuitem"].danger {
+        color: var(--danger-fg);
+      }
+      .menu [role="menuitem"].danger:hover,
+      .menu [role="menuitem"].danger:focus-visible {
+        background: var(--danger-bg);
+      }
+      .menu .menu-sep {
+        height: 1px;
+        background: var(--border);
+        margin: var(--sp-1) 0;
+      }
+      .menu .shortcut {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-3);
+      }
+      .caret {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-right: 1.5px solid currentColor;
+        border-bottom: 1.5px solid currentColor;
+        transform: rotate(45deg) translateY(-2px);
+        margin-left: 2px;
+      }
+
+      /* ---------- Tabs ---------- */
+      .tabs {
+        border-bottom: var(--bw) solid var(--border);
+        display: flex;
+        gap: var(--sp-1);
+      }
+      .tab {
+        appearance: none;
+        background: none;
+        border: 0;
+        border-bottom: 2px solid transparent;
+        padding: 8px var(--sp-3);
+        margin-bottom: -1px;
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--text-2);
+        cursor: pointer;
+        border-radius: var(--radius-1) var(--radius-1) 0 0;
+      }
+      .tab:hover {
+        color: var(--text);
+        background: var(--surface-2);
+      }
+      .tab[aria-selected="true"] {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+      }
+      .tabpanel {
+        padding: var(--sp-4) 0 0;
+        font-size: 13px;
+        color: var(--text-2);
+      }
+      .tabpanel:focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 4px;
+      }
+
+      /* ---------- Tables ---------- */
+      .table-wrap {
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-2);
+        overflow: auto;
+        background: var(--surface);
+      }
+      table.data {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        min-width: 640px;
+      }
+      table.data caption {
+        text-align: left;
+        padding: var(--sp-3) var(--sp-4);
+        font-weight: 600;
+        font-size: 13px;
+        border-bottom: var(--bw) solid var(--border);
+      }
+      table.data th {
+        text-align: left;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        font-weight: 500;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        padding: 8px var(--sp-4);
+        border-bottom: var(--bw) solid var(--border);
+        background: var(--surface-2);
+        white-space: nowrap;
+      }
+      table.data td {
+        padding: 10px var(--sp-4);
+        border-bottom: var(--bw) solid var(--border);
+        vertical-align: middle;
+      }
+      table.data tbody tr:last-child td {
+        border-bottom: 0;
+      }
+      table.data tbody tr:hover {
+        background: var(--surface-2);
+      }
+      table.data tbody tr[aria-selected="true"] {
+        background: var(--accent-weak);
+      }
+      table.data tbody tr[aria-selected="true"]:hover {
+        background: var(--accent-weak);
+      }
+      table.data .cell-main {
+        font-weight: 500;
+        color: var(--text);
+      }
+      table.data .cell-sub {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-3);
+        display: block;
+      }
+      table.data td.num {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        text-align: right;
+        color: var(--text-2);
+      }
+      table.data th.num {
+        text-align: right;
+      }
+
+      /* ---------- App shell mock ---------- */
+      .shell-mock {
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-2);
+        overflow: hidden;
+        background: var(--canvas);
+        box-shadow: var(--shadow-2);
+      }
+      .shell-top {
+        display: flex;
+        align-items: center;
+        gap: var(--sp-3);
+        height: 44px;
+        padding: 0 var(--sp-4);
+        background: var(--glass);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border-bottom: var(--bw) solid var(--border);
+      }
+      .shell-top img {
+        height: 13px;
+        width: auto;
+      }
+      .shell-top .env {
+        margin-left: auto;
+      }
+      .crumbs {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--text-3);
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      .crumbs a {
+        color: var(--text-3);
+        text-decoration: none;
+      }
+      .crumbs a:hover {
+        color: var(--text);
+        text-decoration: underline;
+      }
+      .crumbs li[aria-current="page"] {
+        color: var(--text);
+        font-weight: 500;
+      }
+      .crumbs .sep {
+        color: var(--border-strong);
+      }
+      .shell-body {
+        display: grid;
+        grid-template-columns: 196px minmax(0, 1fr);
+        min-height: 520px;
+      }
+      .shell-nav {
+        border-right: var(--bw) solid var(--border);
+        background: var(--surface);
+        padding: var(--sp-3) var(--sp-2);
+        display: flex;
+        flex-direction: column;
+      }
+      .shell-nav .nav-group {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        padding: var(--sp-3) var(--sp-2) var(--sp-1);
+      }
+      .shell-nav a {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--sp-2);
+        padding: 6px var(--sp-2);
+        margin-bottom: 1px;
+        font-size: 13px;
+        color: var(--text-2);
+        text-decoration: none;
+        border-radius: var(--radius-1);
+        border-left: 2px solid transparent;
+      }
+      .shell-nav a:hover {
+        background: var(--surface-2);
+        color: var(--text);
+      }
+      .shell-nav a[aria-current="page"] {
+        background: var(--accent-weak);
+        color: var(--accent);
+        border-left-color: var(--accent);
+        font-weight: 500;
+      }
+      .shell-nav .nav-foot {
+        margin-top: auto;
+        padding: var(--sp-3) var(--sp-2) var(--sp-1);
+        border-top: var(--bw) solid var(--border);
+        font-size: 12px;
+        color: var(--text-3);
+      }
+      .shell-main {
+        padding: var(--sp-5);
+        min-width: 0;
+        background: var(--canvas);
+      }
+      .shell-main-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: var(--sp-4);
+        margin-bottom: var(--sp-4);
+        flex-wrap: wrap;
+      }
+      .shell-main-head p {
+        color: var(--text-3);
+        font-size: 12px;
+        margin: 2px 0 0;
+      }
+
+      /* Session / run metadata */
+      .meta-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-2);
+        background: var(--surface);
+        overflow: hidden;
+        margin-bottom: var(--sp-4);
+      }
+      .meta-cell {
+        padding: var(--sp-3) var(--sp-4);
+        border-right: var(--bw) solid var(--border);
+      }
+      .meta-cell:last-child {
+        border-right: 0;
+      }
+      .meta-cell dt {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        margin-bottom: 2px;
+      }
+      .meta-cell dd {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 500;
+      }
+      .meta-cell dd .mono {
+        color: var(--text-2);
+      }
+
+      /* Transcript */
+      .transcript {
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-2);
+        background: var(--surface);
+        overflow: hidden;
+      }
+      .t-row {
+        display: grid;
+        grid-template-columns: 88px minmax(0, 1fr) auto;
+        gap: var(--sp-4);
+        padding: var(--sp-3) var(--sp-4);
+        border-bottom: var(--bw) solid var(--border);
+        font-size: 13px;
+      }
+      .t-row:last-child {
+        border-bottom: 0;
+      }
+      .t-row:hover {
+        background: var(--surface-2);
+      }
+      .t-role {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        padding-top: 2px;
+      }
+      .t-role.user {
+        color: var(--info-fg);
+      }
+      .t-role.assistant {
+        color: var(--accent);
+      }
+      .t-role.tool {
+        color: var(--warning-fg);
+      }
+      .t-role.system {
+        color: var(--text-3);
+      }
+      .t-body {
+        min-width: 0;
+        color: var(--text);
+      }
+      .t-body .tool-line {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        color: var(--text-2);
+        background: var(--surface-2);
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-1);
+        padding: 6px 10px;
+        display: inline-block;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .t-time {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-3);
+        white-space: nowrap;
+        padding-top: 2px;
+      }
+
+      /* Debug waterfall */
+      .waterfall {
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-2);
+        background: var(--surface);
+        padding: var(--sp-4);
+      }
+      .wf-row {
+        display: grid;
+        grid-template-columns: 150px minmax(0, 1fr) 58px;
+        align-items: center;
+        gap: var(--sp-3);
+        padding: 4px 0;
+        font-size: 12px;
+      }
+      .wf-name {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-2);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .wf-track {
+        position: relative;
+        height: 14px;
+        background: var(--surface-2);
+        border-radius: var(--radius-1);
+      }
+      .wf-bar {
+        position: absolute;
+        top: 2px;
+        bottom: 2px;
+        border-radius: var(--radius-1);
+        min-width: 3px;
+      }
+      .wf-bar.llm {
+        background: var(--green-500);
+      }
+      .wf-bar.tool {
+        background: var(--amber-300);
+      }
+      .wf-bar.db {
+        background: var(--blue-300);
+      }
+      .wf-bar.err {
+        background: var(--red-300);
+      }
+      [data-theme="dark"] .wf-bar.llm {
+        background: var(--green-600);
+      }
+      [data-theme="dark"] .wf-bar.tool {
+        background: #8a6a2e;
+      }
+      [data-theme="dark"] .wf-bar.db {
+        background: #3c608a;
+      }
+      [data-theme="dark"] .wf-bar.err {
+        background: #8a4444;
+      }
+      .wf-ms {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-3);
+        text-align: right;
+      }
+      .wf-legend {
+        display: flex;
+        gap: var(--sp-4);
+        margin-top: var(--sp-3);
+        padding-top: var(--sp-3);
+        border-top: var(--bw) solid var(--border);
+        font-size: 11px;
+        color: var(--text-3);
+        flex-wrap: wrap;
+      }
+      .wf-legend .swatch-sq {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        border-radius: var(--radius-1);
+        margin-right: 5px;
+        vertical-align: -1px;
+      }
+
+      /* Approval card */
+      .approval {
+        border: var(--bw) solid var(--warning-bd);
+        border-radius: var(--radius-2);
+        background: var(--surface);
+        overflow: hidden;
+      }
+      .approval-head {
+        display: flex;
+        align-items: center;
+        gap: var(--sp-3);
+        padding: var(--sp-3) var(--sp-4);
+        background: var(--warning-bg);
+        border-bottom: var(--bw) solid var(--warning-bd);
+        color: var(--warning-fg);
+        font-weight: 600;
+        font-size: 13px;
+      }
+      .approval-body {
+        padding: var(--sp-4);
+        font-size: 13px;
+      }
+      .approval pre {
+        margin: var(--sp-3) 0;
+        padding: var(--sp-3) var(--sp-4);
+        overflow: auto;
+        background: var(--surface-2);
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-1);
+        font-family: var(--font-mono);
+        font-size: 12px;
+        line-height: 1.7;
+        color: var(--text-2);
+      }
+      .approval-actions {
+        display: flex;
+        gap: var(--sp-2);
+        align-items: center;
+      }
+      .approval-actions .note {
+        font-size: 12px;
+        color: var(--text-3);
+        margin-left: auto;
+      }
+
+      /* API keys */
+      .key-mask {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        letter-spacing: 0.05em;
+        color: var(--text-2);
+      }
+
+      /* ---------- Dialog ---------- */
+      dialog.dlg {
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-2);
+        background: var(--surface);
+        color: var(--text);
+        padding: 0;
+        width: min(440px, calc(100vw - 32px));
+        box-shadow: var(--shadow-3);
+      }
+      dialog.dlg::backdrop {
+        background: var(--scrim);
+      }
+      .dlg-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--sp-4);
+        padding: var(--sp-4) var(--sp-5);
+        border-bottom: var(--bw) solid var(--border);
+      }
+      .dlg-body {
+        padding: var(--sp-5);
+        font-size: 13px;
+        color: var(--text-2);
+      }
+      .dlg-body .field {
+        margin-top: var(--sp-3);
+      }
+      .dlg-foot {
+        display: flex;
+        justify-content: flex-end;
+        gap: var(--sp-2);
+        padding: var(--sp-4) var(--sp-5);
+        border-top: var(--bw) solid var(--border);
+        background: var(--surface-2);
+      }
+      .dlg-close {
+        border: 0;
+        background: none;
+        cursor: pointer;
+        color: var(--text-3);
+        font-size: 16px;
+        line-height: 1;
+        padding: 4px;
+        border-radius: var(--radius-1);
+      }
+      .dlg-close:hover {
+        color: var(--text);
+        background: var(--surface-2);
+      }
+
+      /* ---------- Toast ---------- */
+      .toast-region {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 60;
+        display: flex;
+        flex-direction: column;
+        gap: var(--sp-2);
+      }
+      .toast {
+        display: flex;
+        align-items: center;
+        gap: var(--sp-3);
+        min-width: 260px;
+        max-width: 360px;
+        padding: var(--sp-3) var(--sp-4);
+        background: var(--surface);
+        border: var(--bw) solid var(--border-strong);
+        border-left: 3px solid var(--accent);
+        border-radius: var(--radius-1);
+        box-shadow: var(--shadow-3);
+        font-size: 13px;
+        animation: toast-in var(--dur-2) var(--ease);
+      }
+      .toast--success {
+        border-left-color: var(--success-fg);
+      }
+      .toast--danger {
+        border-left-color: var(--danger-fg);
+      }
+      .toast--warning {
+        border-left-color: var(--warning-fg);
+      }
+      .toast .t-msg {
+        flex: 1;
+      }
+      .toast .t-x {
+        border: 0;
+        background: none;
+        cursor: pointer;
+        color: var(--text-3);
+        padding: 2px 4px;
+        border-radius: var(--radius-1);
+      }
+      .toast .t-x:hover {
+        color: var(--text);
+      }
+      @keyframes toast-in {
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+
+      /* ---------- Alerts / banners ---------- */
+      .alert {
+        display: flex;
+        gap: var(--sp-3);
+        padding: var(--sp-3) var(--sp-4);
+        border-radius: var(--radius-1);
+        border: var(--bw) solid;
+        font-size: 13px;
+        align-items: flex-start;
+      }
+      .alert strong {
+        display: block;
+      }
+      .alert--info {
+        background: var(--info-bg);
+        border-color: var(--info-bd);
+        color: var(--info-fg);
+      }
+      .alert--success {
+        background: var(--success-bg);
+        border-color: var(--success-bd);
+        color: var(--success-fg);
+      }
+      .alert--warning {
+        background: var(--warning-bg);
+        border-color: var(--warning-bd);
+        color: var(--warning-fg);
+      }
+      .alert--danger {
+        background: var(--danger-bg);
+        border-color: var(--danger-bd);
+        color: var(--danger-fg);
+      }
+
+      /* ---------- Empty / loading / error states ---------- */
+      .state-panel {
+        border: var(--bw) dashed var(--border-strong);
+        border-radius: var(--radius-2);
+        padding: var(--sp-8) var(--sp-5);
+        text-align: center;
+        background: var(--surface);
+      }
+      .state-panel h4 {
+        margin-bottom: var(--sp-1);
+      }
+      .state-panel p {
+        color: var(--text-3);
+        font-size: 13px;
+        max-width: 340px;
+        margin: 0 auto var(--sp-4);
+      }
+      .state-icon {
+        width: 36px;
+        height: 36px;
+        margin: 0 auto var(--sp-3);
+        border-radius: var(--radius-1);
+        display: grid;
+        place-items: center;
+        font-size: 16px;
+        background: var(--surface-2);
+        border: var(--bw) solid var(--border);
+        color: var(--text-3);
+      }
+      .state-panel--error {
+        border-style: solid;
+        border-color: var(--danger-bd);
+      }
+      .state-panel--error .state-icon {
+        background: var(--danger-bg);
+        border-color: var(--danger-bd);
+        color: var(--danger-fg);
+      }
+      .skeleton {
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-2);
+        background: var(--surface);
+        padding: var(--sp-4);
+      }
+      .sk-line {
+        height: 10px;
+        border-radius: var(--radius-1);
+        background: var(--surface-3);
+        margin-bottom: 10px;
+        animation: sk-pulse 1.4s var(--ease) infinite;
+      }
+      .sk-line:last-child {
+        margin-bottom: 0;
+      }
+      @keyframes sk-pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.45;
+        }
+      }
+      .state-3col {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: var(--sp-4);
+      }
+
+      /* ---------- Token visualisation ---------- */
+      .swatch-grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: var(--sp-2);
+      }
+      .swatch-card {
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-1);
+        overflow: hidden;
+        background: var(--surface);
+      }
+      .swatch-card .chipfill {
+        height: 44px;
+        border-bottom: var(--bw) solid var(--border);
+      }
+      .swatch-card .lbl {
+        padding: 6px 8px;
+      }
+      .swatch-card .lbl strong {
+        display: block;
+        font-size: 11px;
+      }
+      .swatch-card .lbl code {
+        font-size: 10px;
+        color: var(--text-3);
+      }
+      .token-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      .token-table th {
+        text-align: left;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        padding: 6px var(--sp-3);
+        border-bottom: var(--bw) solid var(--border);
+        font-weight: 500;
+      }
+      .token-table td {
+        padding: 8px var(--sp-3);
+        border-bottom: var(--bw) solid var(--border);
+        vertical-align: middle;
+      }
+      .token-table tr:last-child td {
+        border-bottom: 0;
+      }
+      .token-table code {
+        color: var(--text-2);
+      }
+      .radius-demo {
+        display: inline-block;
+        width: 44px;
+        height: 32px;
+        background: var(--accent-weak);
+        border: var(--bw) solid var(--accent-weak-border);
+      }
+      .shadow-demo {
+        display: inline-block;
+        width: 64px;
+        height: 36px;
+        background: var(--surface);
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-1);
+      }
+      .space-demo {
+        display: inline-block;
+        height: 14px;
+        background: var(--green-300);
+        border-radius: var(--radius-1);
+        vertical-align: middle;
+      }
+      .type-demo-display {
+        font-family: var(--font-display);
+        font-weight: 700;
+        font-size: 24px;
+        letter-spacing: -0.02em;
+      }
+      .type-demo-body {
+        font-size: 14px;
+      }
+      .type-demo-mono {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        color: var(--text-2);
+      }
+      .role-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: var(--sp-2);
+        margin-top: var(--sp-4);
+      }
+      .role-card {
+        border: var(--bw) solid var(--border);
+        border-radius: var(--radius-1);
+        padding: var(--sp-3);
+        background: var(--surface);
+      }
+      .role-card .role-chip {
+        width: 26px;
+        height: 26px;
+        border-radius: var(--radius-1);
+        border: var(--bw) solid var(--border);
+        margin-bottom: var(--sp-2);
+      }
+      .role-card strong {
+        font-size: 12px;
+        display: block;
+      }
+      .role-card code {
+        font-size: 10px;
+        color: var(--text-3);
+      }
+
+      /* ---------- Responsive ---------- */
+      @media (max-width: 980px) {
+        .layout {
+          grid-template-columns: 1fr;
+          gap: 0;
+        }
+        .index-rail {
+          position: static;
+          max-height: none;
+          padding: var(--sp-5) 0 0;
+          border-bottom: var(--bw) solid var(--border);
+        }
+        .index-rail ol {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 2px;
+        }
+        .index-rail a {
+          border-left: 0;
+          border-bottom: 2px solid transparent;
+        }
+        .index-rail a[aria-current="true"] {
+          border-bottom-color: var(--accent);
+        }
+        .shell-body {
+          grid-template-columns: 1fr;
+        }
+        .shell-nav {
+          flex-direction: row;
+          overflow-x: auto;
+          border-right: 0;
+          border-bottom: var(--bw) solid var(--border);
+          align-items: center;
+        }
+        .shell-nav .nav-group,
+        .shell-nav .nav-foot {
+          display: none;
+        }
+        .shell-nav a {
+          white-space: nowrap;
+          border-left: 0;
+        }
+        .meta-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .meta-cell:nth-child(2) {
+          border-right: 0;
+        }
+        .meta-cell {
+          border-bottom: var(--bw) solid var(--border);
+        }
+        .meta-cell:nth-child(n + 3) {
+          border-bottom: 0;
+        }
+        .state-3col,
+        .form-grid,
+        .role-grid {
+          grid-template-columns: 1fr;
+        }
+        .swatch-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        .t-row {
+          grid-template-columns: 64px minmax(0, 1fr);
+        }
+        .t-time {
+          grid-column: 2;
+        }
+        .topbar .meta {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a
+          class="brand"
+          href="#top"
+          aria-label="OAO design prototype — back to top"
+        >
+          <img src="style-guide-assets/oao-wordmark-black.png" alt="OAO" />
+        </a>
+        <span class="proto-badge">Design prototype — not the live app</span>
+        <span class="spacer"></span>
+        <span class="meta">Component reference · v0.1 · 20 Aug 2026</span>
+        <button
+          class="btn btn--sm"
+          id="themeToggle"
+          type="button"
+          aria-pressed="false"
+        >
+          <span aria-hidden="true">◐</span> Dark preview
+        </button>
+      </div>
+    </header>
+
+    <div class="layout" id="top">
+      <nav class="index-rail" aria-label="Page index">
+        <h2>Index</h2>
+        <ol>
+          <li><a href="#intro">0 · About this file</a></li>
+          <li><a href="#tokens">1 · Design tokens</a></li>
+          <li><a href="#buttons">2 · Buttons</a></li>
+          <li><a href="#forms">3 · Forms & inputs</a></li>
+          <li><a href="#dropdowns">4 · Dropdowns & menus</a></li>
+          <li><a href="#dialogs">5 · Dialogs</a></li>
+          <li><a href="#tabs">6 · Tabs</a></li>
+          <li><a href="#status">7 · Status indicators</a></li>
+          <li><a href="#tables">8 · Tables</a></li>
+          <li><a href="#shell">9 · App shell & navigation</a></li>
+          <li><a href="#session">10 · Session & debug surfaces</a></li>
+          <li><a href="#settings">11 · Presets & API keys</a></li>
+          <li><a href="#feedback">12 · Toasts & alerts</a></li>
+          <li><a href="#states">13 · Empty / loading / error</a></li>
+        </ol>
+      </nav>
+
+      <main class="content" id="main">
+        <!-- ============ 0 · INTRO ============ -->
+        <section class="doc-section" id="intro" style="padding-top: 0">
+          <span class="sec-label">0 · About this file</span>
+          <h1>OAO design prototype</h1>
+          <p class="sec-intro">
+            A standalone reference for iterating on the OAO console design
+            before touching the application. Light-first, squared geometry
+            (0–4&nbsp;px radii), thin borders, restrained shadows, translucent
+            glass only on floating chrome,
+            <strong>no gradients anywhere</strong>. The palette stays anchored
+            on the approved seed <code>#6ebc91</code>, with darker greens
+            (700/800) carrying text and actions for contrast.
+          </p>
+          <div class="alert alert--warning" role="note">
+            <span aria-hidden="true">⚠︎</span>
+            <div>
+              <strong>Prototype only.</strong> Nothing here has been applied to
+              the OAO application. Use this page to review and iterate; port
+              approved decisions to the app afterwards.
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ 1 · TOKENS ============ -->
+        <section class="doc-section" id="tokens">
+          <span class="sec-label">1 · Foundations</span>
+          <h2>Design tokens</h2>
+          <p class="sec-intro">
+            Components reference semantic roles (<code>--accent</code>,
+            <code>--surface</code>…), never raw shades, so light and dark themes
+            stay coherent. Toggle the dark preview in the top bar to verify
+            every token pair.
+          </p>
+
+          <div class="demo">
+            <p class="demo-title">Green scale — seed #6ebc91</p>
+            <div class="swatch-grid">
+              <div class="swatch-card">
+                <div class="chipfill" style="background: #f3faf6"></div>
+                <div class="lbl"><strong>50</strong><code>#f3faf6</code></div>
+              </div>
+              <div class="swatch-card">
+                <div class="chipfill" style="background: #e4f4eb"></div>
+                <div class="lbl"><strong>100</strong><code>#e4f4eb</code></div>
+              </div>
+              <div class="swatch-card">
+                <div class="chipfill" style="background: #cae8d7"></div>
+                <div class="lbl"><strong>200</strong><code>#cae8d7</code></div>
+              </div>
+              <div class="swatch-card">
+                <div class="chipfill" style="background: #a6d8bc"></div>
+                <div class="lbl"><strong>300</strong><code>#a6d8bc</code></div>
+              </div>
+              <div class="swatch-card">
+                <div class="chipfill" style="background: #82c8a1"></div>
+                <div class="lbl"><strong>400</strong><code>#82c8a1</code></div>
+              </div>
+              <div class="swatch-card">
+                <div class="chipfill" style="background: #6ebc91"></div>
+                <div class="lbl">
+                  <strong>500 · seed</strong><code>#6ebc91</code>
+                </div>
+              </div>
+              <div class="swatch-card">
+                <div class="chipfill" style="background: #4e9d74"></div>
+                <div class="lbl"><strong>600</strong><code>#4e9d74</code></div>
+              </div>
+              <div class="swatch-card">
+                <div class="chipfill" style="background: #3d7c5c"></div>
+                <div class="lbl">
+                  <strong>700 · action</strong><code>#3d7c5c</code>
+                </div>
+              </div>
+              <div class="swatch-card">
+                <div class="chipfill" style="background: #326349"></div>
+                <div class="lbl">
+                  <strong>800 · hover</strong><code>#326349</code>
+                </div>
+              </div>
+              <div class="swatch-card">
+                <div class="chipfill" style="background: #2a513e"></div>
+                <div class="lbl"><strong>900</strong><code>#2a513e</code></div>
+              </div>
+              <div class="swatch-card">
+                <div class="chipfill" style="background: #142d21"></div>
+                <div class="lbl"><strong>950</strong><code>#142d21</code></div>
+              </div>
+              <div class="swatch-card">
+                <div class="chipfill" style="background: #080c0a"></div>
+                <div class="lbl"><strong>Ink</strong><code>#080c0a</code></div>
+              </div>
+            </div>
+
+            <p class="demo-title" style="margin-top: 24px">
+              Theme roles (resolve per theme)
+            </p>
+            <div class="role-grid">
+              <div class="role-card">
+                <div class="role-chip" style="background: var(--canvas)"></div>
+                <strong>Canvas</strong><code>--canvas</code>
+              </div>
+              <div class="role-card">
+                <div class="role-chip" style="background: var(--surface)"></div>
+                <strong>Surface</strong><code>--surface</code>
+              </div>
+              <div class="role-card">
+                <div
+                  class="role-chip"
+                  style="background: var(--surface-2)"
+                ></div>
+                <strong>Surface 2 · hover</strong><code>--surface-2</code>
+              </div>
+              <div class="role-card">
+                <div class="role-chip" style="background: var(--accent)"></div>
+                <strong>Accent · actions</strong><code>--accent</code>
+              </div>
+              <div class="role-card">
+                <div
+                  class="role-chip"
+                  style="background: var(--accent-weak)"
+                ></div>
+                <strong>Accent weak · selection</strong
+                ><code>--accent-weak</code>
+              </div>
+              <div class="role-card">
+                <div class="role-chip" style="background: var(--focus)"></div>
+                <strong>Focus ring · live</strong><code>--focus</code>
+              </div>
+              <div class="role-card">
+                <div class="role-chip" style="background: var(--text)"></div>
+                <strong>Text</strong><code>--text</code>
+              </div>
+              <div class="role-card">
+                <div class="role-chip" style="background: var(--text-2)"></div>
+                <strong>Text secondary</strong><code>--text-2</code>
+              </div>
+              <div class="role-card">
+                <div class="role-chip" style="background: var(--border)"></div>
+                <strong>Border</strong><code>--border</code>
+              </div>
+            </div>
+          </div>
+
+          <div class="demo">
+            <p class="demo-title">Geometry · spacing · elevation · type</p>
+            <table class="token-table">
+              <thead>
+                <tr>
+                  <th scope="col">Token</th>
+                  <th scope="col">Value</th>
+                  <th scope="col">Sample</th>
+                  <th scope="col">Use</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>--radius-0</code></td>
+                  <td><code>0px</code></td>
+                  <td>
+                    <span class="radius-demo" style="border-radius: 0"></span>
+                  </td>
+                  <td>Full-bleed panels, table containers flush to edges</td>
+                </tr>
+                <tr>
+                  <td><code>--radius-1</code></td>
+                  <td><code>2px</code></td>
+                  <td>
+                    <span class="radius-demo" style="border-radius: 2px"></span>
+                  </td>
+                  <td>Controls: buttons, inputs, chips, menu items</td>
+                </tr>
+                <tr>
+                  <td><code>--radius-2</code></td>
+                  <td><code>4px</code></td>
+                  <td>
+                    <span class="radius-demo" style="border-radius: 4px"></span>
+                  </td>
+                  <td>Cards, menus, dialogs — the maximum radius</td>
+                </tr>
+                <tr>
+                  <td><code>--radius-pill</code></td>
+                  <td><code>999px</code></td>
+                  <td>
+                    <span
+                      class="radius-demo"
+                      style="border-radius: 999px; height: 20px"
+                    ></span>
+                  </td>
+                  <td>Compact status chips only — never buttons or cards</td>
+                </tr>
+                <tr>
+                  <td><code>--sp-1 … --sp-12</code></td>
+                  <td><code>4 → 48px</code></td>
+                  <td>
+                    <span class="space-demo" style="width: 4px"></span>
+                    <span class="space-demo" style="width: 8px"></span>
+                    <span class="space-demo" style="width: 16px"></span>
+                    <span class="space-demo" style="width: 24px"></span>
+                    <span class="space-demo" style="width: 48px"></span>
+                  </td>
+                  <td>4&nbsp;px base unit; whitespace does the separating</td>
+                </tr>
+                <tr>
+                  <td><code>--bw</code></td>
+                  <td><code>1px</code></td>
+                  <td>
+                    <span class="shadow-demo" style="box-shadow: none"></span>
+                  </td>
+                  <td>
+                    Hairline borders everywhere;
+                    <code>--border-strong</code> for controls
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>--shadow-1</code></td>
+                  <td><code>0 1px 2px</code></td>
+                  <td>
+                    <span
+                      class="shadow-demo"
+                      style="box-shadow: var(--shadow-1)"
+                    ></span>
+                  </td>
+                  <td>Resting cards that need lift (rare)</td>
+                </tr>
+                <tr>
+                  <td><code>--shadow-2</code></td>
+                  <td><code>0 2px 8px</code></td>
+                  <td>
+                    <span
+                      class="shadow-demo"
+                      style="box-shadow: var(--shadow-2)"
+                    ></span>
+                  </td>
+                  <td>Sticky chrome, framed app shells</td>
+                </tr>
+                <tr>
+                  <td><code>--shadow-3</code></td>
+                  <td><code>0 12px 32px</code></td>
+                  <td>
+                    <span
+                      class="shadow-demo"
+                      style="box-shadow: var(--shadow-3)"
+                    ></span>
+                  </td>
+                  <td>Floating layers: menus, dialogs, toasts</td>
+                </tr>
+                <tr>
+                  <td><code>--font-display</code></td>
+                  <td>Manrope 600/700</td>
+                  <td><span class="type-demo-display">Agents</span></td>
+                  <td>Page titles, section headings</td>
+                </tr>
+                <tr>
+                  <td><code>--font-ui</code></td>
+                  <td>Inter 400–600 · 13–14px</td>
+                  <td>
+                    <span class="type-demo-body"
+                      >Every state, made visible.</span
+                    >
+                  </td>
+                  <td>Controls, tables, body copy</td>
+                </tr>
+                <tr>
+                  <td><code>--font-mono</code></td>
+                  <td>IBM Plex Mono 400/500 · 11–12px</td>
+                  <td>
+                    <span class="type-demo-mono"
+                      >run_01JQ7 · 42.8k tok · 2.1s</span
+                    >
+                  </td>
+                  <td>IDs, timings, JSON, column headers</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="rules">
+            <strong>Rules</strong>
+            <ul>
+              <li>
+                Borders separate; shadows elevate. A surface gets a shadow only
+                if it floats above the page (menu, dialog, toast) or frames an
+                app preview.
+              </li>
+              <li>
+                Glass (translucency + blur) is reserved for sticky chrome — top
+                bars and floating headers. Never on content cards.
+              </li>
+              <li>
+                Seed green 500 is a signal color (focus rings, live dots,
+                charts). Text and buttons use green 700 on light, green 400 on
+                dark.
+              </li>
+              <li>
+                Avoid: gradients (banned), radii above 4&nbsp;px except
+                status-chip pills, more than one accent hue per view.
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- ============ 2 · BUTTONS ============ -->
+        <section class="doc-section" id="buttons">
+          <span class="sec-label">2 · Components</span>
+          <h2>Buttons</h2>
+          <p class="sec-intro">
+            One primary action per view. Everything else is secondary
+            (bordered), ghost (toolbars, table rows), or danger (destructive,
+            always behind a confirm dialog).
+          </p>
+
+          <div class="demo">
+            <p class="demo-title">Variants</p>
+            <div class="demo-row">
+              <button class="btn btn--primary" type="button">
+                Create agent
+              </button>
+              <button class="btn" type="button">Secondary</button>
+              <button class="btn btn--ghost" type="button">Ghost</button>
+              <button class="btn btn--danger" type="button">Delete key</button>
+              <a class="btn" href="#buttons">Link as button</a>
+            </div>
+            <p class="demo-title">Sizes</p>
+            <div class="demo-row">
+              <button class="btn btn--primary btn--lg" type="button">
+                Large · 38px
+              </button>
+              <button class="btn btn--primary" type="button">
+                Default · 32px
+              </button>
+              <button class="btn btn--primary btn--sm" type="button">
+                Small · 26px
+              </button>
+            </div>
+            <p class="demo-title">
+              States (hover / focus rendered statically for review)
+            </p>
+            <div class="demo-row">
+              <button class="btn btn--primary demo-hover" type="button">
+                Hover
+              </button>
+              <button class="btn demo-focus" type="button">Focus ring</button>
+              <button class="btn btn--primary" type="button" disabled>
+                Disabled
+              </button>
+              <button class="btn" type="button" aria-disabled="true">
+                <span class="spin" aria-hidden="true"></span> Deploying…
+              </button>
+            </div>
+          </div>
+
+          <div class="rules">
+            <strong>Rules</strong>
+            <ul>
+              <li>
+                Use <em>primary</em> for the single next safe action (Create
+                agent, Approve). Two primaries on screen means the hierarchy is
+                broken.
+              </li>
+              <li>
+                Ghost buttons live inside toolbars, table rows and card headers
+                where a border would add noise.
+              </li>
+              <li>
+                Loading buttons keep their width, show a spinner, and set
+                <code>aria-disabled</code> — don't swap them for a skeleton.
+              </li>
+              <li>
+                Avoid: icon-only buttons without <code>aria-label</code>,
+                pill-shaped buttons, uppercase button labels.
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- ============ 3 · FORMS ============ -->
+        <section class="doc-section" id="forms">
+          <span class="sec-label">3 · Components</span>
+          <h2>Forms &amp; inputs</h2>
+          <p class="sec-intro">
+            Labels above fields, hints below, errors inline and announced. The
+            working example below validates on submit — try submitting it empty.
+          </p>
+
+          <div class="demo">
+            <p class="demo-title">Input states</p>
+            <div class="form-grid">
+              <div class="field">
+                <label for="in-default">Agent name</label>
+                <input
+                  class="input"
+                  id="in-default"
+                  type="text"
+                  placeholder="e.g. Shipment investigator"
+                />
+                <span class="hint"
+                  >Shown in the agent list and session headers.</span
+                >
+              </div>
+              <div class="field">
+                <label for="in-disabled">Runtime (managed)</label>
+                <input
+                  class="input"
+                  id="in-disabled"
+                  type="text"
+                  value="oao-runtime v2.4"
+                  disabled
+                />
+                <span class="hint">Locked by your plan.</span>
+              </div>
+              <div class="field">
+                <label for="in-error">Webhook URL</label>
+                <input
+                  class="input"
+                  id="in-error"
+                  type="url"
+                  value="not-a-url"
+                  aria-invalid="true"
+                  aria-describedby="in-error-msg"
+                />
+                <span class="error-msg" id="in-error-msg"
+                  ><span aria-hidden="true">✕</span> Must be a valid HTTPS
+                  URL.</span
+                >
+              </div>
+              <div class="field">
+                <label for="in-ok">Slug</label>
+                <input
+                  class="input input--ok"
+                  id="in-ok"
+                  type="text"
+                  value="shipment-investigator"
+                  aria-describedby="in-ok-msg"
+                />
+                <span
+                  class="hint"
+                  id="in-ok-msg"
+                  style="color: var(--success-fg)"
+                  >✓ Available</span
+                >
+              </div>
+              <div class="field">
+                <label for="sel-model">Default model</label>
+                <select class="select" id="sel-model">
+                  <option>openrouter/claude-sonnet</option>
+                  <option>openrouter/claude-opus</option>
+                  <option>openrouter/gemini-pro</option>
+                  <option>openrouter/gpt-5</option>
+                </select>
+                <span class="hint"
+                  >Native select — use for &gt;7 options or inside forms.</span
+                >
+              </div>
+              <div class="field">
+                <label for="ta-prompt">System prompt</label>
+                <textarea
+                  class="textarea"
+                  id="ta-prompt"
+                  placeholder="You are an agent that…"
+                ></textarea>
+              </div>
+            </div>
+
+            <p class="demo-title" style="margin-top: 24px">
+              Choices &amp; switches
+            </p>
+            <div class="demo-row" style="gap: 24px">
+              <label class="check-row"
+                ><input type="checkbox" checked />
+                <span
+                  >Stream tokens<span class="sub"
+                    >Send partial output to the client</span
+                  ></span
+                ></label
+              >
+              <label class="check-row"
+                ><input type="checkbox" />
+                <span
+                  >Redact PII<span class="sub"
+                    >Mask emails and phone numbers in logs</span
+                  ></span
+                ></label
+              >
+              <label class="check-row"
+                ><input type="checkbox" disabled />
+                <span style="color: var(--text-3)"
+                  >Legacy mode<span class="sub"
+                    >Unavailable on this runtime</span
+                  ></span
+                ></label
+              >
+            </div>
+            <div class="demo-row" style="gap: 24px; margin-top: 12px">
+              <label class="switch"
+                ><input type="checkbox" checked /><span
+                  class="track"
+                  aria-hidden="true"
+                ></span
+                ><span>Tool approvals required</span></label
+              >
+              <label class="switch"
+                ><input type="checkbox" /><span
+                  class="track"
+                  aria-hidden="true"
+                ></span
+                ><span>Auto-retry failed runs</span></label
+              >
+              <label class="switch"
+                ><input type="checkbox" disabled /><span
+                  class="track"
+                  aria-hidden="true"
+                ></span
+                ><span style="color: var(--text-3)"
+                  >Disabled switch</span
+                ></label
+              >
+            </div>
+            <fieldset style="border: 0; padding: 0; margin: 20px 0 0">
+              <legend class="demo-title" style="padding: 0">
+                Radio group — visibility
+              </legend>
+              <div class="demo-row" style="gap: 20px">
+                <label class="check-row"
+                  ><input type="radio" name="vis" checked />
+                  <span>Private</span></label
+                >
+                <label class="check-row"
+                  ><input type="radio" name="vis" /> <span>Team</span></label
+                >
+                <label class="check-row"
+                  ><input type="radio" name="vis" />
+                  <span>Organization</span></label
+                >
+              </div>
+            </fieldset>
+          </div>
+
+          <div class="demo">
+            <p class="demo-title">Working example — create agent</p>
+            <form id="agentForm" novalidate>
+              <div class="form-banner" id="formBanner" role="status">
+                ✓ Agent saved (prototype — nothing was persisted).
+              </div>
+              <div class="form-grid">
+                <div class="field">
+                  <label for="f-name"
+                    >Agent name
+                    <span aria-hidden="true" style="color: var(--danger-fg)"
+                      >*</span
+                    ></label
+                  >
+                  <input
+                    class="input"
+                    id="f-name"
+                    name="name"
+                    type="text"
+                    required
+                    aria-describedby="f-name-err"
+                  />
+                  <span class="error-msg" id="f-name-err" hidden
+                    ><span aria-hidden="true">✕</span> Name is required.</span
+                  >
+                </div>
+                <div class="field">
+                  <label for="f-model">Model</label>
+                  <select class="select" id="f-model" name="model">
+                    <option>openrouter/claude-sonnet</option>
+                    <option>openrouter/gemini-pro</option>
+                    <option>openrouter/gpt-5</option>
+                  </select>
+                </div>
+                <div class="field span-2">
+                  <label for="f-desc">Description</label>
+                  <textarea
+                    class="textarea"
+                    id="f-desc"
+                    name="description"
+                    placeholder="What does this agent do?"
+                  ></textarea>
+                  <span class="hint"
+                    >Optional — shown as help text in the agent list.</span
+                  >
+                </div>
+              </div>
+              <div class="form-actions">
+                <button class="btn" type="reset">Cancel</button>
+                <button class="btn btn--primary" type="submit">
+                  Save agent
+                </button>
+              </div>
+            </form>
+          </div>
+
+          <div class="rules">
+            <strong>Rules</strong>
+            <ul>
+              <li>
+                Always visible labels — placeholders are examples, never labels.
+                Mark required fields, not optional ones.
+              </li>
+              <li>
+                Validate on submit (plus on blur for expensive checks like slug
+                availability). Errors are inline text tied via
+                <code>aria-describedby</code>, not toast-only.
+              </li>
+              <li>
+                Switches apply immediately (settings); checkboxes wait for the
+                form submit. Don't mix the two behaviors in one panel.
+              </li>
+              <li>
+                Avoid: three-plus column forms, center-aligned labels, disabling
+                the submit button as the only validation feedback.
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- ============ 4 · DROPDOWNS ============ -->
+        <section class="doc-section" id="dropdowns">
+          <span class="sec-label">4 · Components</span>
+          <h2>Dropdowns &amp; menus</h2>
+          <p class="sec-intro">
+            Action menus float on <code>--shadow-3</code> with a 4&nbsp;px
+            radius. Fully keyboard-operable: <span class="kbd">↵</span> /
+            <span class="kbd">↓</span> opens, arrows cycle,
+            <span class="kbd">Esc</span> closes and returns focus.
+          </p>
+
+          <div class="demo">
+            <p class="demo-title">Interactive action menu</p>
+            <div class="demo-row">
+              <div class="menu-wrap">
+                <button
+                  class="btn"
+                  type="button"
+                  id="menuBtn"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  aria-controls="menu1"
+                >
+                  Agent actions <span class="caret" aria-hidden="true"></span>
+                </button>
+                <ul
+                  class="menu"
+                  id="menu1"
+                  role="menu"
+                  aria-labelledby="menuBtn"
+                >
+                  <li role="none">
+                    <button
+                      role="menuitem"
+                      type="button"
+                      data-action="Open session viewer"
+                    >
+                      Open session viewer <span class="shortcut">↵</span>
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button
+                      role="menuitem"
+                      type="button"
+                      data-action="Duplicate agent"
+                    >
+                      Duplicate <span class="shortcut">⌘D</span>
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button
+                      role="menuitem"
+                      type="button"
+                      data-action="Export config"
+                    >
+                      Export config <span class="shortcut">⌘E</span>
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button role="menuitem" type="button" aria-disabled="true">
+                      Transfer ownership
+                    </button>
+                  </li>
+                  <li role="none" class="menu-sep" aria-hidden="true"></li>
+                  <li role="none">
+                    <button
+                      role="menuitem"
+                      type="button"
+                      class="danger"
+                      data-action="Archive agent"
+                    >
+                      Archive agent…
+                    </button>
+                  </li>
+                </ul>
+              </div>
+              <span style="font-size: 12px; color: var(--text-3)"
+                >← try it with the keyboard</span
+              >
+            </div>
+          </div>
+
+          <div class="rules">
+            <strong>Rules</strong>
+            <ul>
+              <li>
+                Menus hold <em>actions</em>; use a native
+                <code>&lt;select&gt;</code> for choosing a <em>value</em> in a
+                form.
+              </li>
+              <li>
+                Destructive items sit last, after a separator, in danger red,
+                and always end with “…” because a confirm dialog follows.
+              </li>
+              <li>
+                Disabled items stay visible with <code>aria-disabled</code> so
+                users learn what exists — never silently remove them.
+              </li>
+              <li>
+                Avoid: nested submenus (restructure instead), menus longer than
+                ~9 items, mixing navigation links and actions in one menu.
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- ============ 5 · DIALOGS ============ -->
+        <section class="doc-section" id="dialogs">
+          <span class="sec-label">5 · Components</span>
+          <h2>Dialogs</h2>
+          <p class="sec-intro">
+            Native <code>&lt;dialog&gt;</code> with a scrim, 440&nbsp;px default
+            width, actions right-aligned in a footer. Focus is trapped by the
+            platform; <span class="kbd">Esc</span> cancels.
+          </p>
+
+          <div class="demo">
+            <p class="demo-title">Interactive examples</p>
+            <div class="demo-row">
+              <button class="btn btn--primary" type="button" id="openFormDlg">
+                New API key…
+              </button>
+              <button class="btn btn--danger" type="button" id="openConfirmDlg">
+                Archive agent…
+              </button>
+            </div>
+          </div>
+
+          <dialog class="dlg" id="formDlg" aria-labelledby="formDlgTitle">
+            <form method="dialog">
+              <div class="dlg-head">
+                <h3 id="formDlgTitle">Create API key</h3>
+                <button
+                  class="dlg-close"
+                  value="cancel"
+                  aria-label="Close dialog"
+                >
+                  ✕
+                </button>
+              </div>
+              <div class="dlg-body">
+                <p>
+                  The key is shown once after creation. Store it in your secret
+                  manager.
+                </p>
+                <div class="field">
+                  <label for="dlg-key-name">Key name</label>
+                  <input
+                    class="input"
+                    id="dlg-key-name"
+                    type="text"
+                    placeholder="e.g. ci-deploy"
+                  />
+                </div>
+                <div class="field">
+                  <label for="dlg-key-scope">Scope</label>
+                  <select class="select" id="dlg-key-scope">
+                    <option>Read-only</option>
+                    <option>Read + run sessions</option>
+                    <option>Full admin</option>
+                  </select>
+                </div>
+              </div>
+              <div class="dlg-foot">
+                <button class="btn" value="cancel" type="submit">Cancel</button>
+                <button class="btn btn--primary" value="create" type="submit">
+                  Create key
+                </button>
+              </div>
+            </form>
+          </dialog>
+
+          <dialog class="dlg" id="confirmDlg" aria-labelledby="confirmDlgTitle">
+            <form method="dialog">
+              <div class="dlg-head">
+                <h3 id="confirmDlgTitle">Archive “Shipment investigator”?</h3>
+                <button
+                  class="dlg-close"
+                  value="cancel"
+                  aria-label="Close dialog"
+                >
+                  ✕
+                </button>
+              </div>
+              <div class="dlg-body">
+                <p>
+                  Active sessions finish, then the agent stops accepting new
+                  runs. History stays readable. You can unarchive at any time.
+                </p>
+              </div>
+              <div class="dlg-foot">
+                <button class="btn" value="cancel" type="submit">
+                  Keep active
+                </button>
+                <button class="btn btn--danger" value="archive" type="submit">
+                  Archive agent
+                </button>
+              </div>
+            </form>
+          </dialog>
+
+          <div class="rules">
+            <strong>Rules</strong>
+            <ul>
+              <li>
+                Dialogs are for short, blocking decisions or one-to-three-field
+                forms. Longer flows deserve a page.
+              </li>
+              <li>
+                Confirm titles name the object (“Archive ‘Shipment
+                investigator’?”) and the confirm button repeats the verb — never
+                “OK”.
+              </li>
+              <li>
+                The cancel action must be a real button; don't rely on
+                <span class="kbd">Esc</span> alone.
+              </li>
+              <li>
+                Avoid: nested dialogs, dialogs that open on page load,
+                destructive primary buttons in green.
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- ============ 6 · TABS ============ -->
+        <section class="doc-section" id="tabs">
+          <span class="sec-label">6 · Components</span>
+          <h2>Tabs</h2>
+          <p class="sec-intro">
+            Underline tabs with roving focus: <span class="kbd">←</span>
+            <span class="kbd">→</span> move between tabs,
+            <span class="kbd">Home</span>/<span class="kbd">End</span> jump.
+            Selection follows focus.
+          </p>
+
+          <div class="demo">
+            <div class="tabs" role="tablist" aria-label="Session detail views">
+              <button
+                class="tab"
+                role="tab"
+                id="tab-transcript"
+                aria-selected="true"
+                aria-controls="panel-transcript"
+              >
+                Transcript
+              </button>
+              <button
+                class="tab"
+                role="tab"
+                id="tab-debug"
+                aria-selected="false"
+                aria-controls="panel-debug"
+                tabindex="-1"
+              >
+                Debug
+              </button>
+              <button
+                class="tab"
+                role="tab"
+                id="tab-cost"
+                aria-selected="false"
+                aria-controls="panel-cost"
+                tabindex="-1"
+              >
+                Cost
+              </button>
+              <button
+                class="tab"
+                role="tab"
+                id="tab-config"
+                aria-selected="false"
+                aria-controls="panel-config"
+                tabindex="-1"
+              >
+                Config snapshot
+              </button>
+            </div>
+            <div
+              class="tabpanel"
+              role="tabpanel"
+              id="panel-transcript"
+              aria-labelledby="tab-transcript"
+              tabindex="0"
+            >
+              Full conversation view: user turns, assistant output, tool calls
+              and results in order. This is the default landing tab for a
+              session.
+            </div>
+            <div
+              class="tabpanel"
+              role="tabpanel"
+              id="panel-debug"
+              aria-labelledby="tab-debug"
+              tabindex="0"
+              hidden
+            >
+              Timing waterfall, raw request/response payloads, and retry
+              markers. See <a href="#session">section 10</a> for the full
+              surface.
+            </div>
+            <div
+              class="tabpanel"
+              role="tabpanel"
+              id="panel-cost"
+              aria-labelledby="tab-cost"
+              tabindex="0"
+              hidden
+            >
+              Token counts per step, cache hits and per-model pricing. Totals:
+              <code>42.8k in / 3.1k out · $0.147</code>.
+            </div>
+            <div
+              class="tabpanel"
+              role="tabpanel"
+              id="panel-config"
+              aria-labelledby="tab-config"
+              tabindex="0"
+              hidden
+            >
+              Immutable snapshot of the agent config at run time: model preset,
+              tool allowlist, prompt version <code>v14</code>.
+            </div>
+          </div>
+
+          <div class="rules">
+            <strong>Rules</strong>
+            <ul>
+              <li>
+                Tabs switch <em>views of the same object</em> (one session,
+                several lenses). For navigating between objects use the sidebar.
+              </li>
+              <li>
+                Keep to 5 tabs or fewer; overflow means the page is doing too
+                much.
+              </li>
+              <li>
+                Persist the active tab in the URL so deep links land on the
+                right view.
+              </li>
+              <li>
+                Avoid: tabs as a wizard/stepper, icon-only tabs, nesting tab
+                sets.
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- ============ 7 · STATUS ============ -->
+        <section class="doc-section" id="status">
+          <span class="sec-label">7 · Components</span>
+          <h2>Status indicators</h2>
+          <p class="sec-intro">
+            The one sanctioned pill shape. Every status pairs color with a label
+            — color alone never carries meaning.
+          </p>
+
+          <div class="demo">
+            <p class="demo-title">Status chips</p>
+            <div class="demo-row">
+              <span class="chip chip--success"
+                ><span class="dot" aria-hidden="true"></span>Active</span
+              >
+              <span class="chip chip--success chip--live"
+                ><span class="dot" aria-hidden="true"></span>Running</span
+              >
+              <span class="chip chip--warning"
+                ><span class="dot" aria-hidden="true"></span>Pending
+                approval</span
+              >
+              <span class="chip chip--danger"
+                ><span class="dot" aria-hidden="true"></span>Failed</span
+              >
+              <span class="chip chip--info"
+                ><span class="dot" aria-hidden="true"></span>Queued</span
+              >
+              <span class="chip"
+                ><span class="dot" aria-hidden="true"></span>Archived</span
+              >
+            </div>
+            <p class="demo-title">Counts &amp; progress</p>
+            <div class="demo-row" style="gap: 24px">
+              <span style="font-size: 13px"
+                >Approvals <span class="badge-count">3</span></span
+              >
+              <div class="meter-line">
+                <div
+                  class="progress"
+                  role="progressbar"
+                  aria-valuenow="64"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-label="Monthly token budget used"
+                >
+                  <span style="width: 64%"></span>
+                </div>
+                <span class="mono">64% of token budget</span>
+              </div>
+              <div class="meter-line">
+                <div
+                  class="progress"
+                  role="progressbar"
+                  aria-valuenow="91"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-label="Rate limit used"
+                >
+                  <span
+                    style="width: 91%; background: var(--warning-fg)"
+                  ></span>
+                </div>
+                <span class="mono" style="color: var(--warning-fg)"
+                  >91% rate limit</span
+                >
+              </div>
+            </div>
+          </div>
+
+          <div class="rules">
+            <strong>Rules</strong>
+            <ul>
+              <li>
+                Green = healthy/approved, amber = waiting on a human, red =
+                failed, blue = system-neutral in-flight, gray = inert.
+              </li>
+              <li>
+                The animated live dot is only for genuinely streaming work; it
+                pauses under <code>prefers-reduced-motion</code>.
+              </li>
+              <li>
+                Progress bars turn amber above 85% of a quota — don't invent
+                intermediate colors.
+              </li>
+              <li>
+                Avoid: chips as buttons, more than one chip per table row,
+                sentence-length chip labels.
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- ============ 8 · TABLES ============ -->
+        <section class="doc-section" id="tables">
+          <span class="sec-label">8 · Components</span>
+          <h2>Tables</h2>
+          <p class="sec-intro">
+            Dense, hairline-ruled data tables: mono uppercase headers, hover
+            rows, green-100 selection. Numeric columns are right-aligned mono.
+          </p>
+
+          <div class="demo" style="padding: 0; overflow: hidden">
+            <div class="table-wrap" style="border: 0">
+              <table class="data">
+                <caption>
+                  Agents · 4 of 12
+                  <span style="font-weight: 400; color: var(--text-3)"
+                    >(row 2 selected)</span
+                  >
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Agent</th>
+                    <th scope="col">Model</th>
+                    <th scope="col">Status</th>
+                    <th scope="col" class="num">Sessions 24h</th>
+                    <th scope="col" class="num">P50 latency</th>
+                    <th scope="col">
+                      <span class="visually-hidden">Actions</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>
+                      <span class="cell-main">Shipment investigator</span
+                      ><span class="cell-sub">agent_01JQ7Y8M</span>
+                    </td>
+                    <td><code>openrouter/claude-sonnet</code></td>
+                    <td>
+                      <span class="chip chip--success"
+                        ><span class="dot" aria-hidden="true"></span
+                        >Active</span
+                      >
+                    </td>
+                    <td class="num">182</td>
+                    <td class="num">2.1s</td>
+                    <td>
+                      <button
+                        class="btn btn--ghost btn--sm"
+                        type="button"
+                        aria-label="Actions for Shipment investigator"
+                      >
+                        ⋯
+                      </button>
+                    </td>
+                  </tr>
+                  <tr aria-selected="true">
+                    <td>
+                      <span class="cell-main">Order extraction</span
+                      ><span class="cell-sub">agent_01JQ8A2D</span>
+                    </td>
+                    <td><code>openrouter/gemini-pro</code></td>
+                    <td>
+                      <span class="chip chip--success chip--live"
+                        ><span class="dot" aria-hidden="true"></span
+                        >Running</span
+                      >
+                    </td>
+                    <td class="num">97</td>
+                    <td class="num">1.4s</td>
+                    <td>
+                      <button
+                        class="btn btn--ghost btn--sm"
+                        type="button"
+                        aria-label="Actions for Order extraction"
+                      >
+                        ⋯
+                      </button>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <span class="cell-main">Customer assistant</span
+                      ><span class="cell-sub">agent_01JQ8EV4</span>
+                    </td>
+                    <td><code>openrouter/gpt-5</code></td>
+                    <td>
+                      <span class="chip chip--warning"
+                        ><span class="dot" aria-hidden="true"></span>Pending
+                        approval</span
+                      >
+                    </td>
+                    <td class="num">41</td>
+                    <td class="num">3.8s</td>
+                    <td>
+                      <button
+                        class="btn btn--ghost btn--sm"
+                        type="button"
+                        aria-label="Actions for Customer assistant"
+                      >
+                        ⋯
+                      </button>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <span class="cell-main">Invoice reconciler</span
+                      ><span class="cell-sub">agent_01JQ9C11</span>
+                    </td>
+                    <td><code>openrouter/claude-opus</code></td>
+                    <td>
+                      <span class="chip chip--danger"
+                        ><span class="dot" aria-hidden="true"></span
+                        >Failed</span
+                      >
+                    </td>
+                    <td class="num">3</td>
+                    <td class="num">—</td>
+                    <td>
+                      <button
+                        class="btn btn--ghost btn--sm"
+                        type="button"
+                        aria-label="Actions for Invoice reconciler"
+                      >
+                        ⋯
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="rules">
+            <strong>Rules</strong>
+            <ul>
+              <li>
+                Primary cell: entity name in medium weight with its mono ID
+                beneath. Users copy IDs constantly — keep them visible.
+              </li>
+              <li>
+                Selection uses green-100 background
+                (<code>aria-selected</code>), hover uses surface-2. Selected
+                beats hover.
+              </li>
+              <li>
+                Row overflow menus (⋯) hold everything beyond the primary
+                click-through; each needs an <code>aria-label</code> naming the
+                row.
+              </li>
+              <li>
+                Avoid: zebra striping (rules are enough), center-aligned
+                numbers, truncating IDs without a copy affordance.
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- ============ 9 · APP SHELL ============ -->
+        <section class="doc-section" id="shell">
+          <span class="sec-label">9 · Patterns</span>
+          <h2>App shell &amp; navigation</h2>
+          <p class="sec-intro">
+            The console frame: glass top bar with breadcrumbs and environment
+            chip, 196&nbsp;px sidebar with grouped nav and a green-100 active
+            state, content on the canvas tint.
+          </p>
+
+          <div
+            class="shell-mock"
+            role="group"
+            aria-label="Example OAO console shell (non-functional mock)"
+          >
+            <div class="shell-top">
+              <img
+                src="style-guide-assets/oao-wordmark-black.png"
+                alt="OAO"
+                class="invert-dark"
+              />
+              <nav aria-label="Breadcrumb (example)">
+                <ol class="crumbs">
+                  <li><a href="#shell">Agents</a></li>
+                  <li class="sep" aria-hidden="true">/</li>
+                  <li><a href="#shell">Shipment investigator</a></li>
+                  <li class="sep" aria-hidden="true">/</li>
+                  <li aria-current="page">run_01JQ7ZK4</li>
+                </ol>
+              </nav>
+              <span class="env chip chip--info"
+                ><span class="dot" aria-hidden="true"></span>Production</span
+              >
+              <span class="chip chip--success chip--live"
+                ><span class="dot" aria-hidden="true"></span>System
+                healthy</span
+              >
+            </div>
+            <div class="shell-body">
+              <nav class="shell-nav" aria-label="Console navigation (example)">
+                <span class="nav-group">Build</span>
+                <a href="#shell" aria-current="page">Agents</a>
+                <a href="#shell">Prompts</a>
+                <a href="#shell">Tools</a>
+                <span class="nav-group">Observe</span>
+                <a href="#shell">Sessions</a>
+                <a href="#shell"
+                  >Approvals <span class="badge-count">3</span></a
+                >
+                <a href="#shell">Alerts</a>
+                <span class="nav-group">Configure</span>
+                <a href="#shell">API keys</a>
+                <a href="#shell">Members</a>
+                <div class="nav-foot">
+                  developer@example.test<br /><span class="mono" style="font-size: 10px"
+                    >org_vectrix · admin</span
+                  >
+                </div>
+              </nav>
+              <div class="shell-main">
+                <div class="shell-main-head">
+                  <div>
+                    <h3 style="font-size: 17px">Shipment investigator</h3>
+                    <p>Durable agent · created 12 Mar 2026 · prompt v14</p>
+                  </div>
+                  <div class="demo-row">
+                    <button class="btn btn--sm" type="button">Export</button>
+                    <button class="btn btn--primary btn--sm" type="button">
+                      New session
+                    </button>
+                  </div>
+                </div>
+                <dl class="meta-grid" style="margin-bottom: 0">
+                  <div class="meta-cell">
+                    <dt>Status</dt>
+                    <dd>
+                      <span class="chip chip--success chip--live"
+                        ><span class="dot" aria-hidden="true"></span
+                        >Running</span
+                      >
+                    </dd>
+                  </div>
+                  <div class="meta-cell">
+                    <dt>Model preset</dt>
+                    <dd><span class="mono">claude-sonnet · balanced</span></dd>
+                  </div>
+                  <div class="meta-cell">
+                    <dt>Sessions 24h</dt>
+                    <dd>
+                      182
+                      <span class="mono" style="color: var(--success-fg)"
+                        >▲ 12%</span
+                      >
+                    </dd>
+                  </div>
+                  <div class="meta-cell">
+                    <dt>Error rate</dt>
+                    <dd>
+                      0.4%
+                      <span class="mono" style="color: var(--text-3)"
+                        >p50 2.1s</span
+                      >
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+            </div>
+          </div>
+
+          <div class="rules" style="margin-top: 16px">
+            <strong>Rules</strong>
+            <ul>
+              <li>
+                The sidebar navigates between object types; breadcrumbs show
+                where you are inside one. Never duplicate one in the other.
+              </li>
+              <li>
+                Group nav under mono uppercase headers (Build / Observe /
+                Configure); counts appear only for queues needing action.
+              </li>
+              <li>
+                Environment is always visible in the top bar; production gets
+                the info-blue chip so green stays reserved for health.
+              </li>
+              <li>
+                Avoid: collapsing the sidebar to icons-only by default, more
+                than three nav groups, nav items that open dialogs.
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- ============ 10 · SESSION & DEBUG ============ -->
+        <section class="doc-section" id="session">
+          <span class="sec-label">10 · Patterns</span>
+          <h2>Session &amp; debug surfaces</h2>
+          <p class="sec-intro">
+            The operator's daily view: run metadata, the transcript, the timing
+            waterfall, and the pending tool-approval card.
+          </p>
+
+          <div class="demo">
+            <p class="demo-title">Run metadata</p>
+            <dl class="meta-grid">
+              <div class="meta-cell">
+                <dt>Run ID</dt>
+                <dd class="mono">run_01JQ7ZK4</dd>
+              </div>
+              <div class="meta-cell">
+                <dt>Duration</dt>
+                <dd class="mono">12.4s</dd>
+              </div>
+              <div class="meta-cell">
+                <dt>Tokens</dt>
+                <dd class="mono">42.8k in · 3.1k out</dd>
+              </div>
+              <div class="meta-cell">
+                <dt>Cost</dt>
+                <dd class="mono">$0.147</dd>
+              </div>
+            </dl>
+
+            <p class="demo-title">Transcript rows</p>
+            <div class="transcript">
+              <div class="t-row">
+                <span class="t-role user">User</span>
+                <div class="t-body">
+                  Where is order #88231? The customer says it has been stuck for
+                  a week.
+                </div>
+                <span class="t-time">14:02:11</span>
+              </div>
+              <div class="t-row">
+                <span class="t-role assistant">Assistant</span>
+                <div class="t-body">
+                  I'll check the shipment status and the carrier's latest scan
+                  events.
+                </div>
+                <span class="t-time">14:02:12</span>
+              </div>
+              <div class="t-row">
+                <span class="t-role tool">Tool ▸</span>
+                <div class="t-body">
+                  <span class="tool-line"
+                    >lookup_shipment({ "order_id": "88231" }) → 200 · 0.6s</span
+                  >
+                </div>
+                <span class="t-time">14:02:12</span>
+              </div>
+              <div class="t-row">
+                <span class="t-role tool">Tool ▸</span>
+                <div class="t-body">
+                  <span class="tool-line"
+                    >carrier_events({ "tracking": "1Z8842…" }) → 200 ·
+                    1.8s</span
+                  >
+                </div>
+                <span class="t-time">14:02:13</span>
+              </div>
+              <div class="t-row">
+                <span class="t-role assistant">Assistant</span>
+                <div class="t-body">
+                  The parcel cleared customs in Liège on 18 Aug and is on a
+                  delivery truck today. I've drafted a customer update for your
+                  review.
+                </div>
+                <span class="t-time">14:02:19</span>
+              </div>
+              <div class="t-row">
+                <span class="t-role system">System</span>
+                <div class="t-body" style="color: var(--text-3)">
+                  Run completed · 6 steps · no retries
+                </div>
+                <span class="t-time">14:02:19</span>
+              </div>
+            </div>
+
+            <p class="demo-title" style="margin-top: 24px">Debug waterfall</p>
+            <div
+              class="waterfall"
+              role="img"
+              aria-label="Timing waterfall: six steps over 12.4 seconds; the longest is an LLM turn of 5.1 seconds"
+            >
+              <div class="wf-row">
+                <span class="wf-name">llm · plan</span>
+                <div class="wf-track">
+                  <div class="wf-bar llm" style="left: 0%; width: 18%"></div>
+                </div>
+                <span class="wf-ms">2.2s</span>
+              </div>
+              <div class="wf-row">
+                <span class="wf-name">tool · lookup_shipment</span>
+                <div class="wf-track">
+                  <div class="wf-bar tool" style="left: 18%; width: 5%"></div>
+                </div>
+                <span class="wf-ms">0.6s</span>
+              </div>
+              <div class="wf-row">
+                <span class="wf-name">tool · carrier_events</span>
+                <div class="wf-track">
+                  <div class="wf-bar tool" style="left: 23%; width: 15%"></div>
+                </div>
+                <span class="wf-ms">1.8s</span>
+              </div>
+              <div class="wf-row">
+                <span class="wf-name">db · session_write</span>
+                <div class="wf-track">
+                  <div class="wf-bar db" style="left: 38%; width: 3%"></div>
+                </div>
+                <span class="wf-ms">0.3s</span>
+              </div>
+              <div class="wf-row">
+                <span class="wf-name">llm · synthesize</span>
+                <div class="wf-track">
+                  <div class="wf-bar llm" style="left: 41%; width: 41%"></div>
+                </div>
+                <span class="wf-ms">5.1s</span>
+              </div>
+              <div class="wf-row">
+                <span class="wf-name">tool · draft_email (retry)</span>
+                <div class="wf-track">
+                  <div class="wf-bar err" style="left: 82%; width: 6%"></div>
+                  <div class="wf-bar tool" style="left: 89%; width: 11%"></div>
+                </div>
+                <span class="wf-ms">2.4s</span>
+              </div>
+              <div class="wf-legend">
+                <span
+                  ><span
+                    class="swatch-sq"
+                    style="background: var(--green-500)"
+                  ></span
+                  >LLM</span
+                >
+                <span
+                  ><span
+                    class="swatch-sq"
+                    style="background: var(--amber-300)"
+                  ></span
+                  >Tool</span
+                >
+                <span
+                  ><span
+                    class="swatch-sq"
+                    style="background: var(--blue-300)"
+                  ></span
+                  >Storage</span
+                >
+                <span
+                  ><span
+                    class="swatch-sq"
+                    style="background: var(--red-300)"
+                  ></span
+                  >Failed attempt</span
+                >
+              </div>
+            </div>
+
+            <p class="demo-title" style="margin-top: 24px">
+              Pending approval — tool request
+            </p>
+            <div class="approval">
+              <div class="approval-head">
+                <span aria-hidden="true">⏸</span> Waiting for approval ·
+                <span class="mono" style="font-weight: 400"
+                  >send_customer_email</span
+                >
+              </div>
+              <div class="approval-body">
+                <p style="margin-bottom: 0">
+                  The agent wants to send an email on your behalf. Review the
+                  payload before it leaves the system.
+                </p>
+                <pre><code>{
+  "tool": "send_customer_email",
+  "to": "customer@example.com",
+  "subject": "Update on order #88231",
+  "body_preview": "Good news — your parcel cleared customs…",
+  "requested_at": "2026-08-20T14:02:19Z"
+}</code></pre>
+                <div class="approval-actions">
+                  <button
+                    class="btn btn--primary btn--sm approve-btn"
+                    type="button"
+                  >
+                    Approve &amp; run
+                  </button>
+                  <button class="btn btn--sm deny-btn" type="button">
+                    Deny
+                  </button>
+                  <button class="btn btn--ghost btn--sm" type="button">
+                    Edit payload
+                  </button>
+                  <span class="note">Expires in 58 min</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="rules">
+            <strong>Rules</strong>
+            <ul>
+              <li>
+                Transcript role labels are mono and color-coded (blue user,
+                green assistant, amber tool, gray system) with the same colors
+                reused in the waterfall.
+              </li>
+              <li>
+                Tool calls collapse to a single mono line — name, args preview,
+                status, duration. Full payloads live one click away in Debug.
+              </li>
+              <li>
+                Approvals interrupt visually (amber header) but never modally;
+                operators keep scrolling context while deciding.
+              </li>
+              <li>
+                Avoid: chat-bubble styling, auto-approving on timeout, hiding
+                retries — failed attempts stay visible in red.
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- ============ 11 · SETTINGS ============ -->
+        <section class="doc-section" id="settings">
+          <span class="sec-label">11 · Patterns</span>
+          <h2>Model presets &amp; API keys</h2>
+          <p class="sec-intro">
+            Configuration surfaces: a segmented preset control with tuning
+            fields, and the key-management table with masked secrets.
+          </p>
+
+          <div class="demo">
+            <p class="demo-title">Model preset controls</p>
+            <fieldset style="border: 0; padding: 0; margin: 0">
+              <legend class="visually-hidden">Model preset</legend>
+              <div class="segmented" role="group" aria-label="Model preset">
+                <label
+                  ><input type="radio" name="preset" value="fast" /><span
+                    class="seg-btn"
+                    >Fast</span
+                  ></label
+                >
+                <label
+                  ><input
+                    type="radio"
+                    name="preset"
+                    value="balanced"
+                    checked
+                  /><span class="seg-btn">Balanced</span></label
+                >
+                <label
+                  ><input type="radio" name="preset" value="thorough" /><span
+                    class="seg-btn"
+                    >Thorough</span
+                  ></label
+                >
+                <label
+                  ><input type="radio" name="preset" value="custom" /><span
+                    class="seg-btn"
+                    >Custom</span
+                  ></label
+                >
+              </div>
+            </fieldset>
+            <div
+              class="demo-row"
+              style="margin-top: 16px; gap: 32px; align-items: flex-end"
+            >
+              <div class="field">
+                <label for="temp"
+                  >Temperature
+                  <span class="mono" id="tempVal" style="color: var(--text-3)"
+                    >0.3</span
+                  ></label
+                >
+                <input
+                  class="range"
+                  type="range"
+                  id="temp"
+                  min="0"
+                  max="1"
+                  step="0.1"
+                  value="0.3"
+                  aria-describedby="tempVal"
+                />
+              </div>
+              <div class="field" style="width: 130px">
+                <label for="maxtok">Max output tokens</label>
+                <input
+                  class="input"
+                  id="maxtok"
+                  type="number"
+                  value="4096"
+                  min="256"
+                  step="256"
+                />
+              </div>
+              <label class="switch" style="padding-bottom: 6px"
+                ><input type="checkbox" checked /><span
+                  class="track"
+                  aria-hidden="true"
+                ></span
+                ><span>Prompt caching</span></label
+              >
+            </div>
+            <p class="hint" style="margin: 12px 0 0">
+              Presets map to a pinned model + sampling config. Editing any field
+              switches the preset to <strong>Custom</strong>.
+            </p>
+          </div>
+
+          <div class="demo" style="padding: 0; overflow: hidden">
+            <div class="table-wrap" style="border: 0">
+              <table class="data">
+                <caption
+                  style="
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                  "
+                >
+                  API keys
+                  <button
+                    class="btn btn--primary btn--sm"
+                    type="button"
+                    id="openFormDlg2"
+                  >
+                    New API key…
+                  </button>
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Name</th>
+                    <th scope="col">Key</th>
+                    <th scope="col">Scope</th>
+                    <th scope="col">Last used</th>
+                    <th scope="col">
+                      <span class="visually-hidden">Actions</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><span class="cell-main">ci-deploy</span></td>
+                    <td>
+                      <span class="key-mask">oao_sk_…9f2e</span>
+                      <button
+                        class="btn btn--ghost btn--sm copy-key"
+                        type="button"
+                        aria-label="Copy key ci-deploy"
+                      >
+                        Copy
+                      </button>
+                    </td>
+                    <td>
+                      <span class="chip"
+                        ><span class="dot" aria-hidden="true"></span>Read +
+                        run</span
+                      >
+                    </td>
+                    <td class="num">2 min ago</td>
+                    <td>
+                      <button class="btn btn--danger btn--sm" type="button">
+                        Revoke
+                      </button>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><span class="cell-main">local-dev</span></td>
+                    <td>
+                      <span class="key-mask">oao_sk_…41ac</span>
+                      <button
+                        class="btn btn--ghost btn--sm copy-key"
+                        type="button"
+                        aria-label="Copy key local-dev"
+                      >
+                        Copy
+                      </button>
+                    </td>
+                    <td>
+                      <span class="chip"
+                        ><span class="dot" aria-hidden="true"></span
+                        >Read-only</span
+                      >
+                    </td>
+                    <td class="num">3 days ago</td>
+                    <td>
+                      <button class="btn btn--danger btn--sm" type="button">
+                        Revoke
+                      </button>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <span class="cell-main">legacy-import</span>
+                      <span class="chip chip--warning" style="margin-left: 6px"
+                        ><span class="dot" aria-hidden="true"></span>Unused
+                        90d</span
+                      >
+                    </td>
+                    <td>
+                      <span class="key-mask">oao_sk_…c7b0</span>
+                      <button
+                        class="btn btn--ghost btn--sm copy-key"
+                        type="button"
+                        aria-label="Copy key legacy-import"
+                      >
+                        Copy
+                      </button>
+                    </td>
+                    <td>
+                      <span class="chip"
+                        ><span class="dot" aria-hidden="true"></span>Full
+                        admin</span
+                      >
+                    </td>
+                    <td class="num">Feb 2026</td>
+                    <td>
+                      <button class="btn btn--danger btn--sm" type="button">
+                        Revoke
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="rules">
+            <strong>Rules</strong>
+            <ul>
+              <li>
+                Secrets show a masked prefix + last four; the full value appears
+                exactly once, at creation, inside the dialog.
+              </li>
+              <li>
+                Flag stale credentials (unused 90 days) with a warning chip —
+                nudge, don't auto-revoke.
+              </li>
+              <li>
+                Revoke is an inline danger button because it is common and
+                reversible by re-issuing; deletion of agents is not, so it hides
+                behind a menu + dialog.
+              </li>
+              <li>
+                Avoid: eye-toggle reveals of stored secrets, copying keys to
+                clipboard without a confirming toast.
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- ============ 12 · TOASTS & ALERTS ============ -->
+        <section class="doc-section" id="feedback">
+          <span class="sec-label">12 · Feedback</span>
+          <h2>Toasts &amp; alerts</h2>
+          <p class="sec-intro">
+            Toasts confirm what just happened (transient, bottom-right,
+            auto-dismiss ~5s). Alerts describe a persistent condition and stay
+            put until resolved.
+          </p>
+
+          <div class="demo">
+            <p class="demo-title">Trigger toasts</p>
+            <div class="demo-row">
+              <button
+                class="btn"
+                type="button"
+                data-toast="success"
+                data-msg="Agent deployed to production."
+              >
+                Success toast
+              </button>
+              <button
+                class="btn"
+                type="button"
+                data-toast="warning"
+                data-msg="Rate limit at 91% — throttling soon."
+              >
+                Warning toast
+              </button>
+              <button
+                class="btn"
+                type="button"
+                data-toast="danger"
+                data-msg="Run failed: tool timeout after 30s."
+              >
+                Error toast
+              </button>
+              <button
+                class="btn"
+                type="button"
+                data-toast="default"
+                data-msg="Config copied to clipboard."
+              >
+                Neutral toast
+              </button>
+            </div>
+
+            <p class="demo-title" style="margin-top: 24px">Persistent alerts</p>
+            <div style="display: grid; gap: 8px">
+              <div class="alert alert--info">
+                <span aria-hidden="true">ℹ︎</span>
+                <div>
+                  <strong>Scheduled maintenance</strong> The EU runtime restarts
+                  tonight 02:00–02:10 CET. Running sessions resume
+                  automatically.
+                </div>
+              </div>
+              <div class="alert alert--success">
+                <span aria-hidden="true">✓</span>
+                <div>
+                  <strong>All systems operational</strong> 182 sessions
+                  completed in the last 24 h with 0.4% errors.
+                </div>
+              </div>
+              <div class="alert alert--warning">
+                <span aria-hidden="true">⚠︎</span>
+                <div>
+                  <strong>Key expiring</strong> <code>ci-deploy</code> rotates
+                  in 6 days. Update your CI secrets before then.
+                </div>
+              </div>
+              <div class="alert alert--danger">
+                <span aria-hidden="true">✕</span>
+                <div>
+                  <strong>Provider degraded</strong> openrouter/gpt-5 is
+                  returning elevated 529s. Affected agents fall back to
+                  claude-sonnet.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="rules">
+            <strong>Rules</strong>
+            <ul>
+              <li>
+                Toast = past tense, one line, optional single action (Undo). If
+                it needs two actions or a paragraph, it's a dialog or alert.
+              </li>
+              <li>
+                Errors that block the user's current task render inline where
+                the task is — never toast-only.
+              </li>
+              <li>
+                The toast region is <code>aria-live="polite"</code>; stack at
+                most three, oldest drops first.
+              </li>
+              <li>
+                Avoid: toasts for validation errors, success toasts for pure
+                navigation, center-screen toasts.
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- ============ 13 · STATES ============ -->
+        <section class="doc-section" id="states">
+          <span class="sec-label">13 · Feedback</span>
+          <h2>Empty, loading &amp; error states</h2>
+          <p class="sec-intro">
+            Every list surface ships all three. Skeletons pulse opacity (no
+            shimmer gradients) and match the real layout so nothing jumps on
+            load.
+          </p>
+
+          <div class="state-3col">
+            <div class="state-panel">
+              <div class="state-icon" aria-hidden="true">◇</div>
+              <h4>No agents yet</h4>
+              <p>
+                Agents are durable runtimes with versioned prompts and tool
+                access.
+              </p>
+              <button class="btn btn--primary btn--sm" type="button">
+                Create your first agent
+              </button>
+            </div>
+            <div class="skeleton" aria-hidden="true">
+              <p class="demo-title">Loading (skeleton)</p>
+              <div class="sk-line" style="width: 55%"></div>
+              <div class="sk-line" style="width: 85%"></div>
+              <div class="sk-line" style="width: 70%"></div>
+              <div class="sk-line" style="width: 82%"></div>
+              <div class="sk-line" style="width: 40%"></div>
+            </div>
+            <div class="state-panel state-panel--error">
+              <div class="state-icon" aria-hidden="true">✕</div>
+              <h4>Couldn't load sessions</h4>
+              <p>
+                The API returned 503. Your agents are unaffected; this is a
+                console issue.
+              </p>
+              <button class="btn btn--sm" type="button">Retry</button>
+            </div>
+          </div>
+
+          <div class="rules" style="margin-top: 16px">
+            <strong>Rules</strong>
+            <ul>
+              <li>
+                Empty states teach: one sentence on what the object <em>is</em>,
+                then the primary creation action. Dashed border marks “nothing
+                here yet”.
+              </li>
+              <li>
+                Error states say what failed, what is still safe, and offer
+                Retry. Never a bare “Something went wrong”.
+              </li>
+              <li>
+                Show skeletons only after ~300 ms so fast loads don't flash;
+                they're <code>aria-hidden</code> with loading announced on the
+                region.
+              </li>
+              <li>
+                Avoid: illustration-heavy empty states, spinners for full-page
+                loads (use skeletons), blaming the user in error copy.
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <footer
+          style="
+            padding: 32px 0 8px;
+            color: var(--text-3);
+            font-size: 12px;
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            flex-wrap: wrap;
+          "
+        >
+          <span
+            >OAO design prototype v0.1 · 20 August 2026 · iterate here before
+            changing the app</span
+          >
+          <span
+            >Seed <a href="https://uicolors.app/generate/6ebc91">#6ebc91</a> ·
+            squared geometry · no gradients</span
+          >
+        </footer>
+      </main>
+    </div>
+
+    <div
+      class="toast-region"
+      id="toastRegion"
+      aria-live="polite"
+      aria-label="Notifications"
+    ></div>
+
+    <script>
+      (function () {
+        "use strict";
+
+        /* ---------- Theme toggle (light is default) ---------- */
+        var root = document.documentElement;
+        var themeBtn = document.getElementById("themeToggle");
+        themeBtn.addEventListener("click", function () {
+          var dark = root.dataset.theme === "dark";
+          root.dataset.theme = dark ? "light" : "dark";
+          themeBtn.setAttribute("aria-pressed", String(!dark));
+          themeBtn.innerHTML = !dark
+            ? '<span aria-hidden="true">◐</span> Light preview'
+            : '<span aria-hidden="true">◐</span> Dark preview';
+        });
+
+        /* ---------- Toasts ---------- */
+        var toastRegion = document.getElementById("toastRegion");
+        var MAX_TOASTS = 3;
+        function showToast(message, tone) {
+          while (toastRegion.children.length >= MAX_TOASTS) {
+            toastRegion.removeChild(toastRegion.firstChild);
+          }
+          var el = document.createElement("div");
+          el.className =
+            "toast" + (tone && tone !== "default" ? " toast--" + tone : "");
+          var msg = document.createElement("span");
+          msg.className = "t-msg";
+          msg.textContent = message;
+          var x = document.createElement("button");
+          x.className = "t-x";
+          x.type = "button";
+          x.setAttribute("aria-label", "Dismiss notification");
+          x.textContent = "✕";
+          x.addEventListener("click", function () {
+            el.remove();
+          });
+          el.appendChild(msg);
+          el.appendChild(x);
+          toastRegion.appendChild(el);
+          window.setTimeout(function () {
+            el.remove();
+          }, 5000);
+        }
+        document.querySelectorAll("[data-toast]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            showToast(btn.dataset.msg, btn.dataset.toast);
+          });
+        });
+
+        /* ---------- Dropdown menu ---------- */
+        var menuBtn = document.getElementById("menuBtn");
+        var menu = document.getElementById("menu1");
+        function menuItems() {
+          return Array.prototype.filter.call(
+            menu.querySelectorAll('[role="menuitem"]'),
+            function (i) {
+              return i.getAttribute("aria-disabled") !== "true";
+            },
+          );
+        }
+        function openMenu(focusFirst) {
+          menu.classList.add("open");
+          menuBtn.setAttribute("aria-expanded", "true");
+          if (focusFirst !== false) {
+            var items = menuItems();
+            if (items.length) {
+              items[0].focus();
+            }
+          }
+        }
+        function closeMenu(returnFocus) {
+          menu.classList.remove("open");
+          menuBtn.setAttribute("aria-expanded", "false");
+          if (returnFocus) {
+            menuBtn.focus();
+          }
+        }
+        menuBtn.addEventListener("click", function () {
+          if (menu.classList.contains("open")) {
+            closeMenu(true);
+          } else {
+            openMenu(true);
+          }
+        });
+        menuBtn.addEventListener("keydown", function (e) {
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            openMenu(true);
+          }
+        });
+        menu.addEventListener("keydown", function (e) {
+          var items = menuItems();
+          var idx = items.indexOf(document.activeElement);
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            items[(idx + 1) % items.length].focus();
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            items[(idx - 1 + items.length) % items.length].focus();
+          } else if (e.key === "Home") {
+            e.preventDefault();
+            items[0].focus();
+          } else if (e.key === "End") {
+            e.preventDefault();
+            items[items.length - 1].focus();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            closeMenu(true);
+          } else if (e.key === "Tab") {
+            closeMenu(false);
+          }
+        });
+        menu.addEventListener("click", function (e) {
+          var item = e.target.closest('[role="menuitem"]');
+          if (!item || item.getAttribute("aria-disabled") === "true") {
+            return;
+          }
+          closeMenu(true);
+          showToast(item.dataset.action + " (prototype action)", "default");
+        });
+        document.addEventListener("click", function (e) {
+          if (
+            menu.classList.contains("open") &&
+            !menu.contains(e.target) &&
+            !menuBtn.contains(e.target)
+          ) {
+            closeMenu(false);
+          }
+        });
+
+        /* ---------- Dialogs ---------- */
+        var formDlg = document.getElementById("formDlg");
+        var confirmDlg = document.getElementById("confirmDlg");
+        document
+          .getElementById("openFormDlg")
+          .addEventListener("click", function () {
+            formDlg.showModal();
+          });
+        document
+          .getElementById("openFormDlg2")
+          .addEventListener("click", function () {
+            formDlg.showModal();
+          });
+        document
+          .getElementById("openConfirmDlg")
+          .addEventListener("click", function () {
+            confirmDlg.showModal();
+          });
+        formDlg.addEventListener("close", function () {
+          if (formDlg.returnValue === "create") {
+            showToast(
+              "API key created — value shown once in the real app.",
+              "success",
+            );
+          }
+          formDlg.returnValue = "";
+        });
+        confirmDlg.addEventListener("close", function () {
+          if (confirmDlg.returnValue === "archive") {
+            showToast(
+              "Agent archived. You can unarchive it from the list.",
+              "warning",
+            );
+          }
+          confirmDlg.returnValue = "";
+        });
+
+        /* ---------- Tabs (roving focus, selection follows focus) ---------- */
+        var tablist = document.querySelector('[role="tablist"]');
+        var tabs = Array.prototype.slice.call(
+          tablist.querySelectorAll('[role="tab"]'),
+        );
+        function selectTab(tab) {
+          tabs.forEach(function (t) {
+            var selected = t === tab;
+            t.setAttribute("aria-selected", String(selected));
+            t.tabIndex = selected ? 0 : -1;
+            document.getElementById(t.getAttribute("aria-controls")).hidden =
+              !selected;
+          });
+          tab.focus();
+        }
+        tabs.forEach(function (tab) {
+          tab.addEventListener("click", function () {
+            selectTab(tab);
+          });
+        });
+        tablist.addEventListener("keydown", function (e) {
+          var idx = tabs.indexOf(document.activeElement);
+          if (idx === -1) {
+            return;
+          }
+          if (e.key === "ArrowRight") {
+            e.preventDefault();
+            selectTab(tabs[(idx + 1) % tabs.length]);
+          } else if (e.key === "ArrowLeft") {
+            e.preventDefault();
+            selectTab(tabs[(idx - 1 + tabs.length) % tabs.length]);
+          } else if (e.key === "Home") {
+            e.preventDefault();
+            selectTab(tabs[0]);
+          } else if (e.key === "End") {
+            e.preventDefault();
+            selectTab(tabs[tabs.length - 1]);
+          }
+        });
+
+        /* ---------- Form validation demo ---------- */
+        var agentForm = document.getElementById("agentForm");
+        var nameInput = document.getElementById("f-name");
+        var nameErr = document.getElementById("f-name-err");
+        var banner = document.getElementById("formBanner");
+        agentForm.addEventListener("submit", function (e) {
+          e.preventDefault();
+          var valid = nameInput.value.trim().length > 0;
+          nameErr.hidden = valid;
+          nameInput.setAttribute("aria-invalid", String(!valid));
+          banner.classList.toggle("show", valid);
+          if (!valid) {
+            nameInput.focus();
+          } else {
+            showToast(
+              "Agent “" + nameInput.value.trim() + "” saved (prototype).",
+              "success",
+            );
+          }
+        });
+        agentForm.addEventListener("reset", function () {
+          nameErr.hidden = true;
+          nameInput.removeAttribute("aria-invalid");
+          banner.classList.remove("show");
+        });
+
+        /* ---------- Temperature slider readout ---------- */
+        var temp = document.getElementById("temp");
+        var tempVal = document.getElementById("tempVal");
+        temp.addEventListener("input", function () {
+          tempVal.textContent = Number(temp.value).toFixed(1);
+        });
+
+        /* ---------- Preset → Custom when tuning fields change ---------- */
+        var customPreset = document.querySelector(
+          'input[name="preset"][value="custom"]',
+        );
+        ["temp", "maxtok"].forEach(function (id) {
+          document.getElementById(id).addEventListener("input", function () {
+            customPreset.checked = true;
+          });
+        });
+
+        /* ---------- Approval / copy-key demo actions ---------- */
+        document.querySelectorAll(".approve-btn").forEach(function (b) {
+          b.addEventListener("click", function () {
+            showToast("Tool call approved — resuming run.", "success");
+          });
+        });
+        document.querySelectorAll(".deny-btn").forEach(function (b) {
+          b.addEventListener("click", function () {
+            showToast("Tool call denied — agent will re-plan.", "warning");
+          });
+        });
+        document.querySelectorAll(".copy-key").forEach(function (b) {
+          b.addEventListener("click", function () {
+            showToast(
+              "Key prefix copied (full keys are never re-shown).",
+              "default",
+            );
+          });
+        });
+
+        /* ---------- Index scrollspy ---------- */
+        var navLinks = Array.prototype.slice.call(
+          document.querySelectorAll(".index-rail a"),
+        );
+        var sections = navLinks
+          .map(function (a) {
+            return document.getElementById(a.getAttribute("href").slice(1));
+          })
+          .filter(Boolean);
+        if ("IntersectionObserver" in window) {
+          var current = null;
+          var observer = new IntersectionObserver(
+            function (entries) {
+              entries.forEach(function (entry) {
+                if (entry.isIntersecting) {
+                  current = entry.target.id;
+                }
+              });
+              if (!current) {
+                return;
+              }
+              navLinks.forEach(function (a) {
+                var isCurrent = a.getAttribute("href") === "#" + current;
+                if (isCurrent) {
+                  a.setAttribute("aria-current", "true");
+                } else {
+                  a.removeAttribute("aria-current");
+                }
+              });
+            },
+            { rootMargin: "-20% 0px -70% 0px" },
+          );
+          sections.forEach(function (s) {
+            observer.observe(s);
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

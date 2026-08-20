@@ -1,0 +1,301 @@
+---
+title: HTTP API
+description: Use the current project-scoped endpoints, pagination, idempotency, and error contracts.
+---
+
+The local API base URL is `http://127.0.0.1:3000/v1`. Hosted clients should use
+their deployment's HTTPS URL. All tenant resources below are scoped by the
+project in the path and by the authenticated principal resolved from the
+credential.
+
+## Common headers
+
+```http
+Authorization: Bearer oao_your_secret
+Accept: application/json
+Content-Type: application/json
+Idempotency-Key: unique-key-for-this-logical-write
+```
+
+`Idempotency-Key` is required for operations that change application state.
+
+## Model providers, presets, and catalog
+
+A published agent version names an immutable model preset. A hosted preset
+references an OpenRouter or OpenAI provider connection in the same project.
+
+| Method | Path                                                    | Purpose                                              |
+| ------ | ------------------------------------------------------- | ---------------------------------------------------- |
+| `GET`  | `/projects/{projectId}/model-providers`                 | List safe provider and credential metadata.          |
+| `POST` | `/projects/{projectId}/model-providers`                 | Add a provider and encrypted API key.                |
+| `PUT`  | `/projects/{projectId}/model-providers/{id}/credential` | Rotate the write-only API key.                       |
+| `GET`  | `/projects/{projectId}/model-catalog?providerId={id}`   | List the matching pinned provider catalog.           |
+| `GET`  | `/projects/{projectId}/model-presets`                   | List local, project, and unavailable legacy presets. |
+| `POST` | `/projects/{projectId}/model-presets`                   | Add an immutable preset linked to a provider.        |
+
+Reads require `agent:read`; writes require `project:admin`. Every write requires
+an `Idempotency-Key`.
+
+Create a provider with `{ key, displayName, providerType, apiKey }`, where
+`providerType` is `openrouter` or `openai`. Responses contain
+`credentialConfigured`, a 12-character `credentialFingerprint`, and an
+incrementing `credentialVersion`; they never contain the API key or encryption
+material. Rotate a key with `{ "apiKey": "..." }`.
+
+`GET /model-catalog` requires `providerId`, accepts `search` and `limit`, and
+returns `providerId`, `providerType`, and safe catalog entries. Each entry
+includes `providerType`, prefixed `model`, `catalogId`, display name, context
+window, output limit, and reasoning support.
+
+Create a preset with:
+
+```json
+{
+  "key": "claude-sonnet-4-6-zdr-v1",
+  "displayName": "Claude Sonnet 4.6 (zero retention)",
+  "providerId": "55555555-5555-4555-8555-555555555555",
+  "model": "openrouter/anthropic/claude-sonnet-4.6",
+  "routing": {
+    "zeroDataRetention": true,
+    "dataCollection": "deny",
+    "allowFallbacks": false,
+    "providerAllowlist": ["anthropic"]
+  }
+}
+```
+
+The model must belong to the selected provider catalog. OpenRouter catalog
+responses include live OpenRouter models and saved presets as
+`openrouter/@preset/<slug>` entries. OpenRouter supports the routing policy
+below. OpenAI presets require an empty routing object.
+
+### OpenRouter routing policy
+
+| Field                             | Type                                       | Meaning                                          |
+| --------------------------------- | ------------------------------------------ | ------------------------------------------------ |
+| `allowFallbacks`                  | boolean                                    | Allow the provider to fall back to another route |
+| `requireParameters`               | boolean                                    | Route only to upstreams honoring every parameter |
+| `dataCollection`                  | `"deny"` \| `"allow"`                      | Requested training/data-collection policy        |
+| `zeroDataRetention`               | boolean                                    | Request zero-retention routing                   |
+| `providerOrder`                   | string array, 1–16 unique slugs            | Preference order                                 |
+| `providerAllowlist`               | string array, 1–16 unique slugs            | Only these upstream providers                    |
+| `providerDenylist`                | string array, 1–16 unique slugs            | Never these upstream providers                   |
+| `sort`                            | `"price"` \| `"throughput"` \| `"latency"` | Route preference                                 |
+| `maxPromptPriceUsdPerMillion`     | number, 0–1,000,000                        | Prompt price cap in USD per million tokens       |
+| `maxCompletionPriceUsdPerMillion` | number, 0–1,000,000                        | Completion price cap in USD per million tokens   |
+
+### Failure modes
+
+| Status | Cause                                                                               |
+| ------ | ----------------------------------------------------------------------------------- |
+| `400`  | Malformed input, catalog/provider mismatch, or routing unsupported by the provider  |
+| `403`  | Principal lacks the required scope, or the path project is outside its tenant scope |
+| `404`  | Provider connection does not exist in this project                                  |
+| `409`  | Provider or preset key already exists                                               |
+| `500`  | Platform credential encryption is not configured                                    |
+
+<Warning>
+  Provider create and rotation requests accept an API key as write-only secret
+  input. No response, list route, event, audit detail, log, or trace returns it.
+</Warning>
+
+## Sandbox providers
+
+Sandbox provider connections are project-scoped and require `project:admin`
+for writes. List reads use `agent:read`. `daytona` is the only supported
+`providerType` today; the connection and agent contracts keep provider type
+and provider key explicit so more adapters can be added later.
+
+| Method | Path                                                         | Purpose                                       |
+| ------ | ------------------------------------------------------------ | --------------------------------------------- |
+| `GET`  | `/projects/{projectId}/sandbox-providers`                    | List safe connection and credential metadata  |
+| `GET`  | `/projects/{projectId}/sandbox-providers/{id}/snapshots`     | List all safe Daytona snapshot metadata       |
+| `POST` | `/projects/{projectId}/sandbox-providers`                    | Add an encrypted provider credential          |
+| `PUT`  | `/projects/{projectId}/sandbox-providers/{id}/credential`    | Rotate the write-only key                     |
+| `PUT`  | `/projects/{projectId}/sandbox-providers/{id}/configuration` | Change target and restricted-egress allowlist |
+
+Create a connection with:
+
+```json
+{
+  "key": "daytona-primary",
+  "displayName": "Daytona primary",
+  "providerType": "daytona",
+  "apiKey": "write-only-value",
+  "target": null,
+  "restrictedEgress": {
+    "allowedDomains": ["api.example.com", "*.example.net"],
+    "allowedCidrs": ["203.0.113.0/24"]
+  }
+}
+```
+
+Responses expose only `credentialConfigured`, a 12-character fingerprint,
+credential version, target, and allowlists. Rotate with `{ "apiKey": "..." }`.
+Update configuration with `{ target, restrictedEgress }`. All writes require
+an `Idempotency-Key`; no read route returns credential or encryption material.
+
+Snapshot discovery decrypts the selected connection only inside the API and
+uses it to query Daytona. The response returns every snapshot visible to that
+connection with safe identity, state, image, resource, region, class, and
+timestamp metadata. It excludes credentials, build logs, build details, and
+provider error payloads. `available` is true only when Daytona reports the
+snapshot as `active`.
+
+An agent version's sandbox object requires `enabled`, `provider`, `network`, and
+`capabilities`, and may include an active snapshot UUID as `snapshotId`.
+Capabilities are unique values from `filesystem_read`,
+`filesystem_write`, `shell`, and `browser`. Publishing an enabled sandbox
+rejects an unknown project provider, missing encryption setup, or a
+restricted network policy whose selected connection has no allowlist.
+
+## Workspace storage providers
+
+S3-compatible storage connections are project scoped. Writes require
+`project:admin`; list reads use `agent:read`. Credentials are encrypted with
+the platform credential key and are accepted only as write-only input.
+
+| Method | Path                                                      | Purpose                                      |
+| ------ | --------------------------------------------------------- | -------------------------------------------- |
+| `GET`  | `/projects/{projectId}/storage-providers`                 | List safe connection and credential metadata |
+| `POST` | `/projects/{projectId}/storage-providers`                 | Add an encrypted S3-compatible connection    |
+| `PUT`  | `/projects/{projectId}/storage-providers/{id}/credential` | Rotate write-only S3 credentials             |
+| `PUT`  | `/projects/{projectId}/storage-providers/{id}/default`    | Make the connection the project default      |
+
+Create input contains `key`, `displayName`, `providerType: "s3"`, nullable
+HTTP(S) `endpoint`, `region`, `bucket`, nullable safe relative `prefix`,
+`forcePathStyle`, optional `setDefault`, `accessKeyId`, `secretAccessKey`, and
+optional `sessionToken`. The first connection becomes default even when
+`setDefault` is false. All writes require an `Idempotency-Key`.
+
+Responses contain connection coordinates, default state, a 12-character
+credential fingerprint, and credential version. They never contain S3
+credentials or encryption material. Provider configuration is immutable;
+credentials can rotate and the default can change. A thread with an existing
+backup stays bound to that provider.
+
+See [Workspace backups](/storage/workspace-backups) for the automatic backup,
+checksum verification, replacement-sandbox restore, and failure contracts.
+
+## Agents and versions
+
+| Method | Path                                              | Purpose                                |
+| ------ | ------------------------------------------------- | -------------------------------------- |
+| `GET`  | `/projects/{projectId}/agents`                    | List agent definitions.                |
+| `POST` | `/projects/{projectId}/agents`                    | Create an agent and publish version 1. |
+| `GET`  | `/projects/{projectId}/agents/{agentId}`          | Read the definition and all versions.  |
+| `GET`  | `/projects/{projectId}/agents/{agentId}/versions` | List immutable versions.               |
+| `POST` | `/projects/{projectId}/agents/{agentId}/versions` | Publish the next version.              |
+
+Creating an agent accepts `name`, optional `key` and `description`, and requires
+`initialConfig` (or its `config` alias).
+See [Create an agent](/agents/create-agent) for the exact configuration shape.
+Set `initialConfig.sandbox.enabled`, `provider`, optional `snapshotId`,
+`network`, and `capabilities`
+to make the same sandbox selection available in API-driven creation as in the
+console. `provider` must be a key returned by the sandbox provider list route;
+there is no public fake-sandbox provider.
+
+`config.modelPreset` must be an available deployment preset key or a preset
+this project approved against a provider connection; the check runs inside
+the same tenant transaction as the write. An unapproved or unavailable key
+returns `400`. Linking a different model always means publishing a new version,
+and existing sessions stay on the version they were created with.
+
+## Sessions and runs
+
+Create a session and its first run atomically:
+
+```http
+POST /v1/projects/{projectId}/sessions
+
+{
+  "agentId": "d1111111-1111-4111-8111-111111111111",
+  "title": "Repository review",
+  "initialMessage": "Review the authentication boundary."
+}
+```
+
+Use `agentVersionId` instead of `agentId` to pin an exact version yourself. If
+you send `agentId`, OAO resolves its latest published version during the same
+transaction. The response contains the session, `latestRunId`, and first queued
+`run`.
+
+| Method | Path                                              | Purpose                                                             |
+| ------ | ------------------------------------------------- | ------------------------------------------------------------------- |
+| `GET`  | `/projects/{projectId}/sessions`                  | List sessions for the console or an integration.                    |
+| `GET`  | `/projects/{projectId}/sessions/{sessionId}`      | Get transcript, runs, timing, pending work, and safe debug records. |
+| `POST` | `/projects/{projectId}/sessions/{sessionId}/runs` | Submit a later message after the latest run settles.                |
+| `GET`  | `/projects/{projectId}/runs/{runId}`              | Read one run.                                                       |
+| `POST` | `/projects/{projectId}/runs/{runId}/cancel`       | Record cancellation intent and drain safely.                        |
+| `GET`  | `/projects/{projectId}/runs/{runId}/messages`     | Page through public messages for a run.                             |
+| `GET`  | `/projects/{projectId}/runs/{runId}/timeline`     | Page through the safe timing waterfall.                             |
+
+A later turn accepts either `{ "message": "..." }` or the SDK-compatible
+`{ "redactedInput": "..." }`. Inputs are limited to 100,000 characters. Only
+one run can be active in a session thread; submitting while its latest run is
+unsettled returns a conflict.
+
+The session detail response includes `debug.sandboxCommands`. Each item returns
+the recorded `safeCommand` and `safeResult`, including model-facing arguments,
+file/edit text, shell input, browser values, and tool output. The transcript
+renders each call as a collapsed activity row; expanding it shows arguments
+and results directly, without a second payload inspector. Credential-bearing
+fields and obvious authorization values remain masked.
+
+`debug.modelInvocations` includes each invocation's actual start/completion
+window and any provider thinking text returned with the response. The
+transcript renders that record as a collapsed **Reasoning** row. Expanding it
+shows the full duration, token counts, and thinking text without duplicating it
+in a payload tab. Provider reasoning signatures are not returned. Older invocations
+whose runtime projection recorded a zero-length window use the preceding
+message or tool completion to reconstruct their visible duration.
+
+## Caller tools and approvals
+
+| Method | Path                                             | Purpose                                 |
+| ------ | ------------------------------------------------ | --------------------------------------- |
+| `GET`  | `/projects/{projectId}/tool-calls?runId={runId}` | List tool work, optionally for one run. |
+| `POST` | `/projects/{projectId}/tool-calls/{id}/claim`    | Claim a caller tool for `leaseMs`.      |
+| `POST` | `/projects/{projectId}/tool-calls/{id}/renew`    | Renew using the current fence.          |
+| `POST` | `/projects/{projectId}/tool-calls/{id}/release`  | Release using the current fence.        |
+| `POST` | `/projects/{projectId}/tool-calls/{id}/result`   | Submit one immutable safe result.       |
+| `GET`  | `/projects/{projectId}/approvals?runId={runId}`  | List approval requests.                 |
+| `POST` | `/projects/{projectId}/approvals/{id}/decision`  | Approve or deny a request.              |
+| `GET`  | `/projects/{projectId}/pending-work`             | List unresolved tool and approval work. |
+
+The claim response includes a fence encoded as a positive integer string. The
+same fence must accompany renew, release, and result operations.
+
+## Pagination
+
+List endpoints accept `limit` and an opaque `cursor`. Responses use:
+
+```json
+{
+  "data": [],
+  "pageInfo": {
+    "hasMore": false,
+    "nextCursor": null
+  }
+}
+```
+
+Never parse or synthesize a cursor. Pass `nextCursor` back unchanged.
+
+## Errors
+
+Non-success responses use a redacted envelope and include the request ID:
+
+```json
+{
+  "error": {
+    "code": "conflict",
+    "message": "Only a settled session can accept another run",
+    "requestId": "..."
+  }
+}
+```
+
+Log the request ID and safe error code. Do not log credentials or resend a
+failed write under a new idempotency key until you know whether it was accepted.

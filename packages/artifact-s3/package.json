@@ -16,6 +16,9 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@oao/domain": "workspace:*"
+    "@aws-sdk/client-s3": "3.1114.0",
+    "@oao/db-postgres": "workspace:*",
+    "@oao/domain": "workspace:*",
+    "@oao/provider-credentials": "workspace:*"
   }
 }

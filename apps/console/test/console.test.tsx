@@ -1,8 +1,8 @@
 import { QueryClient } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ConsoleApp } from "../src/app";
 import { DemoConsoleApi } from "../src/api/context";
 
@@ -25,6 +25,22 @@ function renderConsole(
 }
 
 describe("management console", () => {
+  it("uses a light-first appearance and persists the theme toggle", async () => {
+    const user = userEvent.setup();
+    renderConsole("/agents");
+    expect(
+      await screen.findByRole("button", { name: "Use dark appearance" }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Use dark appearance" }),
+    );
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(localStorage.getItem("oao-console-theme")).toBe("dark");
+    expect(
+      screen.getByRole("button", { name: "Use light appearance" }),
+    ).toBeInTheDocument();
+  });
+
   it("lists agents and applies search filters", async () => {
     const user = userEvent.setup();
     renderConsole("/agents");
@@ -41,6 +57,66 @@ describe("management console", () => {
     expect(
       await screen.findByRole("heading", { name: "No matching agents" }),
     ).toBeInTheDocument();
+  });
+
+  it("creates the first agent version with the selected model preset", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/agents", api);
+    await user.click(
+      await screen.findByRole("button", { name: "Create agent" }),
+    );
+    const dialog = within(screen.getByRole("dialog", { name: "Create agent" }));
+    await user.type(dialog.getByLabelText("Name"), "Hosted reviewer");
+    await user.type(
+      dialog.getByLabelText("Description"),
+      "Reviews requests with the hosted model preset.",
+    );
+    const preset = dialog.getByRole("combobox", {
+      name: /^Approved model preset/u,
+    });
+    await user.click(preset);
+    await user.type(preset, "zero retention");
+    await user.click(
+      await dialog.findByRole("option", {
+        name: /Claude Sonnet 4\.6 \(zero retention\)/u,
+      }),
+    );
+    expect(
+      await dialog.findByText(
+        /Claude Sonnet 4\.6 \(zero retention\) · openrouter\/anthropic\/claude-sonnet-4\.6/u,
+      ),
+    ).toBeInTheDocument();
+    await user.click(dialog.getByRole("checkbox", { name: "Enable sandbox" }));
+    await user.selectOptions(
+      dialog.getByLabelText("Sandbox provider"),
+      "daytona-primary",
+    );
+    await user.selectOptions(
+      dialog.getByLabelText("Network policy"),
+      "restricted",
+    );
+    await user.click(dialog.getByRole("button", { name: "Create agent" }));
+    expect(
+      await screen.findByRole("heading", { name: "Hosted reviewer" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Claude Sonnet 4\.6 \(zero retention\) · openrouter\/anthropic\/claude-sonnet-4\.6/u,
+      ),
+    ).toBeInTheDocument();
+    const created = (await api.listAgents({})).data.find(
+      (agent) => agent.name === "Hosted reviewer",
+    );
+    expect(created).toBeDefined();
+    if (!created) throw new Error("Created agent was not listed");
+    const detail = await api.getAgent(created.id);
+    expect(detail.versions[0]?.config.sandbox).toEqual({
+      enabled: true,
+      provider: "daytona-primary",
+      network: "restricted",
+      capabilities: ["filesystem_read", "filesystem_write", "shell"],
+    });
   });
 
   it("keeps the default query cache stable across app rerenders", async () => {
@@ -87,7 +163,7 @@ describe("management console", () => {
     );
   });
 
-  it("shows transcript, debug waterfall, filters, and safe payload views", async () => {
+  it("reads as a conversation with inline tool activity", async () => {
     const user = userEvent.setup();
     renderConsole("/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V");
     expect(
@@ -95,18 +171,358 @@ describe("management console", () => {
         name: "Refund request · Northwind #4831",
       }),
     ).toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: "Inspect lookup_customer" }),
+    // The prompt and the answer are messages; the work behind them is not.
+    expect(screen.getByText("You")).toBeInTheDocument();
+    expect(
+      screen.getByText(/expedited shipment was charged twice/u),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Support operator").length).toBeGreaterThan(0);
+    // Tool calls show their useful transcript content without an inspector.
+    const tool = screen.getByRole("button", { name: /^lookup_customer/u });
+    expect(tool).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(/customer_ref/u)).not.toBeInTheDocument();
+    await user.click(tool);
+    expect(tool).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(/customer_ref/u)).toBeInTheDocument();
+    expect(screen.getByText(/"matches":2/u)).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Raw" })).not.toBeInTheDocument();
+  });
+
+  it("shows reasoning and sandbox contents directly in the transcript", async () => {
+    const user = userEvent.setup();
+    class SandboxActivityApi extends DemoConsoleApi {
+      override async getSession(id: string) {
+        const session = await super.getSession(id);
+        return {
+          ...session,
+          workspaceFiles: [
+            {
+              name: "test.csv",
+              path: "/root/test.csv",
+              backedUp: true,
+              backedUpAt: "2026-08-20T19:21:49.000Z",
+            },
+          ],
+          events: [
+            ...session.events,
+            {
+              id: "debug:modelInvocations:reasoning-1",
+              kind: "reasoning" as const,
+              source: "activity" as const,
+              title: "Reasoning",
+              summary: "Checking the workbook rows before writing the result.",
+              createdAt: "2026-08-20T19:21:47.000Z",
+              durationMs: 5_680,
+              status: "success" as const,
+              tokens: { input: 832, output: 231 },
+            },
+            {
+              id: "debug:sandboxCommands:write-1",
+              kind: "tool" as const,
+              source: "activity" as const,
+              title: "write",
+              summary: "/root/test.csv",
+              createdAt: "2026-08-20T19:21:48.150Z",
+              durationMs: 152,
+              status: "success" as const,
+              payload: {
+                rendered: {
+                  arguments: {
+                    path: "/root/test.csv",
+                    content: "id,name\n1,Alice",
+                  },
+                  result: {
+                    content: [{ type: "text", text: "Wrote 18 bytes" }],
+                  },
+                },
+                raw: JSON.stringify({
+                  arguments: {
+                    path: "/root/test.csv",
+                    content: "id,name\n1,Alice",
+                  },
+                  result: "Wrote 18 bytes",
+                }),
+                redacted: false,
+              },
+            },
+          ],
+        };
+      }
+    }
+
+    renderConsole(
+      "/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V",
+      new SandboxActivityApi({ eventDelayMs: 60_000 }),
+    );
+    const reasoning = await screen.findByRole("button", {
+      name: /^Reasoning/u,
+    });
+    const tool = screen.getByRole("button", { name: /^write/u });
+    const row = tool.closest(".activity");
+    expect(row).not.toBeNull();
+    expect(reasoning).toHaveAttribute("aria-expanded", "false");
+    expect(tool).toHaveAttribute("aria-expanded", "false");
+    expect(
+      screen.queryByText(
+        "Checking the workbook rows before writing the result.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      within(row as HTMLElement).queryByText(/id,name/u),
+    ).not.toBeInTheDocument();
+    await user.click(reasoning);
+    expect(reasoning).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getByText("Checking the workbook rows before writing the result."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("5,680 ms")).toBeInTheDocument();
+    expect(screen.getByText("832 in / 231 out")).toBeInTheDocument();
+    await user.click(tool);
+    expect(tool).toHaveAttribute("aria-expanded", "true");
+    expect(
+      within(row as HTMLElement).queryByText("Payload"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(row as HTMLElement).getAllByText(/root\/test.csv/u).length,
+    ).toBeGreaterThan(0);
+    expect(
+      within(row as HTMLElement).getByText(/id,name/u),
+    ).toBeInTheDocument();
+    expect(
+      within(row as HTMLElement).getByText(/Wrote 18 bytes/u),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^Jump to Reasoning/u }).className,
+    ).toContain("minimap-seg--reasoning");
+    expect(
+      screen.getAllByRole("button", { name: /^Jump to Tool/u }).at(-1)
+        ?.className,
+    ).toContain("minimap-seg--tool");
+    const panel = screen.getByRole("complementary", {
+      name: "Session details",
+    });
+    expect(within(panel).getByText("test.csv")).toBeInTheDocument();
+    expect(within(panel).getByText("Backed up")).toBeInTheDocument();
+  });
+
+  it("renders message Markdown without executing raw HTML", async () => {
+    class MarkdownApi extends DemoConsoleApi {
+      override async getSession(id: string) {
+        const session = await super.getSession(id);
+        return {
+          ...session,
+          events: session.events.map((event) =>
+            event.id === "event-model-1"
+              ? {
+                  ...event,
+                  summary: [
+                    "Here is what I found:",
+                    "",
+                    "- **Reading files** with `src/index.ts`",
+                    "- [Documentation](https://example.com)",
+                    "",
+                    "| File | Status |",
+                    "| --- | --- |",
+                    "| README.md | Ready |",
+                    "",
+                    '<script>alert("unsafe")</script>',
+                    "[Unsafe link](javascript:alert(1))",
+                  ].join("\n"),
+                }
+              : event,
+          ),
+        };
+      }
+    }
+
+    renderConsole(
+      "/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V",
+      new MarkdownApi({ eventDelayMs: 60_000 }),
+    );
+    expect(await screen.findByText("Reading files")).toHaveProperty(
+      "tagName",
+      "STRONG",
+    );
+    expect(screen.getByText("src/index.ts")).toHaveProperty("tagName", "CODE");
+    expect(screen.getByRole("link", { name: "Documentation" })).toHaveAttribute(
+      "href",
+      "https://example.com",
     );
     expect(
-      screen.getByRole("heading", { name: "lookup_customer" }),
+      screen.getByRole("columnheader", { name: "File" }),
     ).toBeInTheDocument();
-    await user.click(screen.getByRole("tab", { name: "Raw" }));
-    expect(screen.getByText(/"customer_ref":"NW-4831"/u)).toBeInTheDocument();
+    expect(document.querySelector("script")).not.toBeInTheDocument();
+    expect(screen.getByText("Unsafe link").closest("a")).toHaveAttribute(
+      "href",
+      "",
+    );
+  });
+
+  it("keeps platform telemetry out of the transcript but in the debug tab", async () => {
+    const user = userEvent.setup();
+    renderConsole("/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V");
+    expect(await screen.findByText("lookup_customer")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /dispatch admitted/u }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("run.created")).not.toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "Debug" }));
-    expect(screen.getByText("10,004 ms")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: /^Inspect runtime\.dispatch admitted/u,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("charts the thread as states with striped idle and a hover card", async () => {
+    const user = userEvent.setup();
+    const scrolledTo: string[] = [];
+    Element.prototype.scrollIntoView = vi.fn(function (this: Element) {
+      scrolledTo.push(this.id);
+    });
+    renderConsole("/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V");
+    const minimap = await screen.findByRole("group", {
+      name: "Session timeline",
+    });
+    const elapsed = screen.getByRole("group", {
+      name: /^Elapsed timeline from 0 seconds to/u,
+    });
+    expect(elapsed).toHaveTextContent("0s");
+    expect(within(elapsed).getAllByText(/s$/u)).toHaveLength(5);
+    // The strip is contiguous states: user, agent, tool, error, retry,
+    // approval — plus striped idle for the wait before the approval.
+    expect(within(minimap).getAllByRole("button")).toHaveLength(6);
+    expect(
+      within(minimap).getAllByRole("img", { name: /^Idle for/u }).length,
+    ).toBeGreaterThan(0);
+    const errorSeg = within(minimap).getByRole("button", {
+      name: /^Jump to Error/u,
+    });
+    expect(errorSeg.className).toContain("minimap-seg--error");
+    // Hovering names the state, its text, and how long it lasted.
+    const userSeg = within(minimap).getByRole("button", {
+      name: /^Jump to User/u,
+    });
+    await user.hover(userSeg);
+    expect(document.querySelector(".minimap-tip")?.textContent).toContain(
+      "Customer Northwind #4831",
+    );
+    await user.hover(errorSeg);
+    expect(document.querySelector(".minimap-tip")?.textContent).toContain(
+      "10.0s",
+    );
+    await user.click(userSeg);
+    expect(scrolledTo).toContain("event-event-user-1");
+    expect(document.getElementById("event-event-user-1")?.className).toContain(
+      "is-flashed",
+    );
+    vi.restoreAllMocks();
+  });
+
+  it("highlights the hovered message's block on the timeline", async () => {
+    const user = userEvent.setup();
+    renderConsole("/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V");
+    const minimap = await screen.findByRole("group", {
+      name: "Session timeline",
+    });
+    const userSeg = within(minimap).getByRole("button", {
+      name: /^Jump to User/u,
+    });
+    expect(userSeg.className).not.toContain("minimap-seg--hot");
+    await user.hover(
+      screen.getByText(/Customer Northwind #4831 says the expedited/u),
+    );
+    expect(userSeg.className).toContain("minimap-seg--hot");
+    await user.unhover(
+      screen.getByText(/Customer Northwind #4831 says the expedited/u),
+    );
+    expect(userSeg.className).not.toContain("minimap-seg--hot");
+  });
+
+  it("shows the session panel with details, cost chart, and usage", async () => {
+    const user = userEvent.setup();
+    renderConsole("/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V");
+    const panel = await screen.findByRole("complementary", {
+      name: "Session details",
+    });
+    expect(
+      within(panel).getByText("session_01J5QTXE7W9M2R6C4A8K3N1P0V"),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("link", { name: "Support operator" }),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText("$0.0184")).toBeInTheDocument();
+    expect(within(panel).getByText("2,841")).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("img", {
+        name: /Cumulative cost over the session/u,
+      }),
+    ).toBeInTheDocument();
+    // The panel closes to give the conversation the full width, and reopens.
+    await user.click(
+      within(panel).getByRole("button", { name: "Close session details" }),
+    );
+    expect(
+      screen.queryByRole("complementary", { name: "Session details" }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Show session details" }),
+    );
+    expect(
+      screen.getByRole("complementary", { name: "Session details" }),
+    ).toBeInTheDocument();
+  });
+
+  it("copies and downloads the whole thread as Markdown", async () => {
+    const user = userEvent.setup();
+    const clicked: HTMLAnchorElement[] = [];
+    const createElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tag, options) => {
+      const node = createElement(tag, options);
+      if (tag === "a") {
+        vi.spyOn(node as HTMLAnchorElement, "click").mockImplementation(() => {
+          clicked.push(node as HTMLAnchorElement);
+        });
+      }
+      return node;
+    });
+    globalThis.URL.createObjectURL = vi.fn(() => "blob:thread");
+    globalThis.URL.revokeObjectURL = vi.fn();
+
+    renderConsole("/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V");
+    await user.click(
+      await screen.findByRole("button", { name: "Copy thread as Markdown" }),
+    );
+    const copied = await navigator.clipboard.readText();
+    expect(copied).toContain("# Refund request · Northwind #4831");
+    expect(copied).toContain("expedited shipment was charged twice");
+    expect(copied).toContain("**lookup_customer**");
+    // Telemetry stays out of the export, exactly as it stays off the screen.
+    expect(copied).not.toContain("dispatch admitted");
+
+    await user.click(
+      screen.getByRole("button", { name: "Download thread as Markdown" }),
+    );
+    expect(clicked).toHaveLength(1);
+    expect(clicked[0]!.download).toBe(
+      "session-session_01J5QTXE7W9M2R6C4A8K3N1P0V.md",
+    );
+    vi.restoreAllMocks();
+  });
+
+  it("shows the debug waterfall, the inspector, and event filters", async () => {
+    const user = userEvent.setup();
+    renderConsole("/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V");
+    await user.click(await screen.findByRole("tab", { name: "Debug" }));
+    await user.click(
+      screen.getByRole("button", { name: "Inspect Provider request failed" }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Provider request failed" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("10,004 ms").length).toBeGreaterThan(0);
     await user.type(
-      screen.getByRole("searchbox", { name: "Search events" }),
+      screen.getByRole("searchbox", { name: "Filter events" }),
       "does-not-exist",
     );
     expect(
@@ -140,14 +556,14 @@ describe("management console", () => {
     ).not.toHaveLength(0);
   });
 
-  it("submits a second message only after the latest run settles", async () => {
+  it("submits a second message with Command+Enter after the latest run settles", async () => {
     const user = userEvent.setup();
     renderConsole("/sessions/session_01J5PDRS7WZTP4H3F6M2A9B8CX");
     const message = await screen.findByLabelText("Message");
     await user.type(message, "Now summarize only the renewal exceptions.");
-    await user.click(
-      screen.getByRole("button", { name: "Submit next message" }),
-    );
+    await user.keyboard("{Enter}");
+    expect(message).toHaveValue("Now summarize only the renewal exceptions.\n");
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
     expect(
       await screen.findByText("Now summarize only the renewal exceptions."),
     ).toBeInTheDocument();
@@ -172,6 +588,256 @@ describe("management console", () => {
         screen.queryByText("Refund USD 84.50 to the original payment method"),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  it("lists only provider-backed project model presets", async () => {
+    renderConsole("/models");
+    expect(
+      await screen.findByRole("heading", { name: "Models" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("Claude Sonnet 4.6 (zero retention)"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("project")).toBeInTheDocument();
+    expect(screen.queryByText("Local deterministic")).not.toBeInTheDocument();
+    expect(screen.getByText(/zero data retention/u)).toBeInTheDocument();
+    // Provider secrets are write-only and never rendered.
+    expect(document.body.textContent).not.toMatch(/OPENROUTER_API_KEY|apiKey/u);
+  });
+
+  it("adds and rotates a project-scoped OpenAI provider without rendering its key", async () => {
+    const user = userEvent.setup();
+    renderConsole("/models");
+    await user.click(
+      await screen.findByRole("button", { name: "Add provider" }),
+    );
+    const create = within(
+      screen.getByRole("dialog", { name: "Add model provider" }),
+    );
+    await user.selectOptions(create.getByLabelText("Provider type"), "openai");
+    await user.type(
+      create.getByLabelText(/^Connection key/u),
+      "openai-primary",
+    );
+    await user.type(create.getByLabelText("Display name"), "OpenAI primary");
+    await user.type(
+      create.getByLabelText(/^API key/u),
+      "sk-openai-secret-value",
+    );
+    await user.click(create.getByRole("button", { name: "Add provider" }));
+    expect(await screen.findByText("OpenAI primary")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("sk-openai-secret-value");
+
+    const row = screen.getByText("OpenAI primary").closest("tr");
+    expect(row).not.toBeNull();
+    if (!row) throw new Error("Provider row was not rendered");
+    await user.click(within(row).getByRole("button", { name: "Rotate key" }));
+    const rotate = within(
+      screen.getByRole("dialog", { name: "Rotate OpenAI primary key" }),
+    );
+    await user.type(
+      rotate.getByLabelText(/^New API key/u),
+      "sk-openai-rotated-value",
+    );
+    await user.click(rotate.getByRole("button", { name: "Rotate key" }));
+    expect(await screen.findByText(/v2/u)).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("sk-openai-rotated-value");
+  });
+
+  it("creates an API key and shows its secret only in the acknowledgement dialog", async () => {
+    const user = userEvent.setup();
+    renderConsole("/api-keys");
+    await user.click(
+      await screen.findByRole("button", { name: "Create API key" }),
+    );
+    const create = within(
+      screen.getByRole("dialog", { name: "Create API key" }),
+    );
+    await user.type(create.getByLabelText("Name"), "Session integration");
+    expect(
+      create.getByRole("checkbox", { name: /^agent:write/u }),
+    ).not.toBeChecked();
+    expect(
+      create.getByRole("checkbox", { name: /^session:write/u }),
+    ).toBeChecked();
+    await user.click(create.getByRole("button", { name: "Create API key" }));
+
+    const save = within(screen.getByRole("dialog", { name: "Save API key" }));
+    expect(save.getByRole("alert")).toHaveTextContent("Shown only once");
+    expect(
+      (save.getByLabelText("API key secret") as HTMLInputElement).value,
+    ).toMatch(/^oao_/u);
+    await user.click(save.getByRole("button", { name: "I’ve saved it" }));
+    expect(await screen.findByText("Session integration")).toBeInTheDocument();
+    expect(screen.queryByLabelText("API key secret")).not.toBeInTheDocument();
+  });
+
+  it("adds a project sandbox provider without redisplaying its secret", async () => {
+    const user = userEvent.setup();
+    renderConsole("/sandbox-providers");
+    expect(
+      await screen.findByRole("heading", { name: "Sandbox providers" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Sandbox providers" }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Add sandbox provider" }),
+    );
+    const dialog = within(
+      screen.getByRole("dialog", { name: "Add sandbox provider" }),
+    );
+    expect(dialog.getByLabelText("Provider")).toHaveValue("daytona");
+    await user.type(dialog.getByLabelText("Connection key"), "daytona-eu");
+    await user.type(dialog.getByLabelText("Display name"), "Daytona EU");
+    await user.type(
+      dialog.getByLabelText("Daytona API key"),
+      "daytona-secret-value",
+    );
+    await user.type(dialog.getByLabelText("Target preference"), "eu");
+    await user.type(
+      dialog.getByLabelText("Allowed domains"),
+      "api.example.com",
+    );
+    await user.click(dialog.getByRole("button", { name: "Add provider" }));
+    expect(await screen.findByText("Daytona EU")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("daytona-secret-value");
+  });
+
+  it("adds S3-compatible workspace storage without redisplaying credentials", async () => {
+    const user = userEvent.setup();
+    renderConsole("/storage-providers");
+    expect(
+      await screen.findByRole("heading", { name: "Storage providers" }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Add storage provider" }),
+    );
+    const dialog = within(
+      screen.getByRole("dialog", { name: "Add storage provider" }),
+    );
+    await user.type(dialog.getByLabelText("Connection key"), "workspace-eu");
+    await user.type(dialog.getByLabelText("Display name"), "Workspace EU");
+    await user.type(
+      dialog.getByLabelText("S3-compatible endpoint"),
+      "https://objects.example.test",
+    );
+    await user.clear(dialog.getByLabelText("Region"));
+    await user.type(dialog.getByLabelText("Region"), "eu-test-1");
+    await user.type(dialog.getByLabelText("Bucket"), "oao-workspaces");
+    await user.type(dialog.getByLabelText("Access key ID"), "access-key-value");
+    await user.type(
+      dialog.getByLabelText("Secret access key"),
+      "secret-access-key-value",
+    );
+    await user.click(dialog.getByRole("button", { name: "Add provider" }));
+    expect(await screen.findByText("Workspace EU")).toBeInTheDocument();
+    expect(screen.getByText("oao-workspaces")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("access-key-value");
+    expect(document.body.textContent).not.toContain("secret-access-key-value");
+  });
+
+  it("publishes the selected Daytona snapshot and exact tool capabilities", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", api);
+    const provider = await screen.findByLabelText("Sandbox provider");
+    expect(provider).toHaveValue("daytona-primary");
+    const snapshot = await screen.findByLabelText("Daytona snapshot");
+    await user.selectOptions(snapshot, "77777777-7777-4777-8777-777777777777");
+    const shell = screen.getByRole("checkbox", {
+      name: /^Shell and search/u,
+    });
+    expect(shell).toBeChecked();
+    await user.click(shell);
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 4")).toBeInTheDocument();
+    const updated = await api.getAgent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    expect(updated.versions[0]?.config.sandbox).toMatchObject({
+      provider: "daytona-primary",
+      snapshotId: "77777777-7777-4777-8777-777777777777",
+      capabilities: ["filesystem_read", "filesystem_write", "browser"],
+    });
+  });
+
+  it("creates a model preset from the pinned catalog and links it to a new agent version", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const view = renderConsole("/models", api);
+    await user.click(
+      await screen.findByRole("button", { name: "Add model preset" }),
+    );
+    const dialog = within(
+      screen.getByRole("dialog", { name: "Add model preset" }),
+    );
+
+    // Searching the catalog fills the preset key and display name.
+    const model = dialog.getByRole("combobox", { name: /^Model/u });
+    await user.click(model);
+    await user.type(model, "gpt");
+    await user.click(await dialog.findByRole("option", { name: /GPT-5\.1/u }));
+    expect(dialog.getByLabelText(/^Preset key/u)).toHaveValue("gpt-5-1-v1");
+    expect(dialog.getByLabelText(/^Display name/u)).toHaveValue("GPT-5.1");
+
+    await user.clear(dialog.getByLabelText(/^Preset key/u));
+    await user.type(dialog.getByLabelText(/^Preset key/u), "no-version");
+    expect(
+      await dialog.findByText(/must be lowercase, hyphen separated/u),
+    ).toBeInTheDocument();
+    await user.clear(dialog.getByLabelText(/^Preset key/u));
+    await user.type(dialog.getByLabelText(/^Preset key/u), "gpt-5-1-fast-v1");
+    await user.clear(dialog.getByLabelText(/^Display name/u));
+    await user.type(dialog.getByLabelText(/^Display name/u), "GPT-5.1 fast");
+
+    // Routing controls stay folded away until they are needed.
+    await user.click(dialog.getByText("Routing and data policy"));
+    await user.selectOptions(
+      dialog.getByLabelText(/^Route preference/u),
+      "latency",
+    );
+    await user.type(dialog.getByLabelText(/^Provider allowlist/u), "openai");
+    await user.click(
+      screen.getAllByRole("button", { name: "Add model preset" }).at(-1)!,
+    );
+    expect(await screen.findByText("GPT-5.1 fast")).toBeInTheDocument();
+    view.unmount();
+
+    renderConsole("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", api);
+    const preset = await screen.findByRole("combobox", {
+      name: /Approved model preset/u,
+    });
+    await user.click(preset);
+    await user.type(preset, "gpt-5-1-fast");
+    await user.click(
+      await screen.findByRole("option", { name: /GPT-5\.1 fast/u }),
+    );
+    expect(
+      await screen.findByText(/GPT-5.1 fast · openrouter\/openai\/gpt-5.1/u),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 4")).toBeInTheDocument();
+  });
+
+  it("blocks publishing an agent version against an unapproved preset", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    await expect(
+      api.publishAgentVersion("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+        systemPrompt: "Answer support questions carefully.",
+        modelPreset: "never-approved-v1",
+        tools: [],
+        sandbox: {
+          enabled: false,
+          provider: "local-fake",
+          network: "none",
+          capabilities: ["filesystem_read", "filesystem_write", "shell"],
+        },
+        limits: { maxTurns: 32, timeoutMs: 60_000 },
+      }),
+    ).rejects.toThrow(/not an approved model preset/u);
   });
 
   it("revalidates session queries after a resumable product event", async () => {

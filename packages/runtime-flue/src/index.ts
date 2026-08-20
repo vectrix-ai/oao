@@ -10,6 +10,8 @@ import {
   init,
   instrument,
   observe,
+  setProvider,
+  useAgentFinish,
   useDelivery,
   useInitialData,
   useModel,
@@ -20,6 +22,7 @@ import type {
   DispatchReceipt,
   DeliveredMessage,
   FlueObservation,
+  Sandbox,
   SandboxFactory,
   ToolInputSchema,
   ToolOutputSchema,
@@ -30,13 +33,17 @@ import {
   ManagedAgentInstanceDataSchema,
   ManagedRunDeliverySchema,
   ManagedRunInputV1Schema,
+  ModelRoutingPolicySchema,
   ToolResultFailureCodeSchema,
   type ManagedAgentSnapshot,
   type ManagedAgentInstanceData,
   type ManagedRunDelivery,
+  type ModelProviderType,
+  type ModelRoutingPolicy,
 } from "@oao/contracts";
 import type { PgPool, Queryable, TenantContext } from "@oao/db-postgres";
 import { withTenantTransaction } from "@oao/db-postgres";
+import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import type {
   OrganizationId,
   ProjectId,
@@ -45,7 +52,10 @@ import type {
   ThreadId,
 } from "@oao/domain";
 import { redactForPublic } from "@oao/domain";
-import type { ImmutableModelPresetRegistry } from "@oao/models-openrouter";
+import type {
+  ModelPresetTenant,
+  ResolvedModelPreset,
+} from "@oao/models-openrouter";
 import type { PostgresWakeQueue, RuntimeWakeJob } from "@oao/queue-postgres";
 import type { PostgresToolBroker, ToolObligationInput } from "@oao/tool-broker";
 import { resourceFromAttributes } from "@opentelemetry/resources";
@@ -70,14 +80,43 @@ export type PlatformToolHandler = (
   },
 ) => Promise<PublicValue>;
 
+/**
+ * Synchronous resolver the agent render uses. The models adapter's project
+ * preset registry implements it, covering both deployment presets and durable
+ * project presets that were activated before dispatch.
+ */
+export interface ModelPresetResolverPort {
+  resolve(key: string, tenant: ModelPresetTenant): ResolvedModelPreset;
+}
+
+/** Loads and activates a durable project preset before a run is dispatched. */
+export interface ModelPresetActivationPort {
+  activate(
+    tenant: TenantContext,
+    presetKey: string,
+  ): Promise<ResolvedModelPreset | undefined>;
+}
+
+export interface PersistableSandboxFactory extends SandboxFactory {
+  persistWorkspace?(sandbox: Sandbox): Promise<void>;
+}
+
+/**
+ * Registers a provider with the Flue runtime. Keeping the call behind this
+ * package preserves the single Flue seam: the worker never imports Flue.
+ */
+export function registerRuntimeModelProvider(provider: Provider): void {
+  setProvider(provider);
+}
+
 interface ManagedAgentRuntimeConfig {
-  readonly presets: ImmutableModelPresetRegistry;
+  readonly presets: ModelPresetResolverPort;
   readonly broker: PostgresToolBroker;
   readonly platformTools: ReadonlyMap<string, PlatformToolHandler>;
   readonly sandboxFactory?: (
     initial: ManagedAgentInstanceData,
     delivery: ManagedRunDelivery,
-  ) => SandboxFactory;
+  ) => PersistableSandboxFactory;
 }
 
 let managedRuntime: ManagedAgentRuntimeConfig | undefined;
@@ -192,10 +231,19 @@ export function ManagedAgent(): string {
       "ManagedAgent delivery snapshot does not match its instance",
     );
   const config = runtimeConfig();
-  const preset = config.presets.resolve(initial.snapshot.modelPreset);
+  const preset = config.presets.resolve(initial.snapshot.modelPreset, {
+    organizationId: initial.organizationId,
+    projectId: initial.projectId,
+  });
   useModel(preset.model);
-  if (initial.snapshot.sandbox.enabled && config.sandboxFactory)
-    useSandbox(config.sandboxFactory(initial, delivery));
+  if (initial.snapshot.sandbox.enabled && config.sandboxFactory) {
+    const sandbox = config.sandboxFactory(initial, delivery);
+    useSandbox(sandbox);
+    if (sandbox.persistWorkspace)
+      useAgentFinish(async ({ harness }) =>
+        sandbox.persistWorkspace?.(harness.sandbox),
+      );
+  }
 
   for (const tool of initial.snapshot.tools) {
     useTool({
@@ -344,6 +392,45 @@ function eventUuid(value: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/** Flue stamps completed turn observations; recover the actual model window. */
+function turnWindow(event: {
+  readonly timestamp: string;
+  readonly durationMs: number;
+}): { readonly startedAt: Date; readonly completedAt: Date } {
+  const completedAt = new Date(event.timestamp);
+  const durationMs = Number.isFinite(event.durationMs)
+    ? Math.max(0, event.durationMs)
+    : 0;
+  return {
+    startedAt: new Date(completedAt.getTime() - durationMs),
+    completedAt,
+  };
+}
+
+/** Provider thinking text is transcript data; provider signatures stay private. */
+function turnThinking(output: unknown): string | undefined {
+  if (!output || typeof output !== "object") return undefined;
+  const content = (output as { readonly content?: unknown }).content;
+  if (!Array.isArray(content)) return undefined;
+  const thinking = content
+    .filter(
+      (
+        part,
+      ): part is { readonly type: "thinking"; readonly thinking: string } =>
+        Boolean(
+          part &&
+          typeof part === "object" &&
+          (part as { readonly type?: unknown }).type === "thinking" &&
+          typeof (part as { readonly thinking?: unknown }).thinking ===
+            "string",
+        ),
+    )
+    .map((part) => part.thinking.trim())
+    .filter(Boolean)
+    .join("\n\n");
+  return thinking || undefined;
+}
+
 async function appendEventOnce(
   transaction: Queryable,
   input: TenantContext & {
@@ -400,6 +487,7 @@ export class ManagedRuntimeOrchestrator {
     private readonly trackAdmission?: (
       input: TenantContext & { readonly runId: RunId },
     ) => void,
+    private readonly modelPresets?: ModelPresetActivationPort,
   ) {}
 
   async handleWake(job: RuntimeWakeJob): Promise<void> {
@@ -444,6 +532,9 @@ export class ManagedRuntimeOrchestrator {
 
   async admit(job: RuntimeWakeJob): Promise<void> {
     const run = await this.loadRun(job);
+    // Flue resolves `useModel` synchronously during the agent render, so a
+    // durable project preset must be loaded and registered before dispatch.
+    await this.modelPresets?.activate(run, run.snapshot.modelPreset);
     const admissionKey = `run:${run.runId}`;
     const snapshotHash = digestJson(run.snapshot);
     const deliveredMessage = this.deliveredMessage(run);
@@ -1248,6 +1339,8 @@ export class RuntimeProjection {
     event: Extract<FlueObservation, { type: "turn" }>,
   ): Promise<void> {
     const usage = event.response.usage;
+    const timing = turnWindow(event);
+    const thinking = turnThinking(event.response.output);
     const invocationId = eventUuid(
       `turn:${runtimeDispatch.run_id}:${event.turnId}`,
     );
@@ -1274,7 +1367,7 @@ export class RuntimeProjection {
           organization_id,project_id,id,run_id,attempt,provider_key,model_key,status,
           input_tokens,output_tokens,cost_microunits,safe_request,safe_response,
           started_at,completed_at,usage_source,pricing_snapshot,provider_route
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16,$17)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
         ON CONFLICT (organization_id,project_id,id) DO NOTHING
         RETURNING attempt`,
           [
@@ -1290,8 +1383,12 @@ export class RuntimeProjection {
             usage?.output ?? 0,
             Math.round((usage?.cost.total ?? 0) * 1_000_000),
             { purpose: event.purpose },
-            { finishReason: event.response.finishReason ?? "unknown" },
-            new Date(event.timestamp),
+            {
+              finishReason: event.response.finishReason ?? "unknown",
+              ...(thinking ? { thinking } : {}),
+            },
+            timing.startedAt,
+            timing.completedAt,
             usage ? "estimated" : "unavailable",
             { model: event.request.requestedModel },
             { provider: event.request.providerId },
@@ -1303,14 +1400,15 @@ export class RuntimeProjection {
           `INSERT INTO oao.timeline_entries (
             organization_id,project_id,run_id,entry_sequence,entry_type,
             started_at,completed_at,safe_detail
-          ) VALUES ($1,$2,$3,$4,'model_invocation',$5,$5,$6)
+          ) VALUES ($1,$2,$3,$4,'model_invocation',$5,$6,$7)
           ON CONFLICT DO NOTHING`,
           [
             runtimeDispatch.organization_id,
             runtimeDispatch.project_id,
             runtimeDispatch.run_id,
             stableAttempt + 1,
-            new Date(event.timestamp),
+            timing.startedAt,
+            timing.completedAt,
             {
               status: event.isError ? "failed" : "completed",
               model: event.request.requestedModel,
@@ -1596,16 +1694,108 @@ export async function configureVendorNeutralTelemetry(
   };
 }
 
+interface ProjectModelPresetRow {
+  preset_key: string;
+  model: string;
+  routing: unknown;
+  provider_id: string;
+  provider_type: ModelProviderType;
+  encrypted_api_key: Buffer;
+  encryption_nonce: Buffer;
+  encryption_tag: Buffer;
+  encryption_key_version: number;
+}
+
+/**
+ * Reads a durable project preset and activates it in the process registry.
+ *
+ * The project table is checked before a deployment key is accepted. This
+ * preserves an older durable preset if a later deployment configuration
+ * introduces the same key. Activation re-validates the stored model against
+ * the provider catalog inside the models adapter, which keeps an unapproved model
+ * string from ever reaching the provider.
+ */
+export function createProjectModelPresetActivator(input: {
+  readonly pool: PgPool;
+  readonly credentialCipher?: ProviderCredentialCipher;
+  readonly registry: {
+    activate(
+      preset: ModelPresetTenant & {
+        readonly key: string;
+        readonly providerId: string;
+        readonly providerType: ModelProviderType;
+        readonly apiKey: string;
+        readonly credentialVersion: number;
+        readonly model: string;
+        readonly routing: ModelRoutingPolicy;
+      },
+    ): ResolvedModelPreset;
+  };
+  readonly deploymentPresetKeys: ReadonlySet<string>;
+}): ModelPresetActivationPort {
+  return {
+    async activate(tenant, presetKey) {
+      const result = await withTenantTransaction(
+        input.pool,
+        tenant,
+        (transaction) =>
+          transaction.query<ProjectModelPresetRow>(
+            `SELECT p.preset_key,p.model,p.routing,p.provider_id,
+                    c.provider_type,c.encrypted_api_key,c.encryption_nonce,
+                    c.encryption_tag,c.encryption_key_version
+             FROM oao.project_model_presets p
+             JOIN oao.project_model_providers c
+               ON c.organization_id=p.organization_id
+              AND c.project_id=p.project_id
+              AND c.id=p.provider_id
+             WHERE p.organization_id=$1 AND p.project_id=$2 AND p.preset_key=$3`,
+            [tenant.organizationId, tenant.projectId, presetKey],
+          ),
+      );
+      const row = result.rows[0];
+      if (!row && input.deploymentPresetKeys.has(presetKey)) return undefined;
+      if (!row) throw new Error(`Model preset is not approved: ${presetKey}`);
+      if (!input.credentialCipher)
+        throw new Error("Provider credential decryption is not configured");
+      const apiKey = input.credentialCipher.decrypt(
+        {
+          ciphertext: row.encrypted_api_key,
+          nonce: row.encryption_nonce,
+          tag: row.encryption_tag,
+          keyVersion: row.encryption_key_version,
+        },
+        {
+          organizationId: tenant.organizationId,
+          projectId: tenant.projectId,
+          providerId: row.provider_id,
+          providerType: row.provider_type,
+        },
+      );
+      return input.registry.activate({
+        organizationId: tenant.organizationId,
+        projectId: tenant.projectId,
+        key: row.preset_key,
+        providerId: row.provider_id,
+        providerType: row.provider_type,
+        apiKey,
+        credentialVersion: row.encryption_key_version,
+        model: row.model,
+        routing: v.parse(ModelRoutingPolicySchema, row.routing ?? {}),
+      });
+    },
+  };
+}
+
 export async function startManagedFlueRuntime(input: {
   readonly pool: PgPool;
   readonly providers: readonly Provider[];
-  readonly presets: ImmutableModelPresetRegistry;
+  readonly presets: ModelPresetResolverPort;
   readonly broker: PostgresToolBroker;
   readonly platformTools?: ReadonlyMap<string, PlatformToolHandler>;
   readonly sandboxFactory?: (
     initial: ManagedAgentInstanceData,
     delivery: ManagedRunDelivery,
-  ) => SandboxFactory;
+  ) => PersistableSandboxFactory;
 }): Promise<Flue> {
   configureManagedAgentRuntime({
     presets: input.presets,
@@ -1623,6 +1813,8 @@ export async function startManagedFlueRuntime(input: {
 export const runtimeTesting = {
   eventUuid,
   safeArguments,
+  turnWindow,
+  turnThinking,
   threadInstanceId,
   compileObjectSchema,
 };

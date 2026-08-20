@@ -1,0 +1,49 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "OAO",
+  "description": "Build, run, and inspect durable managed agents with OAO.",
+  "colors": {
+    "primary": "#4338CA",
+    "light": "#A5A5F5",
+    "dark": "#7777E9"
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Overview",
+        "pages": ["index", "concepts/how-oao-works"]
+      },
+      {
+        "group": "Get started",
+        "pages": ["getting-started/local-development"]
+      },
+      {
+        "group": "Build agents",
+        "pages": [
+          "agents/create-agent",
+          "models/adding-models",
+          "sandboxes/daytona",
+          "storage/workspace-backups"
+        ]
+      },
+      {
+        "group": "Connect your app",
+        "pages": ["integrations/codebase"]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "reference/authentication",
+          "reference/http-api",
+          "reference/events",
+          "reference/mvp-limitations",
+          "architecture"
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {}
+  }
+}

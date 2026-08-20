@@ -1,0 +1,62 @@
+---
+title: OAO documentation
+description: Build, operate, and integrate durable managed agents on your own infrastructure.
+---
+
+OAO is an open, self-hostable managed-agent platform built with TypeScript,
+Flue, and PostgreSQL. It gives teams one place to define versioned agents,
+start durable sessions, inspect their public transcripts and timing, and safely
+hand caller-owned tool work back to an application.
+
+The local MVP runs without hosted credentials. Its deterministic model,
+sandbox, and identity adapters let you develop the whole flow on a laptop
+before opting into OpenRouter, Daytona, or WorkOS.
+
+<CardGroup cols={2}>
+  <Card
+    title="Run OAO locally"
+    icon="play"
+    href="/getting-started/local-development"
+  >
+    Start PostgreSQL, the API, runtime worker, and React console.
+  </Card>
+  <Card title="Create an agent" icon="robot" href="/agents/create-agent">
+    Define instructions, tools, sandbox policy, and an immutable version.
+  </Card>
+  <Card
+    title="Connect your application"
+    icon="code"
+    href="/integrations/codebase"
+  >
+    Create sessions, submit later turns, stream updates, and service tools.
+  </Card>
+  <Card title="Add a model" icon="brain" href="/models/adding-models">
+    Approve a model preset in the console and link it to a new agent version.
+  </Card>
+</CardGroup>
+
+## What you can inspect
+
+The React console at `http://127.0.0.1:5173` displays managed agents and their
+immutable versions, the project's approved model presets, sessions and runs, the
+diagnostic transcript, caller tool and approval work, public errors, timing
+entries, and observed token/cost metadata.
+It receives live changes from the same durable PostgreSQL event stream exposed
+to client applications.
+
+<Note>
+  Authorized session transcripts expose model reasoning and sandbox tool
+  input/output for debugging. Credentials, authorization headers, reasoning
+  signatures, and unrestricted SSE/log payloads remain excluded.
+</Note>
+
+## Choose a path
+
+1. Follow [Local development](/getting-started/local-development) to verify the
+   full local stack.
+2. Use [Create an agent](/agents/create-agent) to publish a usable definition.
+3. Follow [Connect a codebase](/integrations/codebase) for a complete Node.js
+   integration, including real-time updates and repository file access.
+
+If you are implementing a different client, use the [HTTP API
+reference](/reference/http-api) and [event stream contract](/reference/events).

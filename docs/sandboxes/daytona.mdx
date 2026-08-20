@@ -1,0 +1,122 @@
+---
+title: Daytona sandboxes
+description: Add an encrypted project connection and expose only the sandbox tools an agent version needs.
+---
+
+OAO can attach one persistent Daytona workspace to an agent thread. The
+project owns the encrypted connection; each immutable agent version selects a
+connection key, network mode, and exact tool capabilities.
+
+## Add a connection
+
+1. Set the same 32-byte `OAO_CREDENTIAL_ENCRYPTION_KEY` for the API and runtime.
+2. Restart those two services.
+3. Open **Sandbox providers** in the console navigation.
+4. Select **Add sandbox provider**, choose **Daytona**, enter the API key, and
+   optionally set a Daytona target plus allowed domains and CIDRs.
+
+The plaintext key exists only in the create or rotate request. List and write
+responses contain a fingerprint and monotonically increasing credential
+version, never the key or encryption fields. Rotating a key and changing the
+target/allowlist do not require republishing an agent version.
+
+<Warning>
+  A Daytona target is a placement preference. OAO does not verify or claim data
+  residency from that value.
+</Warning>
+
+## Select the sandbox on an agent
+
+When creating an agent, enable **Sandbox**, choose a project Daytona connection,
+choose an active snapshot or OAO's default image, then choose `none` or
+`restricted` network access and the capabilities to publish. The same controls
+remain available on the latest agent version. OAO does not expose a local fake
+sandbox in the runnable product.
+
+The snapshot picker calls
+`GET /projects/{projectId}/sandbox-providers/{providerId}/snapshots`. It shows
+every snapshot visible to that Daytona credential with state and resource
+metadata; only snapshots in `active` state are selectable. OAO stores the
+selected snapshot UUID as immutable `sandbox.snapshotId` version data. If no
+snapshot is selected, creation uses `debian:12.9`.
+
+| Capability         | Model-facing tools                                         |
+| ------------------ | ---------------------------------------------------------- |
+| `filesystem_read`  | `read`                                                     |
+| `filesystem_write` | `write`, `edit`                                            |
+| `shell`            | `bash`, `grep`, `glob`                                     |
+| `browser`          | `browser_navigate`, `browser_snapshot`, `browser_interact` |
+
+The runtime composes only these tools. Daytona browser tools start Computer
+Use, launch Chromium, navigate to allowlisted HTTP(S) URLs, return a bounded
+accessibility tree plus compressed screenshot, and interact by accessibility
+node, key press, or scroll. The sandbox image must contain `chromium`,
+`chromium-browser`, or `google-chrome` when browser capability is enabled.
+When no snapshot is selected, OAO uses the public `debian:12.9` base image;
+browser-capable agents therefore need a selected snapshot that adds Chromium.
+
+Every hosted sandbox tool call reserves a fenced `sandbox_commands` record and
+emits safe start/completion/failure events. The record keeps the model-facing
+arguments and result, and the session transcript renders them in an expandable
+tool row alongside the full execution duration. Named credential fields and
+obvious authorization values are masked before persistence; browser media and
+provider credentials are not copied into the transcript. Calls recorded before
+full transcript capture was enabled can show only their earlier allowlisted
+target.
+
+If Daytona creation fails, OAO keeps the safe failure event and marks the
+workspace record as failed. A later retry fences that record into recovery,
+clears its stale provider reference and safe error, and attempts creation again
+with the current runtime configuration. Recovery ignores dead Daytona builds,
+restarts stopped workspaces, and keeps the requested target preference separate
+from the effective target reported by Daytona.
+
+With a default project storage provider, OAO asks Daytona for the active sandbox
+workdir and archives it at the awaited agent-finish seam. If Daytona has deleted
+the thread sandbox, the runtime creates a replacement and restores the verified
+archive into its workdir before exposing tools. See
+[Workspace backups](/storage/workspace-backups).
+
+## Network policy
+
+`none` creates a network-blocked sandbox and browser navigation accepts only
+loopback URLs. `restricted` requires at least one allowed domain or CIDR on the
+selected connection. Browser navigation independently checks the hostname
+against that domain allowlist; Daytona enforces the sandbox network allowlist.
+
+Changing a connection's allowlist affects later sandbox creation that resolves
+the same provider key. It does not rewrite immutable agent versions.
+
+## API example
+
+```bash
+curl --fail-with-body \
+  --request POST \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: daytona-primary-1' \
+  --data '{
+    "key":"daytona-primary",
+    "displayName":"Daytona primary",
+    "providerType":"daytona",
+    "apiKey":"replace-with-daytona-key",
+    "target":null,
+    "restrictedEgress":{
+      "allowedDomains":["api.example.com"],
+      "allowedCidrs":[]
+    }
+  }' \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/sandbox-providers"
+```
+
+See [HTTP API](/reference/http-api) for list, rotation, and configuration
+routes.
+
+## Limitations
+
+- Automated tests may inject isolated sandbox doubles, but the API, console,
+  and runtime do not make those doubles selectable.
+- OAO does not currently expose Daytona Git, LSP, code-interpreter, recording,
+  VNC, or preview APIs as model-facing tools.
+- Browser screenshots are model inputs for the active tool call; they are not
+  copied into public product events or console list views.

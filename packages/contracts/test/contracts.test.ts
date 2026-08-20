@@ -3,11 +3,16 @@ import test from "node:test";
 import * as v from "valibot";
 import {
   ApiErrorSchema,
+  MODEL_PRESET_KEY_PATTERN,
   PLATFORM_MAX_TURNS,
   ProductEventSchema,
   RunSchema,
   ToolCallSchema,
+  parseCreateModelPresetInput,
+  parseCreateProjectSandboxProviderInput,
+  parseCreateProjectStorageProviderInput,
   parseManagedAgentSnapshotForPublication,
+  parseModelRoutingPolicy,
 } from "../src/index.js";
 
 const id = "00000000-0000-4000-8000-000000000001";
@@ -48,6 +53,107 @@ test("run and event public contracts accept safe wire representations", () => {
   );
 });
 
+test("sandbox publication and Daytona connections expose only safe policy", () => {
+  const config = parseManagedAgentSnapshotForPublication({
+    systemPrompt: "Use the sandbox only for the requested task.",
+    modelPreset: "project-model-v1",
+    tools: [],
+    sandbox: {
+      enabled: true,
+      provider: "daytona-primary",
+      snapshotId: id,
+      network: "restricted",
+      capabilities: ["filesystem_read", "shell", "browser"],
+    },
+    limits: { maxTurns: PLATFORM_MAX_TURNS, timeoutMs: 60_000 },
+  });
+  assert.deepEqual(config.sandbox.capabilities, [
+    "filesystem_read",
+    "shell",
+    "browser",
+  ]);
+  assert.equal(config.sandbox.snapshotId, id);
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...config,
+      sandbox: { ...config.sandbox, snapshotId: "not-a-snapshot-id" },
+    }),
+  );
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...config,
+      sandbox: {
+        ...config.sandbox,
+        capabilities: ["shell", "shell"],
+      },
+    }),
+  );
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...config,
+      sandbox: { ...config.sandbox, provider: "local-fake" },
+    }),
+  );
+  const provider = parseCreateProjectSandboxProviderInput({
+    key: "daytona-primary",
+    displayName: "Daytona primary",
+    providerType: "daytona",
+    apiKey: "daytona-secret-key",
+    target: null,
+    restrictedEgress: {
+      allowedDomains: ["api.example.com", "*.example.net"],
+      allowedCidrs: ["203.0.113.0/24"],
+    },
+  });
+  assert.equal(provider.providerType, "daytona");
+  assert.throws(() =>
+    parseCreateProjectSandboxProviderInput({
+      ...provider,
+      key: "local-fake",
+      restrictedEgress: {
+        allowedDomains: ["https://example.com/path"],
+        allowedCidrs: [],
+      },
+    }),
+  );
+});
+
+test("S3-compatible storage configuration accepts safe relative prefixes", () => {
+  const parsed = parseCreateProjectStorageProviderInput({
+    key: "workspace-archive",
+    displayName: "Workspace archive",
+    providerType: "s3",
+    endpoint: "https://s3.eu-central-1.amazonaws.com",
+    region: "eu-central-1",
+    bucket: "oao-workspaces",
+    prefix: "production/oao",
+    forcePathStyle: false,
+    accessKeyId: "access-key",
+    secretAccessKey: "secret-access-key",
+  });
+  assert.equal(parsed.setDefault, true);
+  assert.equal(parsed.prefix, "production/oao");
+  assert.throws(() =>
+    parseCreateProjectStorageProviderInput({
+      ...parsed,
+      prefix: "../another-tenant",
+    }),
+  );
+  assert.throws(() =>
+    parseCreateProjectStorageProviderInput({
+      ...parsed,
+      endpoint: "file:///tmp/storage",
+    }),
+  );
+  assert.throws(() =>
+    parseCreateProjectStorageProviderInput({
+      ...parsed,
+      secretAccessKey: "secret-access-key",
+      unexpectedCredential: "must-not-pass",
+    }),
+  );
+});
+
 test("API errors have a stable envelope", () => {
   const parsed = v.parse(ApiErrorSchema, {
     error: { code: "conflict", message: "already exists" },
@@ -78,7 +184,7 @@ test("tool claim fences remain precise above Number.MAX_SAFE_INTEGER", () => {
 test("agent publication rejects JSON schema keywords the runtime cannot enforce", () => {
   const snapshot = {
     systemPrompt: "Be deterministic",
-    modelPreset: "local-fake",
+    modelPreset: "project-model-v1",
     tools: [
       {
         schemaVersion: 1 as const,
@@ -100,7 +206,11 @@ test("agent publication rejects JSON schema keywords the runtime cannot enforce"
         },
       },
     ],
-    sandbox: { enabled: false, network: "none" },
+    sandbox: {
+      enabled: false,
+      provider: "daytona-primary",
+      network: "none",
+    },
     limits: { maxTurns: PLATFORM_MAX_TURNS, timeoutMs: 60_000 },
   };
   assert.equal(
@@ -123,4 +233,77 @@ test("agent publication rejects JSON schema keywords the runtime cannot enforce"
       ],
     }),
   );
+});
+
+test("model preset input requires a versioned key and supported routing", () => {
+  const valid = parseCreateModelPresetInput({
+    key: "claude-sonnet-4-6-zdr-v1",
+    displayName: "Claude Sonnet 4.6 (zero retention)",
+    providerId: "55555555-5555-4555-8555-555555555555",
+    model: "openrouter/anthropic/claude-sonnet-4.6",
+    routing: {
+      zeroDataRetention: true,
+      dataCollection: "deny",
+      allowFallbacks: false,
+      providerAllowlist: ["anthropic"],
+      sort: "latency",
+      maxPromptPriceUsdPerMillion: 12.5,
+    },
+  });
+  assert.equal(valid.routing.providerAllowlist?.[0], "anthropic");
+  assert.deepEqual(
+    parseCreateModelPresetInput({
+      key: "local-mirror-v2",
+      displayName: "Local mirror",
+      providerId: "55555555-5555-4555-8555-555555555555",
+      model: "openrouter/openai/gpt-5.1",
+    }).routing,
+    {},
+  );
+
+  assert.ok(MODEL_PRESET_KEY_PATTERN.test("claude-sonnet-4-6-zdr-v1"));
+  for (const key of [
+    "no-version-suffix",
+    "Upper-Case-v1",
+    "-leading-hyphen-v1",
+    "trailing-v0",
+  ])
+    assert.throws(
+      () =>
+        parseCreateModelPresetInput({
+          key,
+          displayName: "Rejected",
+          model: "openrouter/openai/gpt-5.1",
+        }),
+      /version suffix/u,
+      `expected ${key} to be rejected`,
+    );
+
+  // Provider wire names and credentials never enter the public contract.
+  assert.throws(() =>
+    parseCreateModelPresetInput({
+      key: "wire-names-v1",
+      displayName: "Wire names",
+      model: "openrouter/openai/gpt-5.1",
+      routing: { allow_fallbacks: false },
+    }),
+  );
+  assert.throws(() =>
+    parseCreateModelPresetInput({
+      key: "credential-v1",
+      displayName: "Credential",
+      model: "openrouter/openai/gpt-5.1",
+      apiKey: "never",
+    }),
+  );
+  assert.throws(() =>
+    parseModelRoutingPolicy({ providerAllowlist: ["Anthropic"] }),
+  );
+  assert.throws(() =>
+    parseModelRoutingPolicy({ providerAllowlist: ["anthropic", "anthropic"] }),
+  );
+  assert.throws(() =>
+    parseModelRoutingPolicy({ maxPromptPriceUsdPerMillion: -1 }),
+  );
+  assert.throws(() => parseModelRoutingPolicy({ sort: "cheapest" }));
 });

@@ -1,4 +1,5 @@
 import { serve } from "@hono/node-server";
+import { ProjectWorkspaceBackupResolver } from "@oao/artifact-s3";
 import type { ServerType } from "@hono/node-server";
 import { createPool, migrate } from "@oao/db-postgres";
 import type {
@@ -10,63 +11,36 @@ import type {
   ThreadId,
 } from "@oao/domain";
 import {
+  DEFAULT_LOCAL_PRESETS,
+  ImmutableModelPresetRegistry,
+  ProjectModelPresetRegistry,
   createDeterministicModelProvider,
-  createOpenRouterPresetProviders,
   loadModelPresetConfiguration,
   withPlatformTurnLimit,
   type FauxResponseStep,
 } from "@oao/models-openrouter";
+import { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { PostgresWakeQueue, WakeWorker } from "@oao/queue-postgres";
 import {
   ManagedRuntimeOrchestrator,
   RuntimeProjection,
   configureVendorNeutralTelemetry,
+  createProjectModelPresetActivator,
+  registerRuntimeModelProvider,
   resetManagedAgentRuntime,
   startManagedFlueRuntime,
   type PlatformToolHandler,
 } from "@oao/runtime-flue";
 import {
-  DaytonaManagedProvider,
-  createFakeFlueSandbox,
   createManagedDaytonaFlueSandbox,
+  createProjectDaytonaFlueSandbox,
   type FlueSandboxProviderPort,
-  type SandboxEgressPolicy,
 } from "@oao/sandbox-daytona";
 import { PostgresToolBroker } from "@oao/tool-broker";
 import { Hono } from "hono";
 
 const DEFAULT_SERVICE_PRINCIPAL =
   "00000000-0000-4000-8000-000000000099" as PrincipalId;
-
-function sandboxProvider(env: NodeJS.ProcessEnv): "fake" | "daytona" {
-  const provider = env.OAO_SANDBOX_PROVIDER ?? "fake";
-  if (provider !== "fake" && provider !== "daytona")
-    throw new TypeError("OAO_SANDBOX_PROVIDER must be fake or daytona");
-  return provider;
-}
-
-function daytonaEgress(env: NodeJS.ProcessEnv): SandboxEgressPolicy {
-  if (!env.OAO_DAYTONA_EGRESS_JSON) return { mode: "none" };
-  const value: unknown = JSON.parse(env.OAO_DAYTONA_EGRESS_JSON);
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new TypeError("OAO_DAYTONA_EGRESS_JSON must be an object");
-  const record = value as Record<string, unknown>;
-  const stringList = (entry: unknown): readonly string[] | undefined => {
-    if (entry === undefined) return undefined;
-    if (!Array.isArray(entry) || entry.some((item) => typeof item !== "string"))
-      throw new TypeError("Daytona egress allowlists must contain strings");
-    return entry as string[];
-  };
-  if (record.mode !== "none" && record.mode !== "restricted")
-    throw new TypeError("Daytona egress mode must be none or restricted");
-  const allowedDomains = stringList(record.allowedDomains);
-  const allowedCidrs = stringList(record.allowedCidrs);
-  return {
-    mode: record.mode,
-    ...(allowedDomains ? { allowedDomains } : {}),
-    ...(allowedCidrs ? { allowedCidrs } : {}),
-  };
-}
 
 export interface RuntimeWorkerHandle {
   readonly port?: number;
@@ -89,24 +63,6 @@ export async function startRuntimeWorker(input: {
   readonly platformTools?: ReadonlyMap<string, PlatformToolHandler>;
 }): Promise<RuntimeWorkerHandle> {
   const env = input.env ?? process.env;
-  const selectedSandbox = sandboxProvider(env);
-  if (
-    selectedSandbox === "daytona" &&
-    !input.daytonaProvider &&
-    !env.DAYTONA_API_KEY
-  )
-    throw new Error(
-      "DAYTONA_API_KEY is required when OAO_SANDBOX_PROVIDER=daytona",
-    );
-  let managedDaytona: FlueSandboxProviderPort | undefined;
-  if (selectedSandbox === "daytona") {
-    managedDaytona =
-      input.daytonaProvider ??
-      new DaytonaManagedProvider({
-        apiKey: env.DAYTONA_API_KEY ?? "",
-        ...(env.DAYTONA_TARGET ? { target: env.DAYTONA_TARGET } : {}),
-      });
-  }
   const pool = createPool(input.databaseUrl);
   await migrate(pool);
   const telemetryStop = await configureVendorNeutralTelemetry({
@@ -121,21 +77,36 @@ export async function startRuntimeWorker(input: {
     DEFAULT_SERVICE_PRINCIPAL;
   const broker = new PostgresToolBroker(pool, { servicePrincipalId });
   const modelConfiguration = loadModelPresetConfiguration(env);
-  const {
-    hostedEnabled,
-    hostedPresets,
-    registry: presets,
-  } = modelConfiguration;
   const fake = input.fakeResponses
     ? createDeterministicModelProvider(input.fakeResponses)
-    : createDeterministicModelProvider();
-  const providers = [
-    withPlatformTurnLimit(fake.provider),
-    ...createOpenRouterPresetProviders(hostedPresets).map((provider) =>
-      withPlatformTurnLimit(provider),
+    : undefined;
+  const deploymentPresets = fake
+    ? new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
+        hostedEnabled: false,
+      })
+    : modelConfiguration.registry;
+  const providers = fake ? [withPlatformTurnLimit(fake.provider)] : [];
+  // Durable project presets are registered lazily, one provider identity per
+  // (organization, project, preset key), so routing policy stays isolated.
+  const presets = new ProjectModelPresetRegistry({
+    deployment: deploymentPresets,
+    registerProvider: (provider) =>
+      registerRuntimeModelProvider(withPlatformTurnLimit(provider)),
+  });
+  const credentialCipher = env.OAO_CREDENTIAL_ENCRYPTION_KEY
+    ? ProviderCredentialCipher.fromBase64(env.OAO_CREDENTIAL_ENCRYPTION_KEY)
+    : undefined;
+  const workspaceBackupResolver = credentialCipher
+    ? new ProjectWorkspaceBackupResolver(pool, credentialCipher)
+    : undefined;
+  const presetActivator = createProjectModelPresetActivator({
+    pool,
+    registry: presets,
+    ...(credentialCipher ? { credentialCipher } : {}),
+    deploymentPresetKeys: new Set(
+      deploymentPresets.list().map((preset) => preset.key),
     ),
-  ];
-  const configuredEgress = daytonaEgress(env);
+  });
   const flue = await startManagedFlueRuntime({
     pool,
     providers,
@@ -143,28 +114,52 @@ export async function startRuntimeWorker(input: {
     broker,
     ...(input.platformTools ? { platformTools: input.platformTools } : {}),
     sandboxFactory: (initial, delivery) => {
-      if (selectedSandbox === "fake") return createFakeFlueSandbox();
-      if (!managedDaytona) throw new Error("Daytona provider is unavailable");
-      return createManagedDaytonaFlueSandbox({
+      const sandbox = initial.snapshot.sandbox;
+      if (sandbox.provider === "local-fake") {
+        throw new Error(
+          "The local-fake sandbox is no longer supported; publish a new agent version with a Daytona provider",
+        );
+      }
+      if (input.daytonaProvider)
+        return createManagedDaytonaFlueSandbox({
+          pool,
+          provider: input.daytonaProvider,
+          organizationId: initial.organizationId as OrganizationId,
+          projectId: initial.projectId as ProjectId,
+          runId: delivery.runId as RunId,
+          threadId: initial.threadId as ThreadId,
+          sessionId: initial.sessionId as SessionId,
+          egress: { mode: "none" },
+          capabilities: sandbox.capabilities,
+          ...(sandbox.snapshotId ? { snapshotId: sandbox.snapshotId } : {}),
+        });
+      if (!credentialCipher)
+        throw new Error(
+          "OAO_CREDENTIAL_ENCRYPTION_KEY is required for project sandbox providers",
+        );
+      return createProjectDaytonaFlueSandbox({
         pool,
-        provider: managedDaytona,
+        credentialCipher,
+        providerKey: sandbox.provider,
         organizationId: initial.organizationId as OrganizationId,
         projectId: initial.projectId as ProjectId,
         runId: delivery.runId as RunId,
         threadId: initial.threadId as ThreadId,
         sessionId: initial.sessionId as SessionId,
-        ...(env.DAYTONA_TARGET ? { targetPreference: env.DAYTONA_TARGET } : {}),
-        egress:
-          initial.snapshot.sandbox.network === "none"
-            ? { mode: "none" }
-            : configuredEgress,
+        network: sandbox.network,
+        capabilities: sandbox.capabilities,
+        ...(sandbox.snapshotId ? { snapshotId: sandbox.snapshotId } : {}),
+        ...(workspaceBackupResolver ? { workspaceBackupResolver } : {}),
       });
     },
   });
   const projection = new RuntimeProjection(pool, queue);
   projection.start();
-  const orchestrator = new ManagedRuntimeOrchestrator(pool, queue, (run) =>
-    projection.trackAdmission(run),
+  const orchestrator = new ManagedRuntimeOrchestrator(
+    pool,
+    queue,
+    (run) => projection.trackAdmission(run),
+    presetActivator,
   );
   const wakeWorker = new WakeWorker(
     queue,
@@ -186,8 +181,8 @@ export async function startRuntimeWorker(input: {
         await pool.query("SELECT 1");
         return context.json({
           status: "ready",
-          profile: hostedEnabled ? "hosted-opt-in" : "local-fake",
-          sandbox: selectedSandbox,
+          profile: "project-providers",
+          sandbox: "daytona",
         });
       } catch {
         return context.json({ status: "not_ready" }, 503);

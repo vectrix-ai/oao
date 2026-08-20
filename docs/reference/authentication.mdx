@@ -1,0 +1,110 @@
+---
+title: Authentication
+description: Authenticate browser users and project integrations without mixing identity with tenant authorization.
+---
+
+OAO supports two authentication modes behind the same application boundary:
+
+- **Development auth** is the credential-free local default. The console signs
+  in to the seeded development tenant through an HTTP-only session cookie.
+- **WorkOS AuthKit** is the hosted human-auth adapter. OAO still requires a
+  matching PostgreSQL principal and project membership; a valid WorkOS identity
+  alone does not grant tenant access.
+
+Server-to-server integrations use project-scoped OAO API keys.
+
+## Create an integration key
+
+A human principal with `project:admin` can create a key from **API keys** in the
+console. Enter a descriptive name, select the least-privilege project scopes,
+and save the secret from the acknowledgement dialog. The console removes the
+plaintext when that dialog closes and cannot reveal it later.
+
+For automated setup, an authenticated human or service principal with
+`project:admin` can use the project API. In local development, first create a
+cookie session and read the seeded project ID:
+
+```bash
+API=http://127.0.0.1:3000
+ORIGIN=http://127.0.0.1:5173
+COOKIE_JAR=/tmp/oao-docs-cookies.txt
+
+curl -sS -c "$COOKIE_JAR" -X POST \
+  -H "Origin: $ORIGIN" \
+  "$API/v1/auth/development/login" >/dev/null
+
+PROJECT_ID="$(curl -sS -b "$COOKIE_JAR" "$API/v1/context" | jq -r '.project.id')"
+```
+
+For a client that creates and watches sessions, grant only:
+
+```text
+agent:read
+session:read
+session:write
+run:create
+run:read
+```
+
+Add `tool_call:claim` and `tool_call:submit` only when the integration executes
+caller-owned tools. Add `run:cancel` only when it should cancel runs.
+
+Create and capture the key once:
+
+```bash
+curl -sS -b "$COOKIE_JAR" -X POST \
+  -H "Origin: $ORIGIN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: create-codebase-integration-key-v1' \
+  "$API/v1/projects/$PROJECT_ID/api-keys" \
+  --data-binary '{
+    "name": "Codebase integration",
+    "scopes": [
+      "agent:read",
+      "session:read",
+      "session:write",
+      "run:create",
+      "run:read"
+    ]
+  }' | jq
+```
+
+The first successful console or API response contains `shown: true` and
+`secret`. A replay of the same API request deliberately omits the secret and
+returns `shown: false`. OAO stores a keyed hash, not plaintext, so copy the
+secret into your secret manager immediately.
+
+Send the key as a bearer credential:
+
+```http
+Authorization: Bearer oao_your_secret
+```
+
+<Warning>
+  Keep OAO API keys on a server. Do not embed them in browser JavaScript, mobile
+  bundles, repository files, query strings, logs, or SSE URLs.
+</Warning>
+
+## Write safety
+
+Every project-state mutation requires a caller-generated `Idempotency-Key` header.
+Retry the same logical request with the same key and identical body. Reusing a
+key with a different body produces a conflict instead of creating ambiguous
+duplicate work.
+
+```http
+Idempotency-Key: 7f44a7de-f878-4c4c-b477-3f680481dc38
+```
+
+Keys are scoped to the authenticated principal and route. Keep them opaque,
+non-empty, and at most 200 characters.
+
+## Browser sessions
+
+The React console uses secure HTTP-only cookies in WorkOS mode. Unsafe
+cookie-authenticated requests are origin-checked. API-key clients do not need
+the browser cookie or a custom tenant header: the key resolves its organization,
+project, principal, and scopes before tenant queries run.
+
+See `apps/api/README.md` in the repository for the exact WorkOS callback,
+webhook, cookie, and local proxy environment variables.
