@@ -9,6 +9,11 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "pnpm": {
+    "overrides": {
+      "@kreuzberg/node>which": "6.0.1"
+    }
+  },
   "scripts": {
     "build": "turbo run build",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",

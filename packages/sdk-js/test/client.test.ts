@@ -14,6 +14,98 @@ test("route builders scope resources to a project and allow a custom prefix", ()
     routes.claimToolCall("project/one", "call one"),
     "/platform/v2/projects/project%2Fone/tool-calls/call%20one/claim",
   );
+  assert.equal(
+    routes.skillVersionExport("project/one", "skill one", "version/one"),
+    "/platform/v2/projects/project%2Fone/skills/skill%20one/versions/version%2Fone/export",
+  );
+  assert.equal(
+    routes.delegationMessages("project/one", "delegation one"),
+    "/platform/v2/projects/project%2Fone/delegations/delegation%20one/messages",
+  );
+});
+
+test("client follows up with and cancels a persistent child delegation", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({
+        delegationId: "delegation-1",
+        state: "cancelled",
+      });
+    },
+  });
+  await client.messageDelegation(
+    "project-1",
+    "delegation-1",
+    "Re-check the approved shipment exception.",
+    { idempotencyKey: "delegation-message-1" },
+  );
+  await client.cancelDelegation("project-1", "delegation-1", {
+    idempotencyKey: "delegation-cancel-1",
+  });
+  assert.equal(
+    requests[0]?.url,
+    "https://api.example.test/v1/projects/project-1/delegations/delegation-1/messages",
+  );
+  assert.deepEqual(await requests[0]?.json(), {
+    message: "Re-check the approved shipment exception.",
+  });
+  assert.equal(requests[1]?.url.endsWith("/delegation-1/cancel"), true);
+  assert.equal(
+    requests[1]?.headers.get("idempotency-key"),
+    "delegation-cancel-1",
+  );
+});
+
+test("client publishes and manages exact Skill versions", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({ id: "skill-version-1", status: "active" });
+    },
+  });
+  const input = {
+    key: "business-rules",
+    displayName: "Business rules",
+    name: "business-rules",
+    description: "Apply approved operating rules.",
+    instructions: "Activate only when operating rules are relevant.",
+    files: [
+      {
+        path: "references/rules.md",
+        contentType: "text/markdown",
+        dataBase64: "IyBSdWxlcw==",
+      },
+    ],
+  };
+
+  await client.createSkill("project-1", input, {
+    idempotencyKey: "skill-create-1",
+  });
+  await client.updateSkillVersionLifecycle(
+    "project-1",
+    "skill-1",
+    "skill-version-1",
+    "revoked",
+    { idempotencyKey: "skill-revoke-1" },
+  );
+
+  assert.equal(
+    requests[0]?.url,
+    "https://api.example.test/v1/projects/project-1/skills",
+  );
+  assert.equal(requests[0]?.headers.get("idempotency-key"), "skill-create-1");
+  assert.deepEqual(await requests[0]?.json(), input);
+  assert.equal(requests[1]?.method, "PATCH");
+  assert.equal(
+    requests[1]?.url,
+    "https://api.example.test/v1/projects/project-1/skills/skill-1/versions/skill-version-1/lifecycle",
+  );
+  assert.deepEqual(await requests[1]?.json(), { status: "revoked" });
 });
 
 test("client encodes pagination, authentication, and idempotency", async () => {
@@ -35,7 +127,16 @@ test("client encodes pagination, authentication, and idempotency", async () => {
   await client.submitRun(
     "project one",
     "session/one",
-    { redactedInput: "hello" },
+    {
+      redactedInput: "hello",
+      files: [
+        {
+          name: "note.txt",
+          contentType: "text/plain",
+          dataBase64: "aGVsbG8=",
+        },
+      ],
+    },
     { idempotencyKey: "submit-1" },
   );
   assert.equal(
@@ -44,7 +145,16 @@ test("client encodes pagination, authentication, and idempotency", async () => {
   );
   assert.equal(requests[0]?.headers.get("authorization"), "Bearer token-value");
   assert.equal(requests[0]?.headers.get("idempotency-key"), "submit-1");
-  assert.deepEqual(await requests[0]?.json(), { redactedInput: "hello" });
+  assert.deepEqual(await requests[0]?.json(), {
+    redactedInput: "hello",
+    files: [
+      {
+        name: "note.txt",
+        contentType: "text/plain",
+        dataBase64: "aGVsbG8=",
+      },
+    ],
+  });
 });
 
 test("client creates a session together with its initial durable run", async () => {
@@ -69,6 +179,13 @@ test("client creates a session together with its initial durable run", async () 
       agentId: "agent-1",
       title: "Repository review",
       initialMessage: "Review the repository entry point.",
+      files: [
+        {
+          name: "entry.ts",
+          contentType: "application/typescript",
+          dataBase64: "ZXhwb3J0IHt9Ow==",
+        },
+      ],
     },
     { idempotencyKey: "session-1" },
   );
@@ -81,6 +198,13 @@ test("client creates a session together with its initial durable run", async () 
     agentId: "agent-1",
     title: "Repository review",
     initialMessage: "Review the repository entry point.",
+    files: [
+      {
+        name: "entry.ts",
+        contentType: "application/typescript",
+        dataBase64: "ZXhwb3J0IHt9Ow==",
+      },
+    ],
   });
   assert.equal(request?.headers.get("idempotency-key"), "session-1");
 });
@@ -117,6 +241,7 @@ test("client publishes the exact managed-agent configuration contract", async ()
         },
       },
     ],
+    skillVersionIds: ["00000000-0000-4000-8000-000000000042"],
     sandbox: {
       enabled: false,
       provider: "daytona-primary",

@@ -849,6 +849,44 @@ details.policy-details .policy-body {
   color: var(--text-3);
 }
 
+.session-tree-link {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  color: inherit;
+  min-width: 0;
+}
+.session-tree-link:hover {
+  text-decoration: none;
+}
+.session-tree-link:hover strong {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.session-tree-connector {
+  flex: none;
+  padding-top: 1px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.25;
+}
+.session-row--child td {
+  padding-block: 7px;
+  background: color-mix(in srgb, var(--surface-2) 42%, transparent);
+  font-size: 12px;
+}
+.session-row--child .entity-text small,
+.session-row--child .cell-sub {
+  font-size: 10px;
+}
+.session-row--child .entity-text strong {
+  white-space: nowrap;
+}
+.session-row--child:hover td {
+  background: var(--surface-2);
+}
+
 .pagination {
   display: flex;
   align-items: center;

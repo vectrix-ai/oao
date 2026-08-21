@@ -24,6 +24,21 @@ const STATE_POLL_MS = 5_000;
 const PROBE_SILENCE_MS = 10_000;
 const DEFAULT_DAYTONA_WORKDIR = "/home/daytona";
 
+/** Managed OAO sessions only mount PostgreSQL-bound Skills through useSkill. */
+export function isReservedWorkspaceSkillPath(path: string): boolean {
+  const normalized = path.replaceAll(/\/{2,}/gu, "/");
+  return /(?:^|\/)\.agents\/skills(?:\/|$)/u.test(normalized);
+}
+
+function assertNotReservedWorkspaceSkillPath(path: string): void {
+  if (isReservedWorkspaceSkillPath(path))
+    throw new SandboxOperationUnsupportedError({
+      operation: "workspace_skills",
+      provider: "Daytona",
+      options: ["managed_skills_only"],
+    });
+}
+
 const DEAD_STATES: ReadonlySet<string> = new Set([
   "destroyed",
   "stopped",
@@ -98,6 +113,7 @@ class DaytonaSandboxDriver implements SandboxDriver {
   }
 
   async readFile(path: string): Promise<string> {
+    assertNotReservedWorkspaceSkillPath(path);
     const buffer = await this.guarded(
       "readFile",
       this.sandbox.fs.downloadFile(path),
@@ -106,6 +122,7 @@ class DaytonaSandboxDriver implements SandboxDriver {
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
+    assertNotReservedWorkspaceSkillPath(path);
     const buffer = await this.guarded(
       "readFile",
       this.sandbox.fs.downloadFile(path),
@@ -114,6 +131,7 @@ class DaytonaSandboxDriver implements SandboxDriver {
   }
 
   async writeFile(path: string, content: string | Uint8Array): Promise<void> {
+    assertNotReservedWorkspaceSkillPath(path);
     const buffer =
       typeof content === "string"
         ? Buffer.from(content, "utf-8")
@@ -122,6 +140,7 @@ class DaytonaSandboxDriver implements SandboxDriver {
   }
 
   async stat(path: string): Promise<FileStat> {
+    assertNotReservedWorkspaceSkillPath(path);
     const info = await this.guarded(
       "stat",
       this.sandbox.fs.getFileDetails(path),
@@ -135,6 +154,7 @@ class DaytonaSandboxDriver implements SandboxDriver {
   }
 
   async readdir(path: string): Promise<string[]> {
+    assertNotReservedWorkspaceSkillPath(path);
     const entries = await this.guarded(
       "readdir",
       this.sandbox.fs.listFiles(path),
@@ -145,6 +165,7 @@ class DaytonaSandboxDriver implements SandboxDriver {
   }
 
   async exists(path: string): Promise<boolean> {
+    if (isReservedWorkspaceSkillPath(path)) return false;
     try {
       await this.guarded("exists", this.sandbox.fs.getFileDetails(path));
       return true;
@@ -155,6 +176,7 @@ class DaytonaSandboxDriver implements SandboxDriver {
   }
 
   async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
+    assertNotReservedWorkspaceSkillPath(path);
     if (options?.recursive) {
       await this.exec(`mkdir -p '${path.replace(/'/g, "'\\''")}'`);
       return;
@@ -166,6 +188,7 @@ class DaytonaSandboxDriver implements SandboxDriver {
     path: string,
     options?: { recursive?: boolean; force?: boolean },
   ): Promise<void> {
+    assertNotReservedWorkspaceSkillPath(path);
     if (options?.force) {
       throw new SandboxOperationUnsupportedError({
         operation: "rm",

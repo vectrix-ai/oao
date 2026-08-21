@@ -1,4 +1,5 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { extractBytes } from "@kreuzberg/node";
 import type { AuthSession, AuthTenantAdapter } from "@oao/auth-core";
 import { readCookie } from "@oao/auth-core";
 import {
@@ -11,6 +12,7 @@ import {
   parseRotateProjectSandboxProviderCredentialInput,
   parseRotateProjectStorageProviderCredentialInput,
   parseUpdateProjectSandboxProviderConfigurationInput,
+  RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION,
   type CreateProjectSandboxProviderInput,
   type CreateProjectStorageProviderInput,
   type CreateModelPresetInput,
@@ -28,10 +30,11 @@ import type { WakeOnlyNotifier } from "@oao/events";
 import { Hono } from "hono";
 import type { Context, MiddlewareHandler } from "hono";
 import { streamSSE } from "hono/streaming";
-import type { PgClient } from "@oao/db-postgres";
+import type { PgClient, Queryable } from "@oao/db-postgres";
 import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import type { PostgresApiStore } from "./store.js";
 import type { RuntimeCommandPort } from "./runtime-commands.js";
+import { extractOpenDocumentText } from "./open-document.js";
 import { errorEnvelope, HttpApiError } from "./errors.js";
 import {
   decodeListCursor,
@@ -120,6 +123,29 @@ type Variables = { principal: Principal; requestId: string };
 type ApiContext = Context<{ Variables: Variables }>;
 const ALLOWED_SCOPES = new Set<string>(["*", ...AUTHORIZATION_ACTIONS]);
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const MAX_RUN_FILES = 8;
+const MAX_RUN_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_RUN_FILES_BYTES = 20 * 1024 * 1024;
+const MAX_RUN_TEXT_CHARACTERS = 200_000;
+const MAX_SKILL_FILES = 128;
+const MAX_SKILL_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_SKILL_PACKAGE_BYTES = 10 * 1024 * 1024;
+const IMAGE_CONTENT_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+]);
+const TEXT_CONTENT_TYPES = new Set([
+  "application/json",
+  "application/ld+json",
+  "application/x-ndjson",
+  "application/xml",
+  "application/yaml",
+  "application/x-yaml",
+  "application/javascript",
+  "application/typescript",
+]);
 const DEFAULT_AUTH_CONFIGURATION: ApiAuthConfiguration = Object.freeze({
   provider: "development",
   appOrigins: ["http://localhost"],
@@ -182,6 +208,597 @@ function parseScopes(value: unknown): string[] {
   return [...new Set(value as string[])];
 }
 
+interface ParsedRunFile {
+  readonly id: string;
+  readonly name: string;
+  readonly contentType: string;
+  readonly bytes: Buffer;
+  readonly sizeBytes: number;
+  readonly sha256: string;
+  readonly modelText?: string;
+}
+
+interface ParsedSkillFile {
+  readonly path: string;
+  readonly contentType: string;
+  readonly bytes: Buffer;
+  readonly sizeBytes: number;
+  readonly sha256: string;
+}
+
+interface ParsedSkillVersionInput {
+  readonly name: string;
+  readonly description: string;
+  readonly instructions: string;
+  readonly license?: string;
+  readonly compatibility?: string;
+  readonly metadata: Readonly<Record<string, string>>;
+  readonly allowedTools?: string;
+  readonly files: readonly ParsedSkillFile[];
+  readonly totalBytes: number;
+  readonly contentHash: string;
+}
+
+const GENERIC_DOCUMENT_CONTENT_TYPES = new Set([
+  "application/octet-stream",
+  "application/zip",
+  "application/x-ole-storage",
+]);
+
+const DOCUMENT_CONTENT_TYPE_ALIASES: Readonly<
+  Record<string, readonly string[]>
+> = Object.freeze({
+  rtf: ["text/rtf"],
+  pages: ["application/vnd.apple.pages"],
+  numbers: ["application/vnd.apple.numbers"],
+  key: ["application/vnd.apple.keynote"],
+  eml: ["application/eml", "text/plain"],
+});
+const OPEN_DOCUMENT_EXTENSIONS = new Set([
+  "odt",
+  "ott",
+  "fodt",
+  "ods",
+  "ots",
+  "fods",
+  "odp",
+  "otp",
+  "fodp",
+  "odg",
+  "otg",
+  "fodg",
+  "odf",
+]);
+
+function imageBytesMatch(contentType: string, bytes: Buffer): boolean {
+  if (contentType === "image/png")
+    return bytes
+      .subarray(0, 8)
+      .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  if (contentType === "image/jpeg")
+    return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  if (contentType === "image/gif") {
+    const signature = bytes.subarray(0, 6).toString("ascii");
+    return signature === "GIF87a" || signature === "GIF89a";
+  }
+  if (contentType === "image/webp")
+    return (
+      bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
+      bytes.subarray(8, 12).toString("ascii") === "WEBP"
+    );
+  return false;
+}
+
+function fileExtension(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot < 0 ? "" : name.slice(dot + 1).toLowerCase();
+}
+
+function declaredDocumentContentTypeMatches(
+  extension: string,
+  declaredContentType: string,
+  canonicalContentType: string,
+): boolean {
+  return (
+    declaredContentType === canonicalContentType.toLowerCase() ||
+    GENERIC_DOCUMENT_CONTENT_TYPES.has(declaredContentType) ||
+    (DOCUMENT_CONTENT_TYPE_ALIASES[extension] ?? []).includes(
+      declaredContentType,
+    )
+  );
+}
+
+async function extractRunDocumentText(
+  name: string,
+  bytes: Buffer,
+  contentType: string,
+): Promise<string> {
+  let content: string;
+  try {
+    if (OPEN_DOCUMENT_EXTENSIONS.has(fileExtension(name))) {
+      content = extractOpenDocumentText(bytes);
+    } else {
+      const extracted = await extractBytes(bytes, contentType, {
+        outputFormat: "markdown",
+        useCache: false,
+      });
+      content = extracted.content.trim();
+    }
+  } catch {
+    throw new HttpApiError(
+      "bad_request",
+      `File ${name} could not be read as a supported document. It may be malformed, encrypted, or password-protected.`,
+    );
+  }
+  if (!content)
+    throw new HttpApiError(
+      "bad_request",
+      `File ${name} did not contain extractable text`,
+    );
+  return content;
+}
+
+async function parseRunFiles(value: unknown): Promise<ParsedRunFile[]> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_RUN_FILES)
+    throw new HttpApiError(
+      "bad_request",
+      `files must contain from 1 through ${MAX_RUN_FILES} supported files`,
+    );
+  const files: ParsedRunFile[] = [];
+  const names = new Set<string>();
+  let totalBytes = 0;
+  let totalTextCharacters = 0;
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw))
+      throw new HttpApiError("bad_request", "Each file must be an object");
+    const input = raw as Readonly<Record<string, unknown>>;
+    const name = requiredString(input.name, "files[].name", 255).normalize(
+      "NFC",
+    );
+    if (
+      /[/\\]/u.test(name) ||
+      [...name].some((character) => {
+        const codePoint = character.codePointAt(0) ?? 0;
+        return codePoint < 32 || codePoint === 127;
+      }) ||
+      name === "." ||
+      name === ".."
+    )
+      throw new HttpApiError(
+        "bad_request",
+        "File names must not contain paths or control characters",
+      );
+    if (names.has(name))
+      throw new HttpApiError(
+        "bad_request",
+        "File names must be unique within one message",
+      );
+    names.add(name);
+    const declaredContentType = requiredString(
+      input.contentType,
+      "files[].contentType",
+      200,
+    )
+      .split(";", 1)[0]!
+      .trim()
+      .toLowerCase();
+    const extension = fileExtension(name);
+    const documentContentType = Object.hasOwn(
+      RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION,
+      extension,
+    )
+      ? RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION[
+          extension as keyof typeof RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION
+        ]
+      : undefined;
+    if (
+      documentContentType &&
+      !declaredDocumentContentTypeMatches(
+        extension,
+        declaredContentType,
+        documentContentType,
+      )
+    )
+      throw new HttpApiError(
+        "bad_request",
+        `File ${name} does not match its declared content type`,
+      );
+    const contentType = documentContentType ?? declaredContentType;
+    const isImage = IMAGE_CONTENT_TYPES.has(contentType);
+    const isText =
+      contentType.startsWith("text/") || TEXT_CONTENT_TYPES.has(contentType);
+    const isDocument = documentContentType !== undefined;
+    if (!isImage && !isText && !isDocument)
+      throw new HttpApiError(
+        "bad_request",
+        `Unsupported file type for ${name}`,
+      );
+    const dataBase64 = requiredString(
+      input.dataBase64,
+      "files[].dataBase64",
+      Math.ceil((MAX_RUN_FILE_BYTES * 4) / 3) + 8,
+    );
+    if (
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(
+        dataBase64,
+      )
+    )
+      throw new HttpApiError(
+        "bad_request",
+        "File data must be canonical base64",
+      );
+    const bytes = Buffer.from(dataBase64, "base64");
+    if (bytes.byteLength < 1 || bytes.byteLength > MAX_RUN_FILE_BYTES)
+      throw new HttpApiError(
+        "bad_request",
+        `Each file must contain from 1 through ${MAX_RUN_FILE_BYTES} bytes`,
+      );
+    if (isImage && !imageBytesMatch(contentType, bytes))
+      throw new HttpApiError(
+        "bad_request",
+        `File ${name} does not match its declared image content type`,
+      );
+    totalBytes += bytes.byteLength;
+    if (totalBytes > MAX_RUN_FILES_BYTES)
+      throw new HttpApiError(
+        "bad_request",
+        `Combined file data must not exceed ${MAX_RUN_FILES_BYTES} bytes`,
+      );
+    let modelText: string | undefined;
+    if (isText) {
+      try {
+        modelText = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        throw new HttpApiError(
+          "bad_request",
+          `Text file ${name} must contain valid UTF-8`,
+        );
+      }
+      if (modelText.includes("\0"))
+        throw new HttpApiError(
+          "bad_request",
+          `Text file ${name} must not contain NUL bytes`,
+        );
+    } else if (isDocument) {
+      modelText = await extractRunDocumentText(name, bytes, contentType);
+    }
+    if (modelText !== undefined) {
+      totalTextCharacters += modelText.length;
+      if (totalTextCharacters > MAX_RUN_TEXT_CHARACTERS)
+        throw new HttpApiError(
+          "bad_request",
+          `Combined extracted file content must not exceed ${MAX_RUN_TEXT_CHARACTERS} characters`,
+        );
+    }
+    files.push({
+      id: randomUUID(),
+      name,
+      contentType,
+      bytes,
+      sizeBytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      ...(modelText === undefined ? {} : { modelText }),
+    });
+  }
+  return files;
+}
+
+function parseRunMessage(
+  value: unknown,
+  field: string,
+  files: readonly ParsedRunFile[],
+): string {
+  if (value === undefined || value === "") {
+    if (files.length === 0)
+      throw new HttpApiError(
+        "bad_request",
+        `${field} or at least one file is required`,
+      );
+    return `Review the attached ${files.length === 1 ? "file" : "files"}.`;
+  }
+  return requiredString(value, field, 100_000);
+}
+
+function publicRunFiles(files: readonly ParsedRunFile[]) {
+  return files.map((file) => ({
+    id: file.id,
+    name: file.name,
+    contentType: file.contentType,
+    sizeBytes: file.sizeBytes,
+    sha256: file.sha256,
+  }));
+}
+
+async function insertRunFiles(
+  transaction: Queryable,
+  actor: Principal,
+  runId: string,
+  messageId: string,
+  files: readonly ParsedRunFile[],
+): Promise<void> {
+  for (const file of files) {
+    await transaction.query(
+      `INSERT INTO oao.run_files (
+         organization_id,project_id,id,run_id,message_id,file_name,content_type,
+         size_bytes,content_sha256,content_bytes,extracted_text
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,decode($9,'hex'),$10,$11)`,
+      [
+        actor.organizationId,
+        actor.projectId,
+        file.id,
+        runId,
+        messageId,
+        file.name,
+        file.contentType,
+        file.sizeBytes,
+        file.sha256,
+        file.bytes,
+        file.modelText ?? null,
+      ],
+    );
+  }
+}
+
+function parseSkillFilePath(value: unknown): string {
+  const path = requiredString(value, "files[].path", 240).normalize("NFC");
+  const segments = path.split("/");
+  if (
+    path === "SKILL.md" ||
+    path.startsWith("/") ||
+    path.endsWith("/") ||
+    path.includes("\\") ||
+    path.includes("\0") ||
+    segments.some(
+      (segment) =>
+        !segment ||
+        segment === "." ||
+        segment === ".." ||
+        [...segment].some((character) => {
+          const point = character.codePointAt(0) ?? 0;
+          return point < 32 || point === 127;
+        }),
+    )
+  )
+    throw new HttpApiError(
+      "bad_request",
+      "Skill file paths must be safe relative paths and must not be SKILL.md",
+    );
+  return path;
+}
+
+function parseSkillVersionInput(
+  value: Readonly<Record<string, unknown>>,
+): ParsedSkillVersionInput {
+  const name = requiredString(value.name, "name", 64);
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(name))
+    throw new HttpApiError(
+      "bad_request",
+      "Skill name must use lowercase letters, numbers, and single hyphens",
+    );
+  const description = requiredString(value.description, "description", 1_024);
+  const instructions = requiredString(
+    value.instructions,
+    "instructions",
+    200_000,
+  );
+  const license = optionalString(value.license, "license", 500);
+  const compatibility = optionalString(
+    value.compatibility,
+    "compatibility",
+    500,
+  );
+  const allowedTools = optionalString(
+    value.allowedTools,
+    "allowedTools",
+    2_000,
+  );
+  const rawMetadata = value.metadata ?? {};
+  if (
+    !rawMetadata ||
+    typeof rawMetadata !== "object" ||
+    Array.isArray(rawMetadata)
+  )
+    throw new HttpApiError("bad_request", "metadata must be an object");
+  const metadata: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(rawMetadata)) {
+    if (!key || key.length > 120 || typeof entry !== "string")
+      throw new HttpApiError(
+        "bad_request",
+        "Skill metadata must map bounded string keys to strings",
+      );
+    metadata[key] = requiredString(entry, `metadata.${key}`, 2_000);
+  }
+  assertPublicPayload(metadata);
+  const rawFiles = value.files ?? [];
+  if (!Array.isArray(rawFiles) || rawFiles.length > MAX_SKILL_FILES)
+    throw new HttpApiError(
+      "bad_request",
+      `files must contain at most ${MAX_SKILL_FILES} entries`,
+    );
+  const files: ParsedSkillFile[] = [];
+  const foldedPaths = new Set<string>();
+  let totalBytes = Buffer.byteLength(instructions, "utf8");
+  for (const raw of rawFiles) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw))
+      throw new HttpApiError(
+        "bad_request",
+        "Each Skill file must be an object",
+      );
+    const file = raw as Readonly<Record<string, unknown>>;
+    const path = parseSkillFilePath(file.path);
+    const folded = path.toLocaleLowerCase("en-US");
+    if (foldedPaths.has(folded))
+      throw new HttpApiError(
+        "bad_request",
+        "Skill file paths must be unique after case folding",
+      );
+    foldedPaths.add(folded);
+    const contentType = requiredString(
+      file.contentType ?? "application/octet-stream",
+      "files[].contentType",
+      200,
+    )
+      .split(";", 1)[0]!
+      .trim()
+      .toLowerCase();
+    const dataBase64 = requiredString(
+      file.dataBase64,
+      "files[].dataBase64",
+      Math.ceil((MAX_SKILL_FILE_BYTES * 4) / 3) + 8,
+    );
+    if (
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(
+        dataBase64,
+      )
+    )
+      throw new HttpApiError(
+        "bad_request",
+        "Skill file data must be canonical base64",
+      );
+    const bytes = Buffer.from(dataBase64, "base64");
+    if (bytes.byteLength < 1 || bytes.byteLength > MAX_SKILL_FILE_BYTES)
+      throw new HttpApiError(
+        "bad_request",
+        `Each Skill file must contain from 1 through ${MAX_SKILL_FILE_BYTES} bytes`,
+      );
+    totalBytes += bytes.byteLength;
+    if (totalBytes > MAX_SKILL_PACKAGE_BYTES)
+      throw new HttpApiError(
+        "bad_request",
+        `Expanded Skill content must not exceed ${MAX_SKILL_PACKAGE_BYTES} bytes`,
+      );
+    files.push({
+      path,
+      contentType,
+      bytes,
+      sizeBytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+  }
+  files.sort((left, right) => left.path.localeCompare(right.path));
+  const canonical = {
+    schemaVersion: 1,
+    name,
+    description,
+    instructions,
+    ...(license ? { license } : {}),
+    ...(compatibility ? { compatibility } : {}),
+    metadata,
+    ...(allowedTools ? { allowedTools } : {}),
+    files: files.map(({ path, contentType, sizeBytes, sha256 }) => ({
+      path,
+      contentType,
+      sizeBytes,
+      sha256,
+    })),
+  };
+  return {
+    name,
+    description,
+    instructions,
+    ...(license ? { license } : {}),
+    ...(compatibility ? { compatibility } : {}),
+    metadata,
+    ...(allowedTools ? { allowedTools } : {}),
+    files,
+    totalBytes,
+    contentHash: Buffer.from(requestHash(canonical)).toString("hex"),
+  };
+}
+
+async function insertSkillVersion(
+  transaction: Queryable,
+  actor: Principal,
+  skillId: string,
+  input: ParsedSkillVersionInput,
+): Promise<Readonly<Record<string, unknown>>> {
+  const skill = await transaction.query(
+    `SELECT id FROM oao.skills
+     WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
+    [actor.organizationId, actor.projectId, skillId],
+  );
+  if (!skill.rowCount) throw new HttpApiError("not_found", "Skill not found");
+  const duplicate = await transaction.query(
+    `SELECT id FROM oao.skill_versions
+     WHERE organization_id=$1 AND project_id=$2 AND skill_id=$3
+       AND content_hash=decode($4,'hex')`,
+    [actor.organizationId, actor.projectId, skillId, input.contentHash],
+  );
+  if (duplicate.rowCount)
+    throw new HttpApiError("conflict", "This Skill version already exists");
+  const versionId = randomUUID();
+  const result = await transaction.query(
+    `INSERT INTO oao.skill_versions (
+       organization_id,project_id,id,skill_id,version,skill_name,description,
+       instructions,license,compatibility,metadata,allowed_tools,content_hash,
+       total_bytes,created_by_principal_id
+     )
+     SELECT $1,$2,$3,$4,COALESCE(max(version),0)+1,$5,$6,$7,$8,$9,$10,$11,
+            decode($12,'hex'),$13,$14
+     FROM oao.skill_versions
+     WHERE organization_id=$1 AND project_id=$2 AND skill_id=$4
+     RETURNING id,organization_id,project_id,skill_id,version,
+       skill_name AS name,description,instructions,license,compatibility,
+       metadata,allowed_tools,encode(content_hash,'hex') AS content_hash,
+       total_bytes,created_by_principal_id,created_at`,
+    [
+      actor.organizationId,
+      actor.projectId,
+      versionId,
+      skillId,
+      input.name,
+      input.description,
+      input.instructions,
+      input.license ?? null,
+      input.compatibility ?? null,
+      input.metadata,
+      input.allowedTools ?? null,
+      input.contentHash,
+      input.totalBytes,
+      actor.id,
+    ],
+  );
+  for (const file of input.files)
+    await transaction.query(
+      `INSERT INTO oao.skill_version_files (
+         organization_id,project_id,skill_version_id,file_path,content_type,
+         size_bytes,content_sha256,content_bytes
+       ) VALUES ($1,$2,$3,$4,$5,$6,decode($7,'hex'),$8)`,
+      [
+        actor.organizationId,
+        actor.projectId,
+        versionId,
+        file.path,
+        file.contentType,
+        file.sizeBytes,
+        file.sha256,
+        file.bytes,
+      ],
+    );
+  await transaction.query(
+    `INSERT INTO oao.skill_version_lifecycle (
+       organization_id,project_id,skill_version_id,status,updated_by_principal_id
+     ) VALUES ($1,$2,$3,'active',$4)`,
+    [actor.organizationId, actor.projectId, versionId, actor.id],
+  );
+  await transaction.query(
+    `UPDATE oao.skills SET latest_version_id=$4,updated_at=clock_timestamp()
+     WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+    [actor.organizationId, actor.projectId, skillId, versionId],
+  );
+  return {
+    ...(publicValue(result.rows[0]) as Readonly<Record<string, unknown>>),
+    status: "active",
+    files: input.files.map(({ path, contentType, sizeBytes, sha256 }) => ({
+      path,
+      contentType,
+      sizeBytes,
+      sha256,
+    })),
+  };
+}
+
 function parseRole(value: unknown): "owner" | "admin" | "member" | "viewer" {
   if (
     value !== "owner" &&
@@ -217,6 +834,95 @@ function parseAgentConfig(value: unknown): ManagedAgentPublicationConfig {
   }
   assertPublicPayload(config as Readonly<Record<string, PublicValue>>);
   return config;
+}
+
+function sharedSandboxPolicy(
+  sandbox: ManagedAgentPublicationConfig["sandbox"],
+): string {
+  return JSON.stringify({
+    enabled: sandbox.enabled,
+    provider: sandbox.provider,
+    ...(sandbox.snapshotId === undefined
+      ? {}
+      : { snapshotId: sandbox.snapshotId }),
+    network: sandbox.network,
+  });
+}
+
+async function assertAgentDelegatesCompatible(
+  transaction: PgClient,
+  actor: Principal,
+  agentDefinitionId: string | undefined,
+  config: ManagedAgentPublicationConfig,
+): Promise<void> {
+  if (config.delegates.length === 0) return;
+  const versionIds = config.delegates.map(
+    (delegate) => delegate.agentVersionId,
+  );
+  const result = await transaction.query<{
+    id: string;
+    agent_definition_id: string;
+    name: string;
+    sandbox: ManagedAgentPublicationConfig["sandbox"];
+  }>(
+    `SELECT version.id,version.agent_definition_id,definition.name,
+            version.config->'sandbox' AS sandbox
+       FROM oao.agent_versions version
+       JOIN oao.agent_definitions definition
+         ON definition.organization_id=version.organization_id
+        AND definition.project_id=version.project_id
+        AND definition.id=version.agent_definition_id
+      WHERE version.organization_id=$1 AND version.project_id=$2
+        AND version.id=ANY($3::uuid[])`,
+    [actor.organizationId, actor.projectId, versionIds],
+  );
+  const byId = new Map(result.rows.map((row) => [row.id, row]));
+  for (const delegate of config.delegates) {
+    const child = byId.get(delegate.agentVersionId);
+    if (!child)
+      throw new HttpApiError(
+        "bad_request",
+        `Delegate ${delegate.key} references an agent version that is not available in this project`,
+      );
+    if (child.agent_definition_id === agentDefinitionId)
+      throw new HttpApiError(
+        "bad_request",
+        `Delegate ${delegate.key} cannot reference another version of the coordinator agent`,
+      );
+    if (
+      sharedSandboxPolicy(child.sandbox) !== sharedSandboxPolicy(config.sandbox)
+    )
+      throw new HttpApiError(
+        "bad_request",
+        `Delegate ${child.name} must use the same sandbox enabled state, provider, snapshot, and network policy as the coordinator; publish a compatible child version first`,
+      );
+  }
+  if (agentDefinitionId) {
+    const cycle = await transaction.query(
+      `WITH RECURSIVE reachable(agent_version_id) AS (
+         SELECT unnest($3::uuid[])
+         UNION
+         SELECT edge.child_agent_version_id
+           FROM reachable
+           JOIN oao.agent_version_delegates edge
+             ON edge.organization_id=$1 AND edge.project_id=$2
+            AND edge.parent_agent_version_id=reachable.agent_version_id
+       )
+       SELECT 1
+         FROM reachable
+         JOIN oao.agent_versions version
+           ON version.organization_id=$1 AND version.project_id=$2
+          AND version.id=reachable.agent_version_id
+        WHERE version.agent_definition_id=$4
+        LIMIT 1`,
+      [actor.organizationId, actor.projectId, versionIds, agentDefinitionId],
+    );
+    if (cycle.rowCount)
+      throw new HttpApiError(
+        "bad_request",
+        "The delegate roster would create an agent cycle",
+      );
+  }
 }
 
 /** Publication may only name a durable preset scoped to the caller's project. */
@@ -523,17 +1229,15 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   app.get("/v1/context", async (c) => {
     const actor = principal(c);
     return dependencies.store.transaction(actor, undefined, async (tx) => {
-      const [organizationResult, projectResult] = await Promise.all([
-        tx.query(
-          "SELECT id,slug,name,created_at FROM oao.organizations WHERE id=$1",
-          [actor.organizationId],
-        ),
-        tx.query(
-          `SELECT id,organization_id,slug,name,created_at FROM oao.projects
-           WHERE organization_id=$1 AND id=$2`,
-          [actor.organizationId, actor.projectId],
-        ),
-      ]);
+      const organizationResult = await tx.query(
+        "SELECT id,slug,name,created_at FROM oao.organizations WHERE id=$1",
+        [actor.organizationId],
+      );
+      const projectResult = await tx.query(
+        `SELECT id,organization_id,slug,name,created_at FROM oao.projects
+         WHERE organization_id=$1 AND id=$2`,
+        [actor.organizationId, actor.projectId],
+      );
       const organization = publicValue(organizationResult.rows[0]);
       const project = publicValue(projectResult.rows[0]);
       if (!organization || !project)
@@ -960,6 +1664,7 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   registerModelPresetRoutes(app, dependencies);
   registerSandboxProviderRoutes(app, dependencies);
   registerStorageProviderRoutes(app, dependencies);
+  registerSkillRoutes(app, dependencies);
   registerAgentRoutes(app, dependencies);
   registerRunRoutes(app, dependencies);
   registerEventRoutes(app, dependencies);
@@ -2187,6 +2892,364 @@ function registerModelPresetRoutes(
   });
 }
 
+function registerSkillRoutes(
+  app: Hono<{ Variables: Variables }>,
+  dependencies: ApiDependencies,
+): void {
+  const versionSelect = `
+    SELECT v.id,v.organization_id,v.project_id,v.skill_id,v.version,
+           v.skill_name AS name,v.description,v.instructions,v.license,
+           v.compatibility,v.metadata,v.allowed_tools,
+           encode(v.content_hash,'hex') AS content_hash,v.total_bytes,
+           lifecycle.status,v.created_by_principal_id,v.created_at,
+           COALESCE((
+             SELECT jsonb_agg(jsonb_build_object(
+               'path',f.file_path,'content_type',f.content_type,
+               'size_bytes',f.size_bytes,
+               'sha256',encode(f.content_sha256,'hex')
+             ) ORDER BY f.file_path)
+             FROM oao.skill_version_files f
+             WHERE f.organization_id=v.organization_id
+               AND f.project_id=v.project_id
+               AND f.skill_version_id=v.id
+           ),'[]'::jsonb) AS files
+    FROM oao.skill_versions v
+    JOIN oao.skill_version_lifecycle lifecycle
+      ON lifecycle.organization_id=v.organization_id
+     AND lifecycle.project_id=v.project_id
+     AND lifecycle.skill_version_id=v.id`;
+
+  app.get("/v1/projects/:projectId/skills", async (c) => {
+    const actor = assertProject(c);
+    const limit = parseLimit(c.req.query("limit"));
+    const cursor = decodeListCursor(c.req.query("cursor"));
+    return dependencies.store.transaction(actor, "skill:read", async (tx) => {
+      const condition = dependencies.store.cursorCondition(
+        cursor,
+        "s.created_at",
+        3,
+        "s.id",
+      );
+      const result = await tx.query(
+        `SELECT s.id,s.organization_id,s.project_id,s.skill_key AS key,
+                s.display_name,s.latest_version_id,s.created_by_principal_id,
+                s.created_at,s.updated_at,v.version,v.skill_name AS name,
+                v.description,encode(v.content_hash,'hex') AS content_hash,
+                lifecycle.status,
+                (SELECT count(*)::int FROM oao.skill_version_files f
+                  WHERE f.organization_id=v.organization_id
+                    AND f.project_id=v.project_id
+                    AND f.skill_version_id=v.id) AS file_count,
+                (SELECT jsonb_agg(all_versions.id ORDER BY all_versions.version)
+                   FROM oao.skill_versions all_versions
+                  WHERE all_versions.organization_id=s.organization_id
+                    AND all_versions.project_id=s.project_id
+                    AND all_versions.skill_id=s.id) AS version_ids
+         FROM oao.skills s
+         LEFT JOIN oao.skill_versions v
+           ON v.organization_id=s.organization_id
+          AND v.project_id=s.project_id AND v.id=s.latest_version_id
+         LEFT JOIN oao.skill_version_lifecycle lifecycle
+           ON lifecycle.organization_id=v.organization_id
+          AND lifecycle.project_id=v.project_id
+          AND lifecycle.skill_version_id=v.id
+         WHERE s.organization_id=$1 AND s.project_id=$2${condition.sql}
+         ORDER BY s.created_at DESC,s.id DESC
+         LIMIT $${3 + condition.values.length}`,
+        [actor.organizationId, actor.projectId, ...condition.values, limit + 1],
+      );
+      return c.json(pagination(rows(result), limit, "createdAt"));
+    });
+  });
+
+  app.post("/v1/projects/:projectId/skills", async (c) => {
+    const actor = assertProject(c);
+    const body = await readJsonObject(c.req.raw);
+    const idem = idempotencyKey(c.req.raw);
+    const versionInput = parseSkillVersionInput(body);
+    const key = requiredString(body.key ?? versionInput.name, "key", 120);
+    if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(key))
+      throw new HttpApiError(
+        "bad_request",
+        "Skill key must use lowercase letters, numbers, and single hyphens",
+      );
+    const displayName = requiredString(
+      body.displayName ?? versionInput.name,
+      "displayName",
+      200,
+    );
+    return dependencies.store.transaction(actor, "skill:write", async (tx) => {
+      const response = await dependencies.store.idempotent(tx, actor, {
+        scope: "POST:/skills",
+        key: idem,
+        hash: requestHash(body),
+        status: 201,
+        execute: async () => {
+          const skillId = randomUUID();
+          await tx.query(
+            `INSERT INTO oao.skills (
+               organization_id,project_id,id,skill_key,display_name,
+               created_by_principal_id
+             ) VALUES ($1,$2,$3,$4,$5,$6)`,
+            [
+              actor.organizationId,
+              actor.projectId,
+              skillId,
+              key,
+              displayName,
+              actor.id,
+            ],
+          );
+          const version = await insertSkillVersion(
+            tx,
+            actor,
+            skillId,
+            versionInput,
+          );
+          await dependencies.store.appendEvent(tx, actor, {
+            aggregateType: "skill",
+            aggregateId: skillId,
+            kind: "skill.created",
+            payload: { skillVersionId: String(version.id), version: 1 },
+          });
+          await dependencies.store.appendEvent(tx, actor, {
+            aggregateType: "skill",
+            aggregateId: skillId,
+            kind: "skill.version_published",
+            payload: {
+              skillVersionId: String(version.id),
+              version: 1,
+              contentHash: versionInput.contentHash,
+            },
+          });
+          await dependencies.store.appendAudit(tx, actor, {
+            action: "skill.created",
+            resourceType: "skill",
+            resourceId: skillId,
+            detail: { skillVersionId: String(version.id), version: 1 },
+          });
+          return {
+            id: skillId,
+            organizationId: actor.organizationId,
+            projectId: actor.projectId,
+            key,
+            displayName,
+            latestVersionId: String(version.id),
+            latestVersion: version,
+          };
+        },
+      });
+      c.header("idempotency-replayed", String(response.replayed));
+      return c.json(response.body, 201);
+    });
+  });
+
+  app.get("/v1/projects/:projectId/skills/:skillId", async (c) => {
+    const actor = assertProject(c);
+    return dependencies.store.transaction(actor, "skill:read", async (tx) => {
+      const result = await tx.query(
+        `SELECT s.id,s.organization_id,s.project_id,s.skill_key AS key,
+                s.display_name,s.latest_version_id,s.created_by_principal_id,
+                s.created_at,s.updated_at,v.version,v.skill_name AS name,
+                v.description,encode(v.content_hash,'hex') AS content_hash,
+                lifecycle.status,
+                (SELECT count(*)::int FROM oao.skill_version_files f
+                  WHERE f.organization_id=v.organization_id
+                    AND f.project_id=v.project_id
+                    AND f.skill_version_id=v.id) AS file_count,
+                (SELECT jsonb_agg(all_versions.id ORDER BY all_versions.version)
+                   FROM oao.skill_versions all_versions
+                  WHERE all_versions.organization_id=s.organization_id
+                    AND all_versions.project_id=s.project_id
+                    AND all_versions.skill_id=s.id) AS version_ids
+         FROM oao.skills s
+         JOIN oao.skill_versions v
+           ON v.organization_id=s.organization_id
+          AND v.project_id=s.project_id AND v.id=s.latest_version_id
+         JOIN oao.skill_version_lifecycle lifecycle
+           ON lifecycle.organization_id=v.organization_id
+          AND lifecycle.project_id=v.project_id
+          AND lifecycle.skill_version_id=v.id
+         WHERE s.organization_id=$1 AND s.project_id=$2 AND s.id=$3`,
+        [actor.organizationId, actor.projectId, c.req.param("skillId")],
+      );
+      const skill = publicValue(result.rows[0]) as
+        Readonly<Record<string, unknown>> | undefined;
+      if (!skill) throw new HttpApiError("not_found", "Skill not found");
+      const versions = await tx.query(
+        `${versionSelect}
+         WHERE v.organization_id=$1 AND v.project_id=$2 AND v.skill_id=$3
+         ORDER BY v.version DESC`,
+        [actor.organizationId, actor.projectId, c.req.param("skillId")],
+      );
+      return c.json({ ...skill, versions: rows(versions) });
+    });
+  });
+
+  app.post("/v1/projects/:projectId/skills/:skillId/versions", async (c) => {
+    const actor = assertProject(c);
+    const body = await readJsonObject(c.req.raw);
+    const idem = idempotencyKey(c.req.raw);
+    const input = parseSkillVersionInput(body);
+    return dependencies.store.transaction(actor, "skill:write", async (tx) => {
+      const response = await dependencies.store.idempotent(tx, actor, {
+        scope: `POST:/skills/${c.req.param("skillId")}/versions`,
+        key: idem,
+        hash: requestHash(body),
+        status: 201,
+        execute: async () => {
+          const version = await insertSkillVersion(
+            tx,
+            actor,
+            c.req.param("skillId"),
+            input,
+          );
+          await dependencies.store.appendEvent(tx, actor, {
+            aggregateType: "skill",
+            aggregateId: c.req.param("skillId"),
+            kind: "skill.version_published",
+            payload: {
+              skillVersionId: String(version.id),
+              version: Number(version.version),
+              contentHash: input.contentHash,
+            },
+          });
+          await dependencies.store.appendAudit(tx, actor, {
+            action: "skill.version_published",
+            resourceType: "skill_version",
+            resourceId: String(version.id),
+            detail: {
+              skillId: c.req.param("skillId"),
+              version: Number(version.version),
+            },
+          });
+          return version;
+        },
+      });
+      c.header("idempotency-replayed", String(response.replayed));
+      return c.json(response.body, 201);
+    });
+  });
+
+  app.get(
+    "/v1/projects/:projectId/skills/:skillId/versions/:versionId/export",
+    async (c) => {
+      const actor = assertProject(c);
+      return dependencies.store.transaction(actor, "skill:read", async (tx) => {
+        const version = await tx.query(
+          `${versionSelect}
+           WHERE v.organization_id=$1 AND v.project_id=$2
+             AND v.skill_id=$3 AND v.id=$4`,
+          [
+            actor.organizationId,
+            actor.projectId,
+            c.req.param("skillId"),
+            c.req.param("versionId"),
+          ],
+        );
+        if (!version.rowCount)
+          throw new HttpApiError("not_found", "Skill version not found");
+        const files = await tx.query<{
+          file_path: string;
+          content_type: string;
+          content_bytes: Buffer;
+        }>(
+          `SELECT file_path,content_type,content_bytes
+           FROM oao.skill_version_files
+           WHERE organization_id=$1 AND project_id=$2 AND skill_version_id=$3
+           ORDER BY file_path`,
+          [actor.organizationId, actor.projectId, c.req.param("versionId")],
+        );
+        return c.json({
+          schemaVersion: 1,
+          version: publicValue(version.rows[0]),
+          files: files.rows.map((file) => ({
+            path: file.file_path,
+            contentType: file.content_type,
+            dataBase64: Buffer.from(file.content_bytes).toString("base64"),
+          })),
+        });
+      });
+    },
+  );
+
+  app.patch(
+    "/v1/projects/:projectId/skills/:skillId/versions/:versionId/lifecycle",
+    async (c) => {
+      const actor = assertProject(c);
+      const body = await readJsonObject(c.req.raw);
+      const idem = idempotencyKey(c.req.raw);
+      const status = requiredString(body.status, "status", 20);
+      if (status !== "deprecated" && status !== "revoked")
+        throw new HttpApiError(
+          "bad_request",
+          "status must be deprecated or revoked",
+        );
+      return dependencies.store.transaction(
+        actor,
+        "skill:revoke",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `PATCH:/skills/${c.req.param("skillId")}/versions/${c.req.param("versionId")}/lifecycle`,
+            key: idem,
+            hash: requestHash(body),
+            status: 200,
+            execute: async () => {
+              const result = await tx.query(
+                `UPDATE oao.skill_version_lifecycle lifecycle
+                 SET status=$5,updated_by_principal_id=$6,updated_at=clock_timestamp()
+                 FROM oao.skill_versions version
+                 WHERE lifecycle.organization_id=$1 AND lifecycle.project_id=$2
+                   AND lifecycle.skill_version_id=$4
+                   AND version.organization_id=lifecycle.organization_id
+                   AND version.project_id=lifecycle.project_id
+                   AND version.id=lifecycle.skill_version_id
+                   AND version.skill_id=$3
+                   AND lifecycle.status <> 'revoked'
+                   AND (lifecycle.status='active' OR $5='revoked')
+                 RETURNING lifecycle.skill_version_id,lifecycle.status,lifecycle.updated_at`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  c.req.param("skillId"),
+                  c.req.param("versionId"),
+                  status,
+                  actor.id,
+                ],
+              );
+              const lifecycle = publicValue(result.rows[0]) as
+                Readonly<Record<string, unknown>> | undefined;
+              if (!lifecycle)
+                throw new HttpApiError(
+                  "conflict",
+                  "Skill version is missing or cannot make that lifecycle transition",
+                );
+              await dependencies.store.appendEvent(tx, actor, {
+                aggregateType: "skill",
+                aggregateId: c.req.param("skillId"),
+                kind:
+                  status === "revoked"
+                    ? "skill.version_revoked"
+                    : "skill.version_deprecated",
+                payload: { skillVersionId: c.req.param("versionId") },
+              });
+              await dependencies.store.appendAudit(tx, actor, {
+                action: `skill.version_${status}`,
+                resourceType: "skill_version",
+                resourceId: c.req.param("versionId"),
+                detail: { skillId: c.req.param("skillId") },
+              });
+              return lifecycle;
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body);
+        },
+      );
+    },
+  );
+}
+
 function registerAgentRoutes(
   app: Hono<{ Variables: Variables }>,
   dependencies: ApiDependencies,
@@ -2208,6 +3271,7 @@ function registerAgentRoutes(
       const result = await tx.query(
         `SELECT d.id,d.organization_id,d.project_id,d.agent_key AS key,d.name,COALESCE(d.description,'') AS description,
                 d.latest_version_id,v.version,v.config->>'modelPreset' AS model,
+                v.config->'sandbox' AS sandbox,
                 CASE WHEN v.id IS NULL THEN 'draft' ELSE 'published' END AS status,
                 d.created_at,COALESCE(v.created_at,d.created_at) AS updated_at
          FROM oao.agent_definitions d
@@ -2235,85 +3299,93 @@ function registerAgentRoutes(
         ? undefined
         : optionalString(body.description, "description");
     const config = parseAgentConfig(body.initialConfig ?? body.config);
-    return dependencies.store.transaction(actor, "agent:write", async (tx) => {
-      await assertModelPresetApproved(
-        tx,
-        actor,
-        config.modelPreset,
-        activeModelPresetKeys,
-        projectModelsEnabled,
-      );
-      await assertSandboxProviderApproved(
-        tx,
-        actor,
-        config.sandbox,
-        projectModelsEnabled,
-      );
-      const response = await dependencies.store.idempotent(tx, actor, {
-        scope: "POST:/agents",
-        key: idem,
-        hash: requestHash(body),
-        status: 201,
-        execute: async () => {
-          const agentId = randomUUID();
-          const versionId = randomUUID();
-          await tx.query(
-            `INSERT INTO oao.agent_definitions
+    return dependencies.store.transaction(
+      actor,
+      config.skillVersionIds.length
+        ? (["agent:write", "skill:bind"] as const)
+        : "agent:write",
+      async (tx) => {
+        await assertModelPresetApproved(
+          tx,
+          actor,
+          config.modelPreset,
+          activeModelPresetKeys,
+          projectModelsEnabled,
+        );
+        await assertSandboxProviderApproved(
+          tx,
+          actor,
+          config.sandbox,
+          projectModelsEnabled,
+        );
+        await assertAgentDelegatesCompatible(tx, actor, undefined, config);
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: "POST:/agents",
+          key: idem,
+          hash: requestHash(body),
+          status: 201,
+          execute: async () => {
+            const agentId = randomUUID();
+            const versionId = randomUUID();
+            await tx.query(
+              `INSERT INTO oao.agent_definitions
                (organization_id,project_id,id,agent_key,name,description)
              VALUES ($1,$2,$3,$4,$5,$6)
              RETURNING id`,
-            [
-              actor.organizationId,
-              actor.projectId,
-              agentId,
-              agentKey,
-              name,
-              description ?? null,
-            ],
-          );
-          await tx.query(
-            "SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7)",
-            [
-              actor.organizationId,
-              actor.projectId,
-              agentId,
-              versionId,
-              config,
-              requestHash(config),
-              actor.id,
-            ],
-          );
-          const result = await tx.query(
-            `SELECT d.id,d.organization_id,d.project_id,d.agent_key AS key,d.name,COALESCE(d.description,'') AS description,
-                    d.latest_version_id,v.version,v.config->>'modelPreset' AS model,'published' AS status,
+              [
+                actor.organizationId,
+                actor.projectId,
+                agentId,
+                agentKey,
+                name,
+                description ?? null,
+              ],
+            );
+            await tx.query(
+              "SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7)",
+              [
+                actor.organizationId,
+                actor.projectId,
+                agentId,
+                versionId,
+                config,
+                requestHash(config),
+                actor.id,
+              ],
+            );
+            const result = await tx.query(
+              `SELECT d.id,d.organization_id,d.project_id,d.agent_key AS key,d.name,COALESCE(d.description,'') AS description,
+                    d.latest_version_id,v.version,v.config->>'modelPreset' AS model,
+                    v.config->'sandbox' AS sandbox,'published' AS status,
                     d.created_at,v.created_at AS updated_at
              FROM oao.agent_definitions d JOIN oao.agent_versions v
                ON v.organization_id=d.organization_id AND v.project_id=d.project_id
               AND v.id=d.latest_version_id
              WHERE d.organization_id=$1 AND d.project_id=$2 AND d.id=$3`,
-            [actor.organizationId, actor.projectId, agentId],
-          );
-          const agent = publicValue(result.rows[0]) as Readonly<
-            Record<string, unknown>
-          >;
-          await dependencies.store.appendAudit(tx, actor, {
-            action: "agent.created",
-            resourceType: "agent",
-            resourceId: agentId,
-            detail: { initialVersionId: versionId },
-          });
-          await dependencies.store.appendAudit(tx, actor, {
-            action: "agent_version.published",
-            resourceType: "agent_version",
-            resourceId: versionId,
-            detail: { agentId, version: 1 },
-          });
-          return agent;
-        },
-      });
-      c.header("idempotency-replayed", String(response.replayed));
-      return c.json(response.body, 201);
-    });
+              [actor.organizationId, actor.projectId, agentId],
+            );
+            const agent = publicValue(result.rows[0]) as Readonly<
+              Record<string, unknown>
+            >;
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "agent.created",
+              resourceType: "agent",
+              resourceId: agentId,
+              detail: { initialVersionId: versionId },
+            });
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "agent_version.published",
+              resourceType: "agent_version",
+              resourceId: versionId,
+              detail: { agentId, version: 1 },
+            });
+            return agent;
+          },
+        });
+        c.header("idempotency-replayed", String(response.replayed));
+        return c.json(response.body, 201);
+      },
+    );
   });
 
   app.get("/v1/projects/:projectId/agents/:agentId", async (c) => {
@@ -2322,6 +3394,7 @@ function registerAgentRoutes(
       const result = await tx.query(
         `SELECT d.id,d.organization_id,d.project_id,d.agent_key AS key,d.name,COALESCE(d.description,'') AS description,
                 d.latest_version_id,v.version,v.config->>'modelPreset' AS model,
+                v.config->'sandbox' AS sandbox,
                 CASE WHEN v.id IS NULL THEN 'draft' ELSE 'published' END AS status,
                 d.created_at,COALESCE(v.created_at,d.created_at) AS updated_at
          FROM oao.agent_definitions d
@@ -2401,57 +3474,69 @@ function registerAgentRoutes(
     const body = await readJsonObject(c.req.raw);
     const idem = idempotencyKey(c.req.raw);
     const config = parseAgentConfig(body.config ?? body);
-    return dependencies.store.transaction(actor, "agent:write", async (tx) => {
-      await assertModelPresetApproved(
-        tx,
-        actor,
-        config.modelPreset,
-        activeModelPresetKeys,
-        projectModelsEnabled,
-      );
-      await assertSandboxProviderApproved(
-        tx,
-        actor,
-        config.sandbox,
-        projectModelsEnabled,
-      );
-      const response = await dependencies.store.idempotent(tx, actor, {
-        scope: `POST:/agents/${c.req.param("agentId")}/versions`,
-        key: idem,
-        hash: requestHash(body),
-        status: 201,
-        execute: async () => {
-          const result = await tx.query(
-            `SELECT (published).*
+    return dependencies.store.transaction(
+      actor,
+      config.skillVersionIds.length
+        ? (["agent:write", "skill:bind"] as const)
+        : "agent:write",
+      async (tx) => {
+        await assertModelPresetApproved(
+          tx,
+          actor,
+          config.modelPreset,
+          activeModelPresetKeys,
+          projectModelsEnabled,
+        );
+        await assertSandboxProviderApproved(
+          tx,
+          actor,
+          config.sandbox,
+          projectModelsEnabled,
+        );
+        await assertAgentDelegatesCompatible(
+          tx,
+          actor,
+          c.req.param("agentId"),
+          config,
+        );
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: `POST:/agents/${c.req.param("agentId")}/versions`,
+          key: idem,
+          hash: requestHash(body),
+          status: 201,
+          execute: async () => {
+            const result = await tx.query(
+              `SELECT (published).*
              FROM (SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7) AS published) q`,
-            [
-              actor.organizationId,
-              actor.projectId,
-              c.req.param("agentId"),
-              randomUUID(),
-              config,
-              requestHash(config),
-              actor.id,
-            ],
-          );
-          const version = publicValue(result.rows[0]) as Readonly<
-            Record<string, unknown>
-          >;
-          await dependencies.store.appendAudit(tx, actor, {
-            action: "agent_version.published",
-            resourceType: "agent_version",
-            resourceId: String(version.id),
-            detail: {
-              agentId: c.req.param("agentId"),
-              version: Number(version.version),
-            },
-          });
-          return version;
-        },
-      });
-      c.header("idempotency-replayed", String(response.replayed));
-      return c.json(response.body, 201);
-    });
+              [
+                actor.organizationId,
+                actor.projectId,
+                c.req.param("agentId"),
+                randomUUID(),
+                config,
+                requestHash(config),
+                actor.id,
+              ],
+            );
+            const version = publicValue(result.rows[0]) as Readonly<
+              Record<string, unknown>
+            >;
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "agent_version.published",
+              resourceType: "agent_version",
+              resourceId: String(version.id),
+              detail: {
+                agentId: c.req.param("agentId"),
+                version: Number(version.version),
+              },
+            });
+            return version;
+          },
+        });
+        c.header("idempotency-replayed", String(response.replayed));
+        return c.json(response.body, 201);
+      },
+    );
   });
 }
 
@@ -2483,6 +3568,7 @@ function registerRunRoutes(
                      WHEN mi.unavailable=mi.invocations THEN 'unavailable'
                      WHEN mi.provider_observed=mi.invocations THEN 'provider_observed'
                      ELSE 'estimated' END AS cost_provenance,
+                delegation.parent_session_id,delegation.delegate_key,
                 s.created_at,s.last_activity_at
          FROM oao.sessions s
          JOIN oao.threads t ON t.organization_id=s.organization_id AND t.project_id=s.project_id AND t.id=s.thread_id
@@ -2502,6 +3588,15 @@ function registerRunRoutes(
              ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id
            WHERE r.organization_id=s.organization_id AND r.project_id=s.project_id AND r.session_id=s.id
          ) mi ON true
+         LEFT JOIN LATERAL (
+           SELECT relation.parent_session_id,relation.delegate_key
+           FROM oao.agent_delegations relation
+           WHERE relation.organization_id=s.organization_id
+             AND relation.project_id=s.project_id
+             AND relation.child_session_id=s.id
+           ORDER BY relation.created_at,relation.id
+           LIMIT 1
+         ) delegation ON true
          WHERE s.organization_id=$1 AND s.project_id=$2${condition.sql}
          ORDER BY s.last_activity_at DESC,s.id DESC LIMIT $${3 + condition.values.length}`,
         [actor.organizationId, actor.projectId, ...condition.values, limit + 1],
@@ -2527,10 +3622,11 @@ function registerRunRoutes(
         "bad_request",
         "agentVersionId or agentId is required",
       );
-    const initialMessage = requiredString(
+    const files = await parseRunFiles(body.files);
+    const initialMessage = parseRunMessage(
       body.initialMessage,
       "initialMessage",
-      100_000,
+      files,
     );
     const title = optionalString(body.title, "title", 500);
     return dependencies.store.transaction(
@@ -2596,7 +3692,10 @@ function registerRunRoutes(
                 runId,
                 actor.id,
                 idem,
-                { message: initialMessage },
+                {
+                  message: initialMessage,
+                  ...(files.length ? { files: publicRunFiles(files) } : {}),
+                },
                 messageId,
                 initialMessage,
               ],
@@ -2607,6 +3706,25 @@ function registerRunRoutes(
             const run = publicValue(result.rows[0]?.run) as Readonly<
               Record<string, unknown>
             >;
+            const skillBindings = await tx.query(
+              `INSERT INTO oao.session_skill_bindings (
+                 organization_id,project_id,session_id,agent_version_id,
+                 skill_version_id,skill_name
+               )
+               SELECT organization_id,project_id,$3,agent_version_id,
+                      skill_version_id,skill_name
+               FROM oao.agent_version_skill_bindings
+               WHERE organization_id=$1 AND project_id=$2
+                 AND agent_version_id=$4
+               RETURNING skill_version_id`,
+              [
+                actor.organizationId,
+                actor.projectId,
+                sessionId,
+                agentVersionId,
+              ],
+            );
+            await insertRunFiles(tx, actor, runId, messageId, files);
             await dependencies.store.appendEvent(tx, actor, {
               aggregateType: "run",
               aggregateId: runId,
@@ -2617,13 +3735,22 @@ function registerRunRoutes(
               aggregateType: "thread",
               aggregateId: threadId,
               kind: "message.created",
-              payload: { messageId, runId, role: "user" },
+              payload: {
+                messageId,
+                runId,
+                role: "user",
+                fileCount: files.length,
+              },
             });
             await dependencies.store.appendAudit(tx, actor, {
               action: "session.created",
               resourceType: "session",
               resourceId: sessionId,
-              detail: { initialRunId: runId },
+              detail: {
+                initialRunId: runId,
+                fileCount: files.length,
+                skillCount: skillBindings.rowCount ?? 0,
+              },
             });
             await dependencies.runtimeCommands.enqueue(tx, {
               organizationId: actor.organizationId,
@@ -2687,43 +3814,43 @@ function registerRunRoutes(
         actor.projectId,
         c.req.param("sessionId"),
       ];
-      const [
-        runs,
-        transcript,
-        timeline,
-        invocations,
-        events,
-        toolCalls,
-        approvals,
-        sandboxCommands,
-        sandboxes,
-        workspaceBackups,
-      ] = await Promise.all([
-        tx.query(
-          `SELECT id,thread_id,session_id,agent_version_id,state,cancellation_requested_at,
+      const runs = await tx.query(
+        `SELECT id,thread_id,session_id,agent_version_id,state,cancellation_requested_at,
                     admitted_at,settled_at,created_at,updated_at
              FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND session_id=$3
              ORDER BY created_at,id`,
-          values,
-        ),
-        tx.query(
-          `SELECT m.id,m.thread_id,m.run_id,m.role,m.redacted_content,m.created_at
+        values,
+      );
+      const transcript = await tx.query(
+        `SELECT m.id,m.organization_id,m.project_id,m.thread_id,m.run_id,m.role,
+                  m.redacted_content,m.created_at,
+                  COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id',f.id,'organization_id',f.organization_id,'project_id',f.project_id,
+                      'run_id',f.run_id,'message_id',f.message_id,'name',f.file_name,
+                      'content_type',f.content_type,'size_bytes',f.size_bytes,
+                      'sha256',encode(f.content_sha256,'hex'),'created_at',f.created_at
+                    ) ORDER BY f.created_at,f.id)
+                    FROM oao.run_files f
+                    WHERE f.organization_id=m.organization_id AND f.project_id=m.project_id
+                      AND f.message_id=m.id
+                  ),'[]'::jsonb) AS files
              FROM oao.messages m JOIN oao.runs r
                ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id
              WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
              ORDER BY m.created_at,m.id`,
-          values,
-        ),
-        tx.query(
-          `SELECT e.run_id,e.entry_sequence,e.entry_type,e.started_at,e.completed_at,e.safe_detail
+        values,
+      );
+      const timeline = await tx.query(
+        `SELECT e.run_id,e.entry_sequence,e.entry_type,e.started_at,e.completed_at,e.safe_detail
              FROM oao.timeline_entries e JOIN oao.runs r
                ON r.organization_id=e.organization_id AND r.project_id=e.project_id AND r.id=e.run_id
              WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
              ORDER BY r.created_at,e.entry_sequence`,
-          values,
-        ),
-        tx.query(
-          `SELECT m.id,m.run_id,m.attempt,m.provider_key,m.model_key,m.provider_request_id,
+        values,
+      );
+      const invocations = await tx.query(
+        `SELECT m.id,m.run_id,m.attempt,m.provider_key,m.model_key,m.provider_request_id,
                     m.status,m.input_tokens,m.output_tokens,m.cost_microunits,m.usage_source,
                     m.pricing_snapshot,m.provider_route,m.safe_request,m.safe_response,
                     m.started_at,m.completed_at
@@ -2731,37 +3858,37 @@ function registerRunRoutes(
                ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id
              WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
              ORDER BY m.started_at,m.attempt`,
-          values,
-        ),
-        tx.query(
-          `SELECT e.project_position,e.id,e.aggregate_type,e.aggregate_id,e.aggregate_sequence,
+        values,
+      );
+      const events = await tx.query(
+        `SELECT e.project_position,e.id,e.aggregate_type,e.aggregate_id,e.aggregate_sequence,
                     e.event_kind,e.public_payload,e.occurred_at
              FROM oao.product_events e WHERE e.organization_id=$1 AND e.project_id=$2
                AND (e.aggregate_id=$3 OR e.aggregate_id IN (
                  SELECT r.id FROM oao.runs r WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
                )) ORDER BY e.project_position`,
-          values,
-        ),
-        tx.query(
-          `SELECT c.id,c.run_id,c.tool_name,c.owner,c.stage,c.safe_arguments,c.claim_fence,
+        values,
+      );
+      const toolCalls = await tx.query(
+        `SELECT c.id,c.run_id,c.tool_name,c.owner,c.stage,c.safe_arguments,c.claim_fence,
                     c.lease_expires_at,c.flue_tool_call_ref,c.created_at,c.updated_at
              FROM oao.tool_calls c JOIN oao.runs r
                ON r.organization_id=c.organization_id AND r.project_id=c.project_id AND r.id=c.run_id
              WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
              ORDER BY c.created_at,c.id`,
-          values,
-        ),
-        tx.query(
-          `SELECT a.id,a.run_id,a.tool_call_id,a.status,a.summary,a.expires_at,
+        values,
+      );
+      const approvals = await tx.query(
+        `SELECT a.id,a.run_id,a.tool_call_id,a.status,a.summary,a.expires_at,
                     a.resolved_by_principal_id,a.resolved_at,a.created_at
              FROM oao.approvals a JOIN oao.runs r
                ON r.organization_id=a.organization_id AND r.project_id=a.project_id AND r.id=a.run_id
              WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
              ORDER BY a.created_at,a.id`,
-          values,
-        ),
-        tx.query(
-          `SELECT c.id,c.run_id,c.state,
+        values,
+      );
+      const sandboxCommands = await tx.query(
+        `SELECT c.id,c.run_id,c.state,
                     c.safe_command->>'toolName' AS tool_name,
                     NULLIF(c.safe_command->>'path','') AS path,
                     NULLIF(c.safe_command->>'commandName','') AS command_name,
@@ -2773,17 +3900,17 @@ function registerRunRoutes(
                ON r.organization_id=c.organization_id AND r.project_id=c.project_id AND r.id=c.run_id
              WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
              ORDER BY c.created_at,c.id`,
-          values,
-        ),
-        tx.query(
-          `SELECT id,run_id,thread_id,session_id,provider,provider_ref,target_preference,provider_target,
+        values,
+      );
+      const sandboxes = await tx.query(
+        `SELECT id,run_id,thread_id,session_id,provider,provider_ref,target_preference,provider_target,
                     state,egress_policy,safe_error,created_at,updated_at,stopped_at
              FROM oao.sandbox_instances WHERE organization_id=$1 AND project_id=$2 AND session_id=$3
              ORDER BY created_at,id`,
-          values,
-        ),
-        tx.query(
-          `SELECT b.thread_id,b.session_id,b.last_run_id,p.provider_key,p.display_name,
+        values,
+      );
+      const workspaceBackups = await tx.query(
+        `SELECT b.thread_id,b.session_id,b.last_run_id,p.provider_key,p.display_name,
                   p.provider_type,p.bucket,b.object_key,b.content_length,b.generation,
                   b.backed_up_at,b.last_restored_at
              FROM oao.thread_workspace_backups b
@@ -2791,11 +3918,58 @@ function registerRunRoutes(
                ON p.organization_id=b.organization_id AND p.project_id=b.project_id
               AND p.id=b.storage_provider_id
             WHERE b.organization_id=$1 AND b.project_id=$2 AND b.session_id=$3`,
-          values,
-        ),
-      ]);
+        values,
+      );
+      const skills = await tx.query(
+        `SELECT binding.skill_version_id,binding.skill_name AS name,
+                  version.skill_id,version.version,version.description,
+                  encode(version.content_hash,'hex') AS content_hash,
+                  lifecycle.status
+           FROM oao.session_skill_bindings binding
+           JOIN oao.skill_versions version
+             ON version.organization_id=binding.organization_id
+            AND version.project_id=binding.project_id
+            AND version.id=binding.skill_version_id
+           JOIN oao.skill_version_lifecycle lifecycle
+             ON lifecycle.organization_id=version.organization_id
+            AND lifecycle.project_id=version.project_id
+            AND lifecycle.skill_version_id=version.id
+           WHERE binding.organization_id=$1 AND binding.project_id=$2
+             AND binding.session_id=$3
+           ORDER BY binding.skill_name`,
+        values,
+      );
+      const delegations = await tx.query(
+        `SELECT delegation.id,delegation.parent_run_id,delegation.parent_thread_id,
+                  delegation.parent_session_id,delegation.parent_agent_version_id,
+                  delegation.delegate_key,delegation.child_agent_version_id,
+                  delegation.child_thread_id,delegation.child_session_id,
+                  delegation.workspace_id,delegation.state,
+                  CASE WHEN delegation.parent_session_id=$3
+                    THEN 'outgoing' ELSE 'parent' END AS direction,
+                  latest.child_run_id AS latest_child_run_id,
+                  latest.state AS latest_child_run_state,
+                  delegation.created_at,delegation.updated_at
+             FROM oao.agent_delegations delegation
+             JOIN LATERAL (
+               SELECT link.child_run_id,child.state::text AS state
+                 FROM oao.delegation_runs link
+                 JOIN oao.runs child ON child.organization_id=link.organization_id
+                  AND child.project_id=link.project_id AND child.id=link.child_run_id
+                WHERE link.organization_id=delegation.organization_id
+                  AND link.project_id=delegation.project_id
+                  AND link.delegation_id=delegation.id
+                ORDER BY link.ordinal DESC LIMIT 1
+             ) latest ON true
+            WHERE delegation.organization_id=$1 AND delegation.project_id=$2
+              AND (delegation.parent_session_id=$3 OR delegation.child_session_id=$3)
+            ORDER BY delegation.created_at,delegation.id`,
+        values,
+      );
       return c.json({
         ...session,
+        skills: rows(skills),
+        delegations: rows(delegations),
         runs: rows(runs),
         transcript: rows(transcript),
         timeline: rows(timeline),
@@ -2825,13 +3999,308 @@ function registerRunRoutes(
     });
   });
 
+  app.get("/v1/projects/:projectId/delegations/:delegationId", async (c) => {
+    const actor = assertProject(c);
+    return dependencies.store.transaction(
+      actor,
+      "delegation:read",
+      async (tx) => {
+        const result = await tx.query(
+          `SELECT delegation.id,delegation.organization_id,delegation.project_id,
+                delegation.parent_run_id,delegation.parent_thread_id,
+                delegation.parent_session_id,delegation.parent_agent_version_id,
+                delegation.delegate_key,delegation.child_agent_version_id,
+                delegation.child_thread_id,delegation.child_session_id,
+                delegation.workspace_id,delegation.state,
+                latest.child_run_id AS latest_child_run_id,
+                latest.state AS latest_child_run_state,
+                delegation.created_at,delegation.updated_at
+           FROM oao.agent_delegations delegation
+           JOIN LATERAL (
+             SELECT link.child_run_id,child.state::text AS state
+               FROM oao.delegation_runs link
+               JOIN oao.runs child ON child.organization_id=link.organization_id
+                AND child.project_id=link.project_id AND child.id=link.child_run_id
+              WHERE link.organization_id=delegation.organization_id
+                AND link.project_id=delegation.project_id
+                AND link.delegation_id=delegation.id
+              ORDER BY link.ordinal DESC LIMIT 1
+           ) latest ON true
+          WHERE delegation.organization_id=$1 AND delegation.project_id=$2
+            AND delegation.id=$3`,
+          [actor.organizationId, actor.projectId, c.req.param("delegationId")],
+        );
+        const delegation = publicValue(result.rows[0]);
+        if (!delegation)
+          throw new HttpApiError("not_found", "Delegation not found");
+        return c.json(delegation);
+      },
+    );
+  });
+
+  app.post(
+    "/v1/projects/:projectId/delegations/:delegationId/messages",
+    async (c) => {
+      const actor = assertProject(c);
+      const body = await readJsonObject(c.req.raw);
+      const idem = idempotencyKey(c.req.raw);
+      const message = parseRunMessage(body.message, "message", []);
+      const delegationId = c.req.param("delegationId");
+      return dependencies.store.transaction(
+        actor,
+        ["delegation:message", "run:create"],
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `POST:/delegations/${delegationId}/messages`,
+            key: idem,
+            hash: requestHash(body),
+            status: 202,
+            execute: async () => {
+              const delegationResult = await tx.query<{
+                child_thread_id: string;
+                child_session_id: string;
+                child_agent_version_id: string;
+                state: string;
+              }>(
+                `SELECT child_thread_id,child_session_id,child_agent_version_id,state
+                   FROM oao.agent_delegations
+                  WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                  FOR UPDATE`,
+                [actor.organizationId, actor.projectId, delegationId],
+              );
+              const delegation = delegationResult.rows[0];
+              if (!delegation)
+                throw new HttpApiError("not_found", "Delegation not found");
+              if (delegation.state !== "active")
+                throw new HttpApiError("conflict", "Delegation is cancelled");
+              const latestResult = await tx.query<{
+                ordinal: number;
+                child_run_id: string;
+                state: string;
+              }>(
+                `SELECT link.ordinal,link.child_run_id,child.state::text AS state
+                   FROM oao.delegation_runs link
+                   JOIN oao.runs child ON child.organization_id=link.organization_id
+                    AND child.project_id=link.project_id AND child.id=link.child_run_id
+                  WHERE link.organization_id=$1 AND link.project_id=$2
+                    AND link.delegation_id=$3
+                  ORDER BY link.ordinal DESC LIMIT 1`,
+                [actor.organizationId, actor.projectId, delegationId],
+              );
+              const latest = latestResult.rows[0];
+              if (
+                !latest ||
+                !["completed", "failed", "cancelled", "timed_out"].includes(
+                  latest.state,
+                )
+              )
+                throw new HttpApiError(
+                  "conflict",
+                  "The child agent is still running",
+                );
+              const ordinal = latest.ordinal + 1;
+              const runId = randomUUID();
+              const messageId = randomUUID();
+              await tx.query(
+                `INSERT INTO oao.runs (
+                   organization_id,project_id,id,thread_id,session_id,agent_version_id,
+                   created_by_principal_id,idempotency_key,input_public
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  runId,
+                  delegation.child_thread_id,
+                  delegation.child_session_id,
+                  delegation.child_agent_version_id,
+                  actor.id,
+                  idem,
+                  { message },
+                ],
+              );
+              await tx.query(
+                `INSERT INTO oao.messages (
+                   organization_id,project_id,id,thread_id,run_id,role,redacted_content
+                 ) VALUES ($1,$2,$3,$4,$5,'user',$6)`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  messageId,
+                  delegation.child_thread_id,
+                  runId,
+                  message,
+                ],
+              );
+              await tx.query(
+                `INSERT INTO oao.delegation_runs (
+                   organization_id,project_id,delegation_id,ordinal,
+                   requested_by_run_id,child_run_id,request_key,request_hash
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  delegationId,
+                  ordinal,
+                  latest.child_run_id,
+                  runId,
+                  idem,
+                  requestHash(body),
+                ],
+              );
+              await tx.query(
+                `UPDATE oao.agent_delegations SET updated_at=clock_timestamp()
+                  WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+                [actor.organizationId, actor.projectId, delegationId],
+              );
+              await dependencies.store.appendEvent(tx, actor, {
+                aggregateType: "delegation",
+                aggregateId: delegationId,
+                kind: "delegation.follow_up_created",
+                payload: {
+                  childSessionId: delegation.child_session_id,
+                  childRunId: runId,
+                  ordinal,
+                },
+              });
+              await dependencies.store.appendEvent(tx, actor, {
+                aggregateType: "run",
+                aggregateId: runId,
+                kind: "run.created",
+                payload: {
+                  state: "queued",
+                  sessionId: delegation.child_session_id,
+                },
+              });
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "delegation.follow_up_created",
+                resourceType: "delegation",
+                resourceId: delegationId,
+                detail: {
+                  childRunId: runId,
+                  childSessionId: delegation.child_session_id,
+                  messageCharacters: message.length,
+                },
+              });
+              await dependencies.runtimeCommands.enqueue(tx, {
+                organizationId: actor.organizationId,
+                projectId: actor.projectId,
+                runId,
+                kind: "admit",
+                payload: { reason: "delegation_follow_up" },
+              });
+              return {
+                delegationId,
+                childSessionId: delegation.child_session_id,
+                childRunId: runId,
+                status: "queued",
+              };
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body, 202);
+        },
+      );
+    },
+  );
+
+  app.post(
+    "/v1/projects/:projectId/delegations/:delegationId/cancel",
+    async (c) => {
+      const actor = assertProject(c);
+      const idem = idempotencyKey(c.req.raw);
+      const delegationId = c.req.param("delegationId");
+      return dependencies.store.transaction(
+        actor,
+        ["delegation:cancel", "run:cancel"],
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `POST:/delegations/${delegationId}/cancel`,
+            key: idem,
+            hash: requestHash({ delegationId }),
+            status: 202,
+            execute: async () => {
+              const result = await tx.query<{
+                state: string;
+                child_run_id: string;
+                child_run_state: string;
+              }>(
+                `SELECT delegation.state,latest.child_run_id,
+                        latest.child_run_state
+                   FROM oao.agent_delegations delegation
+                   JOIN LATERAL (
+                     SELECT link.child_run_id,child.state::text AS child_run_state
+                       FROM oao.delegation_runs link
+                       JOIN oao.runs child ON child.organization_id=link.organization_id
+                        AND child.project_id=link.project_id AND child.id=link.child_run_id
+                      WHERE link.organization_id=delegation.organization_id
+                        AND link.project_id=delegation.project_id
+                        AND link.delegation_id=delegation.id
+                      ORDER BY link.ordinal DESC LIMIT 1
+                   ) latest ON true
+                  WHERE delegation.organization_id=$1 AND delegation.project_id=$2
+                    AND delegation.id=$3 FOR UPDATE OF delegation`,
+                [actor.organizationId, actor.projectId, delegationId],
+              );
+              const delegation = result.rows[0];
+              if (!delegation)
+                throw new HttpApiError("not_found", "Delegation not found");
+              if (delegation.state === "active") {
+                await tx.query(
+                  `UPDATE oao.agent_delegations SET state='cancelled',
+                     cancelled_at=clock_timestamp(),updated_at=clock_timestamp()
+                   WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+                  [actor.organizationId, actor.projectId, delegationId],
+                );
+                if (
+                  !["completed", "failed", "cancelled", "timed_out"].includes(
+                    delegation.child_run_state,
+                  )
+                ) {
+                  await tx.query(
+                    "SELECT oao.request_run_cancellation($1,$2,$3)",
+                    [
+                      actor.organizationId,
+                      actor.projectId,
+                      delegation.child_run_id,
+                    ],
+                  );
+                  await dependencies.runtimeCommands.enqueue(tx, {
+                    organizationId: actor.organizationId,
+                    projectId: actor.projectId,
+                    runId: delegation.child_run_id,
+                    kind: "cancel",
+                    payload: { reason: "delegation_cancelled" },
+                  });
+                }
+                await dependencies.store.appendEvent(tx, actor, {
+                  aggregateType: "delegation",
+                  aggregateId: delegationId,
+                  kind: "delegation.cancelled",
+                  payload: { childRunId: delegation.child_run_id },
+                });
+                await dependencies.store.appendAudit(tx, actor, {
+                  action: "delegation.cancelled",
+                  resourceType: "delegation",
+                  resourceId: delegationId,
+                  detail: { childRunId: delegation.child_run_id },
+                });
+              }
+              return { delegationId, state: "cancelled" };
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body, 202);
+        },
+      );
+    },
+  );
+
   app.get("/v1/projects/:projectId/pending-work", async (c) => {
     const actor = assertProject(c);
     return dependencies.store.transaction(actor, "run:read", async (tx) => {
       const values: unknown[] = [actor.organizationId, actor.projectId];
-      const [tools, approvals] = await Promise.all([
-        tx.query(
-          `SELECT 'tool' AS kind,c.id,c.run_id,r.session_id,t.title,c.tool_name,c.owner,c.stage,
+      const tools = await tx.query(
+        `SELECT 'tool' AS kind,c.id,c.run_id,r.session_id,t.title,c.tool_name,c.owner,c.stage,
                   c.safe_arguments,c.claim_fence,c.lease_holder_principal_id AS claimed_by,
                   c.lease_expires_at AS expires_at,c.created_at
            FROM oao.tool_calls c JOIN oao.runs r
@@ -2840,19 +4309,18 @@ function registerRunRoutes(
            WHERE c.organization_id=$1 AND c.project_id=$2
              AND c.stage IN ('caller_pending','caller_claimed','platform_ready','platform_executing')
            ORDER BY c.created_at,c.id`,
-          values,
-        ),
-        tx.query(
-          `SELECT 'approval' AS kind,a.id,a.run_id,r.session_id,t.title,a.tool_call_id,
+        values,
+      );
+      const approvals = await tx.query(
+        `SELECT 'approval' AS kind,a.id,a.run_id,r.session_id,t.title,a.tool_call_id,
                   a.summary,a.status,a.created_at,a.expires_at
            FROM oao.approvals a JOIN oao.runs r
              ON r.organization_id=a.organization_id AND r.project_id=a.project_id AND r.id=a.run_id
            JOIN oao.threads t ON t.organization_id=r.organization_id AND t.project_id=r.project_id AND t.id=r.thread_id
            WHERE a.organization_id=$1 AND a.project_id=$2 AND a.status='pending'
            ORDER BY a.created_at,a.id`,
-          values,
-        ),
-      ]);
+        values,
+      );
       return c.json({ data: [...rows(tools), ...rows(approvals)] });
     });
   });
@@ -2895,10 +4363,13 @@ function registerRunRoutes(
     const actor = assertProject(c);
     const body = await readJsonObject(c.req.raw);
     const idem = idempotencyKey(c.req.raw);
-    const redactedInput = requiredString(
+    const files = await parseRunFiles(body.files);
+    const messageField =
+      body.message === undefined ? "redactedInput" : "message";
+    const redactedInput = parseRunMessage(
       body.message ?? body.redactedInput,
-      body.message === undefined ? "redactedInput" : "message",
-      100_000,
+      messageField,
+      files,
     );
     const submittedSessionId = resumeRunId
       ? undefined
@@ -2995,11 +4466,15 @@ function registerRunRoutes(
               parent.agent_version_id,
               actor.id,
               idem,
-              { message: redactedInput },
+              {
+                message: redactedInput,
+                ...(files.length ? { files: publicRunFiles(files) } : {}),
+              },
               messageId,
               redactedInput,
             ],
           );
+          await insertRunFiles(tx, actor, runId, messageId, files);
           await dependencies.store.appendEvent(tx, actor, {
             aggregateType: "run",
             aggregateId: runId,
@@ -3010,13 +4485,20 @@ function registerRunRoutes(
             aggregateType: "thread",
             aggregateId: parent.thread_id,
             kind: "message.created",
-            payload: { messageId, runId, role: "user" },
+            payload: {
+              messageId,
+              runId,
+              role: "user",
+              fileCount: files.length,
+            },
           });
           await dependencies.store.appendAudit(tx, actor, {
             action: resumeRunId ? "run.resumed" : "run.created",
             resourceType: "run",
             resourceId: runId,
-            detail: resumeRunId ? { previousRunId: resumeRunId } : {},
+            detail: resumeRunId
+              ? { previousRunId: resumeRunId, fileCount: files.length }
+              : { fileCount: files.length },
           });
           await dependencies.runtimeCommands.enqueue(tx, {
             organizationId: actor.organizationId,
@@ -3137,8 +4619,21 @@ function registerRunRoutes(
         4,
       );
       const result = await tx.query(
-        `SELECT id,organization_id,project_id,thread_id,run_id,role,redacted_content,created_at FROM oao.messages
-         WHERE organization_id=$1 AND project_id=$2 AND run_id=$3${condition.sql}
+        `SELECT m.id,m.organization_id,m.project_id,m.thread_id,m.run_id,m.role,
+                m.redacted_content,m.created_at,
+                COALESCE((
+                  SELECT jsonb_agg(jsonb_build_object(
+                    'id',f.id,'organization_id',f.organization_id,'project_id',f.project_id,
+                    'run_id',f.run_id,'message_id',f.message_id,'name',f.file_name,
+                    'content_type',f.content_type,'size_bytes',f.size_bytes,
+                    'sha256',encode(f.content_sha256,'hex'),'created_at',f.created_at
+                  ) ORDER BY f.created_at,f.id)
+                  FROM oao.run_files f
+                  WHERE f.organization_id=m.organization_id AND f.project_id=m.project_id
+                    AND f.message_id=m.id
+                ),'[]'::jsonb) AS files
+         FROM oao.messages m
+         WHERE m.organization_id=$1 AND m.project_id=$2 AND m.run_id=$3${condition.sql}
          ORDER BY created_at DESC,id DESC LIMIT $${4 + condition.values.length}`,
         [
           actor.organizationId,

@@ -177,6 +177,33 @@ backup stays bound to that provider.
 See [Workspace backups](/storage/workspace-backups) for the automatic backup,
 checksum verification, replacement-sandbox restore, and failure contracts.
 
+## Skills
+
+Skills are PostgreSQL-authoritative, immutable procedural packages. Reads use
+`skill:read`, package writes use `skill:write`, agent publication additionally
+uses `skill:bind`, and lifecycle changes use `skill:revoke`.
+
+| Method  | Path                                                                    | Purpose                                       |
+| ------- | ----------------------------------------------------------------------- | --------------------------------------------- |
+| `GET`   | `/projects/{projectId}/skills`                                          | List Skills and their latest versions.        |
+| `POST`  | `/projects/{projectId}/skills`                                          | Create a Skill and immutable version 1.       |
+| `GET`   | `/projects/{projectId}/skills/{skillId}`                                | Read all immutable versions and manifests.    |
+| `POST`  | `/projects/{projectId}/skills/{skillId}/versions`                       | Publish the next immutable version.           |
+| `GET`   | `/projects/{projectId}/skills/{skillId}/versions/{versionId}/export`    | Export exact instructions and resource bytes. |
+| `PATCH` | `/projects/{projectId}/skills/{skillId}/versions/{versionId}/lifecycle` | Deprecate or revoke one version.              |
+
+Create and version bodies contain `name`, `description`, `instructions`,
+optional `license`, `compatibility`, string-valued `metadata`, informational
+`allowedTools`, and `files`. Creating a Skill also accepts `key` and
+`displayName`. Each file is `{ path, contentType, dataBase64 }`. See
+[Versioned Skills](/concepts/skills) for validation, package hashing,
+progressive disclosure, lifecycle, and script-execution boundaries.
+
+Lifecycle accepts `{ "status": "deprecated" }` or
+`{ "status": "revoked" }`. A deprecated version can later be revoked; a
+revoked version cannot be restored. Package contents and bindings have no
+update or delete endpoint.
+
 ## Agents and versions
 
 | Method | Path                                              | Purpose                                |
@@ -189,12 +216,28 @@ checksum verification, replacement-sandbox restore, and failure contracts.
 
 Creating an agent accepts `name`, optional `key` and `description`, and requires
 `initialConfig` (or its `config` alias).
+Agent list and detail responses include the latest immutable `sandbox` policy
+so operators can determine delegate compatibility before publication.
 See [Create an agent](/agents/create-agent) for the exact configuration shape.
 Set `initialConfig.sandbox.enabled`, `provider`, optional `snapshotId`,
 `network`, and `capabilities`
 to make the same sandbox selection available in API-driven creation as in the
 console. `provider` must be a key returned by the sandbox provider list route;
 there is no public fake-sandbox provider.
+
+Set `config.skillVersionIds` to a unique array of active, exact Skill version
+UUIDs from the same project. Names must also be unique within one agent
+version. The server records immutable agent-version bindings; the array is not
+a reference to each Skill's moving latest version.
+
+Set `config.delegates` to a unique roster of `{ key, description,
+agentVersionId, maxParallel }`. Each UUID names an exact version of another
+agent in the same project. The maximum is 32 bindings and `maxParallel` is 1–8.
+The reserved platform tools `delegate_agent` and `message_agent` are supplied
+by OAO and must not appear in `config.tools`. Coordinator and child versions
+must have the same sandbox enabled state, provider, snapshot, and network
+policy. An incompatible publication returns a `bad_request` that identifies the
+child and directs the caller to publish a compatible child version first.
 
 `config.modelPreset` must be an available deployment preset key or a preset
 this project approved against a provider connection; the check runs inside
@@ -212,14 +255,21 @@ POST /v1/projects/{projectId}/sessions
 {
   "agentId": "d1111111-1111-4111-8111-111111111111",
   "title": "Repository review",
-  "initialMessage": "Review the authentication boundary."
+  "initialMessage": "Review the attached authentication boundary.",
+  "files": [{
+    "name": "auth.ts",
+    "contentType": "application/typescript",
+    "dataBase64": "ZXhwb3J0IGNvbnN0IGF1dGggPSB0cnVlOwo="
+  }]
 }
 ```
 
 Use `agentVersionId` instead of `agentId` to pin an exact version yourself. If
 you send `agentId`, OAO resolves its latest published version during the same
 transaction. The response contains the session, `latestRunId`, and first queued
-`run`.
+`run`. OAO copies the selected agent version's Skill bindings into immutable
+session bindings in that transaction. Session create and follow-up bodies do
+not accept a Skill list.
 
 | Method | Path                                              | Purpose                                                             |
 | ------ | ------------------------------------------------- | ------------------------------------------------------------------- |
@@ -231,10 +281,23 @@ transaction. The response contains the session, `latestRunId`, and first queued
 | `GET`  | `/projects/{projectId}/runs/{runId}/messages`     | Page through public messages for a run.                             |
 | `GET`  | `/projects/{projectId}/runs/{runId}/timeline`     | Page through the safe timing waterfall.                             |
 
+Each session-list item created by delegation includes `parentSessionId` and
+`delegateKey`. Both fields are `null` for root sessions. This lets clients group a
+persistent child session beneath its coordinator without fetching every
+session detail record.
+
 A later turn accepts either `{ "message": "..." }` or the SDK-compatible
-`{ "redactedInput": "..." }`. Inputs are limited to 100,000 characters. Only
-one run can be active in a session thread; submitting while its latest run is
-unsettled returns a conflict.
+`{ "redactedInput": "..." }`, plus the same optional `files` array used during
+session creation. Message text is limited to 100,000 characters and decoded or
+extracted file context to 200,000 characters per turn. A text field may be
+omitted only when `files` is non-empty. See
+[Send files to an agent](/integrations/files) for accepted media types, base64
+encoding, and per-turn limits. Only one run can be active in a session thread;
+submitting while its latest run is unsettled returns a conflict.
+
+Session transcript messages and run-message pages include safe file metadata:
+ID, filename, content type, byte size, SHA-256, and creation time. Stored bytes
+and base64 are never returned from those endpoints.
 
 The session detail response includes `debug.sandboxCommands`. Each item returns
 the recorded `safeCommand` and `safeResult`, including model-facing arguments,
@@ -243,6 +306,10 @@ renders each call as a collapsed activity row; expanding it shows arguments
 and results directly, without a second payload inspector. Credential-bearing
 fields and obvious authorization values remain masked.
 
+The same response includes top-level `skills` metadata with `skillId`, exact
+`skillVersionId`, version number, name, description, content hash, and current
+lifecycle status. It never includes Skill instructions or resource bytes.
+
 `debug.modelInvocations` includes each invocation's actual start/completion
 window and any provider thinking text returned with the response. The
 transcript renders that record as a collapsed **Reasoning** row. Expanding it
@@ -250,6 +317,29 @@ shows the full duration, token counts, and thinking text without duplicating it
 in a payload tab. Provider reasoning signatures are not returned. Older invocations
 whose runtime projection recorded a zero-length window use the preceding
 message or tool completion to reconstruct their visible duration.
+
+## Delegations
+
+The session detail response includes a top-level `delegations` array for
+coordinator and child sessions. It contains the delegate key, exact child
+version, child thread/session, shared workspace ID, relation state, and latest
+child run/state.
+
+| Method | Path                                                        | Scope                                 |
+| ------ | ----------------------------------------------------------- | ------------------------------------- |
+| `GET`  | `/projects/{projectId}/delegations/{delegationId}`          | `delegation:read`                     |
+| `POST` | `/projects/{projectId}/delegations/{delegationId}/messages` | `delegation:message` and `run:create` |
+| `POST` | `/projects/{projectId}/delegations/{delegationId}/cancel`   | `delegation:cancel` and `run:cancel`  |
+
+The message body is `{ "message": "..." }`. It creates a new run on the
+same persistent child session only after that child's latest run settles and
+returns `202` with `delegationId`, `childSessionId`, `childRunId`, and
+`status: "queued"`. Both mutations require a fresh `Idempotency-Key`.
+
+Cancelling closes the relation to future follow-ups and requests cancellation
+of its latest unsettled child run. Raw prompts are not returned in delegation
+events, audit detail, or tool-call safe arguments. See
+[Multi-agent orchestration](/concepts/multi-agent-orchestration).
 
 ## Caller tools and approvals
 

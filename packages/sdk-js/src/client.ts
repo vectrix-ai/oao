@@ -1,6 +1,7 @@
 import type {
   AgentDefinition,
   AgentVersion,
+  AgentDelegation,
   Approval,
   Message,
   Organization,
@@ -22,6 +23,7 @@ import type {
   AuthSession,
   CreateAgentInput,
   CreatedSession,
+  DelegationMessageResult,
   CreateSessionInput,
   CreatedPlatformApiKey,
   CreateModelPresetInput,
@@ -41,11 +43,17 @@ import type {
   ProjectEventFrame,
   ProjectEventStreamOptions,
   PublishAgentVersionInput,
+  PublishSkillVersionInput,
+  CreateSkillInput,
   RotateProjectModelProviderCredentialInput,
   RotateProjectSandboxProviderCredentialInput,
   RotateProjectStorageProviderCredentialInput,
   ReadinessStatus,
   RequestOptions,
+  SkillDetail,
+  SkillExport,
+  SkillSummary,
+  SkillVersionView,
   RunInput,
   RunTimelineEntry,
   SandboxPolicyInput,
@@ -457,6 +465,74 @@ export class OaoClient {
     );
   }
 
+  listSkills(
+    projectId: string,
+    pagination: PaginationOptions = {},
+    options?: RequestOptions,
+  ): Promise<Page<SkillSummary>> {
+    return this.#request(
+      this.#path(this.routes.skills(projectId), pagination),
+      options,
+    );
+  }
+
+  createSkill(
+    projectId: string,
+    input: CreateSkillInput,
+    options: WriteOptions,
+  ): Promise<SkillDetail> {
+    return this.#write(this.routes.skills(projectId), "POST", input, options);
+  }
+
+  getSkill(
+    projectId: string,
+    skillId: string,
+    options?: RequestOptions,
+  ): Promise<SkillDetail> {
+    return this.#request(this.routes.skill(projectId, skillId), options);
+  }
+
+  publishSkillVersion(
+    projectId: string,
+    skillId: string,
+    input: PublishSkillVersionInput,
+    options: WriteOptions,
+  ): Promise<SkillVersionView> {
+    return this.#write(
+      this.routes.skillVersions(projectId, skillId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
+  exportSkillVersion(
+    projectId: string,
+    skillId: string,
+    versionId: string,
+    options?: RequestOptions,
+  ): Promise<SkillExport> {
+    return this.#request(
+      this.routes.skillVersionExport(projectId, skillId, versionId),
+      options,
+    );
+  }
+
+  updateSkillVersionLifecycle(
+    projectId: string,
+    skillId: string,
+    versionId: string,
+    status: "deprecated" | "revoked",
+    options: WriteOptions,
+  ): Promise<{ readonly skillVersionId: string; readonly status: string }> {
+    return this.#write(
+      this.routes.skillVersionLifecycle(projectId, skillId, versionId),
+      "PATCH",
+      { status },
+      options,
+    );
+  }
+
   listAgents(
     projectId: string,
     pagination: PaginationOptions = {},
@@ -547,6 +623,44 @@ export class OaoClient {
     options?: RequestOptions,
   ): Promise<Session> {
     return this.#request(this.routes.session(projectId, sessionId), options);
+  }
+
+  getDelegation(
+    projectId: string,
+    delegationId: string,
+    options?: RequestOptions,
+  ): Promise<AgentDelegation> {
+    return this.#request(
+      this.routes.delegation(projectId, delegationId),
+      options,
+    );
+  }
+
+  messageDelegation(
+    projectId: string,
+    delegationId: string,
+    message: string,
+    options: WriteOptions,
+  ): Promise<DelegationMessageResult> {
+    return this.#write(
+      this.routes.delegationMessages(projectId, delegationId),
+      "POST",
+      { message },
+      options,
+    );
+  }
+
+  cancelDelegation(
+    projectId: string,
+    delegationId: string,
+    options: WriteOptions,
+  ): Promise<{ readonly delegationId: string; readonly state: "cancelled" }> {
+    return this.#write(
+      this.routes.cancelDelegation(projectId, delegationId),
+      "POST",
+      {},
+      options,
+    );
   }
 
   listThreads(

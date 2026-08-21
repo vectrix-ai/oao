@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import type {
   EventId,
@@ -187,7 +188,7 @@ test(
     try {
       await t.test("migration applies cleanly and is idempotent", async () => {
         const first = await migrate(pool);
-        assert.equal(first.applied.length + first.alreadyApplied.length, 15);
+        assert.equal(first.applied.length + first.alreadyApplied.length, 18);
         const second = await migrate(pool);
         assert.deepEqual(second.alreadyApplied, [
           "0001_foundation.sql",
@@ -205,9 +206,196 @@ test(
           "0013_sandbox_provider_target.sql",
           "0014_agent_sandbox_snapshot.sql",
           "0015_workspace_storage.sql",
+          "0016_run_files.sql",
+          "0017_skills.sql",
+          "0018_multi_agent_orchestration.sql",
         ]);
         await seed(pool);
       });
+
+      await t.test(
+        "delegate versions are normalized and child threads share the root workspace",
+        async () => {
+          await withTenantTransaction(pool, tenant, async (transaction) => {
+            const childAgentId = uuid(300);
+            const childVersionId = uuid(301);
+            const parentAgentId = uuid(302);
+            const parentVersionId = uuid(303);
+            const rootThreadId = uuid(304);
+            const rootSessionId = uuid(305);
+            const rootRunId = uuid(306);
+            const childThreadId = uuid(307);
+            const childSessionId = uuid(308);
+            const childRunId = uuid(309);
+            const baseConfig = {
+              systemPrompt: "Perform the assigned shipment work carefully.",
+              modelPreset: "local-default",
+              tools: [],
+              skillVersionIds: [],
+              delegates: [],
+              sandbox: {
+                enabled: true,
+                provider: "daytona-primary",
+                network: "none",
+                capabilities: ["filesystem_read", "filesystem_write", "shell"],
+              },
+              limits: { maxTurns: 32, timeoutMs: 60_000 },
+            };
+            await transaction.query(
+              `INSERT INTO oao.agent_definitions
+                 (organization_id,project_id,id,agent_key,name)
+               VALUES ($1,$2,$3,'shipment-child','Shipment child'),
+                      ($1,$2,$4,'shipment-parent','Shipment parent')`,
+              [ids.organization, ids.project, childAgentId, parentAgentId],
+            );
+            await transaction.query(
+              "SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7)",
+              [
+                ids.organization,
+                ids.project,
+                childAgentId,
+                childVersionId,
+                baseConfig,
+                createHash("sha256")
+                  .update(JSON.stringify(baseConfig))
+                  .digest(),
+                ids.principal,
+              ],
+            );
+            const parentConfig = {
+              ...baseConfig,
+              systemPrompt: "Coordinate shipment analysis with a child agent.",
+              delegates: [
+                {
+                  key: "shipment-extraction",
+                  description:
+                    "Extract shipment facts in the shared workspace.",
+                  agentVersionId: childVersionId,
+                  maxParallel: 2,
+                },
+              ],
+            };
+            await transaction.query(
+              "SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7)",
+              [
+                ids.organization,
+                ids.project,
+                parentAgentId,
+                parentVersionId,
+                parentConfig,
+                createHash("sha256")
+                  .update(JSON.stringify(parentConfig))
+                  .digest(),
+                ids.principal,
+              ],
+            );
+            const binding = await transaction.query<{
+              child_agent_version_id: string;
+              max_parallel: number;
+            }>(
+              `SELECT child_agent_version_id,max_parallel
+                 FROM oao.agent_version_delegates
+                WHERE organization_id=$1 AND project_id=$2
+                  AND parent_agent_version_id=$3
+                  AND delegate_key='shipment-extraction'`,
+              [ids.organization, ids.project, parentVersionId],
+            );
+            assert.equal(
+              binding.rows[0]?.child_agent_version_id,
+              childVersionId,
+            );
+            assert.equal(binding.rows[0]?.max_parallel, 2);
+
+            await transaction.query(
+              `INSERT INTO oao.threads (organization_id,project_id,id,title)
+               VALUES ($1,$2,$3,'Root')`,
+              [ids.organization, ids.project, rootThreadId],
+            );
+            await transaction.query(
+              `INSERT INTO oao.sessions
+                 (organization_id,project_id,id,thread_id,agent_version_id)
+               VALUES ($1,$2,$3,$4,$5)`,
+              [
+                ids.organization,
+                ids.project,
+                rootSessionId,
+                rootThreadId,
+                parentVersionId,
+              ],
+            );
+            await transaction.query(
+              `INSERT INTO oao.runs (
+                 organization_id,project_id,id,thread_id,session_id,
+                 agent_version_id,created_by_principal_id,idempotency_key
+               ) VALUES ($1,$2,$3,$4,$5,$6,$7,'workspace-root')`,
+              [
+                ids.organization,
+                ids.project,
+                rootRunId,
+                rootThreadId,
+                rootSessionId,
+                parentVersionId,
+                ids.principal,
+              ],
+            );
+            const rootWorkspace = await transaction.query<{
+              workspace_id: string;
+            }>(
+              `SELECT workspace_id FROM oao.thread_workspace_bindings
+                WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3`,
+              [ids.organization, ids.project, rootThreadId],
+            );
+            const workspaceId = rootWorkspace.rows[0]?.workspace_id;
+            assert.ok(workspaceId);
+            await transaction.query(
+              `INSERT INTO oao.threads (organization_id,project_id,id,title)
+               VALUES ($1,$2,$3,'Child')`,
+              [ids.organization, ids.project, childThreadId],
+            );
+            await transaction.query(
+              `INSERT INTO oao.sessions
+                 (organization_id,project_id,id,thread_id,agent_version_id)
+               VALUES ($1,$2,$3,$4,$5)`,
+              [
+                ids.organization,
+                ids.project,
+                childSessionId,
+                childThreadId,
+                childVersionId,
+              ],
+            );
+            await transaction.query(
+              `INSERT INTO oao.thread_workspace_bindings
+                 (organization_id,project_id,thread_id,workspace_id,role)
+               VALUES ($1,$2,$3,$4,'child')`,
+              [ids.organization, ids.project, childThreadId, workspaceId],
+            );
+            await transaction.query(
+              `INSERT INTO oao.runs (
+                 organization_id,project_id,id,thread_id,session_id,
+                 agent_version_id,created_by_principal_id,idempotency_key
+               ) VALUES ($1,$2,$3,$4,$5,$6,$7,'workspace-child')`,
+              [
+                ids.organization,
+                ids.project,
+                childRunId,
+                childThreadId,
+                childSessionId,
+                childVersionId,
+                ids.principal,
+              ],
+            );
+            const shared = await transaction.query<{ count: string }>(
+              `SELECT count(DISTINCT workspace_id)::text AS count
+                 FROM oao.thread_workspace_bindings
+                WHERE organization_id=$1 AND project_id=$2
+                  AND thread_id IN ($3,$4)`,
+              [ids.organization, ids.project, rootThreadId, childThreadId],
+            );
+            assert.equal(shared.rows[0]?.count, "1");
+          });
+        },
+      );
 
       await t.test(
         "tenant correlation and RLS require both organization and project",

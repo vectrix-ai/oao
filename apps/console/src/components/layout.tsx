@@ -1,6 +1,7 @@
 import {
   Activity,
   Box,
+  BookOpen,
   Bot,
   Boxes,
   CircleHelp,
@@ -46,6 +47,7 @@ const navGroups: readonly {
     label: "Build",
     items: [
       { to: "/agents", label: "Agents", icon: Bot },
+      { to: "/skills", label: "Skills", icon: BookOpen },
       { to: "/models", label: "Models", icon: Cpu },
     ],
   },

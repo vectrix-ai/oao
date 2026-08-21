@@ -307,3 +307,73 @@ test("model preset input requires a versioned key and supported routing", () => 
   );
   assert.throws(() => parseModelRoutingPolicy({ sort: "cheapest" }));
 });
+
+test("agent publications pin a unique, bounded delegate roster", () => {
+  const base = {
+    systemPrompt: "Coordinate shipment analysis with approved child agents.",
+    modelPreset: "coordinator-v1",
+    tools: [],
+    sandbox: {
+      enabled: true,
+      provider: "daytona-primary",
+      network: "none" as const,
+    },
+    limits: { maxTurns: PLATFORM_MAX_TURNS, timeoutMs: 60_000 },
+  };
+  const parsed = parseManagedAgentSnapshotForPublication({
+    ...base,
+    delegates: [
+      {
+        key: "shipment-extraction",
+        description: "Extract shipment facts into the shared workspace.",
+        agentVersionId: "00000000-0000-4000-8000-000000000002",
+        maxParallel: 2,
+      },
+    ],
+  });
+  assert.equal(parsed.delegates[0]?.key, "shipment-extraction");
+  assert.equal(parsed.delegates[0]?.maxParallel, 2);
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...base,
+      delegates: [
+        {
+          key: "shipment-extraction",
+          description: "First binding",
+          agentVersionId: "00000000-0000-4000-8000-000000000002",
+        },
+        {
+          key: "shipment-extraction",
+          description: "Duplicate key",
+          agentVersionId: "00000000-0000-4000-8000-000000000003",
+        },
+      ],
+    }),
+  );
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...base,
+      tools: [
+        {
+          schemaVersion: 1,
+          name: "delegate_agent",
+          description: "Reserved",
+          owner: "platform",
+          approval: "never",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            required: [],
+            additionalProperties: false,
+          },
+          outputSchema: {
+            type: "object",
+            properties: {},
+            required: [],
+            additionalProperties: false,
+          },
+        },
+      ],
+    }),
+  );
+});

@@ -53,8 +53,41 @@ approval, or sandbox ID. On relevant events, re-fetch
 
 <Note>
   Event bodies contain public state and identifiers, not raw model reasoning,
-  credentials, authorization headers, or unredacted tool payloads.
+  credentials, authorization headers, unredacted tool payloads, or attached file
+  bytes. A user `message.created` event may include only the safe `fileCount`;
+  re-fetch the session for filename, content type, size, and SHA-256 metadata.
 </Note>
+
+## Delegation events
+
+| Kind                           | Meaning                                                |
+| ------------------------------ | ------------------------------------------------------ |
+| `delegation.created`           | A persistent child thread/session and first run exist. |
+| `delegation.follow_up_created` | Another run was queued on the same child session.      |
+| `delegation.completed`         | A child run completed and returned a result.           |
+| `delegation.failed`            | A child run failed, timed out, or was cancelled.       |
+| `delegation.cancelled`         | The relation was closed to future follow-ups.          |
+
+Payloads contain only delegate/version/session/run identifiers, ordinal,
+state, and bounded status metadata. They never contain the delegated prompt,
+child response, workspace contents, credentials, or authorization headers.
+
+## Skill events
+
+| Kind                       | Meaning                                                   |
+| -------------------------- | --------------------------------------------------------- |
+| `skill.created`            | A project Skill and version 1 were committed.             |
+| `skill.version_published`  | A new immutable package version was committed.            |
+| `skill.version_deprecated` | A version was blocked from new agent bindings.            |
+| `skill.version_revoked`    | A version was blocked from binding and runtime admission. |
+| `skill.activated`          | Flue progressively loaded a bound Skill's instructions.   |
+| `skill.resource_read`      | Flue read one supporting resource from a bound Skill.     |
+
+Publication events may include Skill/version identifiers, version number, and
+content hash. Runtime events contain only safe identifiers, the requested
+resource path, outcome, and duration. They never contain instructions,
+resource contents, decoded bytes, model text, credentials, or authorization
+headers. Audit records follow the same boundary.
 
 ## TypeScript SDK
 

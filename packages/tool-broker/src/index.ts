@@ -279,6 +279,20 @@ export class PostgresToolBroker {
     execute: () => Promise<PublicValue>,
     signal?: AbortSignal,
   ): Promise<ToolOutcome> {
+    try {
+      return await this.executePlatformSafely(input, execute, signal);
+    } catch {
+      return signal?.aborted
+        ? failure("run_cancelled", "Run was cancelled")
+        : failure("platform_tool_failed", "Platform tool execution failed");
+    }
+  }
+
+  private async executePlatformSafely(
+    input: ToolObligationInput,
+    execute: () => Promise<PublicValue>,
+    signal?: AbortSignal,
+  ): Promise<ToolOutcome> {
     const toolCallId = await this.publishPlatform(input);
     const terminal = await this.read(input, toolCallId);
     const gate = this.stageFailure(terminal);
@@ -336,6 +350,7 @@ export class PostgresToolBroker {
       this.pool,
       input,
       async (transaction) => {
+        await this.ensureServicePrincipal(transaction, input);
         const fenceResult = await transaction.query(
           "SELECT oao.begin_platform_tool_execution($1,$2,$3,$4,interval '30 seconds') AS fence",
           [
@@ -403,6 +418,34 @@ export class PostgresToolBroker {
     });
     await this.resumeRun(input, await this.read(input, toolCallId));
     return decodeResult(safeResult);
+  }
+
+  private async ensureServicePrincipal(
+    transaction: Queryable,
+    input: TenantContext,
+  ): Promise<void> {
+    const subject = `oao-runtime-worker:${this.options.servicePrincipalId}`;
+    await transaction.query(
+      `INSERT INTO oao.principals (
+         organization_id,project_id,id,kind,subject,scopes
+       ) VALUES ($1,$2,$3,'service',$4,ARRAY[]::text[])
+       ON CONFLICT (organization_id,project_id,id) DO NOTHING`,
+      [
+        input.organizationId,
+        input.projectId,
+        this.options.servicePrincipalId,
+        subject,
+      ],
+    );
+    const principal = await transaction.query(
+      `SELECT kind::text,subject FROM oao.principals
+       WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+      [input.organizationId, input.projectId, this.options.servicePrincipalId],
+    );
+    const row = principal.rows[0] as
+      { readonly kind: string; readonly subject: string } | undefined;
+    if (row?.kind !== "service" || row.subject !== subject)
+      throw new Error("Runtime service principal identity conflict");
   }
 
   private async waitForResult(

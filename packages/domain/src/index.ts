@@ -5,6 +5,8 @@ export type ProjectId = Brand<string, "ProjectId">;
 export type PrincipalId = Brand<string, "PrincipalId">;
 export type AgentDefinitionId = Brand<string, "AgentDefinitionId">;
 export type AgentVersionId = Brand<string, "AgentVersionId">;
+export type SkillId = Brand<string, "SkillId">;
+export type SkillVersionId = Brand<string, "SkillVersionId">;
 export type ThreadId = Brand<string, "ThreadId">;
 export type SessionId = Brand<string, "SessionId">;
 export type RunId = Brand<string, "RunId">;
@@ -12,6 +14,8 @@ export type MessageId = Brand<string, "MessageId">;
 export type ToolCallId = Brand<string, "ToolCallId">;
 export type ApprovalId = Brand<string, "ApprovalId">;
 export type EventId = Brand<string, "EventId">;
+export type DelegationId = Brand<string, "DelegationId">;
+export type WorkspaceId = Brand<string, "WorkspaceId">;
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -36,6 +40,10 @@ export interface Principal extends TenantIdentity {
 export const AUTHORIZATION_ACTIONS = [
   "agent:read",
   "agent:write",
+  "skill:read",
+  "skill:write",
+  "skill:bind",
+  "skill:revoke",
   "session:read",
   "session:write",
   "run:create",
@@ -44,6 +52,9 @@ export const AUTHORIZATION_ACTIONS = [
   "tool_call:claim",
   "tool_call:submit",
   "approval:resolve",
+  "delegation:read",
+  "delegation:message",
+  "delegation:cancel",
   "audit:read",
   "project:admin",
 ] as const;

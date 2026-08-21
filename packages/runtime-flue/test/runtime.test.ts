@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import type { PgPool } from "@oao/db-postgres";
 import type { OrganizationId, ProjectId } from "@oao/domain";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
 import {
   FLUE_PACKAGE_VERSIONS,
+  PostgresSkillRegistry,
+  createManagedRunDeliveredMessage,
   createProjectModelPresetActivator,
   runtimeTesting,
 } from "../src/index.js";
@@ -50,6 +53,61 @@ test("runtime projections retain full model timing and thinking text", () => {
     }),
     "Count the words first.\n\nThen count the letters.",
   );
+});
+
+const delivery = {
+  version: "1" as const,
+  runId: "00000000-0000-4000-8000-000000000011",
+  sessionId: "00000000-0000-4000-8000-000000000012",
+  snapshotHash: "a".repeat(64),
+};
+
+test("files use their admitted model-visible text", () => {
+  const message = createManagedRunDeliveredMessage({
+    delivery,
+    message: "Review this file.",
+    files: [
+      {
+        id: "00000000-0000-4000-8000-000000000013",
+        name: "entry.ts",
+        contentType: "application/typescript",
+        sizeBytes: Buffer.byteLength("export const x=1;", "utf8"),
+        sha256: "b".repeat(64),
+        bytes: Buffer.from("export const x=1;", "utf8"),
+        modelText: "export const x=1;",
+      },
+    ],
+  });
+  assert.equal(message.kind, "signal");
+  assert.match(message.body, /Attached file: entry\.ts/u);
+  assert.match(message.body, /export const x=1;/u);
+  assert.deepEqual(
+    message.kind === "signal" ? message.attributes : {},
+    delivery,
+  );
+});
+
+test("image files use Flue image attachments without putting bytes in metadata", () => {
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+  const message = createManagedRunDeliveredMessage({
+    delivery,
+    message: "Describe this image.",
+    files: [
+      {
+        id: "00000000-0000-4000-8000-000000000014",
+        name: "diagram.png",
+        contentType: "image/png",
+        sizeBytes: bytes.byteLength,
+        sha256: "c".repeat(64),
+        bytes,
+      },
+    ],
+  });
+  assert.equal(message.kind, "user");
+  assert.equal(message.attachments?.[0]?.data, bytes.toString("base64"));
+  assert.equal(message.attachments?.[0]?.mimeType, "image/png");
+  assert.match(message.attachments?.[0]?.filename ?? "", /^oao-run-v1\./u);
+  assert.doesNotMatch(message.body, new RegExp(bytes.toString("base64"), "u"));
 });
 
 const tenant = {
@@ -228,4 +286,87 @@ test("an unknown or malformed preset never reaches the provider", async () => {
     deploymentPresetKeys: new Set(["local-default"]),
   });
   await assert.rejects(malformed.activate(tenant, "wire-names-v1"));
+});
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object")
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => `${JSON.stringify(key)}:${stableJson(nested)}`)
+      .join(",")}}`;
+  return JSON.stringify(value);
+}
+
+test("PostgreSQL Skill versions become verified immutable Flue definitions", async () => {
+  const skillId = "00000000-0000-4000-8000-000000000021";
+  const skillVersionId = "00000000-0000-4000-8000-000000000022";
+  const instructions = "Read the reference only when this procedure applies.";
+  const canonical = {
+    schemaVersion: 1,
+    name: "shipment-intake",
+    description: "Process shipment documents using the approved flow.",
+    instructions,
+    metadata: {},
+    files: [],
+  };
+  const contentHash = createHash("sha256")
+    .update(stableJson(canonical))
+    .digest("hex");
+  const queries: string[] = [];
+  const pool = {
+    connect: async () => ({
+      query: async (text: string) => {
+        queries.push(text);
+        if (text.includes("FROM oao.skill_versions version"))
+          return {
+            rowCount: 1,
+            rows: [
+              {
+                skill_id: skillId,
+                id: skillVersionId,
+                version: 1,
+                skill_name: canonical.name,
+                description: canonical.description,
+                instructions,
+                license: null,
+                compatibility: null,
+                metadata: {},
+                allowed_tools: null,
+                content_hash: Buffer.from(contentHash, "hex"),
+                total_bytes: Buffer.byteLength(instructions),
+                status: "active",
+              },
+            ],
+          };
+        if (text.includes("FROM oao.skill_version_files"))
+          return { rowCount: 0, rows: [] };
+        return { rowCount: 0, rows: [] };
+      },
+      release: () => undefined,
+    }),
+  } as unknown as PgPool;
+  const registry = new PostgresSkillRegistry(pool);
+  const binding = {
+    skillId,
+    skillVersionId,
+    version: 1,
+    name: canonical.name,
+    description: canonical.description,
+    contentHash,
+  };
+  await registry.activate(tenant, [binding]);
+  const definition = registry.resolve(tenant, binding);
+  assert.equal(definition.name, "shipment-intake");
+  assert.equal(definition.description, canonical.description);
+  assert.equal(definition.instructions, instructions);
+  assert.equal(
+    queries.filter((query) => query.includes("skill_versions version")).length,
+    1,
+  );
+  await registry.activate(tenant, [binding]);
+  assert.equal(
+    queries.filter((query) => query.includes("skill_versions version")).length,
+    1,
+  );
 });

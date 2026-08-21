@@ -22,9 +22,10 @@
   },
   "dependencies": {
     "@hono/node-server": "1.19.9",
+    "@kreuzberg/node": "4.10.2",
+    "@oao/artifact-s3": "workspace:*",
     "@oao/auth-core": "workspace:*",
     "@oao/auth-workos": "workspace:*",
-    "@oao/artifact-s3": "workspace:*",
     "@oao/contracts": "workspace:*",
     "@oao/db-postgres": "workspace:*",
     "@oao/domain": "workspace:*",
@@ -32,8 +33,10 @@
     "@oao/models-openrouter": "workspace:*",
     "@oao/provider-credentials": "workspace:*",
     "@oao/sandbox-daytona": "workspace:*",
+    "fflate": "0.8.2",
     "hono": "4.13.3",
-    "pg": "8.23.0"
+    "pg": "8.23.0",
+    "saxes": "6.0.0"
   },
   "devDependencies": {
     "@oao/testkit": "workspace:*",

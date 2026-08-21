@@ -72,6 +72,9 @@ describe("management console", () => {
       dialog.getByLabelText("Description"),
       "Reviews requests with the hosted model preset.",
     );
+    await user.click(
+      dialog.getByRole("checkbox", { name: /Shipment Intake · v1/u }),
+    );
     const preset = dialog.getByRole("combobox", {
       name: /^Approved model preset/u,
     });
@@ -117,6 +120,50 @@ describe("management console", () => {
       network: "restricted",
       capabilities: ["filesystem_read", "filesystem_write", "shell"],
     });
+    expect(detail.versions[0]?.config.skillVersionIds).toEqual([
+      "44444444-4444-4444-8444-444444444445",
+    ]);
+  });
+
+  it("publishes a reusable Skill with an immutable first version", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/skills", api);
+    expect(
+      await screen.findByRole("heading", { name: "Skills" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Shipment Intake")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create Skill" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Create Skill" }));
+    await user.type(dialog.getByLabelText("Display name"), "Business Rules");
+    await user.type(dialog.getByLabelText("Skill name"), "business-rules");
+    await user.type(
+      dialog.getByLabelText("Catalog description"),
+      "Apply the approved customer operating rules.",
+    );
+    await user.type(
+      dialog.getByLabelText("Instructions"),
+      "Load the relevant customer reference only when a rule applies.",
+    );
+    await user.type(
+      dialog.getByLabelText("Optional reference path"),
+      "references/rules.md",
+    );
+    await user.type(
+      dialog.getByLabelText("Optional Markdown reference"),
+      "# Approved rules",
+    );
+    await user.click(dialog.getByRole("button", { name: "Create Skill" }));
+    expect(
+      await screen.findByRole("heading", { name: "Business Rules" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Version 1")).toBeInTheDocument();
+    const created = (await api.listSkills({})).data.find(
+      (skill) => skill.name === "business-rules",
+    );
+    expect(created?.versionIds).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Deprecate" }));
+    expect(await screen.findByText("deprecated")).toBeInTheDocument();
   });
 
   it("keeps the default query cache stable across app rerenders", async () => {
@@ -453,6 +500,10 @@ describe("management console", () => {
     ).toBeInTheDocument();
     expect(within(panel).getByText("$0.0184")).toBeInTheDocument();
     expect(within(panel).getByText("2,841")).toBeInTheDocument();
+    expect(screen.getByText("1 Skill")).toHaveAttribute(
+      "title",
+      "shipment-intake v1",
+    );
     expect(
       within(panel).getByRole("img", {
         name: /Cumulative cost over the session/u,
@@ -545,6 +596,13 @@ describe("management console", () => {
       screen.getByLabelText("First message"),
       "Complete the deterministic local task.",
     );
+    await user.upload(
+      screen.getByLabelText("Files"),
+      new File(
+        ["From: customer@example.com\r\nSubject: Renewal\r\n\r\nSafe context"],
+        "renewal.eml",
+      ),
+    );
     await user.click(
       screen.getAllByRole("button", { name: "Create session" }).at(-1)!,
     );
@@ -554,6 +612,80 @@ describe("management console", () => {
     expect(
       await screen.findAllByText("Complete the deterministic local task."),
     ).not.toHaveLength(0);
+    expect(await screen.findByText("renewal.eml")).toBeInTheDocument();
+    expect(screen.getByText(/message\/rfc822/u)).toBeInTheDocument();
+  });
+
+  it("groups a delegated child session directly beneath its coordinator", async () => {
+    class DelegatedSessionsApi extends DemoConsoleApi {
+      override async listSessions(
+        filters: Parameters<DemoConsoleApi["listSessions"]>[0],
+      ) {
+        const page = await super.listSessions(filters);
+        const parent = page.data.find(
+          (session) => session.title === "Refund request · Northwind #4831",
+        );
+        const child = page.data.find(
+          (session) => session.title === "Q3 contract extraction",
+        );
+        if (!parent || !child) return page;
+        const rest = page.data.filter(
+          (session) => session.id !== parent.id && session.id !== child.id,
+        );
+        return {
+          ...page,
+          // Deliberately return the child first to prove the UI builds the tree.
+          data: [
+            {
+              ...child,
+              title: "Delegated: shipment extraction",
+              parentSessionId: parent.id,
+              delegateKey: "shipment-extraction",
+            },
+            parent,
+            ...rest,
+          ],
+        };
+      }
+    }
+
+    renderConsole(
+      "/sessions",
+      new DelegatedSessionsApi({ eventDelayMs: 60_000 }),
+    );
+    const parentLink = await screen.findByRole("link", {
+      name: /Refund request · Northwind #4831/u,
+    });
+    const childLink = screen.getByRole("link", {
+      name: "Delegated: shipment extraction, delegated child session as shipment-extraction",
+    });
+    const parentRow = parentLink.closest("tr");
+    const childRow = childLink.closest("tr");
+    expect(parentRow).not.toBeNull();
+    expect(childRow).not.toBeNull();
+    if (!parentRow || !childRow)
+      throw new Error("Session rows were not rendered");
+    const rows = within(
+      screen.getByRole("region", { name: "Sessions table" }),
+    ).getAllByRole("row");
+    expect(rows.indexOf(childRow)).toBe(rows.indexOf(parentRow) + 1);
+    expect(childRow).toHaveClass("session-row--child");
+    expect(childRow).toHaveAttribute(
+      "data-parent-session-id",
+      "session_01J5QTXE7W9M2R6C4A8K3N1P0V",
+    );
+    expect(within(childRow).getByText("└─")).toHaveAttribute(
+      "aria-hidden",
+      "true",
+    );
+    expect(parentLink).toHaveAttribute(
+      "href",
+      "/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V",
+    );
+    expect(childLink).toHaveAttribute(
+      "href",
+      "/sessions/session_01J5PDRS7WZTP4H3F6M2A9B8CX",
+    );
   });
 
   it("submits a second message with Command+Enter after the latest run settles", async () => {
@@ -561,12 +693,20 @@ describe("management console", () => {
     renderConsole("/sessions/session_01J5PDRS7WZTP4H3F6M2A9B8CX");
     const message = await screen.findByLabelText("Message");
     await user.type(message, "Now summarize only the renewal exceptions.");
+    await user.upload(
+      screen.getByLabelText("Attach files"),
+      new File(['{"priority":"high"}'], "renewal.json", {
+        type: "application/json",
+      }),
+    );
+    await user.click(message);
     await user.keyboard("{Enter}");
     expect(message).toHaveValue("Now summarize only the renewal exceptions.\n");
     await user.keyboard("{Meta>}{Enter}{/Meta}");
     expect(
       await screen.findByText("Now summarize only the renewal exceptions."),
     ).toBeInTheDocument();
+    expect(await screen.findByText("renewal.json")).toBeInTheDocument();
     expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
   });
 
@@ -760,6 +900,40 @@ describe("management console", () => {
       snapshotId: "77777777-7777-4777-8777-777777777777",
       capabilities: ["filesystem_read", "filesystem_write", "browser"],
     });
+  });
+
+  it("blocks sandbox-incompatible delegates before publication", async () => {
+    class IncompatibleDelegateApi extends DemoConsoleApi {
+      override async listAgents(
+        filters: Parameters<DemoConsoleApi["listAgents"]>[0],
+      ) {
+        const result = await super.listAgents(filters);
+        return {
+          ...result,
+          data: result.data.map((candidate) =>
+            candidate.id === "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+              ? {
+                  ...candidate,
+                  sandbox: { ...candidate.sandbox, enabled: false },
+                }
+              : candidate,
+          ),
+        };
+      }
+    }
+    renderConsole(
+      "/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      new IncompatibleDelegateApi({ eventDelayMs: 60_000 }),
+    );
+    const delegate = await screen.findByRole("checkbox", {
+      name: /Document analyst · v5/u,
+    });
+    expect(delegate).toBeDisabled();
+    expect(
+      screen.getByText(
+        /Unavailable — sandbox is disabled for this child, so it cannot share the coordinator workspace/u,
+      ),
+    ).toBeInTheDocument();
   });
 
   it("creates a model preset from the pinned catalog and links it to a new agent version", async () => {

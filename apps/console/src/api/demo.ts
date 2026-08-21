@@ -9,6 +9,7 @@ import type {
   CreateModelProviderInput,
   CreateModelPresetInput,
   CreateSandboxProviderInput,
+  CreateSkillInput,
   CreateStorageProviderInput,
   CreatedApiKey,
   EventConnection,
@@ -20,7 +21,10 @@ import type {
   ProjectModelProvider,
   ProjectSandboxProvider,
   ProjectStorageProvider,
+  RunFileUpload,
   SessionDetail,
+  SkillDetail,
+  SkillSummary,
   SettingsData,
   UpdateSandboxProviderConfigurationInput,
 } from "./types";
@@ -30,6 +34,22 @@ const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
 const principalId = "33333333-3333-4333-8333-333333333333";
 const OPENROUTER_PROVIDER_ID = "55555555-5555-4555-8555-555555555555";
 const DAYTONA_PROVIDER_ID = "66666666-6666-4666-8666-666666666666";
+
+function demoRunFiles(files: readonly RunFileUpload[], messageId: string) {
+  return files.map((file, index) => ({
+    id: `${messageId}-file-${index + 1}`,
+    name: file.name,
+    contentType: file.contentType,
+    sizeBytes:
+      Math.floor((file.dataBase64.length * 3) / 4) -
+      (file.dataBase64.endsWith("==")
+        ? 2
+        : file.dataBase64.endsWith("=")
+          ? 1
+          : 0),
+    sha256: "demo",
+  }));
+}
 
 const supportConfig: AgentVersionConfig = {
   systemPrompt:
@@ -92,6 +112,8 @@ const agentsSeed: AgentDetail[] = [
     model: "Balanced reasoning v2",
     status: "published",
     version: 3,
+    latestVersionId: "aaaaaaa3-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    sandbox: supportConfig.sandbox,
     createdAt: "2026-08-12T08:40:00.000Z",
     updatedAt: "2026-08-20T07:18:00.000Z",
     versions: [
@@ -129,6 +151,8 @@ const agentsSeed: AgentDetail[] = [
     model: "Long context v1",
     status: "published",
     version: 5,
+    latestVersionId: "bbbbbbb5-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    sandbox: supportConfig.sandbox,
     createdAt: "2026-08-02T10:00:00.000Z",
     updatedAt: "2026-08-19T15:42:00.000Z",
     versions: [
@@ -156,6 +180,8 @@ const agentsSeed: AgentDetail[] = [
     model: "Fast routing v1",
     status: "draft",
     version: 1,
+    latestVersionId: "ccccccc1-cccc-4ccc-8ccc-cccccccccccc",
+    sandbox: supportConfig.sandbox,
     createdAt: "2026-08-19T09:12:00.000Z",
     updatedAt: "2026-08-19T09:12:00.000Z",
     versions: [
@@ -171,6 +197,42 @@ const agentsSeed: AgentDetail[] = [
             "Classify incoming orders into standard, exception, or needs review.",
           modelPreset: "claude-sonnet-4-6-zdr-v1",
         },
+      },
+    ],
+  },
+];
+
+const skillsSeed: SkillDetail[] = [
+  {
+    id: "44444444-4444-4444-8444-444444444444",
+    key: "shipment-intake",
+    displayName: "Shipment Intake",
+    latestVersionId: "44444444-4444-4444-8444-444444444445",
+    version: 1,
+    name: "shipment-intake",
+    description:
+      "Process shipment documents using the approved intake sequence.",
+    contentHash: "4".repeat(64),
+    status: "active",
+    fileCount: 0,
+    versionIds: ["44444444-4444-4444-8444-444444444445"],
+    createdAt: "2026-08-18T09:00:00.000Z",
+    updatedAt: "2026-08-18T09:00:00.000Z",
+    versions: [
+      {
+        id: "44444444-4444-4444-8444-444444444445",
+        skillId: "44444444-4444-4444-8444-444444444444",
+        version: 1,
+        name: "shipment-intake",
+        description:
+          "Process shipment documents using the approved intake sequence.",
+        instructions:
+          "Identify the customer, load their instructions, analyze the files, and request approval before creating records.",
+        contentHash: "4".repeat(64),
+        totalBytes: 112,
+        status: "active",
+        files: [],
+        createdAt: "2026-08-18T09:00:00.000Z",
       },
     ],
   },
@@ -196,6 +258,19 @@ const sessionsSeed: SessionDetail[] = [
     completedAt: null,
     attempt: 1,
     workspaceFiles: [],
+    skills: [
+      {
+        skillId: skillsSeed[0]!.id,
+        skillVersionId: skillsSeed[0]!.latestVersionId,
+        version: 1,
+        name: "shipment-intake",
+        description:
+          "Process shipment documents using the approved intake sequence.",
+        contentHash: "4".repeat(64),
+        status: "active",
+      },
+    ],
+    delegations: [],
     capabilities: { canCancel: true, canResume: false, canBranchReplay: false },
     events: [
       {
@@ -340,6 +415,8 @@ const sessionsSeed: SessionDetail[] = [
     completedAt: "2026-08-19T14:24:38.000Z",
     attempt: 1,
     workspaceFiles: [],
+    skills: [],
+    delegations: [],
     capabilities: { canCancel: false, canResume: false, canBranchReplay: true },
     events: [
       {
@@ -403,6 +480,8 @@ const sessionsSeed: SessionDetail[] = [
     completedAt: "2026-08-18T11:08:15.000Z",
     attempt: 3,
     workspaceFiles: [],
+    skills: [],
+    delegations: [],
     capabilities: { canCancel: false, canResume: true, canBranchReplay: true },
     events: [
       {
@@ -641,6 +720,7 @@ export interface DemoApiOptions {
 
 export class DemoConsoleApi implements ConsoleApi {
   #agents = structuredClone(agentsSeed);
+  #skills = structuredClone(skillsSeed);
   #apiKeys = structuredClone(settingsSeed.apiKeys) as ApiKeySummary[];
   #modelPresets = structuredClone(modelPresetsSeed) as ModelPreset[];
   #modelProviders = structuredClone(
@@ -745,6 +825,7 @@ export class DemoConsoleApi implements ConsoleApi {
     this.#counter += 1;
     const now = new Date().toISOString();
     const id = `dddddddd-dddd-4ddd-8ddd-${String(this.#counter).padStart(12, "0")}`;
+    const versionId = `eeeeeeee-eeee-4eee-8eee-${String(this.#counter).padStart(12, "0")}`;
     const config = input.initialConfig;
     const detail: AgentDetail = {
       id,
@@ -757,11 +838,13 @@ export class DemoConsoleApi implements ConsoleApi {
       model: config.modelPreset,
       status: "draft",
       version: 1,
+      latestVersionId: versionId,
+      sandbox: config.sandbox,
       createdAt: now,
       updatedAt: now,
       versions: [
         {
-          id: `eeeeeeee-eeee-4eee-8eee-${String(this.#counter).padStart(12, "0")}`,
+          id: versionId,
           version: 1,
           contentHash: "draft00000000000",
           createdAt: now,
@@ -784,8 +867,10 @@ export class DemoConsoleApi implements ConsoleApi {
       ...agent,
       status: "published",
       version,
+      latestVersionId: `version-${version}`,
       updatedAt: now,
       model: config.modelPreset,
+      sandbox: config.sandbox,
       versions: [
         {
           id: `version-${version}`,
@@ -800,6 +885,138 @@ export class DemoConsoleApi implements ConsoleApi {
     };
     this.#agents = this.#agents.map((item) =>
       item.id === id ? updated : item,
+    );
+    return structuredClone(updated);
+  }
+
+  async listSkills(filters: ListFilters) {
+    this.#guard();
+    const data =
+      this.#options.scenario === "empty"
+        ? []
+        : this.#filter(
+            this.#skills,
+            filters,
+            (item) => `${item.displayName} ${item.key} ${item.description}`,
+          );
+    return this.#page(data as SkillSummary[], filters.page);
+  }
+
+  async getSkill(id: string) {
+    this.#guard();
+    const skill = this.#skills.find((item) => item.id === id);
+    if (!skill) throw new Error("Skill not found");
+    return structuredClone(skill);
+  }
+
+  async createSkill(input: CreateSkillInput) {
+    this.#counter += 1;
+    const now = new Date().toISOString();
+    const id = `44444444-4444-4444-8444-${String(this.#counter).padStart(12, "0")}`;
+    const versionId = `55555555-5555-4555-8555-${String(this.#counter).padStart(12, "0")}`;
+    const detail: SkillDetail = {
+      id,
+      key: input.key ?? input.name,
+      displayName: input.displayName,
+      latestVersionId: versionId,
+      version: 1,
+      name: input.name,
+      description: input.description,
+      contentHash: "5".repeat(64),
+      status: "active",
+      fileCount: input.files?.length ?? 0,
+      versionIds: [versionId],
+      createdAt: now,
+      updatedAt: now,
+      versions: [
+        {
+          id: versionId,
+          skillId: id,
+          version: 1,
+          name: input.name,
+          description: input.description,
+          instructions: input.instructions,
+          contentHash: "5".repeat(64),
+          totalBytes: input.instructions.length,
+          status: "active",
+          files: [],
+          createdAt: now,
+        },
+      ],
+    };
+    this.#skills.unshift(detail);
+    return structuredClone(detail);
+  }
+
+  async publishSkillVersion(
+    id: string,
+    input: Omit<CreateSkillInput, "key" | "displayName">,
+  ) {
+    const skill = this.#skills.find((item) => item.id === id);
+    if (!skill) throw new Error("Skill not found");
+    const version = skill.version + 1;
+    const now = new Date().toISOString();
+    const versionId = `skill-version-${version}`;
+    const updated: SkillDetail = {
+      ...skill,
+      latestVersionId: versionId,
+      version,
+      name: input.name,
+      description: input.description,
+      contentHash: `${version}`.repeat(64).slice(0, 64),
+      fileCount: input.files?.length ?? 0,
+      versionIds: [...skill.versionIds, versionId],
+      updatedAt: now,
+      versions: [
+        {
+          id: versionId,
+          skillId: id,
+          version,
+          name: input.name,
+          description: input.description,
+          instructions: input.instructions,
+          contentHash: `${version}`.repeat(64).slice(0, 64),
+          totalBytes: input.instructions.length,
+          status: "active",
+          files: [],
+          createdAt: now,
+        },
+        ...skill.versions,
+      ],
+    };
+    this.#skills = this.#skills.map((item) =>
+      item.id === id ? updated : item,
+    );
+    return structuredClone(updated);
+  }
+
+  async exportSkillVersion() {
+    return { files: [] };
+  }
+
+  async updateSkillVersionLifecycle(
+    skillId: string,
+    versionId: string,
+    status: "deprecated" | "revoked",
+  ) {
+    const skill = this.#skills.find((item) => item.id === skillId);
+    if (!skill) throw new Error("Skill not found");
+    const current = skill.versions.find((version) => version.id === versionId);
+    if (!current || current.status === "revoked")
+      throw new Error("Skill version cannot make that lifecycle transition");
+    if (status === "deprecated" && current.status !== "active")
+      throw new Error("Skill version cannot make that lifecycle transition");
+    const versions = skill.versions.map((version) =>
+      version.id === versionId ? { ...version, status } : version,
+    );
+    const updated: SkillDetail = {
+      ...skill,
+      ...(skill.latestVersionId === versionId ? { status } : {}),
+      versions,
+      updatedAt: new Date().toISOString(),
+    };
+    this.#skills = this.#skills.map((item) =>
+      item.id === skillId ? updated : item,
     );
     return structuredClone(updated);
   }
@@ -828,11 +1045,13 @@ export class DemoConsoleApi implements ConsoleApi {
     readonly agentId: string;
     readonly title: string;
     readonly initialMessage: string;
+    readonly files?: readonly RunFileUpload[];
   }) {
     const agent = this.#agents.find((item) => item.id === input.agentId);
     if (!agent) throw new Error("Agent not found");
     this.#counter += 1;
     const now = new Date().toISOString();
+    const messageId = `message_demo_${this.#counter}`;
     const detail: SessionDetail = {
       id: `session_demo_${this.#counter}`,
       title: input.title,
@@ -851,15 +1070,19 @@ export class DemoConsoleApi implements ConsoleApi {
       completedAt: null,
       attempt: 1,
       workspaceFiles: [],
+      delegations: [],
       events: [
         {
-          id: `message_demo_${this.#counter}`,
+          id: messageId,
           kind: "user",
           title: "User",
-          summary: input.initialMessage,
+          summary: input.initialMessage || "Review the attached file(s).",
           createdAt: now,
           durationMs: null,
           status: "success",
+          ...(input.files?.length
+            ? { files: demoRunFiles(input.files, messageId) }
+            : {}),
         },
       ],
       capabilities: {
@@ -867,16 +1090,43 @@ export class DemoConsoleApi implements ConsoleApi {
         canResume: false,
         canBranchReplay: false,
       },
+      skills: (agent.versions[0]?.config.skillVersionIds ?? []).flatMap(
+        (versionId) => {
+          const skill = this.#skills.find(
+            (candidate) => candidate.latestVersionId === versionId,
+          );
+          return skill
+            ? [
+                {
+                  skillId: skill.id,
+                  skillVersionId: versionId,
+                  version: skill.version,
+                  name: skill.name,
+                  description: skill.description,
+                  contentHash: skill.contentHash,
+                  status: skill.status,
+                },
+              ]
+            : [];
+        },
+      ),
     };
     this.#sessions.unshift(detail);
     return detail;
   }
 
-  async submitMessage(id: string, message: string) {
+  async submitMessage(
+    id: string,
+    input: {
+      readonly message: string;
+      readonly files?: readonly RunFileUpload[];
+    },
+  ) {
     const session = this.#sessions.find((item) => item.id === id);
     if (!session) throw new Error("Session not found");
     this.#counter += 1;
     const now = new Date().toISOString();
+    const messageId = `message_demo_${this.#counter}`;
     const updated: SessionDetail = {
       ...session,
       status: "queued",
@@ -887,13 +1137,16 @@ export class DemoConsoleApi implements ConsoleApi {
       events: [
         ...session.events,
         {
-          id: `message_demo_${this.#counter}`,
+          id: messageId,
           kind: "user",
           title: "User",
-          summary: message,
+          summary: input.message || "Review the attached file(s).",
           createdAt: now,
           durationMs: null,
           status: "success",
+          ...(input.files?.length
+            ? { files: demoRunFiles(input.files, messageId) }
+            : {}),
         },
       ],
       capabilities: {

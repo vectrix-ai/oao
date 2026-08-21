@@ -6,6 +6,7 @@ import type {
   CreateModelProviderInput,
   CreateModelPresetInput,
   CreateSandboxProviderInput,
+  CreateSkillInput,
   CreateStorageProviderInput,
   CreatedApiKey,
   EventConnection,
@@ -25,6 +26,9 @@ import type {
   StorageProviderList,
   SessionDetail,
   SessionSummary,
+  SkillDetail,
+  SkillFileInput,
+  SkillSummary,
   SettingsData,
   TimelineEvent,
   TimelineKind,
@@ -194,6 +198,12 @@ function sessionSummary(
   return {
     id: text(value.id),
     title: text(value.title, "Untitled session"),
+    ...(value.parentSessionId === null || value.parentSessionId === undefined
+      ? {}
+      : { parentSessionId: text(value.parentSessionId) }),
+    ...(value.delegateKey === null || value.delegateKey === undefined
+      ? {}
+      : { delegateKey: text(value.delegateKey) }),
     status: text(value.status, "queued") as SessionSummary["status"],
     agentId: text(value.agentId),
     agentName: text(value.agentName, "Managed agent"),
@@ -310,6 +320,18 @@ function sessionDetail(
   const transcript: TimelineEvent[] = transcriptRecords.map(
     (message, index) => {
       const role = text(message.role, "assistant");
+      const files = (Array.isArray(message.files) ? message.files : []).map(
+        (value, fileIndex) => {
+          const file = record(value);
+          return {
+            id: text(file.id, `${text(message.id)}-file-${fileIndex}`),
+            name: text(file.fileName ?? file.name, "Attached file"),
+            contentType: text(file.contentType, "application/octet-stream"),
+            sizeBytes: numeric(file.sizeBytes),
+            sha256: text(file.sha256),
+          };
+        },
+      );
       return {
         id: text(message.id, `message-${index}`),
         kind: timelineKind(role),
@@ -320,6 +342,7 @@ function sessionDetail(
         createdAt: text(message.createdAt, summary.createdAt),
         durationMs: null,
         status: "success",
+        ...(files.length ? { files } : {}),
       };
     },
   );
@@ -552,6 +575,40 @@ function sessionDetail(
       canResume: false,
       canBranchReplay: false,
     },
+    skills: (Array.isArray(value.skills) ? value.skills : []).map((entry) => {
+      const skill = record(entry);
+      return {
+        skillId: text(skill.skillId),
+        skillVersionId: text(skill.skillVersionId),
+        version: numeric(skill.version),
+        name: text(skill.name),
+        description: text(skill.description),
+        contentHash: text(skill.contentHash),
+        status: text(skill.status, "active") as
+          "active" | "deprecated" | "revoked",
+      };
+    }),
+    delegations: (Array.isArray(value.delegations)
+      ? value.delegations
+      : []
+    ).map((entry) => {
+      const delegation = record(entry);
+      return {
+        id: text(delegation.id),
+        delegateKey: text(delegation.delegateKey),
+        direction: text(delegation.direction, "outgoing") as
+          "outgoing" | "parent",
+        parentSessionId: text(delegation.parentSessionId),
+        childAgentVersionId: text(delegation.childAgentVersionId),
+        childSessionId: text(delegation.childSessionId),
+        latestChildRunId: text(delegation.latestChildRunId),
+        latestChildRunState: text(
+          delegation.latestChildRunState,
+          "queued",
+        ) as SessionDetail["delegations"][number]["latestChildRunState"],
+        state: text(delegation.state, "active") as "active" | "cancelled",
+      };
+    }),
     runs,
     transcript: transcriptRecords,
     pendingWork: Array.isArray(value.pendingWork)
@@ -755,6 +812,55 @@ export class HttpConsoleApi implements ConsoleApi {
     return this.getAgent(id);
   };
 
+  listSkills = async (filters: ListFilters) => {
+    const response =
+      await this.#projectRequest<CursorPage<SkillSummary>>("/skills?limit=100");
+    return this.#page(
+      response,
+      filters,
+      (skill) => `${skill.displayName} ${skill.key} ${skill.description}`,
+    );
+  };
+
+  getSkill = async (id: string): Promise<SkillDetail> =>
+    this.#projectRequest(`/skills/${encodeURIComponent(id)}`);
+
+  createSkill = async (input: CreateSkillInput): Promise<SkillDetail> => {
+    const created = await this.#projectRequest<{ readonly id: string }>(
+      "/skills",
+      { method: "POST", body: JSON.stringify(input) },
+    );
+    return this.getSkill(created.id);
+  };
+
+  publishSkillVersion = async (
+    id: string,
+    input: Parameters<ConsoleApi["publishSkillVersion"]>[1],
+  ): Promise<SkillDetail> => {
+    await this.#projectRequest(`/skills/${encodeURIComponent(id)}/versions`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return this.getSkill(id);
+  };
+
+  exportSkillVersion = async (skillId: string, versionId: string) =>
+    this.#projectRequest<{ readonly files: readonly SkillFileInput[] }>(
+      `/skills/${encodeURIComponent(skillId)}/versions/${encodeURIComponent(versionId)}/export`,
+    );
+
+  updateSkillVersionLifecycle = async (
+    skillId: string,
+    versionId: string,
+    status: "deprecated" | "revoked",
+  ): Promise<SkillDetail> => {
+    await this.#projectRequest(
+      `/skills/${encodeURIComponent(skillId)}/versions/${encodeURIComponent(versionId)}/lifecycle`,
+      { method: "PATCH", body: JSON.stringify({ status }) },
+    );
+    return this.getSkill(skillId);
+  };
+
   listSessions = async (filters: ListFilters) => {
     const response = await this.#projectRequest<
       CursorPage<Record<string, unknown>>
@@ -789,6 +895,7 @@ export class HttpConsoleApi implements ConsoleApi {
           agentVersionId,
           title: input.title,
           initialMessage: input.initialMessage,
+          ...(input.files?.length ? { files: input.files } : {}),
         }),
       },
     );
@@ -798,22 +905,34 @@ export class HttpConsoleApi implements ConsoleApi {
       typeof created.runId !== "string" &&
       typeof created.latestRunId !== "string"
     )
-      await this.#createRun(sessionId, input.initialMessage);
+      await this.#createRun(sessionId, {
+        message: input.initialMessage,
+        ...(input.files?.length ? { files: input.files } : {}),
+      });
     return this.getSession(sessionId);
   };
 
-  async #createRun(sessionId: string, message: string): Promise<void> {
+  async #createRun(
+    sessionId: string,
+    input: Parameters<ConsoleApi["submitMessage"]>[1],
+  ): Promise<void> {
     await this.#projectRequest(
       `/sessions/${encodeURIComponent(sessionId)}/runs`,
       {
         method: "POST",
-        body: JSON.stringify({ redactedInput: message }),
+        body: JSON.stringify({
+          message: input.message,
+          ...(input.files?.length ? { files: input.files } : {}),
+        }),
       },
     );
   }
 
-  submitMessage = async (id: string, message: string) => {
-    await this.#createRun(id, message);
+  submitMessage = async (
+    id: string,
+    input: Parameters<ConsoleApi["submitMessage"]>[1],
+  ) => {
+    await this.#createRun(id, input);
     return this.getSession(id);
   };
 

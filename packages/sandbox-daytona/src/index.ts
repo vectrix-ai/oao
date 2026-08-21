@@ -1440,6 +1440,19 @@ export interface ManagedDaytonaSandboxFactory extends SandboxFactory {
   persistWorkspace(sandbox: Sandbox): Promise<void>;
 }
 
+export function sandboxWorkspaceLifecycleIdentity(input: {
+  readonly organizationId: string;
+  readonly projectId: string;
+  readonly ownerThreadId: string;
+}): string {
+  return [
+    "oao-sandbox-v1",
+    input.organizationId,
+    input.projectId,
+    input.ownerThreadId,
+  ].join(":");
+}
+
 export function createManagedDaytonaFlueSandbox(input: {
   readonly pool: PgPool;
   readonly provider: FlueSandboxProviderPort;
@@ -1448,6 +1461,9 @@ export function createManagedDaytonaFlueSandbox(input: {
   readonly runId: RunId;
   readonly threadId: ThreadId;
   readonly sessionId: SessionId;
+  readonly workspaceOwnerRunId?: RunId;
+  readonly workspaceOwnerThreadId?: ThreadId;
+  readonly workspaceOwnerSessionId?: SessionId;
   readonly image?: string;
   readonly snapshotId?: string;
   readonly egress: SandboxEgressPolicy;
@@ -1475,18 +1491,20 @@ export function createManagedDaytonaFlueSandbox(input: {
   };
   return {
     async createSandbox({ id }) {
-      const lifecycleIdentity = [
-        "oao-sandbox-v1",
-        input.organizationId,
-        input.projectId,
-        input.threadId,
-      ].join(":");
+      const ownerRunId = input.workspaceOwnerRunId ?? input.runId;
+      const ownerThreadId = input.workspaceOwnerThreadId ?? input.threadId;
+      const ownerSessionId = input.workspaceOwnerSessionId ?? input.sessionId;
+      const lifecycleIdentity = sandboxWorkspaceLifecycleIdentity({
+        organizationId: input.organizationId,
+        projectId: input.projectId,
+        ownerThreadId,
+      });
       const managed = await lifecycle.ensure({
         organizationId: input.organizationId,
         projectId: input.projectId,
-        runId: input.runId,
-        threadId: input.threadId,
-        sessionId: input.sessionId,
+        runId: ownerRunId,
+        threadId: ownerThreadId,
+        sessionId: ownerSessionId,
         sandboxId: stableUuid(lifecycleIdentity),
         creationKey: lifecycleIdentity,
         image: input.image ?? DEFAULT_DAYTONA_IMAGE,
@@ -1496,7 +1514,10 @@ export function createManagedDaytonaFlueSandbox(input: {
           ? { targetPreference: input.targetPreference }
           : {}),
       });
-      managedInstance = managed;
+      managedInstance = {
+        ...managed,
+        record: { ...managed.record, runId: input.runId },
+      };
       if (managed.created && input.workspaceBackupStore) {
         try {
           const archive = await input.workspaceBackupStore.load();
@@ -1552,6 +1573,9 @@ export function createProjectDaytonaFlueSandbox(input: {
   readonly runId: RunId;
   readonly threadId: ThreadId;
   readonly sessionId: SessionId;
+  readonly workspaceOwnerRunId?: RunId;
+  readonly workspaceOwnerThreadId?: ThreadId;
+  readonly workspaceOwnerSessionId?: SessionId;
   readonly image?: string;
   readonly snapshotId?: string;
   readonly network: "none" | "restricted";
@@ -1632,9 +1656,9 @@ export function createProjectDaytonaFlueSandbox(input: {
         {
           organizationId: input.organizationId,
           projectId: input.projectId,
-          threadId: input.threadId,
-          sessionId: input.sessionId,
-          runId: input.runId,
+          threadId: input.workspaceOwnerThreadId ?? input.threadId,
+          sessionId: input.workspaceOwnerSessionId ?? input.sessionId,
+          runId: input.workspaceOwnerRunId ?? input.runId,
         },
       );
       resolved = createManagedDaytonaFlueSandbox({

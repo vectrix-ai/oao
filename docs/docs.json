@@ -22,6 +22,8 @@
         "group": "Build agents",
         "pages": [
           "agents/create-agent",
+          "concepts/multi-agent-orchestration",
+          "concepts/skills",
           "models/adding-models",
           "sandboxes/daytona",
           "storage/workspace-backups"
@@ -29,7 +31,7 @@
       },
       {
         "group": "Connect your app",
-        "pages": ["integrations/codebase"]
+        "pages": ["integrations/files", "integrations/codebase"]
       },
       {
         "group": "Reference",

@@ -1,6 +1,7 @@
 import type {
   AgentDefinition,
   AgentVersion,
+  AgentDelegation,
   ApiError,
   Approval,
   Message,
@@ -14,6 +15,7 @@ import type {
   Project,
   ProjectSandboxProvider,
   ProjectStorageProvider,
+  RunFile,
   SandboxSnapshotEntry,
   Run,
   Session,
@@ -25,6 +27,7 @@ import type {
 export type {
   AgentDefinition,
   AgentVersion,
+  AgentDelegation,
   ApiError,
   Approval,
   Message,
@@ -38,6 +41,7 @@ export type {
   Project,
   ProjectSandboxProvider,
   ProjectStorageProvider,
+  RunFile,
   SandboxSnapshotEntry,
   Run,
   Session,
@@ -127,11 +131,90 @@ export interface PublishAgentVersionInput {
   readonly systemPrompt: string;
   readonly modelPreset: string;
   readonly tools: readonly AgentToolInput[];
+  readonly skillVersionIds?: readonly string[];
+  readonly delegates?: readonly {
+    readonly key: string;
+    readonly description: string;
+    readonly agentVersionId: string;
+    readonly maxParallel?: number;
+  }[];
   readonly sandbox: SandboxPolicyInput;
   readonly limits: {
     readonly maxTurns: 32;
     readonly timeoutMs: number;
   };
+}
+
+export interface SkillFileInput {
+  readonly path: string;
+  readonly contentType: string;
+  readonly dataBase64: string;
+}
+
+export interface PublishSkillVersionInput {
+  readonly name: string;
+  readonly description: string;
+  readonly instructions: string;
+  readonly license?: string;
+  readonly compatibility?: string;
+  readonly metadata?: Readonly<Record<string, string>>;
+  /** Informational only. OAO and Flue do not enforce this field. */
+  readonly allowedTools?: string;
+  readonly files?: readonly SkillFileInput[];
+}
+
+export interface CreateSkillInput extends PublishSkillVersionInput {
+  readonly key?: string;
+  readonly displayName?: string;
+}
+
+export interface SkillVersionView {
+  readonly id: string;
+  readonly skillId: string;
+  readonly version: number;
+  readonly name: string;
+  readonly description: string;
+  readonly instructions: string;
+  readonly license: string | null;
+  readonly compatibility: string | null;
+  readonly metadata: Readonly<Record<string, string>>;
+  readonly allowedTools: string | null;
+  readonly contentHash: string;
+  readonly totalBytes: number;
+  readonly status: "active" | "deprecated" | "revoked";
+  readonly files: readonly {
+    readonly path: string;
+    readonly contentType: string;
+    readonly sizeBytes: number;
+    readonly sha256: string;
+  }[];
+  readonly createdAt: string;
+}
+
+export interface SkillSummary {
+  readonly id: string;
+  readonly key: string;
+  readonly displayName: string;
+  readonly latestVersionId: string;
+  readonly version: number;
+  readonly name: string;
+  readonly description: string;
+  readonly contentHash: string;
+  readonly status: "active" | "deprecated" | "revoked";
+  readonly fileCount: number;
+  readonly versionIds: readonly string[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface SkillDetail extends SkillSummary {
+  readonly versions: readonly SkillVersionView[];
+}
+
+export interface SkillExport {
+  readonly schemaVersion: 1;
+  readonly version: SkillVersionView;
+  readonly files: readonly SkillFileInput[];
 }
 
 export interface CreateModelPresetInput {
@@ -231,23 +314,51 @@ export interface CreateAgentInput {
   readonly initialConfig?: PublishAgentVersionInput;
 }
 
-export type CreateSessionInput =
+export interface RunFileInput {
+  readonly name: string;
+  readonly contentType: string;
+  readonly dataBase64: string;
+}
+
+type NonEmptyRunFiles = readonly [RunFileInput, ...RunFileInput[]];
+
+type InitialSessionContent =
+  | {
+      readonly initialMessage: string;
+      readonly files?: readonly RunFileInput[];
+    }
+  | { readonly initialMessage?: never; readonly files: NonEmptyRunFiles };
+
+export type CreateSessionInput = (
   | {
       readonly agentId: string;
       readonly agentVersionId?: string;
       readonly title?: string;
-      readonly initialMessage: string;
     }
   | {
       readonly agentId?: never;
       readonly agentVersionId: string;
       readonly title?: string;
-      readonly initialMessage: string;
-    };
+    }
+) &
+  InitialSessionContent;
 
 export type RunInput =
-  | { readonly message: string; readonly redactedInput?: never }
-  | { readonly message?: never; readonly redactedInput: string };
+  | {
+      readonly message: string;
+      readonly redactedInput?: never;
+      readonly files?: readonly RunFileInput[];
+    }
+  | {
+      readonly message?: never;
+      readonly redactedInput: string;
+      readonly files?: readonly RunFileInput[];
+    }
+  | {
+      readonly message?: never;
+      readonly redactedInput?: never;
+      readonly files: NonEmptyRunFiles;
+    };
 
 /** Response from creating a session and its first queued run atomically. */
 export interface CreatedSession {
@@ -261,6 +372,13 @@ export interface CreatedSession {
   readonly lastActivityAt: string;
   readonly latestRunId: string;
   readonly run: Run;
+}
+
+export interface DelegationMessageResult {
+  readonly delegationId: string;
+  readonly childSessionId: string;
+  readonly childRunId: string;
+  readonly status: "queued";
 }
 
 export interface RunTimelineEntry {

@@ -12,12 +12,32 @@ and should shape integrations:
   this monorepo can depend on `@oao/sdk-js` with `workspace:*`. External
   codebases should use the documented HTTP/SSE contracts until the SDK is
   published or distributed from a registry you control.
-- **There is no public attachment upload API yet.** Small trusted text can be
-  sent in a message within the 100,000-character input limit. For codebases,
-  use narrow caller-owned read/search tools. Binary attachments and general
-  artifact ingestion need a future public upload/reference contract.
+- **Run files are deliberately bounded.** Initial and later turns accept up to
+  eight UTF-8 text/code/data files, supported images, PDFs, common Microsoft
+  Office/OpenDocument/iWork documents, or EML/MSG emails. Extracted content is
+  capped at 200,000 characters per turn. Password-protected or text-free
+  documents, standalone archives, audio, video, Access/Publisher/OneNote/Visio/
+  Project files, and arbitrary binaries are not accepted. Files are submitted
+  inline as base64; presigned/direct-to-object storage uploads and reusable
+  artifact references remain future work. For full codebases, use narrow
+  caller-owned read/search tools instead of attaching the repository.
 - **One run executes at a time per session thread.** Submit the next turn only
   after the latest run is completed, failed, cancelled, or timed out.
+- **Delegate rosters are publication-time and exact.** A coordinator version
+  can pin up to 32 child versions and allow 1–8 parallel calls per delegate.
+  OAO creates persistent child sessions and shares the root Daytona workspace,
+  but it does not dynamically discover agents, mutate a published roster,
+  merge child conversation histories, move a child to another workspace, or
+  distribute orchestration across different sandbox providers. Parallel child
+  writes to the same files require application-level coordination; OAO does not
+  provide file locks or merge resolution.
+- **Skill packages are inline and PostgreSQL-backed.** Each request is limited
+  to 128 resources, 5 MiB per resource, and 10 MiB total expanded content.
+  There is no archive, Git registry, object-storage upload, cross-project
+  sharing, signature service, or automatic remote update workflow. Skills are
+  not materialized into Daytona workspaces; Flue reads verified resources from
+  the runtime registry. Files under `scripts/` are never run automatically,
+  and `allowedTools` is informational rather than a policy control.
 - **Runtime execution requires configured providers.** Add a project-scoped
   OpenRouter or OpenAI provider and preset plus a Daytona connection before
   publishing an executable agent version. Test doubles are not selectable in

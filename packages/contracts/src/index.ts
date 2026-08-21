@@ -132,6 +132,66 @@ export const AgentVersionSchema = v.object({
   createdAt: TimestampSchema,
 });
 
+export const SkillLifecycleStatusSchema = v.picklist([
+  "active",
+  "deprecated",
+  "revoked",
+]);
+
+export const SkillSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  key: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  latestVersionId: v.nullable(IdSchema),
+  createdByPrincipalId: IdSchema,
+  createdAt: TimestampSchema,
+  updatedAt: TimestampSchema,
+});
+
+export const SkillVersionFileManifestSchema = v.object({
+  path: v.pipe(v.string(), v.minLength(1), v.maxLength(240)),
+  contentType: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  sizeBytes: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  sha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
+});
+
+export const SkillVersionSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  skillId: IdSchema,
+  version: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  name: v.pipe(
+    v.string(),
+    v.minLength(1),
+    v.maxLength(64),
+    v.regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u),
+  ),
+  description: v.pipe(v.string(), v.minLength(1), v.maxLength(1_024)),
+  instructions: v.pipe(v.string(), v.minLength(1), v.maxLength(200_000)),
+  license: v.nullable(v.pipe(v.string(), v.maxLength(500))),
+  compatibility: v.nullable(v.pipe(v.string(), v.maxLength(500))),
+  metadata: v.record(v.string(), v.string()),
+  allowedTools: v.nullable(v.pipe(v.string(), v.maxLength(2_000))),
+  contentHash: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
+  totalBytes: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  status: SkillLifecycleStatusSchema,
+  files: v.optional(v.array(SkillVersionFileManifestSchema), []),
+  createdByPrincipalId: IdSchema,
+  createdAt: TimestampSchema,
+});
+
+export const ManagedSkillBindingSnapshotSchema = v.strictObject({
+  skillId: IdSchema,
+  skillVersionId: IdSchema,
+  version: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(64)),
+  description: v.pipe(v.string(), v.minLength(1), v.maxLength(1_024)),
+  contentHash: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
+});
+
 export const ThreadSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
@@ -190,6 +250,74 @@ export const MessageRoleSchema = v.picklist([
   "assistant",
   "tool",
 ]);
+
+/**
+ * Binary document formats that are extracted to bounded Markdown when a run is
+ * admitted. Text and native image inputs are accepted separately by media type.
+ */
+export const RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION = Object.freeze({
+  pdf: "application/pdf",
+  rtf: "application/rtf",
+  doc: "application/msword",
+  dot: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  docm: "application/vnd.ms-word.document.macroenabled.12",
+  dotx: "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
+  dotm: "application/vnd.ms-word.template.macroenabled.12",
+  xls: "application/vnd.ms-excel",
+  xlt: "application/vnd.ms-excel",
+  xla: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xlsm: "application/vnd.ms-excel.sheet.macroenabled.12",
+  xlsb: "application/vnd.ms-excel.sheet.binary.macroenabled.12",
+  xlam: "application/vnd.ms-excel.addin.macroenabled.12",
+  xltx: "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
+  xltm: "application/vnd.ms-excel.template.macroenabled.12",
+  ppt: "application/vnd.ms-powerpoint",
+  pot: "application/vnd.ms-powerpoint",
+  pps: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  pptm: "application/vnd.ms-powerpoint.presentation.macroenabled.12",
+  ppsx: "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+  ppsm: "application/vnd.ms-powerpoint.presentation.macroenabled.12",
+  potx: "application/vnd.openxmlformats-officedocument.presentationml.template",
+  potm: "application/vnd.ms-powerpoint.template.macroenabled.12",
+  odt: "application/vnd.oasis.opendocument.text",
+  ott: "application/vnd.oasis.opendocument.text-template",
+  fodt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  ots: "application/vnd.oasis.opendocument.spreadsheet-template",
+  fods: "application/vnd.oasis.opendocument.spreadsheet",
+  odp: "application/vnd.oasis.opendocument.presentation",
+  otp: "application/vnd.oasis.opendocument.presentation-template",
+  fodp: "application/vnd.oasis.opendocument.presentation",
+  odg: "application/vnd.oasis.opendocument.graphics",
+  otg: "application/vnd.oasis.opendocument.graphics-template",
+  fodg: "application/vnd.oasis.opendocument.graphics",
+  odf: "application/vnd.oasis.opendocument.formula",
+  pages: "application/x-iwork-pages-sffpages",
+  numbers: "application/x-iwork-numbers-sffnumbers",
+  key: "application/x-iwork-keynote-sffkey",
+  eml: "message/rfc822",
+  msg: "application/vnd.ms-outlook",
+} as const);
+
+export const RUN_DOCUMENT_EXTENSIONS = Object.freeze(
+  Object.keys(RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION),
+);
+
+export const RunFileSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  runId: IdSchema,
+  messageId: IdSchema,
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(255)),
+  contentType: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  sizeBytes: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  sha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
+  createdAt: TimestampSchema,
+});
 export const MessageSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
@@ -198,6 +326,7 @@ export const MessageSchema = v.object({
   runId: IdSchema,
   role: MessageRoleSchema,
   redactedContent: v.string(),
+  files: v.optional(v.array(RunFileSchema)),
   createdAt: TimestampSchema,
 });
 
@@ -248,6 +377,17 @@ export const ApprovalSchema = v.object({
 });
 
 export const ProductEventKindSchema = v.picklist([
+  "delegation.created",
+  "delegation.follow_up_created",
+  "delegation.completed",
+  "delegation.failed",
+  "delegation.cancelled",
+  "skill.created",
+  "skill.version_published",
+  "skill.version_deprecated",
+  "skill.version_revoked",
+  "skill.activated",
+  "skill.resource_read",
   "run.created",
   "run.state_changed",
   "run.cancellation_requested",
@@ -330,10 +470,50 @@ const SandboxCapabilitiesSchema = v.pipe(
   ),
 );
 
+export const ManagedAgentDelegateSchema = v.strictObject({
+  key: v.pipe(
+    v.string(),
+    v.minLength(1),
+    v.maxLength(64),
+    v.regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u),
+  ),
+  description: v.pipe(v.string(), v.minLength(1), v.maxLength(1_024)),
+  agentVersionId: IdSchema,
+  maxParallel: v.optional(
+    v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(8)),
+    1,
+  ),
+});
+
+const ManagedAgentDelegatesSchema = v.pipe(
+  v.array(ManagedAgentDelegateSchema),
+  v.maxLength(32),
+  v.check(
+    (delegates) =>
+      new Set(delegates.map((delegate) => delegate.key)).size ===
+        delegates.length &&
+      new Set(delegates.map((delegate) => delegate.agentVersionId)).size ===
+        delegates.length,
+    "delegate keys and agent versions must be unique",
+  ),
+);
+
 export const ManagedAgentPublicationConfigSchema = v.strictObject({
   systemPrompt: v.pipe(v.string(), v.minLength(1), v.maxLength(100_000)),
   modelPreset: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
-  tools: v.array(RuntimeToolSnapshotSchema),
+  tools: v.pipe(
+    v.array(RuntimeToolSnapshotSchema),
+    v.check(
+      (tools) =>
+        tools.every(
+          (tool) =>
+            tool.name !== "delegate_agent" && tool.name !== "message_agent",
+        ),
+      "delegate_agent and message_agent are reserved platform tools",
+    ),
+  ),
+  skillVersionIds: v.optional(v.array(IdSchema), []),
+  delegates: v.optional(ManagedAgentDelegatesSchema, []),
   sandbox: v.strictObject({
     enabled: v.boolean(),
     provider: ProjectSandboxProviderKeySchema,
@@ -361,6 +541,8 @@ export const ManagedAgentSnapshotSchema = v.strictObject({
   systemPrompt: ManagedAgentPublicationConfigSchema.entries.systemPrompt,
   modelPreset: ManagedAgentPublicationConfigSchema.entries.modelPreset,
   tools: ManagedAgentPublicationConfigSchema.entries.tools,
+  skills: v.optional(v.array(ManagedSkillBindingSnapshotSchema), []),
+  delegates: v.optional(ManagedAgentDelegatesSchema, []),
   sandbox: v.strictObject({
     enabled: v.boolean(),
     provider: v.optional(LegacySandboxProviderKeySchema, "local-fake"),
@@ -378,7 +560,37 @@ export const ManagedAgentInstanceDataSchema = v.object({
   projectId: IdSchema,
   threadId: IdSchema,
   sessionId: IdSchema,
+  workspace: v.optional(
+    v.strictObject({
+      id: IdSchema,
+      ownerThreadId: IdSchema,
+      ownerSessionId: IdSchema,
+      ownerRunId: IdSchema,
+    }),
+  ),
   snapshot: ManagedAgentSnapshotSchema,
+});
+
+export const AgentDelegationStateSchema = v.picklist(["active", "cancelled"]);
+
+export const AgentDelegationSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  parentRunId: IdSchema,
+  parentThreadId: IdSchema,
+  parentSessionId: IdSchema,
+  parentAgentVersionId: IdSchema,
+  delegateKey: ManagedAgentDelegateSchema.entries.key,
+  childAgentVersionId: IdSchema,
+  childThreadId: IdSchema,
+  childSessionId: IdSchema,
+  workspaceId: IdSchema,
+  state: AgentDelegationStateSchema,
+  latestChildRunId: IdSchema,
+  latestChildRunState: RunStateSchema,
+  createdAt: TimestampSchema,
+  updatedAt: TimestampSchema,
 });
 
 export const ManagedRunDeliverySchema = v.object({
@@ -390,6 +602,20 @@ export const ManagedRunDeliverySchema = v.object({
 
 export const ManagedRunInputV1Schema = v.object({
   message: v.pipe(v.string(), v.minLength(1), v.maxLength(100_000)),
+  files: v.optional(
+    v.pipe(
+      v.array(
+        v.object({
+          id: IdSchema,
+          name: v.pipe(v.string(), v.minLength(1), v.maxLength(255)),
+          contentType: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+          sizeBytes: v.pipe(v.number(), v.integer(), v.minValue(1)),
+          sha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
+        }),
+      ),
+      v.maxLength(8),
+    ),
+  ),
 });
 
 export const ToolResultFailureCodeSchema = v.picklist([
@@ -471,11 +697,23 @@ export type Organization = v.InferOutput<typeof OrganizationSchema>;
 export type Project = v.InferOutput<typeof ProjectSchema>;
 export type AgentDefinition = v.InferOutput<typeof AgentDefinitionSchema>;
 export type AgentVersion = v.InferOutput<typeof AgentVersionSchema>;
+export type Skill = v.InferOutput<typeof SkillSchema>;
+export type SkillVersion = v.InferOutput<typeof SkillVersionSchema>;
+export type SkillLifecycleStatus = v.InferOutput<
+  typeof SkillLifecycleStatusSchema
+>;
+export type ManagedSkillBindingSnapshot = v.InferOutput<
+  typeof ManagedSkillBindingSnapshotSchema
+>;
+export type ManagedAgentDelegate = v.InferOutput<
+  typeof ManagedAgentDelegateSchema
+>;
 export type Thread = v.InferOutput<typeof ThreadSchema>;
 export type Session = v.InferOutput<typeof SessionSchema>;
 export type RunState = v.InferOutput<typeof RunStateSchema>;
 export type Run = v.InferOutput<typeof RunSchema>;
 export type Message = v.InferOutput<typeof MessageSchema>;
+export type RunFile = v.InferOutput<typeof RunFileSchema>;
 export type ToolCall = v.InferOutput<typeof ToolCallSchema>;
 export type ToolOwner = v.InferOutput<typeof ToolOwnerSchema>;
 export type ToolStage = v.InferOutput<typeof ToolStageSchema>;
@@ -491,6 +729,10 @@ export type ManagedAgentPublicationConfig = v.InferOutput<
 export type SandboxCapability = v.InferOutput<typeof SandboxCapabilitySchema>;
 export type ManagedAgentInstanceData = v.InferOutput<
   typeof ManagedAgentInstanceDataSchema
+>;
+export type AgentDelegation = v.InferOutput<typeof AgentDelegationSchema>;
+export type AgentDelegationState = v.InferOutput<
+  typeof AgentDelegationStateSchema
 >;
 export type ManagedRunDelivery = v.InferOutput<typeof ManagedRunDeliverySchema>;
 export type ManagedRunInputV1 = v.InferOutput<typeof ManagedRunInputV1Schema>;

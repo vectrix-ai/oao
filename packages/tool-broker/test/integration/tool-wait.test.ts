@@ -21,6 +21,11 @@ const tenant = {
   projectId: "00000000-0000-4000-8000-000000000002" as ProjectId,
 };
 const principal = "00000000-0000-4000-8000-000000000003" as PrincipalId;
+const servicePrincipal = "00000000-0000-4000-8000-000000000099" as PrincipalId;
+const agentId = "00000000-0000-4000-8000-000000000004";
+const agentVersionId = "00000000-0000-4000-8000-000000000005";
+const threadId = "00000000-0000-4000-8000-000000000006";
+const sessionId = "00000000-0000-4000-8000-000000000007";
 const runId = "00000000-0000-4000-8000-000000000301" as RunId;
 
 test(
@@ -31,10 +36,76 @@ test(
     const pool = createPool(databaseUrl);
     const foundation = new PostgresFoundationRepository();
     const broker = new PostgresToolBroker(pool, {
-      servicePrincipalId: principal,
+      servicePrincipalId: servicePrincipal,
       pollMilliseconds: 1,
     });
     try {
+      const config = {
+        systemPrompt: "Execute deterministic tool-broker integration work.",
+        modelPreset: "integration-model",
+        tools: [],
+        sandbox: {
+          enabled: false,
+          provider: "integration-daytona",
+          network: "none",
+          capabilities: [],
+        },
+        limits: { maxTurns: 32, timeoutMs: 60_000 },
+      };
+      await pool.query(
+        `INSERT INTO oao.organizations (id,slug,name)
+         VALUES ($1,'tool-broker','Tool broker integration')`,
+        [tenant.organizationId],
+      );
+      await pool.query(
+        `INSERT INTO oao.projects (organization_id,id,slug,name)
+         VALUES ($1,$2,'tool-broker','Tool broker integration')`,
+        [tenant.organizationId, tenant.projectId],
+      );
+      await pool.query(
+        `INSERT INTO oao.principals (
+           organization_id,project_id,id,kind,subject,scopes
+         ) VALUES ($1,$2,$3,'human','tool-broker-human',ARRAY['*'])`,
+        [tenant.organizationId, tenant.projectId, principal],
+      );
+      await pool.query(
+        `INSERT INTO oao.agent_definitions (
+           organization_id,project_id,id,agent_key,name
+         ) VALUES ($1,$2,$3,'tool-broker-agent','Tool broker agent')`,
+        [tenant.organizationId, tenant.projectId, agentId],
+      );
+      await pool.query(
+        `INSERT INTO oao.agent_versions (
+           organization_id,project_id,id,agent_definition_id,version,config,
+           content_hash,created_by_principal_id
+         ) VALUES ($1,$2,$3,$4,1,$5,$6,$7)`,
+        [
+          tenant.organizationId,
+          tenant.projectId,
+          agentVersionId,
+          agentId,
+          config,
+          createHash("sha256").update(JSON.stringify(config)).digest(),
+          principal,
+        ],
+      );
+      await pool.query(
+        `INSERT INTO oao.threads (organization_id,project_id,id,title)
+         VALUES ($1,$2,$3,'Tool broker thread')`,
+        [tenant.organizationId, tenant.projectId, threadId],
+      );
+      await pool.query(
+        `INSERT INTO oao.sessions (
+           organization_id,project_id,id,thread_id,agent_version_id
+         ) VALUES ($1,$2,$3,$4,$5)`,
+        [
+          tenant.organizationId,
+          tenant.projectId,
+          sessionId,
+          threadId,
+          agentVersionId,
+        ],
+      );
       await withTenantTransaction(pool, tenant, (transaction) =>
         transaction.query(
           `INSERT INTO oao.runs (
@@ -45,9 +116,9 @@ test(
             tenant.organizationId,
             tenant.projectId,
             runId,
-            "00000000-0000-4000-8000-000000000006",
-            "00000000-0000-4000-8000-000000000007",
-            "00000000-0000-4000-8000-000000000005",
+            threadId,
+            sessionId,
+            agentVersionId,
             principal,
           ],
         ),
@@ -108,6 +179,20 @@ test(
         value: { echoed: true },
       });
       assert.equal(executions, 1);
+      const service = await withTenantTransaction(pool, tenant, (transaction) =>
+        transaction.query(
+          `SELECT kind::text,subject,scopes FROM oao.principals
+             WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+          [tenant.organizationId, tenant.projectId, servicePrincipal],
+        ),
+      );
+      assert.deepEqual(service.rows, [
+        {
+          kind: "service",
+          subject: `oao-runtime-worker:${servicePrincipal}`,
+          scopes: [],
+        },
+      ]);
     } finally {
       await pool.end();
     }

@@ -11,6 +11,7 @@ import { listDaytonaSnapshots } from "@oao/sandbox-daytona";
 import { createApiApp } from "./app.js";
 import { composeAuthentication } from "./composition.js";
 import { loadServerConfiguration } from "./config.js";
+import { HttpApiError } from "./errors.js";
 import { PostgresApiStore } from "./store.js";
 import { PostgresRuntimeCommandPort } from "./runtime-commands.js";
 
@@ -75,6 +76,9 @@ const app = createApiApp({
         level: "error",
         requestId,
         errorType: error instanceof Error ? error.name : "UnknownError",
+        ...(error instanceof HttpApiError
+          ? { errorCode: error.code, errorMessage: error.message }
+          : {}),
       })}\n`,
     );
   },

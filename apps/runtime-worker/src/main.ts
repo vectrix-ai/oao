@@ -23,6 +23,8 @@ import { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { PostgresWakeQueue, WakeWorker } from "@oao/queue-postgres";
 import {
   ManagedRuntimeOrchestrator,
+  PostgresAgentDelegationCoordinator,
+  PostgresSkillRegistry,
   RuntimeProjection,
   configureVendorNeutralTelemetry,
   createProjectModelPresetActivator,
@@ -107,11 +109,15 @@ export async function startRuntimeWorker(input: {
       deploymentPresets.list().map((preset) => preset.key),
     ),
   });
+  const skills = new PostgresSkillRegistry(pool);
+  const delegations = new PostgresAgentDelegationCoordinator(pool, queue);
   const flue = await startManagedFlueRuntime({
     pool,
     providers,
     presets,
     broker,
+    skills,
+    delegations,
     ...(input.platformTools ? { platformTools: input.platformTools } : {}),
     sandboxFactory: (initial, delivery) => {
       const sandbox = initial.snapshot.sandbox;
@@ -129,6 +135,15 @@ export async function startRuntimeWorker(input: {
           runId: delivery.runId as RunId,
           threadId: initial.threadId as ThreadId,
           sessionId: initial.sessionId as SessionId,
+          ...(initial.workspace
+            ? {
+                workspaceOwnerRunId: initial.workspace.ownerRunId as RunId,
+                workspaceOwnerThreadId: initial.workspace
+                  .ownerThreadId as ThreadId,
+                workspaceOwnerSessionId: initial.workspace
+                  .ownerSessionId as SessionId,
+              }
+            : {}),
           egress: { mode: "none" },
           capabilities: sandbox.capabilities,
           ...(sandbox.snapshotId ? { snapshotId: sandbox.snapshotId } : {}),
@@ -146,6 +161,15 @@ export async function startRuntimeWorker(input: {
         runId: delivery.runId as RunId,
         threadId: initial.threadId as ThreadId,
         sessionId: initial.sessionId as SessionId,
+        ...(initial.workspace
+          ? {
+              workspaceOwnerRunId: initial.workspace.ownerRunId as RunId,
+              workspaceOwnerThreadId: initial.workspace
+                .ownerThreadId as ThreadId,
+              workspaceOwnerSessionId: initial.workspace
+                .ownerSessionId as SessionId,
+            }
+          : {}),
         network: sandbox.network,
         capabilities: sandbox.capabilities,
         ...(sandbox.snapshotId ? { snapshotId: sandbox.snapshotId } : {}),
@@ -160,6 +184,7 @@ export async function startRuntimeWorker(input: {
     queue,
     (run) => projection.trackAdmission(run),
     presetActivator,
+    skills,
   );
   const wakeWorker = new WakeWorker(
     queue,

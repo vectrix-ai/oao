@@ -1,6 +1,7 @@
 import {
   Ban,
   Bot,
+  BookOpen,
   Bug,
   ChevronRight,
   Clock3,
@@ -21,12 +22,17 @@ import {
   Sparkles,
   TerminalSquare,
   PanelRight,
+  Paperclip,
   Timer,
   User,
   Wrench,
   X,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION,
+  RUN_DOCUMENT_EXTENSIONS,
+} from "@oao/contracts";
 import {
   useMemo,
   useRef,
@@ -36,7 +42,13 @@ import {
 } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { useApi } from "../api/context";
-import type { SessionDetail, TimelineEvent, TimelineKind } from "../api/types";
+import type {
+  RunFileUpload,
+  SessionDetail,
+  SessionSummary,
+  TimelineEvent,
+  TimelineKind,
+} from "../api/types";
 import {
   Button,
   ConfirmDialog,
@@ -86,6 +98,102 @@ const runStatuses = [
 ];
 
 const settledStates = ["completed", "failed", "cancelled", "timed_out"];
+const RUN_FILE_ACCEPT = [
+  "txt",
+  "md",
+  "csv",
+  "tsv",
+  "json",
+  "jsonl",
+  "xml",
+  "yaml",
+  "yml",
+  "js",
+  "jsx",
+  "ts",
+  "tsx",
+  "html",
+  "css",
+  "svg",
+  "png",
+  "jpg",
+  "jpeg",
+  "webp",
+  "gif",
+  ...RUN_DOCUMENT_EXTENSIONS,
+]
+  .map((extension) => `.${extension}`)
+  .join(",");
+
+function inferredContentType(file: File): string {
+  const extension = file.name.toLowerCase().split(".").at(-1) ?? "";
+  const byExtension: Readonly<Record<string, string>> = {
+    txt: "text/plain",
+    md: "text/markdown",
+    csv: "text/csv",
+    tsv: "text/tab-separated-values",
+    json: "application/json",
+    jsonl: "application/x-ndjson",
+    xml: "application/xml",
+    yaml: "application/yaml",
+    yml: "application/yaml",
+    js: "application/javascript",
+    jsx: "application/javascript",
+    ts: "application/typescript",
+    tsx: "application/typescript",
+    html: "text/html",
+    css: "text/css",
+    svg: "text/xml",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    webp: "image/webp",
+    gif: "image/gif",
+  };
+  return (
+    RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION[
+      extension as keyof typeof RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION
+    ] ??
+    byExtension[extension] ??
+    (file.type || "application/octet-stream")
+  );
+}
+
+function fileBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}.`));
+    reader.onload = () => {
+      const value = String(reader.result ?? "");
+      const comma = value.indexOf(",");
+      if (comma < 0) reject(new Error(`Could not encode ${file.name}.`));
+      else resolve(value.slice(comma + 1));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function runFiles(form: HTMLFormElement): Promise<RunFileUpload[]> {
+  const files = [
+    ...form.querySelectorAll<HTMLInputElement>(
+      'input[type="file"][name="files"]',
+    ),
+  ].flatMap((input) =>
+    [...(input.files ?? [])].filter((file) => file.size > 0),
+  );
+  if (files.length > 8) throw new Error("Attach at most 8 files per message.");
+  if (files.some((file) => file.size > 10 * 1024 * 1024))
+    throw new Error("Each attached file must be no larger than 10 MiB.");
+  if (files.reduce((total, file) => total + file.size, 0) > 20 * 1024 * 1024)
+    throw new Error("Attached files must be no larger than 20 MiB combined.");
+  return Promise.all(
+    files.map(async (file) => ({
+      name: file.name,
+      contentType: inferredContentType(file),
+      dataBase64: await fileBase64(file),
+    })),
+  );
+}
 
 function costLabel(provenance: string): string {
   return provenance === "provider_observed"
@@ -101,6 +209,47 @@ function costSuffix(provenance: string): string {
     : provenance === "unavailable"
       ? "n/a"
       : "observed";
+}
+
+interface SessionTreeRow {
+  readonly session: SessionSummary;
+  readonly depth: number;
+}
+
+/**
+ * Keep the API's activity ordering for roots and siblings while placing every
+ * visible delegated session immediately after its visible coordinator.
+ */
+function sessionTreeRows(
+  sessions: readonly SessionSummary[],
+): SessionTreeRow[] {
+  const visibleIds = new Set(sessions.map((session) => session.id));
+  const children = new Map<string, SessionSummary[]>();
+  for (const session of sessions) {
+    if (!session.parentSessionId || !visibleIds.has(session.parentSessionId))
+      continue;
+    const siblings = children.get(session.parentSessionId) ?? [];
+    siblings.push(session);
+    children.set(session.parentSessionId, siblings);
+  }
+
+  const result: SessionTreeRow[] = [];
+  const seen = new Set<string>();
+  const append = (session: SessionSummary, depth: number): void => {
+    if (seen.has(session.id)) return;
+    seen.add(session.id);
+    result.push({ session, depth });
+    for (const child of children.get(session.id) ?? [])
+      append(child, depth + 1);
+  };
+
+  for (const session of sessions) {
+    if (!session.parentSessionId || !visibleIds.has(session.parentSessionId))
+      append(session, 0);
+  }
+  // A corrupt cycle must not hide sessions from an operator.
+  for (const session of sessions) append(session, 0);
+  return result;
 }
 
 export function SessionsPage() {
@@ -127,6 +276,7 @@ export function SessionsPage() {
       agentId: string;
       title: string;
       initialMessage: string;
+      files?: readonly RunFileUpload[];
     }) => api.createSession(input),
     onSuccess: async (session) => {
       await queryClient.invalidateQueries({ queryKey: ["sessions"] });
@@ -139,6 +289,7 @@ export function SessionsPage() {
   const rows = selectedAgent
     ? query.data?.data.filter((session) => session.agentId === selectedAgent)
     : query.data?.data;
+  const treeRows = sessionTreeRows(rows ?? []);
   const filtered = Boolean(search || status || date || selectedAgent);
 
   return (
@@ -256,10 +407,40 @@ export function SessionsPage() {
             </tr>
           </thead>
           <tbody>
-            {rows?.map((session) => (
-              <tr key={session.id}>
+            {treeRows.map(({ session, depth }) => (
+              <tr
+                key={session.id}
+                className={depth > 0 ? "session-row--child" : undefined}
+                data-parent-session-id={session.parentSessionId}
+              >
                 <td>
-                  <Link to={`/sessions/${session.id}`}>
+                  <Link
+                    className="session-tree-link"
+                    style={{ paddingInlineStart: `${depth * 22}px` }}
+                    to={`/sessions/${session.id}`}
+                    aria-label={
+                      depth > 0
+                        ? `${session.title}, delegated child session${
+                            session.delegateKey
+                              ? ` as ${session.delegateKey}`
+                              : ""
+                          }`
+                        : undefined
+                    }
+                    title={
+                      depth > 0 && session.delegateKey
+                        ? `Delegated as ${session.delegateKey}`
+                        : undefined
+                    }
+                  >
+                    {depth > 0 ? (
+                      <span
+                        className="session-tree-connector"
+                        aria-hidden="true"
+                      >
+                        └─
+                      </span>
+                    ) : null}
                     <span className="entity-text">
                       <strong>{session.title}</strong>
                       <small>{shortId(session.id)}</small>
@@ -322,9 +503,12 @@ function CreateSessionDialog({
     agentId: string;
     title: string;
     initialMessage: string;
+    files?: readonly RunFileUpload[];
   }) => void;
 }) {
   const published = agents.filter((agent) => agent.status === "published");
+  const [encoding, setEncoding] = useState(false);
+  const [fileError, setFileError] = useState("");
   return (
     <Dialog
       title="Create session"
@@ -332,12 +516,30 @@ function CreateSessionDialog({
       onClose={onClose}
       onSubmit={(event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
-        const data = new FormData(event.currentTarget);
-        onSubmit({
-          agentId: String(data.get("agentId") ?? ""),
-          title: String(data.get("title") ?? ""),
-          initialMessage: String(data.get("initialMessage") ?? ""),
-        });
+        const form = event.currentTarget;
+        const data = new FormData(form);
+        const initialMessage = String(data.get("initialMessage") ?? "").trim();
+        setEncoding(true);
+        setFileError("");
+        void runFiles(form)
+          .then((files) => {
+            if (!initialMessage && files.length === 0)
+              throw new Error("Enter a message or attach at least one file.");
+            onSubmit({
+              agentId: String(data.get("agentId") ?? ""),
+              title: String(data.get("title") ?? ""),
+              initialMessage,
+              ...(files.length ? { files } : {}),
+            });
+          })
+          .catch((caught: unknown) =>
+            setFileError(
+              caught instanceof Error
+                ? caught.message
+                : "Could not read files.",
+            ),
+          )
+          .finally(() => setEncoding(false));
       }}
       footer={
         <>
@@ -345,10 +547,10 @@ function CreateSessionDialog({
           <Button
             variant="primary"
             type="submit"
-            loading={pending}
+            loading={pending || encoding}
             disabled={published.length === 0}
           >
-            {pending ? "Creating…" : "Create session"}
+            {pending || encoding ? "Creating…" : "Create session"}
           </Button>
         </>
       }
@@ -376,12 +578,18 @@ function CreateSessionDialog({
       <Field label="First message">
         <Textarea
           name="initialMessage"
-          required
           minLength={1}
           rows={5}
           placeholder="What should the agent do?"
         />
       </Field>
+      <Field
+        label="Files"
+        hint="Up to 8 text, image, Office, PDF, or email files; 10 MiB each and 20 MiB combined."
+      >
+        <Input name="files" type="file" multiple accept={RUN_FILE_ACCEPT} />
+      </Field>
+      {fileError ? <FormError>{fileError}</FormError> : null}
       {error ? <FormError>{error.message}</FormError> : null}
     </Dialog>
   );
@@ -412,7 +620,10 @@ export function SessionDetailPage() {
     },
   });
   const submitMessage = useMutation({
-    mutationFn: (message: string) => api.submitMessage(sessionId, message),
+    mutationFn: (input: {
+      message: string;
+      files?: readonly RunFileUpload[];
+    }) => api.submitMessage(sessionId, input),
     onSuccess: async (session) => {
       queryClient.setQueryData(["session", sessionId], session);
       await queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
@@ -439,7 +650,7 @@ export function SessionDetailPage() {
       onAction={(value) => action.mutate(value)}
       messagePending={submitMessage.isPending}
       messageError={submitMessage.error}
-      onSubmitMessage={(message) => submitMessage.mutate(message)}
+      onSubmitMessage={(input) => submitMessage.mutate(input)}
     />
   );
 }
@@ -468,7 +679,10 @@ function SessionDetailView({
   readonly onAction: (action: "cancel" | "resume" | "branch-replay") => void;
   readonly messagePending: boolean;
   readonly messageError: Error | null;
-  readonly onSubmitMessage: (message: string) => void;
+  readonly onSubmitMessage: (input: {
+    readonly message: string;
+    readonly files?: readonly RunFileUpload[];
+  }) => void;
 }) {
   const [params, setParams] = useSearchParams();
   const tab = params.get("tab") === "debug" ? "debug" : "transcript";
@@ -703,6 +917,42 @@ function SessionFacts({ session }: { readonly session: SessionDetail }) {
         {session.agentName}
         <span className="fact-sub">v{session.agentVersion}</span>
       </span>
+      <span
+        className="fact"
+        title={
+          session.skills.length
+            ? session.skills
+                .map((skill) => `${skill.name} v${skill.version}`)
+                .join(", ")
+            : "No Skills bound"
+        }
+      >
+        <BookOpen size={13} aria-hidden="true" />
+        {session.skills.length}{" "}
+        {session.skills.length === 1 ? "Skill" : "Skills"}
+      </span>
+      {session.delegations.map((delegation) => (
+        <Link
+          className="fact"
+          key={delegation.id}
+          to={`/sessions/${
+            delegation.direction === "outgoing"
+              ? delegation.childSessionId
+              : delegation.parentSessionId
+          }`}
+          title={
+            delegation.direction === "outgoing"
+              ? `Open persistent child session ${delegation.childSessionId}`
+              : `Open coordinator session ${delegation.parentSessionId}`
+          }
+        >
+          <GitBranch size={13} aria-hidden="true" />
+          {delegation.direction === "outgoing"
+            ? delegation.delegateKey
+            : "Coordinator"}
+          <span className="fact-sub">{delegation.latestChildRunState}</span>
+        </Link>
+      ))}
       <span className="fact" title="Latest run on this thread">
         <Hash size={13} aria-hidden="true" />
         <span className="mono">{shortId(session.runId)}</span>
@@ -1488,8 +1738,27 @@ function UserMessage({
         </time>
       </header>
       <MarkdownContent>{event.summary}</MarkdownContent>
+      {event.files?.length ? (
+        <ul className="message-files" aria-label="Attached files">
+          {event.files.map((file) => (
+            <li key={file.id}>
+              <FileText size={14} aria-hidden="true" />
+              <span>{file.name}</span>
+              <small>
+                {file.contentType} · {formatFileSize(file.sizeBytes)}
+              </small>
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </article>
   );
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function AssistantMessage({
@@ -1924,8 +2193,13 @@ function Composer({
   readonly status: string;
   readonly pending: boolean;
   readonly error: Error | null;
-  readonly onSubmit: (message: string) => void;
+  readonly onSubmit: (input: {
+    readonly message: string;
+    readonly files?: readonly RunFileUpload[];
+  }) => void;
 }) {
+  const [encoding, setEncoding] = useState(false);
+  const [fileError, setFileError] = useState("");
   if (!settled)
     return (
       <div className="composer composer--waiting">
@@ -1943,23 +2217,37 @@ function Composer({
         event.preventDefault();
         const form = event.currentTarget;
         const message = String(new FormData(form).get("message") ?? "").trim();
-        if (!message) return;
-        onSubmit(message);
-        form.reset();
+        setEncoding(true);
+        setFileError("");
+        void runFiles(form)
+          .then((files) => {
+            if (!message && files.length === 0)
+              throw new Error("Enter a message or attach at least one file.");
+            onSubmit({ message, ...(files.length ? { files } : {}) });
+            form.reset();
+          })
+          .catch((caught: unknown) =>
+            setFileError(
+              caught instanceof Error
+                ? caught.message
+                : "Could not read files.",
+            ),
+          )
+          .finally(() => setEncoding(false));
       }}
     >
       <Field label="Message" labelHidden>
         <Textarea
           name="message"
           rows={3}
-          required
           placeholder="Send a message to the agent"
           onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
             if (
               event.key !== "Enter" ||
               !event.metaKey ||
               event.nativeEvent.isComposing ||
-              pending
+              pending ||
+              encoding
             )
               return;
             event.preventDefault();
@@ -1967,6 +2255,13 @@ function Composer({
           }}
         />
       </Field>
+      <Field
+        label="Attach files"
+        hint="Text, images, Word, Excel, PowerPoint, PDF, OpenDocument, iWork, EML, or MSG."
+      >
+        <Input name="files" type="file" multiple accept={RUN_FILE_ACCEPT} />
+      </Field>
+      {fileError ? <FormError>{fileError}</FormError> : null}
       {error ? <FormError>{error.message}</FormError> : null}
       <div className="composer-actions">
         <span className="composer-hint">
@@ -1976,10 +2271,10 @@ function Composer({
         <Button
           variant="primary"
           type="submit"
-          loading={pending}
-          icon={<Send size={14} />}
+          loading={pending || encoding}
+          icon={encoding ? <Paperclip size={14} /> : <Send size={14} />}
         >
-          {pending ? "Sending…" : "Send"}
+          {pending || encoding ? "Sending…" : "Send"}
         </Button>
       </div>
     </form>

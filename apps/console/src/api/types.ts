@@ -109,6 +109,8 @@ export interface AgentSummary {
   readonly model: string;
   readonly status: AgentStatus;
   readonly version: number;
+  readonly latestVersionId: string;
+  readonly sandbox: AgentVersionConfig["sandbox"];
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -126,6 +128,13 @@ export interface AgentVersionConfig {
   readonly systemPrompt: string;
   readonly modelPreset: string;
   readonly tools: readonly ToolDefinition[];
+  readonly skillVersionIds?: readonly string[];
+  readonly delegates?: readonly {
+    readonly key: string;
+    readonly description: string;
+    readonly agentVersionId: string;
+    readonly maxParallel: number;
+  }[];
   readonly sandbox: {
     readonly enabled: boolean;
     readonly provider: string;
@@ -139,6 +148,60 @@ export interface AgentVersionConfig {
     readonly maxTurns: 32;
     readonly timeoutMs: number;
   };
+}
+
+export interface SkillFileInput {
+  readonly path: string;
+  readonly contentType: string;
+  readonly dataBase64: string;
+}
+
+export interface SkillVersionView {
+  readonly id: string;
+  readonly skillId: string;
+  readonly version: number;
+  readonly name: string;
+  readonly description: string;
+  readonly instructions: string;
+  readonly contentHash: string;
+  readonly totalBytes: number;
+  readonly status: "active" | "deprecated" | "revoked";
+  readonly files: readonly {
+    readonly path: string;
+    readonly contentType: string;
+    readonly sizeBytes: number;
+    readonly sha256: string;
+  }[];
+  readonly createdAt: string;
+}
+
+export interface SkillSummary {
+  readonly id: string;
+  readonly key: string;
+  readonly displayName: string;
+  readonly latestVersionId: string;
+  readonly version: number;
+  readonly name: string;
+  readonly description: string;
+  readonly contentHash: string;
+  readonly status: "active" | "deprecated" | "revoked";
+  readonly fileCount: number;
+  readonly versionIds: readonly string[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface SkillDetail extends SkillSummary {
+  readonly versions: readonly SkillVersionView[];
+}
+
+export interface CreateSkillInput {
+  readonly key?: string;
+  readonly displayName: string;
+  readonly name: string;
+  readonly description: string;
+  readonly instructions: string;
+  readonly files?: readonly SkillFileInput[];
 }
 
 export interface AgentVersionView {
@@ -157,6 +220,9 @@ export interface AgentDetail extends AgentSummary {
 export interface SessionSummary {
   readonly id: string;
   readonly title: string;
+  /** Present when this persistent session was created by a delegation. */
+  readonly parentSessionId?: string;
+  readonly delegateKey?: string;
   readonly status: RunState;
   readonly agentId: string;
   readonly agentName: string;
@@ -196,6 +262,13 @@ export interface TimelineEvent {
   readonly createdAt: string;
   readonly durationMs: number | null;
   readonly status: "success" | "pending" | "error" | "info";
+  readonly files?: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly contentType: string;
+    readonly sizeBytes: number;
+    readonly sha256: string;
+  }[];
   readonly tokens?: { readonly input: number; readonly output: number };
   readonly costUsd?: number;
   readonly payload?: {
@@ -225,6 +298,26 @@ export interface SessionDetail extends SessionSummary {
     readonly canResume: boolean;
     readonly canBranchReplay: boolean;
   };
+  readonly skills: readonly {
+    readonly skillId: string;
+    readonly skillVersionId: string;
+    readonly version: number;
+    readonly name: string;
+    readonly description: string;
+    readonly contentHash: string;
+    readonly status: "active" | "deprecated" | "revoked";
+  }[];
+  readonly delegations: readonly {
+    readonly id: string;
+    readonly delegateKey: string;
+    readonly direction: "outgoing" | "parent";
+    readonly parentSessionId: string;
+    readonly childAgentVersionId: string;
+    readonly childSessionId: string;
+    readonly latestChildRunId: string;
+    readonly latestChildRunState: RunState;
+    readonly state: "active" | "cancelled";
+  }[];
   readonly runs?: readonly Readonly<Record<string, unknown>>[];
   readonly transcript?: readonly Readonly<Record<string, unknown>>[];
   readonly pendingWork?: readonly Readonly<Record<string, unknown>>[];
@@ -342,6 +435,12 @@ export interface EventConnection {
   close(): void;
 }
 
+export interface RunFileUpload {
+  readonly name: string;
+  readonly contentType: string;
+  readonly dataBase64: string;
+}
+
 export interface ConsoleApi {
   getContext(): Promise<ProjectContext>;
   listAgents(filters: ListFilters): Promise<PageResult<AgentSummary>>;
@@ -355,14 +454,37 @@ export interface ConsoleApi {
     id: string,
     config: AgentVersionConfig,
   ): Promise<AgentDetail>;
+  listSkills(filters: ListFilters): Promise<PageResult<SkillSummary>>;
+  getSkill(id: string): Promise<SkillDetail>;
+  createSkill(input: CreateSkillInput): Promise<SkillDetail>;
+  publishSkillVersion(
+    id: string,
+    input: Omit<CreateSkillInput, "key" | "displayName">,
+  ): Promise<SkillDetail>;
+  exportSkillVersion(
+    skillId: string,
+    versionId: string,
+  ): Promise<{ readonly files: readonly SkillFileInput[] }>;
+  updateSkillVersionLifecycle(
+    skillId: string,
+    versionId: string,
+    status: "deprecated" | "revoked",
+  ): Promise<SkillDetail>;
   listSessions(filters: ListFilters): Promise<PageResult<SessionSummary>>;
   getSession(id: string): Promise<SessionDetail>;
   createSession(input: {
     readonly agentId: string;
     readonly title: string;
     readonly initialMessage: string;
+    readonly files?: readonly RunFileUpload[];
   }): Promise<SessionSummary>;
-  submitMessage(id: string, message: string): Promise<SessionSummary>;
+  submitMessage(
+    id: string,
+    input: {
+      readonly message: string;
+      readonly files?: readonly RunFileUpload[];
+    },
+  ): Promise<SessionSummary>;
   runSessionAction(
     id: string,
     action: "cancel" | "resume" | "branch-replay",

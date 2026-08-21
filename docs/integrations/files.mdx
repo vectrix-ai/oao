@@ -1,0 +1,193 @@
+---
+title: "Send files to an agent"
+description: "Attach durable text, images, Office documents, PDFs, and email files when creating or continuing an OAO session."
+---
+
+OAO accepts files on both the initial session request and every later session
+turn. A file is submitted inline as canonical base64, stored with the durable
+run under tenant row-level security, and integrity-bound to that run by its
+SHA-256 digest.
+
+The current file input supports:
+
+- UTF-8 `text/*`, JSON, JSON-LD, NDJSON, XML, YAML, JavaScript, and TypeScript.
+- PNG, JPEG, WebP, and GIF images. The selected model must support vision.
+- PDF and RTF documents.
+- Microsoft Word `.doc`, `.dot`, `.docx`, `.docm`, `.dotx`, and `.dotm`.
+- Microsoft Excel `.xls`, `.xlt`, `.xla`, `.xlsx`, `.xlsm`, `.xlsb`,
+  `.xlam`, `.xltx`, and `.xltm`.
+- Microsoft PowerPoint `.ppt`, `.pot`, `.pps`, `.pptx`, `.pptm`, `.ppsx`,
+  `.ppsm`, `.potx`, and `.potm`.
+- Zipped and flat OpenDocument text, spreadsheet, presentation, drawing,
+  template, and formula variants: `.odt`, `.ott`, `.fodt`, `.ods`, `.ots`,
+  `.fods`, `.odp`, `.otp`, `.fodp`, `.odg`, `.otg`, `.fodg`, and `.odf`.
+- Apple iWork `.pages`, `.numbers`, and `.key` documents.
+- RFC 822 `.eml` and Outlook `.msg` email files.
+- Up to 8 files per turn, 10 MiB per file, and 20 MiB combined.
+- Up to 200,000 decoded or extracted characters across files on one turn.
+
+Office documents, PDFs, and email files are converted to bounded Markdown
+during API admission. A malformed, encrypted, password-protected, or
+text-free document is rejected before a run is queued. Office macros and email
+attachments are never executed. Standalone archives, audio, video,
+executables, Microsoft Access/Publisher/OneNote/Visio/Project files, and other
+arbitrary binaries remain unsupported.
+
+## API file contract
+
+Each item in `files` has this shape:
+
+```ts
+interface RunFileInput {
+  name: string;
+  contentType: string;
+  dataBase64: string;
+}
+```
+
+`name` is a plain filename, not a path, and must be unique within the message.
+The API normalizes the media type, verifies that known document extensions and
+declared types agree, validates or extracts the content, computes the digest
+itself, and never accepts a caller-supplied storage reference or checksum as
+proof of content. `application/octet-stream` is accepted for a recognized
+document extension; the server still parses the bytes as that format before
+admitting the run.
+
+## Start a session with files
+
+Encode files on a trusted server and send them with `initialMessage`:
+
+```ts
+import { readFile } from "node:fs/promises";
+import { OaoClient } from "@oao/sdk-js";
+
+const client = new OaoClient({
+  baseUrl: process.env.OAO_API_URL!,
+  apiKey: process.env.OAO_API_KEY!,
+});
+
+const source = await readFile("src/index.ts");
+const created = await client.createSession(
+  process.env.OAO_PROJECT_ID!,
+  {
+    agentId: process.env.OAO_AGENT_ID!,
+    title: "Review the entry point",
+    initialMessage: "Review the attached entry point for unsafe boundaries.",
+    files: [
+      {
+        name: "index.ts",
+        contentType: "application/typescript",
+        dataBase64: source.toString("base64"),
+      },
+    ],
+  },
+  { idempotencyKey: "entry-point-review-1" },
+);
+```
+
+The equivalent JSON request is:
+
+```bash
+FILE_BASE64="$(base64 < src/index.ts | tr -d '\n')"
+
+curl --fail-with-body \
+  --request POST \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: entry-point-review-1' \
+  --data "{
+    \"agentId\": \"$OAO_AGENT_ID\",
+    \"title\": \"Review the entry point\",
+    \"initialMessage\": \"Review the attached entry point.\",
+    \"files\": [{
+      \"name\": \"index.ts\",
+      \"contentType\": \"application/typescript\",
+      \"dataBase64\": \"$FILE_BASE64\"
+    }]
+  }" \
+  "$OAO_API_URL/v1/projects/$OAO_PROJECT_ID/sessions"
+```
+
+`initialMessage` may be omitted when at least one file is present. OAO then
+records a neutral `Review the attached file(s).` user message.
+
+## Continue a session with files
+
+Use the same file contract after the latest run settles:
+
+```ts
+await client.submitRun(
+  projectId,
+  sessionId,
+  {
+    message: "Compare this revision with the file from the previous turn.",
+    files: [
+      {
+        name: "index-v2.ts",
+        contentType: "application/typescript",
+        dataBase64: revisedSource.toString("base64"),
+      },
+    ],
+  },
+  { idempotencyKey: "entry-point-review-2" },
+);
+```
+
+The same `files` field is accepted by
+`POST /projects/{projectId}/sessions/{sessionId}/runs` and
+`POST /projects/{projectId}/runs/{runId}/resume`. A turn may contain only files.
+
+## Send an email file
+
+Use `message/rfc822` for an `.eml` file. OAO extracts the sender, recipients,
+subject, date, and readable message body as model context:
+
+```ts
+const email = await readFile("customer-renewal.eml");
+
+await client.submitRun(
+  projectId,
+  sessionId,
+  {
+    message: "Summarize the renewal request and list the stated value.",
+    files: [
+      {
+        name: "customer-renewal.eml",
+        contentType: "message/rfc822",
+        dataBase64: email.toString("base64"),
+      },
+    ],
+  },
+  { idempotencyKey: "renewal-email-1" },
+);
+```
+
+## Use the console
+
+In **Sessions**, select **Create session** and choose files under **Files** before
+submitting. On an existing settled session, use **Attach files** under the
+message composer. Selected files are read in the browser and sent through the
+authenticated API request; the browser never receives an S3 credential.
+
+The transcript shows the filename, normalized content type, and size next to the
+user message. It never returns the stored base64 or raw bytes.
+
+## Runtime and event behavior
+
+UTF-8 content and admission-time document/email extraction are framed with the
+filename and normalized content type in the model-visible turn. Images use
+Flue's native image attachment input. Image use therefore also depends on the
+selected provider model's vision support. Scanned PDFs and image-only office
+documents are not OCRed by this API path.
+
+File bytes are not copied into `runs.inputPublic`, product events, SSE, audit
+details, or ordinary transcript responses. Those surfaces contain only IDs,
+safe metadata, count, size, and SHA-256. Consume the normal resumable project
+event stream and re-fetch the session when a relevant message or run event
+arrives.
+
+<Warning>
+  Treat attached and extracted text as untrusted user input. It can contain
+  prompt injection, secrets, or misleading instructions. Keep authorization in
+  tool handlers and never let file text override execution-time policy.
+</Warning>

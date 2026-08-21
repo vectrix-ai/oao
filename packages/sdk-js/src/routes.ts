@@ -19,6 +19,8 @@ export function createRoutes(apiPrefix = "/v1") {
     `${project(projectId)}/tool-calls/${segment(toolCallId)}`;
   const approval = (projectId: string, approvalId: string) =>
     `${project(projectId)}/approvals/${segment(approvalId)}`;
+  const delegation = (projectId: string, delegationId: string) =>
+    `${project(projectId)}/delegations/${segment(delegationId)}`;
 
   return {
     health: "/healthz",
@@ -61,6 +63,23 @@ export function createRoutes(apiPrefix = "/v1") {
     defaultStorageProvider: (projectId: string, providerId: string) =>
       `${project(projectId)}/storage-providers/${segment(providerId)}/default`,
     modelCatalog: (projectId: string) => `${project(projectId)}/model-catalog`,
+    skills: (projectId: string) => `${project(projectId)}/skills`,
+    skill: (projectId: string, skillId: string) =>
+      `${project(projectId)}/skills/${segment(skillId)}`,
+    skillVersions: (projectId: string, skillId: string) =>
+      `${project(projectId)}/skills/${segment(skillId)}/versions`,
+    skillVersionExport: (
+      projectId: string,
+      skillId: string,
+      versionId: string,
+    ) =>
+      `${project(projectId)}/skills/${segment(skillId)}/versions/${segment(versionId)}/export`,
+    skillVersionLifecycle: (
+      projectId: string,
+      skillId: string,
+      versionId: string,
+    ) =>
+      `${project(projectId)}/skills/${segment(skillId)}/versions/${segment(versionId)}/lifecycle`,
     agents: (projectId: string) => `${project(projectId)}/agents`,
     agent: (projectId: string, agentId: string) =>
       `${project(projectId)}/agents/${segment(agentId)}`,
@@ -73,6 +92,11 @@ export function createRoutes(apiPrefix = "/v1") {
       `${project(projectId)}/sessions/${segment(sessionId)}`,
     sessionRuns: (projectId: string, sessionId: string) =>
       `${project(projectId)}/sessions/${segment(sessionId)}/runs`,
+    delegation,
+    delegationMessages: (projectId: string, delegationId: string) =>
+      `${delegation(projectId, delegationId)}/messages`,
+    cancelDelegation: (projectId: string, delegationId: string) =>
+      `${delegation(projectId, delegationId)}/cancel`,
     threads: (projectId: string) => `${project(projectId)}/threads`,
     thread: (projectId: string, threadId: string) =>
       `${project(projectId)}/threads/${segment(threadId)}`,

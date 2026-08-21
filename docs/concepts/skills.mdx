@@ -1,0 +1,121 @@
+---
+title: "Versioned Skills"
+description: "Publish reusable procedural knowledge, pin exact versions to agents, and load it progressively at runtime."
+---
+
+A Skill is a reusable, versioned package of instructions and supporting
+resources. It is neither a callable application tool, an MCP server, extra
+system-prompt text, nor a file uploaded to one run.
+
+OAO stores Skills in PostgreSQL and binds exact Skill version IDs to immutable
+agent versions. When you create a session, OAO copies those bindings to the
+session automatically. You do not send Skills again at session creation.
+
+```text
+Skill -> immutable Skill version -> immutable agent version -> session binding
+```
+
+Publishing version 2 of a Skill does not change an agent that references
+version 1. Publish a new agent version and select version 2 when you want new
+sessions to use it. Existing sessions remain on their recorded agent and Skill
+versions.
+
+## Package contract
+
+Create and version requests use a provider-neutral JSON representation:
+
+```json
+{
+  "key": "shipment-intake",
+  "displayName": "Shipment Intake",
+  "name": "shipment-intake",
+  "description": "Process shipment documents using the approved intake sequence.",
+  "instructions": "Identify the customer and follow the approved intake procedure.",
+  "metadata": { "owner": "operations" },
+  "files": [
+    {
+      "path": "references/business-rules.md",
+      "contentType": "text/markdown",
+      "dataBase64": "IyBCdXNpbmVzcyBydWxlcwo="
+    }
+  ]
+}
+```
+
+`name` and `description` are the small discovery entry visible to the model.
+`instructions` is the equivalent of the package's `SKILL.md` body. Files may
+represent `references/`, `templates/`, `assets/`, or `scripts/`; their relative
+paths are preserved. `allowedTools` is optional compatibility metadata and is
+not an authorization control.
+
+Validation enforces:
+
+- a lowercase, hyphenated Skill name and key;
+- no more than 128 resource files;
+- no file larger than 5 MiB and no expanded package larger than 10 MiB;
+- canonical base64 and a declared media type for every resource;
+- normalized, relative paths without `..`, backslashes, control characters,
+  empty components, case-folding collisions, or a resource named `SKILL.md`;
+- a SHA-256 for every file and a canonical SHA-256 for the complete version.
+
+PostgreSQL contains the instruction text, file bytes, checksums, lifecycle, and
+tenant identity. Export returns the exact version and resources needed for a
+portable backup or import into another project. OAO does not extract archives,
+follow symlinks, or fetch remote package content.
+
+## Progressive disclosure
+
+OAO uses the Skill primitives in the pinned Flue `2.0.3` runtime:
+
+1. Admission resolves only the exact Skill versions recorded on the session.
+2. OAO verifies tenant identity, lifecycle, package hash, file hashes, and byte
+   limits before registering immutable Flue definitions.
+3. Flue exposes only each Skill's name and description in its discovery
+   catalog.
+4. The model calls Flue's `activate_skill` when that catalog entry is relevant.
+   Full instructions become available only at activation.
+5. The model calls `read_skill_resource` for a supporting file only when it
+   needs that resource.
+
+This keeps complete instructions and resources out of the initial system
+prompt. OAO emits redacted `skill.activated` and `skill.resource_read` events
+for debugging; file contents and instructions are not copied into product
+events or audit details.
+
+OAO does not discover application Skills from a Daytona workspace. The Flue
+filesystem path `.agents/skills` is hidden from runtime discovery so a mutable
+or restored workspace cannot override the PostgreSQL binding. Skill resources
+are served from the verified runtime registry; they are not materialized into
+the persistent workspace in this MVP.
+
+## Lifecycle
+
+Every new Skill version starts `active`.
+
+- `active` versions can be attached to a new agent version.
+- `deprecated` versions cannot be newly attached, but an existing session may
+  continue using one.
+- `revoked` versions cannot be attached or admitted to a run. A session that
+  references one fails safely during admission until an operator creates a new
+  session from an agent version with an allowed Skill version.
+
+Lifecycle only moves forward: `active` to `deprecated` or `revoked`, and
+`deprecated` to `revoked`. Version rows, contents, checksums, agent bindings,
+and session bindings are immutable.
+
+<Warning>
+  Resource files under `scripts/` are data only. OAO never executes a Skill
+  script automatically. A model could read a script and separately request an
+  enabled sandbox shell tool, so normal sandbox capability, approval, secret,
+  and network-egress controls still apply.
+</Warning>
+
+## Authorization
+
+Project-scoped actions are `skill:read`, `skill:write`, `skill:bind`, and
+`skill:revoke`. Publishing an agent version also requires `agent:write` and
+validates every selected Skill version within the same tenant transaction.
+
+The console provides API parity for listing and creating Skills, publishing
+new versions, deprecating or revoking versions, selecting exact versions on a
+new agent version, and viewing the Skill versions inherited by a session.

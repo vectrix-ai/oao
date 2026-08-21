@@ -84,6 +84,43 @@ describe("HTTP console adapter", () => {
     );
   });
 
+  it("maps delegated parent metadata from session-list responses", async () => {
+    const createdAt = "2026-08-21T07:48:00.000Z";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: [
+            {
+              id: "35891f51-4956-4356-8339-000000000001",
+              title: "Delegated: shipment extraction",
+              parentSessionId: "6e90d649-a536-4356-98f6-000000000001",
+              delegateKey: "shipment-extraction",
+              status: "completed",
+              agentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              agentName: "Shipment extractor",
+              inputTokens: 850,
+              outputTokens: 17,
+              costMicrounits: 0,
+              costProvenance: "estimated",
+              createdAt,
+              lastActivityAt: createdAt,
+            },
+          ],
+          pageInfo: { hasMore: false, nextCursor: null },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new HttpConsoleApi().listSessions({});
+
+    expect(result.data[0]).toMatchObject({
+      parentSessionId: "6e90d649-a536-4356-98f6-000000000001",
+      delegateKey: "shipment-extraction",
+    });
+  });
+
   it("starts WorkOS hosted sign-in when development login is unavailable", async () => {
     const authorizationUrl =
       "https://api.workos.com/user_management/authorize?client_id=client_123";
@@ -390,6 +427,95 @@ describe("HTTP console adapter", () => {
         durationMs: 5_000,
         payload: expect.objectContaining({ redacted: false }),
       }),
+    );
+  });
+
+  it("sends files when continuing a session", async () => {
+    const sessionId = "77777777-7777-4777-8777-777777777777";
+    const runId = "88888888-8888-4888-8888-888888888888";
+    const createdAt = "2026-08-20T19:21:48.150Z";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(jsonResponse({ id: runId }, 202))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: sessionId,
+          title: "File test",
+          status: "queued",
+          agentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          agentName: "File agent",
+          agentVersion: 1,
+          latestRunId: runId,
+          createdAt,
+          lastActivityAt: createdAt,
+          runs: [{ id: runId, state: "queued", createdAt }],
+          transcript: [],
+          timeline: [],
+          debug: {},
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+    const files = [
+      {
+        name: "context.txt",
+        contentType: "text/plain",
+        dataBase64: "aGVsbG8=",
+      },
+    ];
+
+    await api.submitMessage(sessionId, { message: "Use this.", files });
+
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      `/v1/projects/${PROJECT_ID}/sessions/${sessionId}/runs`,
+    );
+    const init = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({
+      message: "Use this.",
+      files,
+    });
+  });
+
+  it("uses project-scoped Skill package and lifecycle routes", async () => {
+    const skillId = "44444444-4444-4444-8444-444444444444";
+    const versionId = "55555555-5555-4555-8555-555555555555";
+    const detail = {
+      id: skillId,
+      key: "shipment-intake",
+      displayName: "Shipment Intake",
+      latestVersionId: versionId,
+      version: 1,
+      name: "shipment-intake",
+      description: "Process shipment intake.",
+      contentHash: "4".repeat(64),
+      status: "deprecated",
+      fileCount: 0,
+      versionIds: [versionId],
+      createdAt: "2026-08-20T00:00:00.000Z",
+      updatedAt: "2026-08-20T00:00:00.000Z",
+      versions: [],
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(
+        jsonResponse({ skillVersionId: versionId, status: "deprecated" }),
+      )
+      .mockResolvedValueOnce(jsonResponse(detail));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+
+    await api.updateSkillVersionLifecycle(skillId, versionId, "deprecated");
+
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      `/v1/projects/${PROJECT_ID}/skills/${skillId}/versions/${versionId}/lifecycle`,
+    );
+    const init = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(String(init.body))).toEqual({ status: "deprecated" });
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(
+      `/v1/projects/${PROJECT_ID}/skills/${skillId}`,
     );
   });
 

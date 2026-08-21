@@ -8,26 +8,24 @@ trusted server process. Create the first session and run together, execute any
 caller-owned file tools under a narrow repository policy, and use the durable
 project event stream to resume after disconnects.
 
-<Warning>
-  Direct attachment and binary upload are **not implemented**. There is no
-  current endpoint that accepts a file, directory, archive, Git checkout, or
-  artifact reference as session input. Do not invent an upload URL or send bytes
-  to the artifact endpoints.
-</Warning>
+The current MVP supports three code-context patterns:
 
-The current MVP supports two code-context patterns:
-
-1. Put a small, trusted text excerpt directly in `initialMessage` or a later
+1. Attach up to eight supported text/code files or extracted documents directly
+   to an initial or later turn. See
+   [Send files to an agent](/integrations/files) for media types and limits.
+2. Put a small, trusted text excerpt directly in `initialMessage` or a later
    turn. The complete message must be no more than 100,000 JavaScript
    characters.
-2. Publish narrow `caller` tools such as `read_repository_file` and
+3. Publish narrow `caller` tools such as `read_repository_file` and
    `search_repository`, then run those tools in your own server process against
    one allowlisted repository root.
 
-Use inline text for a deliberate, bounded snapshot. Use caller tools when the
-agent needs to choose which files to inspect over several turns. Caller-tool
-arguments and results are durable public records, so return only content that
-is safe to persist and display.
+Use attached files for a small, deliberate set whose filenames should remain
+visible in the transcript. Use inline text for a tiny excerpt. Use caller tools
+when the agent needs to choose which files to inspect over several turns or when
+the repository exceeds the per-turn attachment limits. Caller-tool arguments
+and results are durable public records, so return only content that is safe to
+persist and display.
 
 ## Create a server-side API key
 
@@ -100,7 +98,38 @@ attempt, and reuse that same key and identical JSON body when the outcome is
 uncertain. A replay returns the original public response. Reusing the key for a
 different body returns `409 idempotency_conflict`.
 
-## Pattern 1: inline a small trusted text file
+## Pattern 1: attach a small trusted text file
+
+Read the selected file on your server and send canonical base64. The API
+validates text or extracts a supported document, stores the bytes and bounded
+model text durably with the run, and exposes only safe metadata in transcript
+reads:
+
+```ts
+const source = await readFile(operatorSelectedPath);
+const created = await client.createSession(
+  projectId,
+  {
+    agentId,
+    title: "Repository review",
+    initialMessage: "Review the attached repository entry point.",
+    files: [
+      {
+        name: repositoryRelativePath.split("/").at(-1)!,
+        contentType: "application/typescript",
+        dataBase64: source.toString("base64"),
+      },
+    ],
+  },
+  { idempotencyKey: persistedCreateSessionKey },
+);
+```
+
+Do not use this pattern for secrets, entire repositories, or unsupported
+binaries. File names cannot contain paths, so use a plain display filename and
+put any reviewed repository-relative path in the message.
+
+## Pattern 2: inline a small trusted text excerpt
 
 Read and review the text on your server before including it. Reject binary
 data and secrets, add a clear path label, and check the final assembled message
@@ -131,7 +160,7 @@ This is text in the conversation, not an attachment. Do not use this pattern
 for untrusted files, generated archives, images, PDFs, executables, entire
 repositories, or any content that may contain credentials.
 
-## Pattern 2: run allowlisted repository tools
+## Pattern 3: run allowlisted repository tools
 
 The following private-workspace example creates one agent, creates its first
 session atomically with `initialMessage`, handles resumable SSE, services two

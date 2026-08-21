@@ -9,18 +9,20 @@ from changing work that is already in progress.
 
 ## Core objects
 
-| Object               | Meaning                                                                             |
-| -------------------- | ----------------------------------------------------------------------------------- |
-| **Organization**     | Top-level tenant and audit boundary.                                                |
-| **Project**          | API-key, agent, session, and event-stream boundary inside an organization.          |
-| **Agent definition** | Stable identity and display name for a managed agent.                               |
-| **Model preset**     | Approved, stable, versioned key naming one reviewed model and routing policy.       |
-| **Agent version**    | Immutable snapshot of prompt, model preset, tools, sandbox policy, and limits.      |
-| **Session**          | Conversation bound to one immutable agent version.                                  |
-| **Run**              | One user submission and its durable execution lifecycle.                            |
-| **Tool call**        | Platform-owned work or a caller-owned request with a durable claim/result protocol. |
-| **Product event**    | Redacted, ordered fact used by the console and external real-time clients.          |
-| **Workspace backup** | Latest verified S3-compatible archive used to replace a deleted thread sandbox.     |
+| Object               | Meaning                                                                              |
+| -------------------- | ------------------------------------------------------------------------------------ |
+| **Organization**     | Top-level tenant and audit boundary.                                                 |
+| **Project**          | API-key, agent, session, and event-stream boundary inside an organization.           |
+| **Agent definition** | Stable identity and display name for a managed agent.                                |
+| **Model preset**     | Approved, stable, versioned key naming one reviewed model and routing policy.        |
+| **Skill version**    | Immutable instructions and resources loaded progressively when relevant.             |
+| **Agent version**    | Immutable snapshot of prompt, model, Skills, tools, sandbox policy, and limits.      |
+| **Delegation**       | Durable coordinator-child relation with an exact child version and shared workspace. |
+| **Session**          | Conversation bound to one agent version and its exact Skill versions.                |
+| **Run**              | One user submission and its durable execution lifecycle.                             |
+| **Tool call**        | Platform-owned work or a caller-owned request with a durable claim/result protocol.  |
+| **Product event**    | Redacted, ordered fact used by the console and external real-time clients.           |
+| **Workspace backup** | Latest verified S3-compatible archive used to replace a deleted thread sandbox.      |
 
 ## Request flow
 
@@ -33,7 +35,7 @@ sequenceDiagram
   participant Provider as Model provider
 
   App->>API: Create session + initial message
-  API->>DB: Commit session, run, message, event, and wake
+  API->>DB: Commit session, inherited Skill bindings, run, message, event, and wake
   API-->>App: 201 + session and queued run
   Runtime->>DB: Claim short wake and fenced admission
   Runtime->>Provider: Execute the durable model/tool loop
@@ -50,7 +52,7 @@ and clients observe progress through reads or SSE.
 The MVP uses one PostgreSQL deployment for:
 
 - Flue's canonical runtime persistence;
-- tenant configuration and immutable agent versions;
+- tenant configuration and immutable agent and Skill versions;
 - sessions, runs, messages, tool/approval ledgers, and audit entries;
 - the short wake queue and fenced ownership records; and
 - the append-only product event feed used for real-time UI updates.
@@ -58,6 +60,17 @@ The MVP uses one PostgreSQL deployment for:
 `LISTEN/NOTIFY` may wake a reader sooner, but notifications are never the
 correctness source. A reconnecting client resumes from a committed product-event
 position.
+
+At admission, OAO resolves only the exact Skill versions copied from the agent
+version into the session. Flue initially shows the model their small name and
+description catalog entries, then loads full instructions and individual
+resources only when the model activates or reads them. See
+[Versioned Skills](/concepts/skills).
+
+A coordinator version can also pin a named roster of exact child-agent
+versions. Delegation creates a separate child thread and Flue instance, binds it
+to the coordinator's workspace, and returns an ID that can receive later
+follow-up turns. See [Multi-agent orchestration](/concepts/multi-agent-orchestration).
 
 ## One active run per session thread
 
@@ -73,7 +86,8 @@ An authorized integration claims the request for a lease, receives a monotonical
 increasing fence, performs the work, and submits one immutable safe result. A
 stale worker cannot commit with an older fence.
 
-This is the recommended way to let an agent inspect files in a codebase: keep
+Attach a small, deliberate set of supported files directly to a run. For a full
+or changing codebase, caller-owned tools remain the recommended pattern: keep
 the repository in your environment, expose narrow read/search tools, validate
 paths against an allowlisted root, and return only the data the agent needs.
 

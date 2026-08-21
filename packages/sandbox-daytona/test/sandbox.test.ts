@@ -19,7 +19,9 @@ import {
   createFakeFlueSandbox,
   daytonaSandboxRecoveryAction,
   safeSandboxToolCommand,
+  sandboxWorkspaceLifecycleIdentity,
 } from "../src/index.js";
+import { isReservedWorkspaceSkillPath } from "../src/flue-daytona-blueprint.js";
 
 const tenant = {
   organizationId: "00000000-0000-4000-8000-000000000001" as OrganizationId,
@@ -49,6 +51,39 @@ test("dead Daytona builds are never reused during recovery", () => {
   assert.equal(daytonaSandboxRecoveryAction("error"), "recover");
   assert.equal(daytonaSandboxRecoveryAction("stopped"), "start");
   assert.equal(daytonaSandboxRecoveryAction("started"), "reuse");
+});
+
+test("coordinator and child threads derive one sandbox lifecycle from the workspace owner", () => {
+  const root = sandboxWorkspaceLifecycleIdentity({
+    organizationId: tenant.organizationId,
+    projectId: tenant.projectId,
+    ownerThreadId: "00000000-0000-4000-8000-000000000010",
+  });
+  const childUsingRoot = sandboxWorkspaceLifecycleIdentity({
+    organizationId: tenant.organizationId,
+    projectId: tenant.projectId,
+    ownerThreadId: "00000000-0000-4000-8000-000000000010",
+  });
+  const isolatedChild = sandboxWorkspaceLifecycleIdentity({
+    organizationId: tenant.organizationId,
+    projectId: tenant.projectId,
+    ownerThreadId: "00000000-0000-4000-8000-000000000011",
+  });
+  assert.equal(root, childUsingRoot);
+  assert.notEqual(root, isolatedChild);
+});
+
+test("mutable workspace Skills are hidden from Flue discovery", () => {
+  assert.equal(isReservedWorkspaceSkillPath(".agents/skills"), true);
+  assert.equal(
+    isReservedWorkspaceSkillPath("/workspace/.agents/skills/local/SKILL.md"),
+    true,
+  );
+  assert.equal(
+    isReservedWorkspaceSkillPath("/workspace/.agents/skills-archive/readme.md"),
+    false,
+  );
+  assert.equal(isReservedWorkspaceSkillPath("/workspace/src/index.ts"), false);
 });
 
 test("sandbox tool transcript keeps content while masking credentials", () => {

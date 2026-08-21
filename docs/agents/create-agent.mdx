@@ -108,8 +108,8 @@ cookies.
     Open **Agents**, select **Create agent**, enter a name and optional
     description, and choose an approved model preset. You can also enable the
     sandbox, choose a configured project Daytona connection, select its network
-    policy, optionally select an active Daytona snapshot, and select exact tool
-    capabilities before submitting the form.
+    policy, optionally select an active Daytona snapshot, select exact tool
+    capabilities, and attach active Skill versions before submitting the form.
 
     The console publishes version 1 with this initial configuration:
 
@@ -118,6 +118,10 @@ cookies.
       "systemPrompt": "You are <agent name>, a helpful managed agent. Complete the user's request carefully and do not expose secrets or internal reasoning.",
       "modelPreset": "<selected preset key>",
       "tools": [],
+      "skillVersionIds": [
+        "44444444-4444-4444-8444-444444444445"
+      ],
+      "delegates": [],
       "sandbox": {
         "enabled": false,
         "provider": "daytona-primary",
@@ -144,14 +148,22 @@ cookies.
 
   <Step title="Review and publish a new version">
     On the agent detail page, edit the latest version's system instructions,
-    approved model preset, sandbox switch, network policy, or timeout. The
+    approved model preset, bound Skill versions, exact delegate roster, sandbox switch, network policy, or timeout. The
     searchable model list is the project's approved preset catalog, and the
     editor shows the resolved model and routing policy for the selected preset
     with a link to **Manage models**. Select **Publish new version** to append an immutable
     version.
 
-    Linking a different model is always a publication. Existing sessions stay
-    attached to the version they were created with.
+    Linking a different model or Skill version is always a publication.
+    Publishing a newer Skill does not update an existing agent version.
+    Existing sessions stay attached to the agent and Skill versions they were
+    created with. See [Versioned Skills](/concepts/skills).
+
+    Delegate selection works the same way: the editor records the selected
+    agent's exact latest version. A coordinator can delegate only to that
+    published roster, and each child keeps its own persistent session while
+    sharing the coordinator workspace. See
+    [Multi-agent orchestration](/concepts/multi-agent-orchestration).
 
     Console validation requires:
 
@@ -167,17 +179,21 @@ cookies.
 
   <Step title="Create a session">
     Open **Sessions**, select **Create session**, choose a published agent,
-    enter a title and first message, and submit.
+    enter a title and first message, optionally choose supported text, image,
+    Office, PDF, or email files, and submit.
 
-    The session pins the agent's latest version at that moment. Creation returns
-    while the first run is `queued`; the runtime finishes it asynchronously.
+    The session pins the agent's latest version at that moment and automatically
+    copies its exact Skill bindings. Do not send Skills in the session request.
+    Creation returns while the first run is `queued`; the runtime finishes it
+    asynchronously.
 
   </Step>
 
   <Step title="Continue after settlement">
     Open the session. When its latest run is `completed`, `failed`, `cancelled`,
     or `timed_out`, the **Continue session** form appears. Submitting a message
-    creates a new durable run on the existing session and thread.
+    creates a new durable run on the existing session and thread. You can attach
+    another supported set of files from the same composer.
   </Step>
 </Steps>
 
@@ -199,18 +215,25 @@ Every mutation requires:
 
 The routes used in this guide enforce these project scopes:
 
-| Operation                                  | Required scope                   |
-| ------------------------------------------ | -------------------------------- |
-| List or read agents and versions           | `agent:read`                     |
-| Create an agent or publish a version       | `agent:write`                    |
-| Create a session and its first run         | `session:write` and `run:create` |
-| Read a session                             | `session:read`                   |
-| Create a follow-up or resume run           | `run:create`                     |
-| Read runs, pending work, or project events | `run:read`                       |
-| Request cancellation                       | `run:cancel`                     |
-| Claim, renew, or release caller work       | `tool_call:claim`                |
-| Submit a caller tool result                | `tool_call:submit`               |
-| Approve or deny an approval                | `approval:resolve`               |
+| Operation                                  | Required scope                     |
+| ------------------------------------------ | ---------------------------------- |
+| List or read agents and versions           | `agent:read`                       |
+| Create an agent or publish a version       | `agent:write`                      |
+| List or read Skills                        | `skill:read`                       |
+| Create a Skill or publish a Skill version  | `skill:write`                      |
+| Bind a Skill while publishing an agent     | `skill:bind`                       |
+| Deprecate or revoke a Skill version        | `skill:revoke`                     |
+| Create a session and its first run         | `session:write` and `run:create`   |
+| Read a session                             | `session:read`                     |
+| Create a follow-up or resume run           | `run:create`                       |
+| Read runs, pending work, or project events | `run:read`                         |
+| Request cancellation                       | `run:cancel`                       |
+| Claim, renew, or release caller work       | `tool_call:claim`                  |
+| Submit a caller tool result                | `tool_call:submit`                 |
+| Approve or deny an approval                | `approval:resolve`                 |
+| Read a delegation                          | `delegation:read`                  |
+| Send a child-agent follow-up               | `delegation:message`, `run:create` |
+| Cancel a delegation                        | `delegation:cancel`, `run:cancel`  |
 
 `*` satisfies every project action. Human principals must also have a current
 membership in the project. The project ID in the URL must match the principal's
@@ -570,6 +593,13 @@ Save the session and run IDs from the real response:
 export OAO_SESSION_ID=7fd65b84-30ea-4ca9-aa40-ac219698e718
 export OAO_RUN_ID=3b1d696c-70c8-4bfd-90df-79772205ee3c
 ```
+
+Both this route and later-turn routes accept an optional `files` array. Each
+file contains `name`, `contentType`, and canonical `dataBase64`; bytes are never
+returned in the response, transcript, audit log, or SSE. See
+[Send files to an agent](/integrations/files) for supported types, limits, and
+complete SDK/API examples. A session or turn may omit its text field only when
+at least one file is present.
 
 ### 2. Wait for the run to settle
 

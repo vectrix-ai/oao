@@ -271,3 +271,69 @@ test("workspace storage migration keeps backups tenant-correlated and credential
   assert.match(sql, /FORCE ROW LEVEL SECURITY/gmu);
   assert.doesNotMatch(sql, /DROP|DELETE/u);
 });
+
+test("run file migration keeps bytes private, immutable, and tenant correlated", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0016_run_files.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE oao\.run_files/u);
+  assert.match(sql, /content_bytes bytea NOT NULL/u);
+  assert.match(sql, /extracted_text text CHECK/u);
+  assert.match(sql, /FOREIGN KEY \(organization_id, project_id, run_id\)/u);
+  assert.match(sql, /FOREIGN KEY \(organization_id, project_id, message_id\)/u);
+  assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
+  assert.match(
+    sql,
+    /CREATE TRIGGER run_files_immutable\nBEFORE UPDATE OR DELETE ON oao\.run_files/u,
+  );
+  assert.match(sql, /GRANT SELECT, INSERT ON oao\.run_files TO oao_app/u);
+  assert.doesNotMatch(sql, /GRANT[^;]*(?:UPDATE|DELETE)/u);
+});
+
+test("skill migration keeps packages immutable and copies exact version bindings", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0017_skills.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE oao\.skills/u);
+  assert.match(sql, /CREATE TABLE oao\.skill_versions/u);
+  assert.match(sql, /CREATE TABLE oao\.skill_version_files/u);
+  assert.match(sql, /CREATE TABLE oao\.agent_version_skill_bindings/u);
+  assert.match(sql, /CREATE TABLE oao\.session_skill_bindings/u);
+  assert.match(sql, /skill_versions_immutable/u);
+  assert.match(sql, /session_skill_bindings_immutable/u);
+  assert.match(sql, /FORCE ROW LEVEL SECURITY/gmu);
+  assert.match(sql, /skillVersionIds/u);
+  assert.match(sql, /lifecycle\.status='active'/u);
+  assert.match(sql, /enforce_skill_version_lifecycle_transition/u);
+  assert.match(sql, /skill\.activated/u);
+  assert.match(sql, /skill\.resource_read/u);
+  assert.doesNotMatch(sql, /DROP TABLE|DELETE FROM/u);
+});
+
+test("multi-agent migration pins delegates and isolates child threads in one workspace", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0018_multi_agent_orchestration.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE oao\.agent_version_delegates/u);
+  assert.match(sql, /CREATE TABLE oao\.agent_workspaces/u);
+  assert.match(sql, /CREATE TABLE oao\.thread_workspace_bindings/u);
+  assert.match(sql, /CREATE TABLE oao\.agent_delegations/u);
+  assert.match(sql, /CREATE TABLE oao\.delegation_runs/u);
+  assert.match(sql, /child_agent_version_id uuid NOT NULL/u);
+  assert.match(sql, /child_thread_id uuid NOT NULL/u);
+  assert.match(sql, /workspace_id uuid NOT NULL/u);
+  assert.match(sql, /request_hash bytea NOT NULL/u);
+  assert.match(sql, /max_parallel integer NOT NULL/u);
+  assert.match(sql, /agent_delegation_update_guard/u);
+  assert.match(sql, /agent_workspace_owner_update_guard/u);
+  assert.match(sql, /FORCE ROW LEVEL SECURITY/gmu);
+  assert.match(sql, /delegate_agent/u);
+  assert.match(sql, /message_agent/u);
+  assert.doesNotMatch(sql, /DROP TABLE|DELETE FROM/u);
+});

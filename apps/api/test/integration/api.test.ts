@@ -17,6 +17,7 @@ import {
   type PrincipalId,
   type ProjectId,
 } from "@oao/domain";
+import { strToU8, zipSync } from "fflate";
 import { createApiApp } from "../../src/app.js";
 import { PostgresApiStore } from "../../src/store.js";
 import { provisionWorkOsIdentity } from "../../src/workos-provisioning.js";
@@ -91,6 +92,22 @@ function jsonRequest(
     },
     body: JSON.stringify(body),
   };
+}
+
+function docxFile(text: string): Buffer {
+  return Buffer.from(
+    zipSync({
+      "[Content_Types].xml": strToU8(
+        `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+      ),
+      "_rels/.rels": strToU8(
+        `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
+      ),
+      "word/document.xml": strToU8(
+        `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`,
+      ),
+    }),
+  );
 }
 
 test(
@@ -235,6 +252,136 @@ test(
     let versionId = "";
     let sessionId = "";
     let runId = "";
+    let skillId = "";
+    let skillVersionId = "";
+
+    await t.test(
+      "Skill packages publish immutable versions and export exact contents",
+      async () => {
+        const reference = Buffer.from(
+          "Only accept shipments with a known customer reference.",
+          "utf8",
+        );
+        const first = await app.request(
+          `${projectPath}/skills`,
+          jsonRequest(
+            {
+              key: "shipment-intake",
+              displayName: "Shipment intake",
+              name: "shipment-intake",
+              description: "Validate and normalize inbound shipment requests.",
+              instructions:
+                "Activate this Skill for inbound shipment intake, then read the reference when validation is required.",
+              metadata: { owner: "operations" },
+              files: [
+                {
+                  path: "references/business-rules.md",
+                  contentType: "text/markdown",
+                  dataBase64: reference.toString("base64"),
+                },
+              ],
+            },
+            "skill-create-1",
+          ),
+        );
+        assert.equal(first.status, 201, await first.clone().text());
+        const firstBody = (await first.json()) as {
+          id: string;
+          latestVersion: { id: string; version: number; contentHash: string };
+        };
+        skillId = firstBody.id;
+        skillVersionId = firstBody.latestVersion.id;
+        assert.equal(firstBody.latestVersion.version, 1);
+        assert.match(firstBody.latestVersion.contentHash, /^[a-f0-9]{64}$/u);
+
+        const second = await app.request(
+          `${projectPath}/skills/${skillId}/versions`,
+          jsonRequest(
+            {
+              name: "shipment-intake",
+              description: "Validate and normalize inbound shipment requests.",
+              instructions:
+                "Version two adds a later procedure without changing existing bindings.",
+              metadata: { owner: "operations" },
+              files: [
+                {
+                  path: "references/business-rules.md",
+                  contentType: "text/markdown",
+                  dataBase64: reference.toString("base64"),
+                },
+              ],
+            },
+            "skill-version-2",
+          ),
+        );
+        assert.equal(second.status, 201, await second.clone().text());
+        const secondBody = (await second.json()) as {
+          id: string;
+          version: number;
+        };
+        assert.equal(secondBody.version, 2);
+
+        const list = await app.request(`${projectPath}/skills`);
+        assert.equal(list.status, 200);
+        const listed = (
+          (await list.json()) as {
+            data: readonly {
+              latestVersionId: string;
+              versionIds: readonly string[];
+            }[];
+          }
+        ).data[0]!;
+        assert.equal(listed.latestVersionId, secondBody.id);
+        assert.deepEqual(listed.versionIds, [skillVersionId, secondBody.id]);
+
+        const exported = await app.request(
+          `${projectPath}/skills/${skillId}/versions/${skillVersionId}/export`,
+        );
+        assert.equal(exported.status, 200);
+        const exportBody = (await exported.json()) as {
+          version: { version: number; instructions: string };
+          files: readonly { path: string; dataBase64: string }[];
+        };
+        assert.equal(exportBody.version.version, 1);
+        assert.match(exportBody.version.instructions, /Activate this Skill/u);
+        assert.equal(exportBody.files[0]?.path, "references/business-rules.md");
+        assert.deepEqual(
+          Buffer.from(exportBody.files[0]!.dataBase64, "base64"),
+          reference,
+        );
+
+        const deprecated = await app.request(
+          `${projectPath}/skills/${skillId}/versions/${secondBody.id}/lifecycle`,
+          {
+            ...jsonRequest(
+              { status: "deprecated" },
+              "skill-version-2-deprecated",
+            ),
+            method: "PATCH",
+          },
+        );
+        assert.equal(deprecated.status, 200, await deprecated.clone().text());
+        const replay = await app.request(
+          `${projectPath}/skills/${skillId}/versions/${secondBody.id}/lifecycle`,
+          {
+            ...jsonRequest(
+              { status: "deprecated" },
+              "skill-version-2-deprecated",
+            ),
+            method: "PATCH",
+          },
+        );
+        assert.equal(replay.headers.get("idempotency-replayed"), "true");
+        const revoked = await app.request(
+          `${projectPath}/skills/${skillId}/versions/${secondBody.id}/lifecycle`,
+          {
+            ...jsonRequest({ status: "revoked" }, "skill-version-2-revoked"),
+            method: "PATCH",
+          },
+        );
+        assert.equal(revoked.status, 200, await revoked.clone().text());
+      },
+    );
 
     await t.test("agent writes are idempotent and lists paginate", async () => {
       const first = await app.request(
@@ -248,6 +395,7 @@ test(
               systemPrompt: "Answer with safe public output.",
               modelPreset: baseModelPresetKey,
               tools: [],
+              skillVersionIds: [skillVersionId],
               sandbox: disabledSandbox,
               limits: { maxTurns: 32, timeoutMs: 60_000 },
             },
@@ -260,10 +408,12 @@ test(
         id: string;
         latestVersionId: string;
         version: number;
+        sandbox: typeof disabledSandbox;
       };
       agentId = firstBody.id;
       assert.ok(firstBody.latestVersionId);
       assert.equal(firstBody.version, 1);
+      assert.deepEqual(firstBody.sandbox, disabledSandbox);
       const replay = await app.request(
         `${projectPath}/agents`,
         jsonRequest(
@@ -275,6 +425,7 @@ test(
               systemPrompt: "Answer with safe public output.",
               modelPreset: baseModelPresetKey,
               tools: [],
+              skillVersionIds: [skillVersionId],
               sandbox: disabledSandbox,
               limits: { maxTurns: 32, timeoutMs: 60_000 },
             },
@@ -321,6 +472,65 @@ test(
         1,
       );
     });
+
+    await t.test(
+      "agent publication explains incompatible delegate sandboxes",
+      async () => {
+        const child = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "incompatible-delegate",
+              name: "Incompatible delegate",
+              config: {
+                systemPrompt: "Extract shipment facts for the coordinator.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                sandbox: {
+                  ...disabledSandbox,
+                  provider: "daytona-secondary",
+                },
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "incompatible-delegate-create",
+          ),
+        );
+        assert.equal(child.status, 201, await child.clone().text());
+        const childVersionId = (
+          (await child.json()) as { latestVersionId: string }
+        ).latestVersionId;
+        const response = await app.request(
+          `${projectPath}/agents/${agentId}/versions`,
+          jsonRequest(
+            {
+              config: {
+                systemPrompt: "Coordinate shipment analysis safely.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                delegates: [
+                  {
+                    key: "shipment-extraction",
+                    description: "Extract shipment facts.",
+                    agentVersionId: childVersionId,
+                    maxParallel: 1,
+                  },
+                ],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "incompatible-delegate-publish",
+          ),
+        );
+        assert.equal(response.status, 400, await response.clone().text());
+        assert.match(
+          ((await response.json()) as { error: { message: string } }).error
+            .message,
+          /same sandbox enabled state, provider, snapshot, and network policy/u,
+        );
+      },
+    );
 
     await t.test(
       "database publication guard rejects incomplete and unsafe configs",
@@ -423,6 +633,7 @@ test(
                     },
                   },
                 ],
+                skillVersionIds: [skillVersionId],
                 sandbox: disabledSandbox,
                 limits: { maxTurns: 32, timeoutMs: 60_000 },
               },
@@ -432,6 +643,17 @@ test(
         );
         assert.equal(version.status, 201, await version.clone().text());
         versionId = ((await version.json()) as { id: string }).id;
+        const emailContext = [
+          "From: alice@example.com",
+          "To: operator@example.com",
+          "Subject: Renewal context",
+          "Content-Type: text/plain; charset=utf-8",
+          "",
+          "Northwind renews for EUR 48000.",
+        ].join("\r\n");
+        const wordContext = docxFile(
+          "The signed Word brief confirms the EUR 48000 annual value.",
+        );
         const session = await app.request(
           `${projectPath}/sessions`,
           jsonRequest(
@@ -440,17 +662,91 @@ test(
               agentVersionId: versionId,
               title: "API test",
               initialMessage: "first safe operator request",
+              files: [
+                {
+                  name: "renewal.eml",
+                  contentType: "message/rfc822",
+                  dataBase64: Buffer.from(emailContext, "utf8").toString(
+                    "base64",
+                  ),
+                },
+                {
+                  name: "renewal-brief.docx",
+                  contentType:
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                  dataBase64: wordContext.toString("base64"),
+                },
+              ],
             },
             "session-create-1",
           ),
         );
-        assert.equal(session.status, 201);
+        assert.equal(session.status, 201, await session.clone().text());
         const sessionBody = (await session.json()) as {
           id: string;
           run: { id: string; state: string };
         };
         sessionId = sessionBody.id;
         assert.equal(sessionBody.run.state, "queued");
+        const sessionList = await app.request(
+          `${projectPath}/sessions?limit=100`,
+        );
+        assert.equal(sessionList.status, 200, await sessionList.clone().text());
+        const listedSession = (
+          (await sessionList.json()) as {
+            data: readonly {
+              id: string;
+              parentSessionId: string | null;
+              delegateKey: string | null;
+            }[];
+          }
+        ).data.find((item) => item.id === sessionId);
+        assert.ok(listedSession);
+        assert.equal(listedSession.parentSessionId, null);
+        assert.equal(listedSession.delegateKey, null);
+        const inheritedSkills = await pool.query<{
+          skill_version_id: string;
+        }>(
+          `SELECT skill_version_id FROM oao.session_skill_bindings
+           WHERE organization_id=$1 AND project_id=$2 AND session_id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            sessionId,
+          ],
+        );
+        assert.deepEqual(inheritedSkills.rows, [
+          { skill_version_id: skillVersionId },
+        ]);
+        const initialFiles = await pool.query<{
+          file_name: string;
+          content_bytes: Buffer;
+          extracted_text: string | null;
+        }>(
+          `SELECT file_name,content_bytes,extracted_text
+           FROM oao.run_files WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            sessionBody.run.id,
+          ],
+        );
+        const emailFile = initialFiles.rows.find(
+          (file) => file.file_name === "renewal.eml",
+        );
+        const wordFile = initialFiles.rows.find(
+          (file) => file.file_name === "renewal-brief.docx",
+        );
+        assert.equal(emailFile?.content_bytes.toString("utf8"), emailContext);
+        assert.deepEqual(wordFile?.content_bytes, wordContext);
+        assert.match(
+          emailFile?.extracted_text ?? "",
+          /Renewal context[\s\S]*Northwind renews for EUR 48000/u,
+        );
+        assert.match(
+          wordFile?.extracted_text ?? "",
+          /signed Word brief confirms the EUR 48000 annual value/u,
+        );
         await pool.query(
           `UPDATE oao.runs SET state='running' WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
           [
@@ -488,24 +784,39 @@ test(
         );
         assert.equal(rolledBackCommands.rows[0]?.count, "1");
 
+        const officeContext = String.raw`{\rtf1\ansi\b Account brief\b0\par Contoso annual value is EUR 72000.}`;
+        const followUpBody = {
+          redactedInput: "safe operator request",
+          files: [
+            {
+              name: "account-brief.rtf",
+              contentType: "application/rtf",
+              dataBase64: Buffer.from(officeContext, "utf8").toString("base64"),
+            },
+          ],
+        };
         const submitted = await app.request(
           `${projectPath}/sessions/${sessionId}/runs`,
-          jsonRequest(
-            { redactedInput: "safe operator request" },
-            "run-create-1",
-          ),
+          jsonRequest(followUpBody, "run-create-1"),
         );
         assert.equal(submitted.status, 202);
         runId = ((await submitted.json()) as { id: string }).id;
         const persistedInput = await pool.query<{
-          input_public: { message?: string; redactedInput?: string };
+          input_public: {
+            message?: string;
+            files?: readonly { name: string; sha256: string }[];
+          };
           message_count: string;
+          file_count: string;
         }>(
           `SELECT run.input_public,
              (SELECT count(*)::text FROM oao.messages message
               WHERE message.organization_id=run.organization_id
                 AND message.project_id=run.project_id AND message.run_id=run.id
-                AND message.role='user') AS message_count
+                AND message.role='user') AS message_count,
+             (SELECT count(*)::text FROM oao.run_files file
+              WHERE file.organization_id=run.organization_id
+                AND file.project_id=run.project_id AND file.run_id=run.id) AS file_count
            FROM oao.runs run
            WHERE run.organization_id=$1 AND run.project_id=$2 AND run.id=$3`,
           [
@@ -514,16 +825,36 @@ test(
             runId,
           ],
         );
-        assert.deepEqual(persistedInput.rows[0]?.input_public, {
-          message: "safe operator request",
-        });
+        assert.equal(
+          persistedInput.rows[0]?.input_public.message,
+          "safe operator request",
+        );
+        assert.equal(
+          persistedInput.rows[0]?.input_public.files?.[0]?.name,
+          "account-brief.rtf",
+        );
+        assert.match(
+          persistedInput.rows[0]?.input_public.files?.[0]?.sha256 ?? "",
+          /^[a-f0-9]{64}$/u,
+        );
         assert.equal(persistedInput.rows[0]?.message_count, "1");
+        assert.equal(persistedInput.rows[0]?.file_count, "1");
+        const officeFile = await pool.query<{ extracted_text: string | null }>(
+          `SELECT extracted_text FROM oao.run_files
+           WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            runId,
+          ],
+        );
+        assert.match(
+          officeFile.rows[0]?.extracted_text ?? "",
+          /Account brief[\s\S]*Contoso annual value is EUR 72000/u,
+        );
         const replay = await app.request(
           `${projectPath}/sessions/${sessionId}/runs`,
-          jsonRequest(
-            { redactedInput: "safe operator request" },
-            "run-create-1",
-          ),
+          jsonRequest(followUpBody, "run-create-1"),
         );
         assert.equal(replay.status, 202);
         assert.equal(replay.headers.get("idempotency-replayed"), "true");
@@ -532,6 +863,64 @@ test(
           [runId, `admit:${runId}`],
         );
         assert.equal(commands.rows[0]?.count, "1");
+        const detail = await app.request(
+          `${projectPath}/sessions/${sessionId}`,
+        );
+        assert.equal(detail.status, 200);
+        const detailBody = (await detail.json()) as {
+          skills: readonly {
+            skillId: string;
+            skillVersionId: string;
+            version: number;
+            name: string;
+            description: string;
+            contentHash: string;
+          }[];
+          transcript: readonly {
+            runId: string;
+            files: readonly {
+              name: string;
+              contentType: string;
+              sizeBytes: number;
+              sha256: string;
+            }[];
+          }[];
+        };
+        assert.equal(detailBody.skills.length, 1);
+        assert.equal(detailBody.skills[0]?.skillId, skillId);
+        assert.equal(detailBody.skills[0]?.skillVersionId, skillVersionId);
+        assert.equal(detailBody.skills[0]?.version, 1);
+        assert.equal(detailBody.skills[0]?.name, "shipment-intake");
+        assert.match(
+          detailBody.skills[0]?.contentHash ?? "",
+          /^[a-f0-9]{64}$/u,
+        );
+        const transcript = (
+          detailBody as {
+            transcript: readonly {
+              runId: string;
+              files: readonly {
+                name: string;
+                contentType: string;
+                sizeBytes: number;
+                sha256: string;
+              }[];
+            }[];
+          }
+        ).transcript;
+        const transcriptFile = transcript.find(
+          (message) => message.runId === runId,
+        )?.files[0];
+        assert.equal(transcriptFile?.name, "account-brief.rtf");
+        assert.equal(transcriptFile?.contentType, "application/rtf");
+        assert.equal(
+          transcriptFile?.sizeBytes,
+          Buffer.byteLength(officeContext, "utf8"),
+        );
+        assert.equal(
+          transcriptFile?.sha256,
+          createHash("sha256").update(officeContext).digest("hex"),
+        );
       },
     );
 
@@ -675,21 +1064,26 @@ test(
     await t.test(
       "run resume has one transactional durable command",
       async () => {
+        const resumeBody = {
+          files: [
+            {
+              name: "resume.txt",
+              contentType: "text/plain",
+              dataBase64: Buffer.from("resume file context", "utf8").toString(
+                "base64",
+              ),
+            },
+          ],
+        };
         const resumed = await app.request(
           `${projectPath}/runs/${runId}/resume`,
-          jsonRequest(
-            { redactedInput: "safe resumed request" },
-            "resume-run-1",
-          ),
+          jsonRequest(resumeBody, "resume-run-1"),
         );
         assert.equal(resumed.status, 202, await resumed.clone().text());
         const resumedRunId = ((await resumed.json()) as { id: string }).id;
         const replay = await app.request(
           `${projectPath}/runs/${runId}/resume`,
-          jsonRequest(
-            { redactedInput: "safe resumed request" },
-            "resume-run-1",
-          ),
+          jsonRequest(resumeBody, "resume-run-1"),
         );
         assert.equal(replay.headers.get("idempotency-replayed"), "true");
         const commands = await pool.query<{ count: string }>(
@@ -697,6 +1091,18 @@ test(
           [resumedRunId, `admit:${resumedRunId}`],
         );
         assert.equal(commands.rows[0]?.count, "1");
+        const files = await pool.query<{ file_name: string; content: string }>(
+          `SELECT file_name,convert_from(content_bytes,'UTF8') AS content
+           FROM oao.run_files WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            resumedRunId,
+          ],
+        );
+        assert.deepEqual(files.rows, [
+          { file_name: "resume.txt", content: "resume file context" },
+        ]);
       },
     );
 

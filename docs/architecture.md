@@ -45,6 +45,24 @@ OTel SDK -> optional Collector -> configured OTLP backend
 8. Cancellation of an unreserved queued run is database-only. Once admission becomes ambiguous or succeeds, cancellation completes keyed admission reconciliation, performs Flue abort, and waits for canonical settlement.
 9. A sandbox workspace is keyed by organization, project, and platform thread. Successive submissions in that thread reuse the same workspace; Flue callback identifiers are correlation metadata, not lifecycle identity.
 10. An awaited at-least-once finish hook overwrites the thread's latest tenant-scoped workspace archive. A replacement sandbox is not exposed until the recorded object passes tenant metadata, length, checksum, and archive validation.
+11. Run input files are immutable tenant-scoped PostgreSQL records correlated to
+    both their run and user message. Admission revalidates byte length and
+    SHA-256 before text or image content enters Flue. Supported documents and
+    emails are extracted during API admission and the bounded model text is
+    stored beside the immutable source bytes. Product events, audit details,
+    and transcript responses contain metadata only.
+12. Skill definitions, version contents, lifecycle, agent-version bindings,
+    and session bindings are tenant-scoped PostgreSQL records. Agent versions
+    pin exact active Skill version IDs; session creation copies those bindings.
+    Runtime admission revalidates lifecycle and canonical/file SHA-256 values,
+    exposes only discovery metadata initially, and lets Flue load instructions
+    and resources progressively. Mutable `.agents/skills` workspace discovery
+    is excluded from the authoritative runtime path.
+13. Agent versions pin exact named delegate versions. Every delegation creates
+    a separate thread, session, Flue identity, and ordered child-run ledger,
+    while an immutable thread binding points coordinator and child threads at
+    one PostgreSQL-authoritative workspace identity. Tool replay is keyed and
+    hashed; parent cancellation cascades to unsettled child runs.
 
 ## Public run states
 
@@ -64,7 +82,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 
 ### Runtime
 
-- `@oao/runtime-flue`: generic compiled `ManagedAgent`, pinned `@flue/postgres`, history projection.
+- `@oao/runtime-flue`: generic compiled `ManagedAgent`, pinned `@flue/postgres`, verified PostgreSQL Skill registry, progressive Flue Skill activation, durable child-session coordinator, and history projection.
 - `@oao/queue-postgres`: PostgreSQL wake jobs and platform dispatch leases.
 - `@oao/tool-broker`: caller requests/claims/results and single-approver gates.
 - `@oao/models-openrouter`: pinned OpenRouter/OpenAI catalog projections, provider-neutral routing translation, project-scoped preset activation, and provider construction. The package name is retained while the adapter seam expands beyond OpenRouter.
@@ -81,11 +99,12 @@ OTel SDK -> optional Collector -> configured OTLP backend
 
 ## Required console screens
 
-- Agents list/detail, immutable versions, prompts, models, tools, and sandbox policy
+- Skills list/detail, immutable packages and versions, and publication workflow
+- Agents list/detail, immutable versions, prompts, models, exact Skill and delegate bindings, tools, and sandbox policy
 - Project-scoped OpenRouter/OpenAI provider connections, write-only encrypted API keys, and approval of model presets from the matching provider catalog
 - Project-scoped S3-compatible storage connections, automatic latest-thread workspace backup, and safe restore diagnostics
 - Sessions list with status, agent, usage, cost, creation and last activity
-- Session detail with Transcript and Debug tabs
+- Session detail with Transcript and Debug tabs plus persistent child-session links
 - Pending tool calls and approvals
 - Errors, attempts/recovery, timing waterfall, usage/cost provenance, and redacted payload inspection
 - Organization/project/API-key/member/settings screens

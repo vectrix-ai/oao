@@ -9,6 +9,7 @@ import { AgentDetailPage, AgentsPage } from "./pages/agents";
 import { ModelsPage } from "./pages/models";
 import { PendingWorkPage } from "./pages/pending-work";
 import { SessionDetailPage, SessionsPage } from "./pages/sessions";
+import { SkillDetailPage, SkillsPage } from "./pages/skills";
 import { SettingsPage } from "./pages/settings";
 
 export function ConsoleApp({
@@ -31,6 +32,8 @@ export function ConsoleApp({
         <Route index element={<Navigate to="/agents" replace />} />
         <Route path="agents" element={<AgentsPage />} />
         <Route path="agents/:agentId" element={<AgentDetailPage />} />
+        <Route path="skills" element={<SkillsPage />} />
+        <Route path="skills/:skillId" element={<SkillDetailPage />} />
         <Route path="models" element={<ModelsPage />} />
         <Route path="sessions" element={<SessionsPage />} />
         <Route path="sessions/:sessionId" element={<SessionDetailPage />} />

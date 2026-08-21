@@ -4,10 +4,12 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../api/context";
 import type {
+  AgentSummary,
   AgentVersionConfig,
   ModelPreset,
   ProjectSandboxProvider,
   SandboxSnapshotEntry,
+  SkillSummary,
 } from "../api/types";
 import { describePresetRouting } from "../model-presets";
 import type { ComboboxOption } from "../components/ui";
@@ -86,6 +88,23 @@ function snapshotLabel(snapshot: SandboxSnapshotEntry): string {
   return `${snapshot.name} · ${resources}${snapshot.available ? "" : ` · ${snapshot.state}`}`;
 }
 
+function delegateSandboxMismatch(
+  coordinator: AgentVersionConfig["sandbox"],
+  child: AgentVersionConfig["sandbox"],
+): string | undefined {
+  if (coordinator.enabled !== child.enabled)
+    return child.enabled
+      ? "sandbox is enabled for this child but disabled for the coordinator"
+      : "sandbox is disabled for this child, so it cannot share the coordinator workspace";
+  if (coordinator.provider !== child.provider)
+    return `sandbox provider ${child.provider} does not match coordinator provider ${coordinator.provider}`;
+  if ((coordinator.snapshotId ?? null) !== (child.snapshotId ?? null))
+    return "the Daytona snapshot does not match the coordinator snapshot";
+  if (coordinator.network !== child.network)
+    return `network policy ${child.network} does not match coordinator policy ${coordinator.network}`;
+  return undefined;
+}
+
 function initialAgentConfig(
   name: string,
   modelPreset: string,
@@ -95,6 +114,8 @@ function initialAgentConfig(
     systemPrompt: `You are ${name}, a helpful managed agent. Complete the user's request carefully and do not expose secrets or internal reasoning.`,
     modelPreset,
     tools: [],
+    skillVersionIds: [],
+    delegates: [],
     sandbox: {
       enabled: false,
       provider: sandboxProvider,
@@ -110,6 +131,7 @@ interface CreateAgentInput {
   readonly description: string;
   readonly modelPreset: string;
   readonly sandbox: AgentVersionConfig["sandbox"];
+  readonly skillVersionIds: readonly string[];
 }
 
 export function AgentsPage() {
@@ -134,6 +156,10 @@ export function AgentsPage() {
     queryKey: ["sandbox-providers"],
     queryFn: () => api.listSandboxProviders(),
   });
+  const skills = useQuery({
+    queryKey: ["skills"],
+    queryFn: () => api.listSkills({}),
+  });
   const create = useMutation({
     mutationFn: (input: CreateAgentInput) => {
       const config = initialAgentConfig(
@@ -144,7 +170,11 @@ export function AgentsPage() {
       return api.createAgent({
         name: input.name,
         description: input.description,
-        initialConfig: { ...config, sandbox: input.sandbox },
+        initialConfig: {
+          ...config,
+          sandbox: input.sandbox,
+          skillVersionIds: input.skillVersionIds,
+        },
       });
     },
     onSuccess: async (agent) => {
@@ -301,6 +331,7 @@ export function AgentsPage() {
           sandboxProviders={sandboxProviders.data?.data ?? []}
           sandboxProvidersPending={sandboxProviders.isPending}
           sandboxProvidersError={sandboxProviders.error}
+          skills={skills.data?.data ?? []}
           onClose={() => setCreating(false)}
           onSubmit={(input) => create.mutate(input)}
         />
@@ -318,6 +349,7 @@ function CreateAgentDialog({
   sandboxProviders,
   sandboxProvidersPending,
   sandboxProvidersError,
+  skills,
   onClose,
   onSubmit,
 }: {
@@ -329,6 +361,7 @@ function CreateAgentDialog({
   readonly sandboxProviders: readonly ProjectSandboxProvider[];
   readonly sandboxProvidersPending: boolean;
   readonly sandboxProvidersError: Error | null;
+  readonly skills: readonly SkillSummary[];
   readonly onClose: () => void;
   readonly onSubmit: (input: CreateAgentInput) => void;
 }) {
@@ -340,6 +373,7 @@ function CreateAgentDialog({
   const [sandboxCapabilities, setSandboxCapabilities] = useState<
     readonly SandboxCapability[]
   >(["filesystem_read", "filesystem_write", "shell"]);
+  const [skillVersionIds, setSkillVersionIds] = useState<readonly string[]>([]);
   const selectedPreset = modelPresets.find(
     (preset) => preset.key === modelPreset,
   );
@@ -390,6 +424,7 @@ function CreateAgentDialog({
             network,
             capabilities: sandboxCapabilities,
           },
+          skillVersionIds,
         });
       }}
       footer={
@@ -422,6 +457,38 @@ function CreateAgentDialog({
           maxLength={2000}
           placeholder="What should this agent do?"
         />
+      </Field>
+      <Field
+        label="Skills"
+        hint="Exact versions are frozen into agent version 1 and inherited by every new session."
+      >
+        {skills.length === 0 ? (
+          <p className="muted">
+            No active Skills are available. <Link to="/skills">Create one</Link>
+            .
+          </p>
+        ) : (
+          <div className="stack">
+            {skills
+              .filter((skill) => skill.status === "active")
+              .map((skill) => (
+                <CheckboxRow
+                  key={skill.id}
+                  label={`${skill.displayName} · v${skill.version}`}
+                  description={skill.description}
+                  checked={skillVersionIds.includes(skill.latestVersionId)}
+                  disabled={pending}
+                  onChange={(event) =>
+                    setSkillVersionIds((current) =>
+                      event.target.checked
+                        ? [...current, skill.latestVersionId]
+                        : current.filter((id) => id !== skill.latestVersionId),
+                    )
+                  }
+                />
+              ))}
+          </div>
+        )}
       </Field>
       <Field
         label="Approved model preset"
@@ -619,6 +686,14 @@ export function AgentDetailPage() {
     queryKey: ["sandbox-providers"],
     queryFn: () => api.listSandboxProviders(),
   });
+  const skills = useQuery({
+    queryKey: ["skills"],
+    queryFn: () => api.listSkills({}),
+  });
+  const agents = useQuery({
+    queryKey: ["agents", "delegate-roster"],
+    queryFn: () => api.listAgents({}),
+  });
   const publish = useMutation({
     mutationFn: (config: AgentVersionConfig) =>
       api.publishAgentVersion(agentId, config),
@@ -650,6 +725,10 @@ export function AgentDetailPage() {
       modelPresets={modelPresets.data?.data ?? []}
       sandboxProviders={sandboxProviders.data?.data ?? []}
       sandboxProvidersError={sandboxProviders.error}
+      skills={skills.data?.data ?? []}
+      availableAgents={(agents.data?.data ?? []).filter(
+        (candidate) => candidate.id !== query.data.id,
+      )}
     />
   );
 }
@@ -662,6 +741,8 @@ function AgentEditor({
   modelPresets,
   sandboxProviders,
   sandboxProvidersError,
+  skills,
+  availableAgents,
 }: {
   readonly agent: Awaited<ReturnType<ReturnType<typeof useApi>["getAgent"]>>;
   readonly publishing: boolean;
@@ -670,6 +751,8 @@ function AgentEditor({
   readonly modelPresets: readonly ModelPreset[];
   readonly sandboxProviders: readonly ProjectSandboxProvider[];
   readonly sandboxProvidersError: Error | null;
+  readonly skills: readonly SkillSummary[];
+  readonly availableAgents: readonly AgentSummary[];
 }) {
   const api = useApi();
   const [selectedVersion, setSelectedVersion] = useState(agent.version);
@@ -693,6 +776,10 @@ function AgentEditor({
     baseConfig.sandbox.capabilities,
   );
   const [timeout, setTimeoutValue] = useState(baseConfig.limits.timeoutMs);
+  const [skillVersionIds, setSkillVersionIds] = useState(
+    baseConfig.skillVersionIds ?? [],
+  );
+  const [delegates, setDelegates] = useState(baseConfig.delegates ?? []);
   const selectedSandboxProvider = sandboxProviders.find(
     (provider) => provider.key === sandboxProvider,
   );
@@ -741,11 +828,36 @@ function AgentEditor({
           `${snapshotId} is not an active snapshot for this Daytona connection.`,
         );
     }
+    const coordinatorSandbox: AgentVersionConfig["sandbox"] = {
+      enabled: sandboxEnabled,
+      provider: sandboxProvider,
+      ...(snapshotId ? { snapshotId } : {}),
+      network,
+      capabilities: sandboxCapabilities,
+    };
+    for (const delegate of delegates) {
+      const candidate = availableAgents.find(
+        (item) => item.latestVersionId === delegate.agentVersionId,
+      );
+      if (!candidate) continue;
+      const mismatch = delegateSandboxMismatch(
+        coordinatorSandbox,
+        candidate.sandbox,
+      );
+      if (mismatch)
+        errors.push(
+          `${candidate.name} cannot be delegated: ${mismatch}. Publish a compatible child version first.`,
+        );
+    }
     return errors;
   }, [
+    availableAgents,
+    delegates,
     instructions,
     modelPreset,
     modelPresets,
+    network,
+    sandboxCapabilities,
     sandboxEnabled,
     sandboxProvider,
     sandboxProviders,
@@ -770,11 +882,15 @@ function AgentEditor({
     setNetwork(next.config.sandbox.network);
     setSandboxCapabilities(next.config.sandbox.capabilities);
     setTimeoutValue(next.config.limits.timeoutMs);
+    setSkillVersionIds(next.config.skillVersionIds ?? []);
+    setDelegates(next.config.delegates ?? []);
   };
   const config: AgentVersionConfig = {
     ...baseConfig,
     systemPrompt: instructions,
     modelPreset,
+    skillVersionIds,
+    delegates,
     sandbox: {
       enabled: sandboxEnabled,
       provider: sandboxProvider,
@@ -946,6 +1062,120 @@ function AgentEditor({
                     </details>
                   </article>
                 ))}
+              </div>
+            )}
+          </Panel>
+          <Panel
+            title="Skills"
+            description="Catalog metadata stays small; instructions and resources load only after activation."
+            actions={<Link to="/skills">Manage Skills</Link>}
+          >
+            {skills.length === 0 ? (
+              <EmptyState
+                icon="◇"
+                title="No Skills available"
+                description="Create a versioned Skill before attaching it to this agent."
+              />
+            ) : (
+              <div className="stack">
+                {skills.map((skill) => {
+                  const selectedId = skill.versionIds.find((id) =>
+                    skillVersionIds.includes(id),
+                  );
+                  const checked = selectedId !== undefined;
+                  return (
+                    <CheckboxRow
+                      key={skill.id}
+                      label={`${skill.displayName} · ${
+                        selectedId === skill.latestVersionId
+                          ? `v${skill.version}`
+                          : checked
+                            ? "older pinned version"
+                            : `v${skill.version}`
+                      }`}
+                      description={skill.description}
+                      checked={checked}
+                      disabled={!isLatest || skill.status !== "active"}
+                      onChange={(event) =>
+                        setSkillVersionIds((current) => {
+                          const withoutSkill = current.filter(
+                            (id) => !skill.versionIds.includes(id),
+                          );
+                          return event.target.checked
+                            ? [...withoutSkill, skill.latestVersionId]
+                            : withoutSkill;
+                        })
+                      }
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </Panel>
+          <Panel
+            title="Delegates"
+            description="Each coordinator version pins exact child-agent versions. Child sessions keep isolated history while sharing the coordinator workspace."
+          >
+            {availableAgents.length === 0 ? (
+              <EmptyState
+                icon="⇢"
+                title="No delegate agents available"
+                description="Create and publish another agent before adding it to this coordinator's roster."
+              />
+            ) : (
+              <div className="stack">
+                <Alert tone="info" role="status">
+                  A child can be selected only when its latest version has the
+                  same sandbox enabled state, provider, snapshot, and network
+                  policy as this coordinator. Tool capabilities may differ.
+                </Alert>
+                {availableAgents.map((candidate) => {
+                  const checked = delegates.some(
+                    (delegate) =>
+                      delegate.agentVersionId === candidate.latestVersionId,
+                  );
+                  const mismatch = delegateSandboxMismatch(
+                    config.sandbox,
+                    candidate.sandbox,
+                  );
+                  return (
+                    <CheckboxRow
+                      key={candidate.id}
+                      label={`${candidate.name} · v${candidate.version}`}
+                      description={`${candidate.description} ${
+                        mismatch
+                          ? `Unavailable — ${mismatch}. Publish a compatible child version first.`
+                          : "Sandbox-compatible with this coordinator."
+                      } Exact version ${candidate.latestVersionId}.`}
+                      checked={checked}
+                      disabled={
+                        !isLatest ||
+                        candidate.status !== "published" ||
+                        (!checked && mismatch !== undefined)
+                      }
+                      onChange={(event) =>
+                        setDelegates((current) =>
+                          event.target.checked
+                            ? [
+                                ...current,
+                                {
+                                  key: candidate.key,
+                                  description:
+                                    candidate.description || candidate.name,
+                                  agentVersionId: candidate.latestVersionId,
+                                  maxParallel: 1,
+                                },
+                              ]
+                            : current.filter(
+                                (delegate) =>
+                                  delegate.agentVersionId !==
+                                  candidate.latestVersionId,
+                              ),
+                        )
+                      }
+                    />
+                  );
+                })}
               </div>
             )}
           </Panel>
