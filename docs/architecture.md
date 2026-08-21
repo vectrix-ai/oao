@@ -45,12 +45,12 @@ OTel SDK -> optional Collector -> configured OTLP backend
 8. Cancellation of an unreserved queued run is database-only. Once admission becomes ambiguous or succeeds, cancellation completes keyed admission reconciliation, performs Flue abort, and waits for canonical settlement.
 9. A sandbox workspace is keyed by organization, project, and platform thread. Successive submissions in that thread reuse the same workspace; Flue callback identifiers are correlation metadata, not lifecycle identity.
 10. An awaited at-least-once finish hook overwrites the thread's latest tenant-scoped workspace archive. A replacement sandbox is not exposed until the recorded object passes tenant metadata, length, checksum, and archive validation.
-11. Run input files are immutable tenant-scoped PostgreSQL records correlated to
-    both their run and user message. Admission revalidates byte length and
-    SHA-256 before text or image content enters Flue. Supported documents and
-    emails are extracted during API admission and the bounded model text is
-    stored beside the immutable source bytes. Product events, audit details,
-    and transcript responses contain metadata only.
+11. Run attachment bytes live only in the project-scoped S3-compatible object
+    store. PostgreSQL keeps the immutable run manifest and provider/object
+    binding, never attachment bytes or extracted text. Runtime admission
+    downloads the bound object and revalidates content type, byte length, and
+    SHA-256 before copying it unchanged into Daytona. Product events, audit
+    details, and transcript responses contain safe metadata only.
 12. Skill definitions, version contents, lifecycle, agent-version bindings,
     and session bindings are tenant-scoped PostgreSQL records. Agent versions
     pin exact active Skill version IDs; session creation copies those bindings.

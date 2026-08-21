@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import test from "node:test";
 import { DevelopmentAuthAdapter } from "@oao/auth-core";
-import { InMemoryArtifactAdapter } from "@oao/artifact-s3";
+import {
+  encodeWorkspaceBackupManifest,
+  InMemoryArtifactAdapter,
+  workspaceBackupManifestObjectKey,
+} from "@oao/artifact-s3";
 import { createPool, migrate, type Queryable } from "@oao/db-postgres";
 import {
   isApprovedCatalogModel,
@@ -17,7 +21,6 @@ import {
   type PrincipalId,
   type ProjectId,
 } from "@oao/domain";
-import { strToU8, zipSync } from "fflate";
 import { createApiApp } from "../../src/app.js";
 import { PostgresApiStore } from "../../src/store.js";
 import { provisionWorkOsIdentity } from "../../src/workos-provisioning.js";
@@ -45,6 +48,13 @@ const disabledSandbox = {
   provider: "daytona-primary",
   network: "none",
   capabilities: [],
+} as const;
+const fileSandbox = {
+  enabled: true,
+  provider: "integration-file-daytona",
+  snapshotId: "77777777-7777-4777-8777-777777777777",
+  network: "none",
+  capabilities: ["filesystem_read", "filesystem_write", "shell"],
 } as const;
 
 class TransactionalTestRuntimeCommands implements RuntimeCommandPort {
@@ -92,22 +102,6 @@ function jsonRequest(
     },
     body: JSON.stringify(body),
   };
-}
-
-function docxFile(text: string): Buffer {
-  return Buffer.from(
-    zipSync({
-      "[Content_Types].xml": strToU8(
-        `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
-      ),
-      "_rels/.rels": strToU8(
-        `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
-      ),
-      "word/document.xml": strToU8(
-        `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`,
-      ),
-    }),
-  );
 }
 
 test(
@@ -185,17 +179,50 @@ test(
       },
     );
     const artifacts = new InMemoryArtifactAdapter();
+    const runFileStorageProviderId = "00000000-0000-4000-8000-000000009010";
+    const runFileStorage = {
+      resolve: (input: { readonly providerId?: string }) =>
+        Promise.resolve(
+          input.providerId && input.providerId !== runFileStorageProviderId
+            ? undefined
+            : { providerId: runFileStorageProviderId, store: artifacts },
+        ),
+    };
     const runtimeCommands = new TransactionalTestRuntimeCommands();
     const app = createApiApp({
       store: new PostgresApiStore(pool, "integration-api-key-pepper"),
       auth: new DevelopmentAuthAdapter({ principal: integrationPrincipal }),
       artifacts,
+      runFileStorage,
       runtimeCommands,
       credentialCipher: new ProviderCredentialCipher(Buffer.alloc(32, 5)),
       modelCatalog: {
         deploymentPresets: [],
         listCatalog: (input) => listApprovedModelCatalog(input?.providerType),
         isApprovedModel: isApprovedCatalogModel,
+      },
+      sandboxSnapshotCatalog: {
+        listSnapshots: () =>
+          Promise.resolve([
+            {
+              id: fileSandbox.snapshotId,
+              providerType: "daytona" as const,
+              name: "daytona-small",
+              state: "active",
+              available: true,
+              imageName: "daytonaio/sandbox:0.9.0",
+              general: true,
+              cpu: 1,
+              gpu: 0,
+              memoryGiB: 1,
+              diskGiB: 3,
+              regionIds: ["eu", "us"],
+              sandboxClass: "container",
+              createdAt: "2026-07-28T14:58:11.540Z",
+              updatedAt: "2026-08-20T15:26:23.838Z",
+              lastUsedAt: "2026-08-20T15:26:23.827Z",
+            },
+          ]),
       },
     });
 
@@ -228,6 +255,21 @@ test(
       ),
     );
     assert.equal(basePresetResponse.status, 201);
+    const fileSandboxProviderResponse = await app.request(
+      `${projectPath}/sandbox-providers`,
+      jsonRequest(
+        {
+          key: fileSandbox.provider,
+          displayName: "Integration file Daytona",
+          providerType: "daytona",
+          apiKey: "daytona-integration-file-secret",
+          target: null,
+          restrictedEgress: { allowedDomains: [], allowedCidrs: [] },
+        },
+        "file-sandbox-provider-1",
+      ),
+    );
+    assert.equal(fileSandboxProviderResponse.status, 201);
 
     await t.test("context, readiness and tenant/RLS route scope", async () => {
       assert.equal((await app.request("/readyz")).status, 200);
@@ -249,6 +291,7 @@ test(
     });
 
     let agentId = "";
+    let disabledAgentVersionId = "";
     let versionId = "";
     let sessionId = "";
     let runId = "";
@@ -383,6 +426,146 @@ test(
       },
     );
 
+    await t.test(
+      "Skill drafts persist folders and multiple Markdown files before atomic publication",
+      async () => {
+        const created = await app.request(
+          `${projectPath}/skill-drafts`,
+          jsonRequest({}, "skill-draft-create-1"),
+        );
+        assert.equal(created.status, 201, await created.clone().text());
+        const draft = (await created.json()) as {
+          id: string;
+          status: string;
+          entries: readonly unknown[];
+        };
+        assert.equal(draft.status, "editing");
+        assert.deepEqual(draft.entries, []);
+
+        const saved = await app.request(
+          `${projectPath}/skill-drafts/${draft.id}`,
+          {
+            ...jsonRequest(
+              {
+                key: "business-rules-library",
+                displayName: "Business rules library",
+                name: "business-rules-library",
+                description: "Load customer-specific operating rules.",
+                instructions:
+                  "Read only the customer reference required for the request.",
+              },
+              "skill-draft-save-1",
+            ),
+            method: "PATCH",
+          },
+        );
+        assert.equal(saved.status, 200, await saved.clone().text());
+
+        const directory = await app.request(
+          `${projectPath}/skill-drafts/${draft.id}/directories`,
+          jsonRequest(
+            { path: "references/customers" },
+            "skill-draft-directory-1",
+          ),
+        );
+        assert.equal(directory.status, 201, await directory.clone().text());
+
+        for (const [index, customer] of ["acme", "globex"].entries()) {
+          const uploaded = await app.request(
+            `${projectPath}/skill-drafts/${draft.id}/files`,
+            {
+              ...jsonRequest(
+                {
+                  path: `references/customers/${customer}.md`,
+                  contentType: "text/markdown",
+                  dataBase64: Buffer.from(
+                    `# ${customer}\n\nUse the approved ${customer} workflow.`,
+                    "utf8",
+                  ).toString("base64"),
+                },
+                `skill-draft-file-${index + 1}`,
+              ),
+              method: "PUT",
+            },
+          );
+          assert.equal(uploaded.status, 200, await uploaded.clone().text());
+        }
+
+        const traversal = await app.request(
+          `${projectPath}/skill-drafts/${draft.id}/files`,
+          {
+            ...jsonRequest(
+              {
+                path: "../escape.md",
+                contentType: "text/markdown",
+                dataBase64: Buffer.from("# Escape", "utf8").toString("base64"),
+              },
+              "skill-draft-traversal-1",
+            ),
+            method: "PUT",
+          },
+        );
+        assert.equal(traversal.status, 400);
+
+        const foldedCollision = await app.request(
+          `${projectPath}/skill-drafts/${draft.id}/files`,
+          {
+            ...jsonRequest(
+              {
+                path: "references/customers/ACME.md",
+                contentType: "text/markdown",
+                dataBase64: Buffer.from("# Collision", "utf8").toString(
+                  "base64",
+                ),
+              },
+              "skill-draft-collision-1",
+            ),
+            method: "PUT",
+          },
+        );
+        assert.equal(foldedCollision.status, 409);
+
+        const validation = await app.request(
+          `${projectPath}/skill-drafts/${draft.id}/validate`,
+          { method: "POST" },
+        );
+        assert.equal(validation.status, 200, await validation.clone().text());
+        assert.equal(
+          ((await validation.json()) as { fileCount: number }).fileCount,
+          2,
+        );
+
+        const published = await app.request(
+          `${projectPath}/skill-drafts/${draft.id}/publish`,
+          jsonRequest({}, "skill-draft-publish-1"),
+        );
+        assert.equal(published.status, 201, await published.clone().text());
+        const publishedBody = (await published.json()) as {
+          skillId: string;
+          version: { id: string; version: number };
+        };
+        assert.equal(publishedBody.version.version, 1);
+
+        const exported = await app.request(
+          `${projectPath}/skills/${publishedBody.skillId}/versions/${publishedBody.version.id}/export`,
+        );
+        assert.equal(exported.status, 200);
+        const files = (
+          (await exported.json()) as {
+            files: readonly { path: string; dataBase64: string }[];
+          }
+        ).files;
+        assert.deepEqual(
+          files.map((file) => file.path),
+          ["references/customers/acme.md", "references/customers/globex.md"],
+        );
+        assert.match(
+          Buffer.from(files[0]!.dataBase64, "base64").toString("utf8"),
+          /approved acme workflow/u,
+        );
+      },
+    );
+
     await t.test("agent writes are idempotent and lists paginate", async () => {
       const first = await app.request(
         `${projectPath}/agents`,
@@ -411,6 +594,7 @@ test(
         sandbox: typeof disabledSandbox;
       };
       agentId = firstBody.id;
+      disabledAgentVersionId = firstBody.latestVersionId;
       assert.ok(firstBody.latestVersionId);
       assert.equal(firstBody.version, 1);
       assert.deepEqual(firstBody.sandbox, disabledSandbox);
@@ -634,7 +818,7 @@ test(
                   },
                 ],
                 skillVersionIds: [skillVersionId],
-                sandbox: disabledSandbox,
+                sandbox: fileSandbox,
                 limits: { maxTurns: 32, timeoutMs: 60_000 },
               },
             },
@@ -651,8 +835,31 @@ test(
           "",
           "Northwind renews for EUR 48000.",
         ].join("\r\n");
-        const wordContext = docxFile(
-          "The signed Word brief confirms the EUR 48000 annual value.",
+        const wordContext = Buffer.from([
+          0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0x10, 0x80,
+        ]);
+        const rejectedWithoutSandbox = await app.request(
+          `${projectPath}/sessions`,
+          jsonRequest(
+            {
+              agentVersionId: disabledAgentVersionId,
+              title: "Rejected raw file session",
+              files: [
+                {
+                  name: "renewal-brief.docx",
+                  contentType:
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                  dataBase64: wordContext.toString("base64"),
+                },
+              ],
+            },
+            "session-files-without-sandbox-1",
+          ),
+        );
+        assert.equal(rejectedWithoutSandbox.status, 409);
+        assert.match(
+          await rejectedWithoutSandbox.text(),
+          /File attachments require a sandbox-enabled agent/u,
         );
         const session = await app.request(
           `${projectPath}/sessions`,
@@ -718,35 +925,99 @@ test(
         assert.deepEqual(inheritedSkills.rows, [
           { skill_version_id: skillVersionId },
         ]);
-        const initialFiles = await pool.query<{
-          file_name: string;
-          content_bytes: Buffer;
-          extracted_text: string | null;
+        const initialInput = await pool.query<{
+          input_public: {
+            files: readonly {
+              name: string;
+              contentType: string;
+              objectKey: string;
+              storageProviderId: string;
+            }[];
+          };
         }>(
-          `SELECT file_name,content_bytes,extracted_text
-           FROM oao.run_files WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
+          `SELECT input_public FROM oao.runs
+           WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
           [
             integrationPrincipal.organizationId,
             integrationPrincipal.projectId,
             sessionBody.run.id,
           ],
         );
-        const emailFile = initialFiles.rows.find(
-          (file) => file.file_name === "renewal.eml",
+        const emailManifest = initialInput.rows[0]?.input_public.files.find(
+          (file) => file.name === "renewal.eml",
         );
-        const wordFile = initialFiles.rows.find(
-          (file) => file.file_name === "renewal-brief.docx",
+        const wordManifest = initialInput.rows[0]?.input_public.files.find(
+          (file) => file.name === "renewal-brief.docx",
         );
-        assert.equal(emailFile?.content_bytes.toString("utf8"), emailContext);
-        assert.deepEqual(wordFile?.content_bytes, wordContext);
-        assert.match(
-          emailFile?.extracted_text ?? "",
-          /Renewal context[\s\S]*Northwind renews for EUR 48000/u,
+        assert.equal(
+          emailManifest?.storageProviderId,
+          runFileStorageProviderId,
         );
-        assert.match(
-          wordFile?.extracted_text ?? "",
-          /signed Word brief confirms the EUR 48000 annual value/u,
+        assert.equal(wordManifest?.storageProviderId, runFileStorageProviderId);
+        assert.ok(emailManifest);
+        assert.ok(wordManifest);
+        const emailFile = await artifacts.get({
+          tenant: integrationPrincipal,
+          key: emailManifest.objectKey,
+        });
+        const wordFile = await artifacts.get({
+          tenant: integrationPrincipal,
+          key: wordManifest.objectKey,
+        });
+        assert.equal(
+          Buffer.from(emailFile?.bytes ?? []).toString("utf8"),
+          emailContext,
         );
+        assert.deepEqual(Buffer.from(wordFile?.bytes ?? []), wordContext);
+        const storageRoot = await app.request(
+          `${projectPath}/storage-providers/${runFileStorageProviderId}/objects`,
+        );
+        assert.equal(storageRoot.status, 200, await storageRoot.clone().text());
+        const storageRootBody = (await storageRoot.json()) as {
+          providerId: string;
+          prefix: string;
+          folders: readonly string[];
+          objects: readonly { key: string }[];
+          truncated: boolean;
+        };
+        assert.equal(storageRootBody.providerId, runFileStorageProviderId);
+        assert.equal(storageRootBody.prefix, "");
+        assert.ok(storageRootBody.folders.includes("run-files/"));
+        const emailFolder = emailManifest.objectKey
+          .split("/")
+          .slice(0, -1)
+          .join("/");
+        const storageFolder = await app.request(
+          `${projectPath}/storage-providers/${runFileStorageProviderId}/objects?prefix=${encodeURIComponent(emailFolder)}`,
+        );
+        assert.equal(
+          storageFolder.status,
+          200,
+          await storageFolder.clone().text(),
+        );
+        const storageFolderBody = (await storageFolder.json()) as {
+          objects: readonly { key: string; sizeBytes: number }[];
+        };
+        assert.deepEqual(
+          storageFolderBody.objects.map((object) => object.key),
+          [emailManifest.objectKey],
+        );
+        assert.equal(
+          storageFolderBody.objects[0]?.sizeBytes,
+          Buffer.byteLength(emailContext, "utf8"),
+        );
+        const badPrefix = await app.request(
+          `${projectPath}/storage-providers/${runFileStorageProviderId}/objects?prefix=${encodeURIComponent("../escape")}`,
+        );
+        assert.equal(badPrefix.status, 400);
+        const unknownProvider = await app.request(
+          `${projectPath}/storage-providers/00000000-0000-4000-8000-000000009999/objects`,
+        );
+        assert.equal(unknownProvider.status, 404);
+        const legacyTable = await pool.query<{ table_name: string | null }>(
+          "SELECT to_regclass('oao.run_files')::text AS table_name",
+        );
+        assert.equal(legacyTable.rows[0]?.table_name, null);
         await pool.query(
           `UPDATE oao.runs SET state='running' WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
           [
@@ -804,19 +1075,20 @@ test(
         const persistedInput = await pool.query<{
           input_public: {
             message?: string;
-            files?: readonly { name: string; sha256: string }[];
+            files?: readonly {
+              name: string;
+              sha256: string;
+              objectKey: string;
+              storageProviderId: string;
+            }[];
           };
           message_count: string;
-          file_count: string;
         }>(
           `SELECT run.input_public,
              (SELECT count(*)::text FROM oao.messages message
               WHERE message.organization_id=run.organization_id
                 AND message.project_id=run.project_id AND message.run_id=run.id
-                AND message.role='user') AS message_count,
-             (SELECT count(*)::text FROM oao.run_files file
-              WHERE file.organization_id=run.organization_id
-                AND file.project_id=run.project_id AND file.run_id=run.id) AS file_count
+                AND message.role='user') AS message_count
            FROM oao.runs run
            WHERE run.organization_id=$1 AND run.project_id=$2 AND run.id=$3`,
           [
@@ -838,19 +1110,19 @@ test(
           /^[a-f0-9]{64}$/u,
         );
         assert.equal(persistedInput.rows[0]?.message_count, "1");
-        assert.equal(persistedInput.rows[0]?.file_count, "1");
-        const officeFile = await pool.query<{ extracted_text: string | null }>(
-          `SELECT extracted_text FROM oao.run_files
-           WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
-          [
-            integrationPrincipal.organizationId,
-            integrationPrincipal.projectId,
-            runId,
-          ],
+        const officeManifest = persistedInput.rows[0]?.input_public.files?.[0];
+        assert.equal(
+          officeManifest?.storageProviderId,
+          runFileStorageProviderId,
         );
-        assert.match(
-          officeFile.rows[0]?.extracted_text ?? "",
-          /Account brief[\s\S]*Contoso annual value is EUR 72000/u,
+        assert.ok(officeManifest);
+        const officeFile = await artifacts.get({
+          tenant: integrationPrincipal,
+          key: officeManifest.objectKey,
+        });
+        assert.equal(
+          Buffer.from(officeFile?.bytes ?? []).toString("utf8"),
+          officeContext,
         );
         const replay = await app.request(
           `${projectPath}/sessions/${sessionId}/runs`,
@@ -863,6 +1135,76 @@ test(
           [runId, `admit:${runId}`],
         );
         assert.equal(commands.rows[0]?.count, "1");
+        const backupIdentity = await pool.query<{
+          thread_id: string;
+          session_id: string;
+        }>(
+          `SELECT thread_id,session_id FROM oao.runs
+           WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            runId,
+          ],
+        );
+        const backupThreadId = backupIdentity.rows[0]?.thread_id;
+        assert.ok(backupThreadId);
+        const archive = Buffer.from("workspace archive");
+        const archiveSha256 = createHash("sha256").update(archive).digest();
+        const backupObjectKey = `workspace-backups/threads/${backupThreadId}/workspace.tar.gz`;
+        const workspaceFiles = [
+          {
+            name: "account-brief.rtf",
+            path: `.oao/attachments/${runId}/account-brief.rtf`,
+            sizeBytes: Buffer.byteLength(officeContext, "utf8"),
+          },
+          { name: "result.csv", path: "output/result.csv", sizeBytes: 42 },
+        ];
+        await artifacts.put({
+          tenant: integrationPrincipal,
+          key: workspaceBackupManifestObjectKey(backupObjectKey),
+          bytes: encodeWorkspaceBackupManifest({
+            archive,
+            files: workspaceFiles,
+          }),
+          contentType: "application/json",
+        });
+        await pool.query(
+          `INSERT INTO oao.project_storage_providers (
+             organization_id,project_id,id,provider_key,display_name,
+             provider_type,endpoint,region,bucket,object_prefix,force_path_style,
+             is_default,encrypted_credential,encryption_nonce,encryption_tag,
+             encryption_key_version,credential_fingerprint,created_by_principal_id
+           ) VALUES ($1,$2,$3,'run-files-test','Run files test','s3',NULL,
+             'test-1','run-files',NULL,false,false,$4,$5,$6,1,$7,$8)`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            runFileStorageProviderId,
+            Buffer.from("test"),
+            Buffer.alloc(12, 1),
+            Buffer.alloc(16, 2),
+            "a".repeat(64),
+            integrationPrincipal.id,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.thread_workspace_backups (
+             organization_id,project_id,thread_id,session_id,storage_provider_id,
+             last_run_id,object_key,content_length,content_sha256
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            backupThreadId,
+            sessionId,
+            runFileStorageProviderId,
+            runId,
+            backupObjectKey,
+            archive.byteLength,
+            archiveSha256,
+          ],
+        );
         const detail = await app.request(
           `${projectPath}/sessions/${sessionId}`,
         );
@@ -883,8 +1225,21 @@ test(
               contentType: string;
               sizeBytes: number;
               sha256: string;
+              storageProviderId: string;
+              objectKey: string;
             }[];
           }[];
+          debug: {
+            workspaceBackups: readonly {
+              lastRunId: string;
+              manifestState: string;
+              files: readonly {
+                name: string;
+                path: string;
+                sizeBytes: number;
+              }[];
+            }[];
+          };
         };
         assert.equal(detailBody.skills.length, 1);
         assert.equal(detailBody.skills[0]?.skillId, skillId);
@@ -895,19 +1250,7 @@ test(
           detailBody.skills[0]?.contentHash ?? "",
           /^[a-f0-9]{64}$/u,
         );
-        const transcript = (
-          detailBody as {
-            transcript: readonly {
-              runId: string;
-              files: readonly {
-                name: string;
-                contentType: string;
-                sizeBytes: number;
-                sha256: string;
-              }[];
-            }[];
-          }
-        ).transcript;
+        const transcript = detailBody.transcript;
         const transcriptFile = transcript.find(
           (message) => message.runId === runId,
         )?.files[0];
@@ -920,6 +1263,46 @@ test(
         assert.equal(
           transcriptFile?.sha256,
           createHash("sha256").update(officeContext).digest("hex"),
+        );
+        assert.equal(
+          transcriptFile?.storageProviderId,
+          runFileStorageProviderId,
+        );
+        assert.match(transcriptFile?.objectKey ?? "", /^run-files\/runs\//u);
+        assert.equal(
+          detailBody.debug.workspaceBackups[0]?.manifestState,
+          "available",
+        );
+        assert.equal(detailBody.debug.workspaceBackups[0]?.lastRunId, runId);
+        assert.equal(
+          (
+            detailBody.debug.workspaceBackups[0] as unknown as {
+              storageProviderId?: string;
+            }
+          ).storageProviderId,
+          runFileStorageProviderId,
+        );
+        assert.deepEqual(
+          detailBody.debug.workspaceBackups[0]?.files,
+          workspaceFiles,
+        );
+        await pool.query(
+          `DELETE FROM oao.thread_workspace_backups
+           WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            backupThreadId,
+          ],
+        );
+        await pool.query(
+          `DELETE FROM oao.project_storage_providers
+           WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            runFileStorageProviderId,
+          ],
         );
       },
     );
@@ -1091,18 +1474,30 @@ test(
           [resumedRunId, `admit:${resumedRunId}`],
         );
         assert.equal(commands.rows[0]?.count, "1");
-        const files = await pool.query<{ file_name: string; content: string }>(
-          `SELECT file_name,convert_from(content_bytes,'UTF8') AS content
-           FROM oao.run_files WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
+        const resumeInput = await pool.query<{
+          input_public: {
+            files: readonly { name: string; objectKey: string }[];
+          };
+        }>(
+          `SELECT input_public FROM oao.runs
+           WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
           [
             integrationPrincipal.organizationId,
             integrationPrincipal.projectId,
             resumedRunId,
           ],
         );
-        assert.deepEqual(files.rows, [
-          { file_name: "resume.txt", content: "resume file context" },
-        ]);
+        const resumeManifest = resumeInput.rows[0]?.input_public.files[0];
+        assert.equal(resumeManifest?.name, "resume.txt");
+        assert.ok(resumeManifest);
+        const resumeFile = await artifacts.get({
+          tenant: integrationPrincipal,
+          key: resumeManifest.objectKey,
+        });
+        assert.equal(
+          Buffer.from(resumeFile?.bytes ?? []).toString("utf8"),
+          "resume file context",
+        );
       },
     );
 
@@ -1409,7 +1804,7 @@ test(
         assert.equal(sandboxList.credentialEncryptionConfigured, true);
         assert.deepEqual(
           sandboxList.data.map((entry) => entry.key),
-          ["integration-daytona"],
+          ["integration-daytona", "integration-file-daytona"],
         );
 
         const snapshotsResponse = await hosted.request(
@@ -1663,6 +2058,35 @@ test(
           ),
         );
         assert.equal(sandboxAgent.status, 201);
+
+        const unavailableSnapshotAgent = await hosted.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "sandbox-agent-unavailable-snapshot",
+              name: "Sandbox agent unavailable snapshot",
+              config: {
+                systemPrompt: "Use only an active Daytona snapshot.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                sandbox: {
+                  enabled: true,
+                  provider: "integration-daytona",
+                  snapshotId: "78787878-7878-4787-8787-787878787878",
+                  network: "none",
+                  capabilities: ["filesystem_read", "shell"],
+                },
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "sandbox-agent-unavailable-snapshot-1",
+          ),
+        );
+        assert.equal(unavailableSnapshotAgent.status, 400);
+        assert.match(
+          await unavailableSnapshotAgent.text(),
+          /not an active snapshot for this Daytona connection/u,
+        );
 
         // Approval is audited and no response body carries a credential.
         const audit = await hosted.request(`${projectPath}/audit?limit=100`);

@@ -190,6 +190,9 @@ async function seedFixture(
       sandbox: {
         enabled: options.sandboxEnabled ?? false,
         provider: options.sandboxProvider ?? "test-daytona",
+        ...((options.sandboxEnabled ?? false)
+          ? { snapshotId: uuid(`${label}:snapshot`) }
+          : {}),
         network: "none",
         capabilities: ["filesystem_read", "filesystem_write", "shell"],
       },

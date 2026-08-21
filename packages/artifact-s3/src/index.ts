@@ -3,7 +3,16 @@ import type * as S3Sdk from "@aws-sdk/client-s3";
 import type { S3Client } from "@aws-sdk/client-s3";
 import type { PgPool, TenantContext } from "@oao/db-postgres";
 import { withTenantTransaction } from "@oao/db-postgres";
-import type { ArtifactPort, TenantIdentity } from "@oao/domain";
+import type {
+  ArtifactMetadata,
+  ArtifactObjectEntry,
+  ArtifactObjectList,
+  ArtifactStorePort,
+  ProjectArtifactStoreResolution,
+  ProjectArtifactStoreResolverPort,
+  StoredArtifact,
+  TenantIdentity,
+} from "@oao/domain";
 import type { RunId, SessionId, ThreadId } from "@oao/domain";
 import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 
@@ -17,23 +26,13 @@ export interface ArtifactWrite extends ArtifactLocation {
   readonly contentType: string;
 }
 
-export interface StoredArtifact extends ArtifactLocation {
-  readonly bytes: Uint8Array;
-  readonly contentType: string;
-  readonly etag?: string;
-}
-
-export interface ArtifactMetadata extends ArtifactLocation {
-  readonly contentLength: number;
-  readonly contentType: string;
-  readonly etag?: string;
-}
-
-export interface ArtifactStorePort extends ArtifactPort {
-  get(input: ArtifactLocation): Promise<StoredArtifact | undefined>;
-  head(input: ArtifactLocation): Promise<ArtifactMetadata | undefined>;
-  delete(input: ArtifactLocation): Promise<void>;
-}
+export type {
+  ArtifactMetadata,
+  ArtifactObjectEntry,
+  ArtifactObjectList,
+  ArtifactStorePort,
+  StoredArtifact,
+} from "@oao/domain";
 
 export interface S3PutObjectInput {
   readonly bucket: string;
@@ -62,6 +61,27 @@ export interface S3ObjectMetadata {
   readonly metadata?: Readonly<Record<string, string>>;
 }
 
+export interface S3ListObjectsInput {
+  readonly bucket: string;
+  readonly prefix: string;
+  readonly delimiter?: string;
+  readonly maxKeys?: number;
+  readonly continuationToken?: string;
+}
+
+export interface S3ListedObject {
+  readonly key: string;
+  readonly sizeBytes: number;
+  readonly lastModifiedAt?: string;
+}
+
+export interface S3ObjectListing {
+  readonly objects: readonly S3ListedObject[];
+  readonly commonPrefixes: readonly string[];
+  readonly truncated: boolean;
+  readonly continuationToken?: string;
+}
+
 /**
  * Narrow seam around an S3-compatible client. Hosted wiring can translate these
  * calls to any vendor SDK without leaking that SDK's types into the application.
@@ -71,6 +91,7 @@ export interface S3ObjectClient {
   getObject(input: S3GetObjectInput): Promise<S3ObjectBody | undefined>;
   headObject(input: S3GetObjectInput): Promise<S3ObjectMetadata | undefined>;
   deleteObject(input: S3GetObjectInput): Promise<void>;
+  listObjects(input: S3ListObjectsInput): Promise<S3ObjectListing>;
 }
 
 export interface S3ArtifactAdapterOptions {
@@ -164,6 +185,43 @@ export class AwsS3CompatibleObjectClient implements S3ObjectClient {
     );
   }
 
+  async listObjects(input: S3ListObjectsInput): Promise<S3ObjectListing> {
+    const { client, sdk } = await this.#load();
+    const response = await client.send(
+      new sdk.ListObjectsV2Command({
+        Bucket: input.bucket,
+        Prefix: input.prefix,
+        ...(input.delimiter ? { Delimiter: input.delimiter } : {}),
+        ...(input.maxKeys === undefined ? {} : { MaxKeys: input.maxKeys }),
+        ...(input.continuationToken
+          ? { ContinuationToken: input.continuationToken }
+          : {}),
+      }),
+    );
+    return {
+      objects: (response.Contents ?? []).flatMap((item) =>
+        item.Key === undefined
+          ? []
+          : [
+              {
+                key: item.Key,
+                sizeBytes: item.Size ?? 0,
+                ...(item.LastModified
+                  ? { lastModifiedAt: item.LastModified.toISOString() }
+                  : {}),
+              },
+            ],
+      ),
+      commonPrefixes: (response.CommonPrefixes ?? []).flatMap((item) =>
+        item.Prefix === undefined ? [] : [item.Prefix],
+      ),
+      truncated: response.IsTruncated ?? false,
+      ...(response.NextContinuationToken
+        ? { continuationToken: response.NextContinuationToken }
+        : {}),
+    };
+  }
+
   #load(): Promise<{
     readonly client: S3Client;
     readonly sdk: typeof S3Sdk;
@@ -189,8 +247,121 @@ export class AwsS3CompatibleObjectClient implements S3ObjectClient {
 
 export interface WorkspaceBackupStore {
   load(): Promise<Uint8Array | undefined>;
-  save(bytes: Uint8Array): Promise<void>;
+  loadManifest(): Promise<WorkspaceBackupManifest | undefined>;
+  save(bytes: Uint8Array, files: readonly WorkspaceBackupFile[]): Promise<void>;
   markRestored(): Promise<void>;
+}
+
+export interface WorkspaceBackupFile {
+  readonly name: string;
+  readonly path: string;
+  readonly sizeBytes: number;
+}
+
+export interface WorkspaceBackupManifest {
+  readonly version: 1;
+  readonly archiveSha256: string;
+  readonly archiveSizeBytes: number;
+  readonly files: readonly WorkspaceBackupFile[];
+}
+
+const MAX_WORKSPACE_MANIFEST_BYTES = 5 * 1024 * 1024;
+const MAX_WORKSPACE_MANIFEST_FILES = 10_000;
+
+export function workspaceBackupManifestObjectKey(objectKey: string): string {
+  return objectKey.endsWith(".tar.gz")
+    ? `${objectKey.slice(0, -".tar.gz".length)}.manifest.json`
+    : `${objectKey}.manifest.json`;
+}
+
+function validWorkspaceBackupFile(
+  value: unknown,
+): value is WorkspaceBackupFile {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const file = value as Readonly<Record<string, unknown>>;
+  if (
+    typeof file.name !== "string" ||
+    typeof file.path !== "string" ||
+    typeof file.sizeBytes !== "number" ||
+    !Number.isSafeInteger(file.sizeBytes) ||
+    file.sizeBytes < 0 ||
+    file.name.length < 1 ||
+    file.name.length > 255 ||
+    file.path.length < 1 ||
+    file.path.length > 1_024 ||
+    file.path.startsWith("/") ||
+    file.path.includes("\0") ||
+    file.path.includes("\n") ||
+    file.path.includes("\r")
+  )
+    return false;
+  const segments = file.path.split("/");
+  return (
+    segments.every(
+      (segment) => segment && segment !== "." && segment !== "..",
+    ) && segments.at(-1) === file.name
+  );
+}
+
+export function encodeWorkspaceBackupManifest(input: {
+  readonly archive: Uint8Array;
+  readonly files: readonly WorkspaceBackupFile[];
+}): Uint8Array {
+  if (
+    input.files.length > MAX_WORKSPACE_MANIFEST_FILES ||
+    input.files.some((file) => !validWorkspaceBackupFile(file))
+  )
+    throw new Error("Workspace backup file manifest is invalid");
+  const manifest: WorkspaceBackupManifest = {
+    version: 1,
+    archiveSha256: sha256(input.archive).toString("hex"),
+    archiveSizeBytes: input.archive.byteLength,
+    files: [...input.files].sort((left, right) =>
+      left.path.localeCompare(right.path),
+    ),
+  };
+  const bytes = Buffer.from(JSON.stringify(manifest), "utf8");
+  if (bytes.byteLength > MAX_WORKSPACE_MANIFEST_BYTES)
+    throw new Error("Workspace backup file manifest exceeds its size limit");
+  return bytes;
+}
+
+export function parseWorkspaceBackupManifest(
+  bytes: Uint8Array,
+  expected?: {
+    readonly archiveSha256?: string;
+    readonly archiveSizeBytes?: number;
+  },
+): WorkspaceBackupManifest {
+  if (bytes.byteLength > MAX_WORKSPACE_MANIFEST_BYTES)
+    throw new Error("Workspace backup file manifest exceeds its size limit");
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    throw new Error("Workspace backup file manifest is invalid");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Workspace backup file manifest is invalid");
+  const manifest = value as Readonly<Record<string, unknown>>;
+  const files = manifest.files;
+  if (
+    manifest.version !== 1 ||
+    typeof manifest.archiveSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(manifest.archiveSha256) ||
+    typeof manifest.archiveSizeBytes !== "number" ||
+    !Number.isSafeInteger(manifest.archiveSizeBytes) ||
+    manifest.archiveSizeBytes < 0 ||
+    !Array.isArray(files) ||
+    files.length > MAX_WORKSPACE_MANIFEST_FILES ||
+    files.some((file) => !validWorkspaceBackupFile(file)) ||
+    (expected?.archiveSha256 !== undefined &&
+      manifest.archiveSha256 !== expected.archiveSha256) ||
+    (expected?.archiveSizeBytes !== undefined &&
+      manifest.archiveSizeBytes !== expected.archiveSizeBytes)
+  )
+    throw new Error("Workspace backup file manifest is invalid");
+  return manifest as unknown as WorkspaceBackupManifest;
 }
 
 export interface WorkspaceBackupIdentity extends TenantContext {
@@ -219,6 +390,88 @@ interface S3CredentialPayload {
   readonly accessKeyId: string;
   readonly secretAccessKey: string;
   readonly sessionToken?: string;
+}
+
+interface ProjectStorageProviderRow {
+  readonly id: string;
+  readonly endpoint: string | null;
+  readonly region: string;
+  readonly bucket: string;
+  readonly object_prefix: string | null;
+  readonly force_path_style: boolean;
+  readonly encrypted_credential: Buffer;
+  readonly encryption_nonce: Buffer;
+  readonly encryption_tag: Buffer;
+  readonly encryption_key_version: number;
+}
+
+export class ProjectArtifactStoreResolver implements ProjectArtifactStoreResolverPort {
+  constructor(
+    private readonly pool: PgPool,
+    private readonly cipher: ProviderCredentialCipher,
+    private readonly clientFactory: (
+      options: S3CompatibleClientOptions,
+    ) => S3ObjectClient = (options) => new AwsS3CompatibleObjectClient(options),
+  ) {}
+
+  async resolve(input: {
+    readonly tenant: TenantIdentity;
+    readonly providerId?: string;
+  }): Promise<ProjectArtifactStoreResolution | undefined> {
+    const provider = await withTenantTransaction(
+      this.pool,
+      input.tenant,
+      async (transaction) => {
+        const result = await transaction.query<ProjectStorageProviderRow>(
+          `SELECT id,endpoint,region,bucket,object_prefix,force_path_style,
+                  encrypted_credential,encryption_nonce,encryption_tag,
+                  encryption_key_version
+             FROM oao.project_storage_providers
+            WHERE organization_id=$1 AND project_id=$2
+              AND id=COALESCE($3,(
+                SELECT id FROM oao.project_storage_providers
+                 WHERE organization_id=$1 AND project_id=$2 AND is_default
+                 LIMIT 1
+              ))`,
+          [
+            input.tenant.organizationId,
+            input.tenant.projectId,
+            input.providerId ?? null,
+          ],
+        );
+        return result.rows[0];
+      },
+    );
+    if (!provider) return undefined;
+    const credentialText = this.cipher.decrypt(
+      {
+        ciphertext: provider.encrypted_credential,
+        nonce: provider.encryption_nonce,
+        tag: provider.encryption_tag,
+        keyVersion: provider.encryption_key_version,
+      },
+      {
+        organizationId: input.tenant.organizationId,
+        projectId: input.tenant.projectId,
+        providerId: provider.id,
+        providerType: "s3",
+      },
+    );
+    const client = this.clientFactory({
+      region: provider.region,
+      ...(provider.endpoint ? { endpoint: provider.endpoint } : {}),
+      forcePathStyle: provider.force_path_style,
+      ...parseS3CredentialPayload(credentialText),
+    });
+    return {
+      providerId: provider.id,
+      store: new S3ArtifactAdapter({
+        bucket: provider.bucket,
+        client,
+        ...(provider.object_prefix ? { prefix: provider.object_prefix } : {}),
+      }),
+    };
+  }
 }
 
 export class ProjectWorkspaceBackupResolver {
@@ -335,14 +588,39 @@ class ProjectWorkspaceBackupStore implements WorkspaceBackupStore {
     return stored.bytes;
   }
 
-  async save(bytes: Uint8Array): Promise<void> {
+  async loadManifest(): Promise<WorkspaceBackupManifest | undefined> {
+    if (this.input.expectedSha256 === null) return undefined;
+    const stored = await this.input.artifacts.get({
+      tenant: this.input.identity,
+      key: workspaceBackupManifestObjectKey(this.input.objectKey),
+    });
+    if (!stored) return undefined;
+    return parseWorkspaceBackupManifest(stored.bytes, {
+      archiveSha256: this.input.expectedSha256.toString("hex"),
+      ...(this.input.expectedContentLength === null
+        ? {}
+        : { archiveSizeBytes: this.input.expectedContentLength }),
+    });
+  }
+
+  async save(
+    bytes: Uint8Array,
+    files: readonly WorkspaceBackupFile[],
+  ): Promise<void> {
+    const digest = sha256(bytes);
+    const manifest = encodeWorkspaceBackupManifest({ archive: bytes, files });
     await this.input.artifacts.put({
       tenant: this.input.identity,
       key: this.input.objectKey,
       bytes,
       contentType: "application/gzip",
     });
-    const digest = sha256(bytes);
+    await this.input.artifacts.put({
+      tenant: this.input.identity,
+      key: workspaceBackupManifestObjectKey(this.input.objectKey),
+      bytes: manifest,
+      contentType: "application/json",
+    });
     await withTenantTransaction(
       this.input.pool,
       this.input.identity,
@@ -451,6 +729,40 @@ export class S3ArtifactAdapter implements ArtifactStorePort {
     await this.#client.deleteObject(this.#location(input));
   }
 
+  async list(input: {
+    readonly tenant: TenantIdentity;
+    readonly prefix?: string;
+    readonly cursor?: string;
+    readonly limit?: number;
+  }): Promise<ArtifactObjectList> {
+    const logicalPrefix = normalizeLogicalFolderPrefix(input.prefix);
+    const root = tenantArtifactRootPrefix(input.tenant, this.#prefix);
+    const listing = await this.#client.listObjects({
+      bucket: this.#bucket,
+      prefix: `${root}${encodeLogicalPath(logicalPrefix)}`,
+      delimiter: "/",
+      maxKeys: clampListLimit(input.limit),
+      ...(input.cursor ? { continuationToken: input.cursor } : {}),
+    });
+    return {
+      prefix: logicalPrefix,
+      folders: listing.commonPrefixes.flatMap((item) =>
+        item.startsWith(root)
+          ? [decodeLogicalPath(item.slice(root.length))]
+          : [],
+      ),
+      objects: listing.objects.flatMap((item) =>
+        item.key.startsWith(root)
+          ? [{ ...item, key: decodeLogicalPath(item.key.slice(root.length)) }]
+          : [],
+      ),
+      truncated: listing.truncated,
+      ...(listing.continuationToken
+        ? { cursor: listing.continuationToken }
+        : {}),
+    };
+  }
+
   #location(input: ArtifactLocation): S3GetObjectInput {
     return {
       bucket: this.#bucket,
@@ -523,6 +835,51 @@ export class InMemoryArtifactAdapter implements ArtifactStorePort {
     );
   }
 
+  async list(input: {
+    readonly tenant: TenantIdentity;
+    readonly prefix?: string;
+    readonly cursor?: string;
+    readonly limit?: number;
+  }): Promise<ArtifactObjectList> {
+    const logicalPrefix = normalizeLogicalFolderPrefix(input.prefix);
+    const root = tenantArtifactRootPrefix(input.tenant, this.#prefix);
+    const scope = `${root}${encodeLogicalPath(logicalPrefix)}`;
+    const limit = clampListLimit(input.limit);
+    const folders = new Set<string>();
+    const objects: ArtifactObjectEntry[] = [];
+    const keys = [...this.#objects.keys()]
+      .filter((key) => key.startsWith(scope))
+      .sort();
+    const start = input.cursor ? Number.parseInt(input.cursor, 10) || 0 : 0;
+    let consumed = 0;
+    let truncated = false;
+    for (const key of keys.slice(start)) {
+      if (folders.size + objects.length >= limit) {
+        truncated = true;
+        break;
+      }
+      consumed += 1;
+      const remainder = decodeLogicalPath(key.slice(scope.length));
+      const slash = remainder.indexOf("/");
+      if (slash >= 0) {
+        folders.add(`${logicalPrefix}${remainder.slice(0, slash + 1)}`);
+        continue;
+      }
+      const record = this.#objects.get(key)!;
+      objects.push({
+        key: `${logicalPrefix}${remainder}`,
+        sizeBytes: record.bytes.byteLength,
+      });
+    }
+    return {
+      prefix: logicalPrefix,
+      folders: [...folders].sort(),
+      objects,
+      truncated,
+      ...(truncated ? { cursor: String(start + consumed) } : {}),
+    };
+  }
+
   clear(): void {
     this.#objects.clear();
   }
@@ -545,6 +902,59 @@ export function tenantArtifactObjectKey(
   return prefix === undefined
     ? tenantPath
     : `${normalizePrefix(prefix)}/${tenantPath}`;
+}
+
+export function tenantArtifactRootPrefix(
+  tenant: TenantIdentity,
+  prefix?: string,
+): string {
+  const tenantPath = [
+    "organizations",
+    encodePathSegment(tenant.organizationId),
+    "projects",
+    encodePathSegment(tenant.projectId),
+    "artifacts",
+  ].join("/");
+  return prefix === undefined
+    ? `${tenantPath}/`
+    : `${normalizePrefix(prefix)}/${tenantPath}/`;
+}
+
+export function normalizeLogicalFolderPrefix(
+  prefix: string | undefined,
+): string {
+  if (prefix === undefined || prefix.length === 0) return "";
+  const withoutSlash = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
+  return `${normalizeLogicalKey(withoutSlash)}/`;
+}
+
+function encodeLogicalPath(path: string): string {
+  return path
+    .split("/")
+    .map((segment) => (segment.length === 0 ? "" : encodeURIComponent(segment)))
+    .join("/");
+}
+
+function decodeLogicalPath(path: string): string {
+  return path
+    .split("/")
+    .map((segment) => {
+      try {
+        return decodeURIComponent(segment);
+      } catch {
+        return segment;
+      }
+    })
+    .join("/");
+}
+
+const MAX_LIST_LIMIT = 1_000;
+const DEFAULT_LIST_LIMIT = 500;
+
+function clampListLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isSafeInteger(limit) || limit < 1)
+    return DEFAULT_LIST_LIMIT;
+  return Math.min(limit, MAX_LIST_LIMIT);
 }
 
 function normalizeLogicalKey(key: string): string {

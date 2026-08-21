@@ -19,6 +19,10 @@ test("route builders scope resources to a project and allow a custom prefix", ()
     "/platform/v2/projects/project%2Fone/skills/skill%20one/versions/version%2Fone/export",
   );
   assert.equal(
+    routes.skillDraftFiles("project/one", "draft one"),
+    "/platform/v2/projects/project%2Fone/skill-drafts/draft%20one/files",
+  );
+  assert.equal(
     routes.delegationMessages("project/one", "delegation one"),
     "/platform/v2/projects/project%2Fone/delegations/delegation%20one/messages",
   );
@@ -106,6 +110,75 @@ test("client publishes and manages exact Skill versions", async () => {
     "https://api.example.test/v1/projects/project-1/skills/skill-1/versions/skill-version-1/lifecycle",
   );
   assert.deepEqual(await requests[1]?.json(), { status: "revoked" });
+});
+
+test("client authors nested Skill draft resources before publication", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      requests.push(request);
+      if (request.url.endsWith("/publish"))
+        return Response.json({
+          skillId: "skill-1",
+          version: { id: "version-1" },
+        });
+      return Response.json({
+        id: "draft-1",
+        skillId: null,
+        sourceSkillVersionId: null,
+        key: "",
+        displayName: "",
+        name: "",
+        description: "",
+        instructions: "",
+        revision: requests.length,
+        status: "editing",
+        publishedSkillVersionId: null,
+        entries: [],
+        createdAt: "2026-08-21T00:00:00.000Z",
+        updatedAt: "2026-08-21T00:00:00.000Z",
+      });
+    },
+  });
+
+  await client.createSkillDraft(
+    "project-1",
+    {},
+    {
+      idempotencyKey: "draft-create-1",
+    },
+  );
+  await client.createSkillDraftDirectory(
+    "project-1",
+    "draft-1",
+    "references/customers",
+    { idempotencyKey: "draft-directory-1" },
+  );
+  await client.putSkillDraftFile(
+    "project-1",
+    "draft-1",
+    {
+      path: "references/customers/acme.md",
+      contentType: "text/markdown",
+      dataBase64: "IyBBY21l",
+    },
+    { idempotencyKey: "draft-file-1" },
+  );
+  await client.publishSkillDraft("project-1", "draft-1", {
+    idempotencyKey: "draft-publish-1",
+  });
+
+  assert.equal(requests[0]?.url.endsWith("/skill-drafts"), true);
+  assert.equal(requests[1]?.url.endsWith("/draft-1/directories"), true);
+  assert.equal(requests[2]?.method, "PUT");
+  assert.deepEqual(await requests[2]?.json(), {
+    path: "references/customers/acme.md",
+    contentType: "text/markdown",
+    dataBase64: "IyBBY21l",
+  });
+  assert.equal(requests[3]?.url.endsWith("/draft-1/publish"), true);
 });
 
 test("client encodes pagination, authentication, and idempotency", async () => {
@@ -359,6 +432,10 @@ test("client manages S3-compatible workspace storage without a credential read p
   await client.setDefaultStorageProvider("project-1", "storage-provider-1", {
     idempotencyKey: "storage-default-1",
   });
+  await client.listStorageObjects("project-1", "storage-provider-1", {
+    prefix: "run-files/runs/run-1/",
+    cursor: "cursor-1",
+  });
 
   assert.match(requests[0]?.url ?? "", /\/storage-providers$/u);
   assert.equal(requests[0]?.method, "GET");
@@ -366,6 +443,11 @@ test("client manages S3-compatible workspace storage without a credential read p
   assert.match(requests[2]?.url ?? "", /\/credential$/u);
   assert.match(requests[3]?.url ?? "", /\/default$/u);
   assert.deepEqual(await requests[3]?.json(), {});
+  assert.equal(requests[4]?.method, "GET");
+  assert.equal(
+    requests[4]?.url,
+    "https://api.example.test/v1/projects/project-1/storage-providers/storage-provider-1/objects?prefix=run-files%2Fruns%2Frun-1%2F&cursor=cursor-1",
+  );
 });
 
 test("client retrieves snapshots through the selected Daytona connection", async () => {

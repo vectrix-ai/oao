@@ -7,6 +7,21 @@ A Skill is a reusable, versioned package of instructions and supporting
 resources. It is neither a callable application tool, an MCP server, extra
 system-prompt text, nor a file uploaded to one run.
 
+## Choose the right primitive
+
+| Primitive                    | Use it for                                                                          | Runtime behavior                                                                                             |
+| ---------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| **Skill**                    | Reusable procedures, policies, examples, templates, and reference material          | The model sees a small catalog entry, then loads the instructions and supporting files only when relevant.   |
+| **Tool or MCP server**       | An action or external integration, such as looking up an order or updating a ticket | The model calls executable application code with a typed input.                                              |
+| **System prompt**            | Guidance that must apply to every turn                                              | The complete text is always present in model context.                                                        |
+| **Uploaded or sandbox file** | Run-specific input or mutable working state                                         | The file belongs to the run or workspace; it is not an immutable, reusable capability attached to the agent. |
+
+A Skill can teach the model when and how to call a tool, but it does not grant
+that tool or bypass its authorization. Likewise, storing a document in a
+sandbox does not turn it into a Skill.
+
+## Version binding and session inheritance
+
 OAO stores Skills in PostgreSQL and binds exact Skill version IDs to immutable
 agent versions. When you create a session, OAO copies those bindings to the
 session automatically. You do not send Skills again at session creation.
@@ -19,6 +34,12 @@ Publishing version 2 of a Skill does not change an agent that references
 version 1. Publish a new agent version and select version 2 when you want new
 sessions to use it. Existing sessions remain on their recorded agent and Skill
 versions.
+
+The binding is therefore made when an **agent version** is published, not every
+time a session starts. A new session created from an agent automatically
+inherits the exact Skill versions on the selected agent version. Session
+creation does not accept a mutable "latest Skill" pointer and does not require
+the caller to repeat the Skill list.
 
 ## Package contract
 
@@ -48,6 +69,81 @@ represent `references/`, `templates/`, `assets/`, or `scripts/`; their relative
 paths are preserved. `allowedTools` is optional compatibility metadata and is
 not an authorization control.
 
+### Resource workspace
+
+The console provides a small package file manager instead of a single
+path/content field. You can create folders, create Markdown files, upload
+multiple `.md` files, select a file to edit and preview, and remove a file or a
+complete folder tree.
+
+```text
+Skill package
+├── Instructions
+├── references
+│   ├── business-rules.md
+│   └── customers
+│       ├── acme.md
+│       └── globex.md
+├── examples
+│   └── valid-shipment.md
+└── templates
+    └── response-template.md
+```
+
+Folders and files use package-relative authoring paths. For example,
+`references/customers/acme.md` means “the `acme.md` resource inside the
+`references/customers` package folders.” It is not a path on your workstation,
+in Daytona, or in the model's runtime tools.
+
+The MVP editor accepts UTF-8 Markdown files. The direct package API remains
+provider-neutral and represents every resource as
+`{ path, contentType, dataBase64 }` in the `files` array.
+
+Keep the main instructions focused on the procedure and tell the model which
+supporting material to consult. Put bulky details that are needed only for some
+requests in references. Do not put a rule in a reference if the model must
+follow that rule on every activation unless the instructions explicitly require
+reading the file.
+
+For example, create `references/carrier-codes.md` in the workspace with:
+
+```markdown title="references/carrier-codes.md"
+# Carrier codes
+
+| Carrier         | Code |
+| --------------- | ---- |
+| Example Express | EXE  |
+| Sample Freight  | SMP  |
+```
+
+Then include this direction in the Skill instructions:
+
+```markdown
+When normalizing a carrier, find the supporting resource whose package-relative
+name is `references/carrier-codes.md`. Call `read_skill_resource` with the exact
+virtual path advertised after activation, then use the code from that table.
+Do not invent a code that is not listed.
+```
+
+### Drafts and immutable publication
+
+The file manager edits a PostgreSQL-authoritative Skill draft. A draft is a
+mutable staging resource; it is not available to agents. Publishing validates
+the complete draft and copies its files atomically into a new immutable Skill
+version.
+
+When you choose **Publish new version**, OAO clones the selected Skill version
+into a new draft. Editing, moving, or removing its resources never changes the
+source version. Empty folders may exist in a draft but are discarded at
+publication because published package directories are reconstructed from file
+paths.
+
+Draft file contents, hashes, tenant identity, revision, and lifecycle remain in
+PostgreSQL. Draft operations require `skill:write`; reading or listing drafts
+requires `skill:read`. Publication emits the normal `skill.created` and
+`skill.version_published` events without placing instructions or file contents
+in event or audit payloads.
+
 Validation enforces:
 
 - a lowercase, hyphenated Skill name and key;
@@ -73,7 +169,7 @@ OAO uses the Skill primitives in the pinned Flue `2.0.3` runtime:
 3. Flue exposes only each Skill's name and description in its discovery
    catalog.
 4. The model calls Flue's `activate_skill` when that catalog entry is relevant.
-   Full instructions become available only at activation.
+   Full Markdown instructions become available only at activation.
 5. The model calls `read_skill_resource` for a supporting file only when it
    needs that resource.
 
@@ -87,6 +183,64 @@ filesystem path `.agents/skills` is hidden from runtime discovery so a mutable
 or restored workspace cannot override the PostgreSQL binding. Skill resources
 are served from the verified runtime registry; they are not materialized into
 the persistent workspace in this MVP.
+
+After activation, Flue lists each supporting file with an exact, read-only
+virtual path similar to:
+
+```text
+/.flue/packaged-skills/<runtime-skill-id>/references/carrier-codes.md
+```
+
+The model must pass the **advertised virtual path exactly** to
+`read_skill_resource`. The package-relative value entered in the console is the
+stable authoring path; Flue adds the runtime prefix when mounting the verified
+package. The virtual file is served from the in-memory runtime catalog backed
+by PostgreSQL. It is not copied into Daytona, cannot be edited, and is not
+visible to shell commands.
+
+## Console workflow
+
+1. Open **Skills** and choose **Create Skill**.
+2. Enter a routing-friendly name and description. The description should say
+   what the Skill does and when the model should activate it.
+3. Write the Markdown instructions.
+4. In **Resource workspace**, create package folders and Markdown files, or
+   select a folder and upload multiple `.md` files. Select any file to edit and
+   preview its complete rendered Markdown.
+5. Publish the Skill, then create or publish an agent version and select the
+   exact Skill version to attach.
+6. Start a session from that agent. The session inherits the binding; do not
+   submit the Skill again.
+7. Inspect the session timeline for `skill.activated` and, when a reference was
+   needed, `skill.resource_read`.
+
+When publishing an update, review the complete rendered instructions and
+reference content before selecting the new version on a new agent version.
+Older agents and sessions remain pinned to their previous Skill versions.
+
+## Troubleshoot supporting-file reads
+
+If activation succeeds but `read_skill_resource` reports that the packaged
+Skill file was not found, inspect the tool call in the session timeline.
+
+The most common cause is passing the authoring path directly:
+
+```json title="Incorrect"
+{ "path": "references/carrier-codes.md" }
+```
+
+Activate the Skill first and copy the exact virtual path included in its
+activation result:
+
+```json title="Correct"
+{
+  "path": "/.flue/packaged-skills/<runtime-skill-id>/references/carrier-codes.md"
+}
+```
+
+Also verify that the file appears in the published version's read-only resource
+tree. Correct the package by publishing a new Skill version and a new agent
+version; existing versions are not edited in place.
 
 ## Lifecycle
 

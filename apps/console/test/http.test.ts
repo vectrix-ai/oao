@@ -198,6 +198,36 @@ describe("HTTP console adapter", () => {
     );
   });
 
+  it("lists storage objects with encoded prefix and cursor parameters", async () => {
+    const listing = {
+      providerId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      prefix: "run-files/runs/run-1/",
+      folders: [],
+      objects: [
+        {
+          key: "run-files/runs/run-1/id-1/input.xlsx",
+          sizeBytes: 12,
+          lastModifiedAt: "2026-08-20T19:21:49.000Z",
+        },
+      ],
+      truncated: false,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(jsonResponse(listing));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await new HttpConsoleApi().listStorageObjects(
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      { prefix: "run-files/runs/run-1/", cursor: "cursor-1" },
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      `/v1/projects/${PROJECT_ID}/storage-providers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/objects?prefix=run-files%2Fruns%2Frun-1%2F&cursor=cursor-1`,
+    );
+    expect(result).toEqual(listing);
+  });
+
   it("reads and creates project model presets through the public API", async () => {
     const preset = {
       id: "44444444-4444-4444-8444-444444444444",
@@ -329,6 +359,19 @@ describe("HTTP console adapter", () => {
           runId: "88888888-8888-4888-8888-888888888888",
           role: "user",
           redactedContent: "Create the file.",
+          files: [
+            {
+              id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab",
+              name: "input.xlsx",
+              contentType:
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              sizeBytes: 12,
+              sha256: "a".repeat(64),
+              storageProviderId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              objectKey:
+                "run-files/runs/88888888-8888-4888-8888-888888888888/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab/input.xlsx",
+            },
+          ],
           createdAt: "2026-08-20T19:21:40.000Z",
         },
       ],
@@ -376,9 +419,19 @@ describe("HTTP console adapter", () => {
         ],
         workspaceBackups: [
           {
+            storageProviderId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             objectKey: "workspace-backups/thread/workspace.tar.gz",
             generation: 2,
             backedUpAt: "2026-08-20T19:21:49.000Z",
+            manifestState: "available",
+            files: [
+              {
+                name: "input.xlsx",
+                path: ".oao/attachments/88888888-8888-4888-8888-888888888888/input.xlsx",
+                sizeBytes: 12,
+              },
+              { name: "test.csv", path: "test.csv", sizeBytes: 18 },
+            ],
           },
         ],
       },
@@ -412,10 +465,24 @@ describe("HTTP console adapter", () => {
     );
     expect(detail.workspaceFiles).toEqual([
       {
-        name: "test.csv",
-        path: "/root/test.csv",
+        name: "input.xlsx",
+        path: ".oao/attachments/88888888-8888-4888-8888-888888888888/input.xlsx",
+        sizeBytes: 12,
+        uploaded: true,
         backedUp: true,
         backedUpAt: "2026-08-20T19:21:49.000Z",
+        storageProviderId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        objectKey:
+          "run-files/runs/88888888-8888-4888-8888-888888888888/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab/input.xlsx",
+      },
+      {
+        name: "test.csv",
+        path: "test.csv",
+        sizeBytes: 18,
+        backedUp: true,
+        backedUpAt: "2026-08-20T19:21:49.000Z",
+        storageProviderId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        objectKey: "workspace-backups/thread/workspace.tar.gz",
       },
     ]);
     expect(detail.events).toContainEqual(
@@ -428,6 +495,58 @@ describe("HTTP console adapter", () => {
         payload: expect.objectContaining({ redacted: false }),
       }),
     );
+  });
+
+  it("ignores shell globs when inferring files for a legacy backup", async () => {
+    const createdAt = "2026-08-20T19:21:48.150Z";
+    const session = {
+      id: "77777777-7777-4777-8777-777777777778",
+      title: "Legacy backup",
+      status: "completed",
+      agentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentName: "Sandbox agent",
+      latestRunId: "88888888-8888-4888-8888-888888888888",
+      createdAt,
+      lastActivityAt: createdAt,
+      runs: [],
+      transcript: [],
+      timeline: [],
+      debug: {
+        sandboxCommands: [
+          {
+            state: "completed",
+            safeCommand: {
+              toolName: "bash",
+              arguments: {
+                command: "ls .oao/files/*.csv && cat .oao/files/result.csv",
+              },
+            },
+            completedAt: createdAt,
+          },
+        ],
+        workspaceBackups: [
+          {
+            manifestState: "missing",
+            backedUpAt: "2026-08-20T19:21:49.000Z",
+          },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(jsonResponse(session));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const detail = await new HttpConsoleApi().getSession(session.id);
+    expect(detail.workspaceFiles).toEqual([
+      {
+        name: "result.csv",
+        path: ".oao/files/result.csv",
+        backedUp: true,
+        backedUpAt: "2026-08-20T19:21:49.000Z",
+      },
+    ]);
   });
 
   it("sends files when continuing a session", async () => {

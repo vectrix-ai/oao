@@ -285,6 +285,62 @@ export interface ArtifactPort {
     readonly contentType: string;
   }): Promise<{ readonly ref: string }>;
 }
+export interface StoredArtifact {
+  readonly tenant: TenantIdentity;
+  readonly key: string;
+  readonly bytes: Uint8Array;
+  readonly contentType: string;
+  readonly etag?: string;
+}
+export interface ArtifactMetadata {
+  readonly tenant: TenantIdentity;
+  readonly key: string;
+  readonly contentLength: number;
+  readonly contentType: string;
+  readonly etag?: string;
+}
+export interface ArtifactObjectEntry {
+  readonly key: string;
+  readonly sizeBytes: number;
+  readonly lastModifiedAt?: string;
+}
+export interface ArtifactObjectList {
+  readonly prefix: string;
+  readonly folders: readonly string[];
+  readonly objects: readonly ArtifactObjectEntry[];
+  readonly truncated: boolean;
+  readonly cursor?: string;
+}
+export interface ArtifactStorePort extends ArtifactPort {
+  get(input: {
+    readonly tenant: TenantIdentity;
+    readonly key: string;
+  }): Promise<StoredArtifact | undefined>;
+  list(input: {
+    readonly tenant: TenantIdentity;
+    readonly prefix?: string;
+    readonly cursor?: string;
+    readonly limit?: number;
+  }): Promise<ArtifactObjectList>;
+  head(input: {
+    readonly tenant: TenantIdentity;
+    readonly key: string;
+  }): Promise<ArtifactMetadata | undefined>;
+  delete(input: {
+    readonly tenant: TenantIdentity;
+    readonly key: string;
+  }): Promise<void>;
+}
+export interface ProjectArtifactStoreResolution {
+  readonly providerId: string;
+  readonly store: ArtifactStorePort;
+}
+export interface ProjectArtifactStoreResolverPort {
+  resolve(input: {
+    readonly tenant: TenantIdentity;
+    readonly providerId?: string;
+  }): Promise<ProjectArtifactStoreResolution | undefined>;
+}
 export interface TelemetryPort {
   record(
     name: string,

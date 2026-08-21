@@ -24,8 +24,12 @@ import type {
   RunFileUpload,
   SessionDetail,
   SkillDetail,
+  SkillDraft,
+  SkillFileInput,
   SkillSummary,
   SettingsData,
+  StorageObjectEntry,
+  StorageObjectList,
   UpdateSandboxProviderConfigurationInput,
 } from "./types";
 
@@ -34,6 +38,8 @@ const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
 const principalId = "33333333-3333-4333-8333-333333333333";
 const OPENROUTER_PROVIDER_ID = "55555555-5555-4555-8555-555555555555";
 const DAYTONA_PROVIDER_ID = "66666666-6666-4666-8666-666666666666";
+const DAYTONA_SNAPSHOT_ID = "77777777-7777-4777-8777-777777777777";
+const DAYTONA_LARGE_SNAPSHOT_ID = "78787878-7878-4787-8787-787878787878";
 
 function demoRunFiles(files: readonly RunFileUpload[], messageId: string) {
   return files.map((file, index) => ({
@@ -96,6 +102,7 @@ const supportConfig: AgentVersionConfig = {
   sandbox: {
     enabled: true,
     provider: "daytona-primary",
+    snapshotId: DAYTONA_SNAPSHOT_ID,
     network: "restricted",
     capabilities: ["filesystem_read", "filesystem_write", "shell", "browser"],
   },
@@ -236,6 +243,39 @@ const skillsSeed: SkillDetail[] = [
       },
     ],
   },
+  {
+    id: "44444444-4444-4444-8444-444444444446",
+    key: "carrier-codes",
+    displayName: "Carrier Codes",
+    latestVersionId: "44444444-4444-4444-8444-444444444447",
+    version: 1,
+    name: "carrier-codes",
+    description:
+      "Look up canonical carrier and service-level codes for shipment records.",
+    contentHash: "5".repeat(64),
+    status: "active",
+    fileCount: 0,
+    versionIds: ["44444444-4444-4444-8444-444444444447"],
+    createdAt: "2026-08-18T09:05:00.000Z",
+    updatedAt: "2026-08-18T09:05:00.000Z",
+    versions: [
+      {
+        id: "44444444-4444-4444-8444-444444444447",
+        skillId: "44444444-4444-4444-8444-444444444446",
+        version: 1,
+        name: "carrier-codes",
+        description:
+          "Look up canonical carrier and service-level codes for shipment records.",
+        instructions:
+          "Match the carrier name to its canonical code before writing shipment records.",
+        contentHash: "5".repeat(64),
+        totalBytes: 82,
+        status: "active",
+        files: [],
+        createdAt: "2026-08-18T09:05:00.000Z",
+      },
+    ],
+  },
 ];
 
 const sessionsSeed: SessionDetail[] = [
@@ -267,6 +307,16 @@ const sessionsSeed: SessionDetail[] = [
         description:
           "Process shipment documents using the approved intake sequence.",
         contentHash: "4".repeat(64),
+        status: "active",
+      },
+      {
+        skillId: skillsSeed[1]!.id,
+        skillVersionId: skillsSeed[1]!.latestVersionId,
+        version: 1,
+        name: "carrier-codes",
+        description:
+          "Look up canonical carrier and service-level codes for shipment records.",
+        contentHash: "5".repeat(64),
         status: "active",
       },
     ],
@@ -323,6 +373,24 @@ const sessionsSeed: SessionDetail[] = [
         status: "success",
         tokens: { input: 1204, output: 91 },
         costUsd: 0.0061,
+      },
+      {
+        id: "event-skill-1",
+        kind: "tool",
+        source: "activity",
+        title: "skill.activated",
+        summary:
+          "Activated Skill shipment-intake to load its full instructions.",
+        createdAt: "2026-08-20T07:02:14.200Z",
+        durationMs: 96,
+        status: "success",
+        payload: {
+          rendered: { skill: "shipment-intake", success: true },
+          raw: null,
+          redacted: true,
+          redactionReason:
+            "Skill instructions are never copied into public events.",
+        },
       },
       {
         id: "event-tool-1",
@@ -721,6 +789,8 @@ export interface DemoApiOptions {
 export class DemoConsoleApi implements ConsoleApi {
   #agents = structuredClone(agentsSeed);
   #skills = structuredClone(skillsSeed);
+  #skillDrafts: SkillDraft[] = [];
+  #skillFiles = new Map<string, readonly SkillFileInput[]>();
   #apiKeys = structuredClone(settingsSeed.apiKeys) as ApiKeySummary[];
   #modelPresets = structuredClone(modelPresetsSeed) as ModelPreset[];
   #modelProviders = structuredClone(
@@ -939,11 +1009,17 @@ export class DemoConsoleApi implements ConsoleApi {
           contentHash: "5".repeat(64),
           totalBytes: input.instructions.length,
           status: "active",
-          files: [],
+          files: (input.files ?? []).map((file) => ({
+            path: file.path,
+            contentType: file.contentType,
+            sizeBytes: atob(file.dataBase64).length,
+            sha256: "a".repeat(64),
+          })),
           createdAt: now,
         },
       ],
     };
+    this.#skillFiles.set(versionId, structuredClone(input.files ?? []));
     this.#skills.unshift(detail);
     return structuredClone(detail);
   }
@@ -978,7 +1054,12 @@ export class DemoConsoleApi implements ConsoleApi {
           contentHash: `${version}`.repeat(64).slice(0, 64),
           totalBytes: input.instructions.length,
           status: "active",
-          files: [],
+          files: (input.files ?? []).map((file) => ({
+            path: file.path,
+            contentType: file.contentType,
+            sizeBytes: atob(file.dataBase64).length,
+            sha256: "b".repeat(64),
+          })),
           createdAt: now,
         },
         ...skill.versions,
@@ -987,11 +1068,287 @@ export class DemoConsoleApi implements ConsoleApi {
     this.#skills = this.#skills.map((item) =>
       item.id === id ? updated : item,
     );
+    this.#skillFiles.set(versionId, structuredClone(input.files ?? []));
     return structuredClone(updated);
   }
 
-  async exportSkillVersion() {
-    return { files: [] };
+  async exportSkillVersion(
+    _skillId: string,
+    versionId: string,
+  ): Promise<{
+    readonly files: readonly SkillFileInput[];
+  }> {
+    return {
+      files: structuredClone(this.#skillFiles.get(versionId) ?? []),
+    };
+  }
+
+  async createSkillDraft(
+    input: {
+      readonly skillId?: string;
+      readonly sourceSkillVersionId?: string;
+    } = {},
+  ): Promise<SkillDraft> {
+    this.#counter += 1;
+    const now = new Date().toISOString();
+    const skill = input.skillId
+      ? this.#skills.find((entry) => entry.id === input.skillId)
+      : undefined;
+    if (input.skillId && !skill) throw new Error("Skill not found");
+    const source = skill?.versions.find(
+      (version) =>
+        version.id === (input.sourceSkillVersionId ?? skill.latestVersionId),
+    );
+    if (skill && !source) throw new Error("Skill version not found");
+    const sourceFiles = source
+      ? (this.#skillFiles.get(source.id) ?? []).map((file) => ({
+          path: file.path,
+          kind: "file" as const,
+          contentType: file.contentType,
+          sizeBytes: atob(file.dataBase64).length,
+          sha256: "c".repeat(64),
+          dataBase64: file.dataBase64,
+        }))
+      : [];
+    const directoryPaths = new Set<string>();
+    for (const file of sourceFiles) {
+      const segments = file.path.split("/");
+      for (let index = 1; index < segments.length; index += 1)
+        directoryPaths.add(segments.slice(0, index).join("/"));
+    }
+    const draft: SkillDraft = {
+      id: `77777777-7777-4777-8777-${String(this.#counter).padStart(12, "0")}`,
+      skillId: skill?.id ?? null,
+      sourceSkillVersionId: source?.id ?? null,
+      key: skill?.key ?? "",
+      displayName: skill?.displayName ?? "",
+      name: source?.name ?? "",
+      description: source?.description ?? "",
+      instructions: source?.instructions ?? "",
+      revision: 1,
+      status: "editing",
+      publishedSkillVersionId: null,
+      entries: [
+        ...[...directoryPaths].map((path) => ({
+          path,
+          kind: "directory" as const,
+          contentType: null,
+          sizeBytes: null,
+          sha256: null,
+        })),
+        ...sourceFiles,
+      ].sort((left, right) => left.path.localeCompare(right.path)),
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.#skillDrafts.unshift(draft);
+    return structuredClone(draft);
+  }
+
+  async updateSkillDraft(
+    draftId: string,
+    input: Pick<
+      SkillDraft,
+      "key" | "displayName" | "name" | "description" | "instructions"
+    >,
+  ): Promise<SkillDraft> {
+    const draft = this.#skillDrafts.find((entry) => entry.id === draftId);
+    if (!draft || draft.status !== "editing")
+      throw new Error("Skill draft is not editable");
+    const updated: SkillDraft = {
+      ...draft,
+      ...input,
+      revision: draft.revision + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    this.#skillDrafts = this.#skillDrafts.map((entry) =>
+      entry.id === draftId ? updated : entry,
+    );
+    return structuredClone(updated);
+  }
+
+  async createSkillDraftDirectory(
+    draftId: string,
+    path: string,
+  ): Promise<SkillDraft> {
+    const draft = this.#skillDrafts.find((entry) => entry.id === draftId);
+    if (!draft || draft.status !== "editing")
+      throw new Error("Skill draft is not editable");
+    const entries = [...draft.entries];
+    const segments = path.split("/");
+    for (let index = 1; index <= segments.length; index += 1) {
+      const directory = segments.slice(0, index).join("/");
+      const existing = entries.find(
+        (entry) => entry.path.toLowerCase() === directory.toLowerCase(),
+      );
+      if (existing?.kind === "file")
+        throw new Error(`A file already occupies ${directory}`);
+      if (!existing)
+        entries.push({
+          path: directory,
+          kind: "directory",
+          contentType: null,
+          sizeBytes: null,
+          sha256: null,
+        });
+    }
+    const updated: SkillDraft = {
+      ...draft,
+      entries: entries.sort((left, right) =>
+        left.path.localeCompare(right.path),
+      ),
+      revision: draft.revision + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    this.#skillDrafts = this.#skillDrafts.map((entry) =>
+      entry.id === draftId ? updated : entry,
+    );
+    return structuredClone(updated);
+  }
+
+  async putSkillDraftFile(
+    draftId: string,
+    file: SkillFileInput,
+  ): Promise<SkillDraft> {
+    const draft = await this.createSkillDraftDirectory(
+      draftId,
+      file.path.includes("/")
+        ? file.path.slice(0, file.path.lastIndexOf("/"))
+        : "resources",
+    );
+    const entries = draft.entries.filter(
+      (entry) => entry.path.toLowerCase() !== file.path.toLowerCase(),
+    );
+    if (!file.path.includes("/")) {
+      const resourcesIndex = entries.findIndex(
+        (entry) => entry.path === "resources" && entry.kind === "directory",
+      );
+      if (resourcesIndex >= 0) entries.splice(resourcesIndex, 1);
+    }
+    entries.push({
+      path: file.path,
+      kind: "file",
+      contentType: file.contentType,
+      sizeBytes: atob(file.dataBase64).length,
+      sha256: "d".repeat(64),
+      dataBase64: file.dataBase64,
+    });
+    const updated: SkillDraft = {
+      ...draft,
+      entries: entries.sort((left, right) =>
+        left.path.localeCompare(right.path),
+      ),
+      revision: draft.revision + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    this.#skillDrafts = this.#skillDrafts.map((entry) =>
+      entry.id === draftId ? updated : entry,
+    );
+    return structuredClone(updated);
+  }
+
+  async removeSkillDraftEntry(
+    draftId: string,
+    path: string,
+    recursive: boolean,
+  ): Promise<SkillDraft> {
+    const draft = this.#skillDrafts.find((entry) => entry.id === draftId);
+    if (!draft || draft.status !== "editing")
+      throw new Error("Skill draft is not editable");
+    if (
+      !recursive &&
+      draft.entries.some((entry) => entry.path.startsWith(`${path}/`))
+    )
+      throw new Error("Directory is not empty");
+    const entries = draft.entries.filter(
+      (entry) => entry.path !== path && !entry.path.startsWith(`${path}/`),
+    );
+    if (entries.length === draft.entries.length)
+      throw new Error("Draft entry not found");
+    const updated: SkillDraft = {
+      ...draft,
+      entries,
+      revision: draft.revision + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    this.#skillDrafts = this.#skillDrafts.map((entry) =>
+      entry.id === draftId ? updated : entry,
+    );
+    return structuredClone(updated);
+  }
+
+  async validateSkillDraft(draftId: string) {
+    const draft = this.#skillDrafts.find((entry) => entry.id === draftId);
+    if (
+      !draft ||
+      !draft.key ||
+      !draft.displayName ||
+      !draft.name ||
+      !draft.description ||
+      !draft.instructions
+    )
+      throw new Error("Complete the Skill overview and instructions");
+    const files = draft.entries.filter((entry) => entry.kind === "file");
+    return {
+      valid: true as const,
+      contentHash: "e".repeat(64),
+      totalBytes:
+        draft.instructions.length +
+        files.reduce((total, file) => total + (file.sizeBytes ?? 0), 0),
+      fileCount: files.length,
+    };
+  }
+
+  async publishSkillDraft(draftId: string) {
+    const draft = this.#skillDrafts.find((entry) => entry.id === draftId);
+    if (!draft) throw new Error("Skill draft not found");
+    await this.validateSkillDraft(draftId);
+    const files = draft.entries
+      .filter(
+        (entry): entry is typeof entry & { readonly dataBase64: string } =>
+          entry.kind === "file" && Boolean(entry.dataBase64),
+      )
+      .map((entry) => ({
+        path: entry.path,
+        contentType: entry.contentType ?? "text/markdown",
+        dataBase64: entry.dataBase64,
+      }));
+    const published = draft.skillId
+      ? await this.publishSkillVersion(draft.skillId, {
+          name: draft.name,
+          description: draft.description,
+          instructions: draft.instructions,
+          files,
+        })
+      : await this.createSkill({
+          key: draft.key,
+          displayName: draft.displayName,
+          name: draft.name,
+          description: draft.description,
+          instructions: draft.instructions,
+          files,
+        });
+    const versionId = published.latestVersionId;
+    this.#skillDrafts = this.#skillDrafts.map((entry) =>
+      entry.id === draftId
+        ? {
+            ...entry,
+            skillId: published.id,
+            status: "published",
+            publishedSkillVersionId: versionId,
+            revision: entry.revision + 1,
+          }
+        : entry,
+    );
+    return { skillId: published.id, versionId };
+  }
+
+  async discardSkillDraft(draftId: string): Promise<void> {
+    const draft = this.#skillDrafts.find((entry) => entry.id === draftId);
+    if (!draft || draft.status !== "editing") return;
+    this.#skillDrafts = this.#skillDrafts.map((entry) =>
+      entry.id === draftId ? { ...entry, status: "discarded" } : entry,
+    );
   }
 
   async updateSkillVersionLifecycle(
@@ -1288,7 +1645,7 @@ export class DemoConsoleApi implements ConsoleApi {
     return {
       data: [
         {
-          id: "77777777-7777-4777-8777-777777777777",
+          id: DAYTONA_SNAPSHOT_ID,
           providerType: "daytona" as const,
           name: "daytona-small",
           state: "active",
@@ -1299,6 +1656,24 @@ export class DemoConsoleApi implements ConsoleApi {
           gpu: 0,
           memoryGiB: 1,
           diskGiB: 3,
+          regionIds: ["eu", "us"],
+          sandboxClass: "container",
+          createdAt: "2026-07-28T14:58:11.540Z",
+          updatedAt: "2026-08-20T15:26:23.838Z",
+          lastUsedAt: "2026-08-20T15:26:23.827Z",
+        },
+        {
+          id: DAYTONA_LARGE_SNAPSHOT_ID,
+          providerType: "daytona" as const,
+          name: "daytona-large",
+          state: "active",
+          available: true,
+          imageName: "daytonaio/sandbox:0.9.0",
+          general: true,
+          cpu: 4,
+          gpu: 0,
+          memoryGiB: 8,
+          diskGiB: 10,
           regionIds: ["eu", "us"],
           sandboxClass: "container",
           createdAt: "2026-07-28T14:58:11.540Z",
@@ -1472,6 +1847,56 @@ export class DemoConsoleApi implements ConsoleApi {
     return structuredClone(
       this.#storageProviders.find((provider) => provider.id === providerId)!,
     );
+  }
+
+  async listStorageObjects(
+    providerId: string,
+    query?: { readonly prefix?: string; readonly cursor?: string },
+  ): Promise<StorageObjectList> {
+    this.#guard();
+    if (!this.#storageProviders.some((provider) => provider.id === providerId))
+      throw new Error("Storage provider not found.");
+    const demoObjects: readonly StorageObjectEntry[] = [
+      {
+        key: "run-files/runs/run-demo-0001/4f2a11aa-demo/quarterly-report.csv",
+        sizeBytes: 48_213,
+        lastModifiedAt: "2026-08-18T09:12:00.000Z",
+      },
+      {
+        key: "run-files/runs/run-demo-0001/9c8b22bb-demo/customer-notes.md",
+        sizeBytes: 5_120,
+        lastModifiedAt: "2026-08-18T09:12:00.000Z",
+      },
+      {
+        key: "workspace-backups/threads/thread-demo-0001/workspace.tar.gz",
+        sizeBytes: 1_204_224,
+        lastModifiedAt: "2026-08-19T16:40:00.000Z",
+      },
+      {
+        key: "workspace-backups/threads/thread-demo-0001/workspace.manifest.json",
+        sizeBytes: 2_048,
+        lastModifiedAt: "2026-08-19T16:40:00.000Z",
+      },
+    ];
+    const rawPrefix = query?.prefix ?? "";
+    const prefix =
+      rawPrefix && !rawPrefix.endsWith("/") ? `${rawPrefix}/` : rawPrefix;
+    const folders = new Set<string>();
+    const objects: StorageObjectEntry[] = [];
+    for (const object of demoObjects) {
+      if (!object.key.startsWith(prefix)) continue;
+      const remainder = object.key.slice(prefix.length);
+      const slash = remainder.indexOf("/");
+      if (slash >= 0) folders.add(`${prefix}${remainder.slice(0, slash + 1)}`);
+      else objects.push(object);
+    }
+    return {
+      providerId,
+      prefix,
+      folders: [...folders].sort(),
+      objects,
+      truncated: false,
+    };
   }
 
   async listModelCatalog(providerId: string, search?: string) {

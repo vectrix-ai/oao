@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import type { PgPool } from "@oao/db-postgres";
-import type { OrganizationId, ProjectId } from "@oao/domain";
+import type { OrganizationId, ProjectId, RunId } from "@oao/domain";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
 import {
   FLUE_PACKAGE_VERSIONS,
   PostgresSkillRegistry,
   createManagedRunDeliveredMessage,
   createProjectModelPresetActivator,
+  managedRunFileSandboxPath,
+  materializeManagedRunFiles,
   runtimeTesting,
 } from "../src/index.js";
 
@@ -61,8 +63,10 @@ const delivery = {
   sessionId: "00000000-0000-4000-8000-000000000012",
   snapshotHash: "a".repeat(64),
 };
+const runFileStorageProviderId = "00000000-0000-4000-8000-000000000016";
 
-test("files use their admitted model-visible text", () => {
+test("files expose sandbox paths without injecting their content", () => {
+  const bytes = Buffer.from("export const x=1;", "utf8");
   const message = createManagedRunDeliveredMessage({
     delivery,
     message: "Review this file.",
@@ -71,23 +75,27 @@ test("files use their admitted model-visible text", () => {
         id: "00000000-0000-4000-8000-000000000013",
         name: "entry.ts",
         contentType: "application/typescript",
-        sizeBytes: Buffer.byteLength("export const x=1;", "utf8"),
-        sha256: "b".repeat(64),
-        bytes: Buffer.from("export const x=1;", "utf8"),
-        modelText: "export const x=1;",
+        sizeBytes: bytes.byteLength,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        storageProviderId: runFileStorageProviderId,
+        objectKey: "run-files/entry.ts",
       },
     ],
   });
   assert.equal(message.kind, "signal");
-  assert.match(message.body, /Attached file: entry\.ts/u);
-  assert.match(message.body, /export const x=1;/u);
+  assert.match(
+    message.body,
+    /\.oao\/attachments\/00000000-0000-4000-8000-000000000011\/entry\.ts/u,
+  );
+  assert.match(message.body, /without preprocessing/u);
+  assert.doesNotMatch(message.body, /export const x=1;/u);
   assert.deepEqual(
     message.kind === "signal" ? message.attributes : {},
     delivery,
   );
 });
 
-test("image files use Flue image attachments without putting bytes in metadata", () => {
+test("image files are also copied as raw sandbox files", () => {
   const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
   const message = createManagedRunDeliveredMessage({
     delivery,
@@ -99,15 +107,48 @@ test("image files use Flue image attachments without putting bytes in metadata",
         contentType: "image/png",
         sizeBytes: bytes.byteLength,
         sha256: "c".repeat(64),
-        bytes,
+        storageProviderId: runFileStorageProviderId,
+        objectKey: "run-files/diagram.png",
       },
     ],
   });
-  assert.equal(message.kind, "user");
-  assert.equal(message.attachments?.[0]?.data, bytes.toString("base64"));
-  assert.equal(message.attachments?.[0]?.mimeType, "image/png");
-  assert.match(message.attachments?.[0]?.filename ?? "", /^oao-run-v1\./u);
+  assert.equal(message.kind, "signal");
+  assert.match(message.body, /diagram\.png/u);
   assert.doesNotMatch(message.body, new RegExp(bytes.toString("base64"), "u"));
+});
+
+test("raw files are materialized byte-for-byte at deterministic run paths", async () => {
+  const bytes = Buffer.from([0x00, 0xff, 0x10, 0x80]);
+  const writes: { readonly path: string; readonly bytes: Uint8Array }[] = [];
+  await materializeManagedRunFiles(
+    {
+      writeFile: async (path: string, content: string | Uint8Array) => {
+        writes.push({
+          path,
+          bytes: typeof content === "string" ? Buffer.from(content) : content,
+        });
+      },
+    } as never,
+    delivery,
+    [
+      {
+        id: "00000000-0000-4000-8000-000000000015",
+        name: "tasks.xlsx",
+        contentType:
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        sizeBytes: bytes.byteLength,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        storageProviderId: runFileStorageProviderId,
+        objectKey: "run-files/tasks.xlsx",
+        bytes,
+      },
+    ],
+  );
+  assert.equal(
+    writes[0]?.path,
+    managedRunFileSandboxPath(delivery.runId, "tasks.xlsx"),
+  );
+  assert.deepEqual(writes[0]?.bytes, bytes);
 });
 
 const tenant = {
@@ -116,6 +157,68 @@ const tenant = {
 };
 const providerId = "00000000-0000-4000-8000-000000000003";
 const credentialCipher = new ProviderCredentialCipher(Buffer.alloc(32, 4));
+
+test("runtime reloads run attachments only from the bound object store", async () => {
+  const bytes = Buffer.from([0x01, 0x02, 0xfe, 0xff]);
+  const runId = "00000000-0000-4000-8000-000000000017" as RunId;
+  const objectKey = `run-files/runs/${runId}/file/report.xlsx`;
+  const inputPublic = {
+    message: "Inspect the workbook.",
+    files: [
+      {
+        id: "00000000-0000-4000-8000-000000000018",
+        name: "report.xlsx",
+        contentType:
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        sizeBytes: bytes.byteLength,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        storageProviderId: runFileStorageProviderId,
+        objectKey,
+      },
+    ],
+  };
+  const pool = {
+    connect: async () => ({
+      query: async (text: string) =>
+        text.includes("SELECT input_public FROM oao.runs")
+          ? { rowCount: 1, rows: [{ input_public: inputPublic }] }
+          : { rowCount: 0, rows: [] },
+      release() {},
+    }),
+  } as unknown as PgPool;
+  const resolver = {
+    resolve: async (input: { readonly providerId?: string }) => {
+      assert.equal(input.providerId, runFileStorageProviderId);
+      return {
+        providerId: runFileStorageProviderId,
+        store: {
+          async put() {
+            return { ref: "artifact:///unused" };
+          },
+          async get(request: { readonly key: string }) {
+            assert.equal(request.key, objectKey);
+            return {
+              tenant,
+              key: objectKey,
+              bytes,
+              contentType: inputPublic.files[0]!.contentType,
+            };
+          },
+          async head() {
+            return undefined;
+          },
+          async delete() {},
+        },
+      };
+    },
+  };
+  const loaded = await runtimeTesting.loadManagedRunFiles(pool, resolver, {
+    ...tenant,
+    runId,
+  });
+  assert.equal(loaded.length, 1);
+  assert.deepEqual(loaded[0]?.bytes, bytes);
+});
 
 function presetRow(input: {
   readonly preset_key: string;
@@ -302,13 +405,28 @@ test("PostgreSQL Skill versions become verified immutable Flue definitions", asy
   const skillId = "00000000-0000-4000-8000-000000000021";
   const skillVersionId = "00000000-0000-4000-8000-000000000022";
   const instructions = "Read the reference only when this procedure applies.";
+  const referencePath = "references/intake-flow.md";
+  const referenceBytes = Buffer.from(
+    "# Intake flow\n\nFollow the approved sequence.",
+    "utf8",
+  );
+  const referenceHash = createHash("sha256")
+    .update(referenceBytes)
+    .digest("hex");
   const canonical = {
     schemaVersion: 1,
     name: "shipment-intake",
     description: "Process shipment documents using the approved flow.",
     instructions,
     metadata: {},
-    files: [],
+    files: [
+      {
+        path: referencePath,
+        contentType: "text/markdown",
+        sizeBytes: referenceBytes.byteLength,
+        sha256: referenceHash,
+      },
+    ],
   };
   const contentHash = createHash("sha256")
     .update(stableJson(canonical))
@@ -334,13 +452,25 @@ test("PostgreSQL Skill versions become verified immutable Flue definitions", asy
                 metadata: {},
                 allowed_tools: null,
                 content_hash: Buffer.from(contentHash, "hex"),
-                total_bytes: Buffer.byteLength(instructions),
+                total_bytes:
+                  Buffer.byteLength(instructions) + referenceBytes.byteLength,
                 status: "active",
               },
             ],
           };
         if (text.includes("FROM oao.skill_version_files"))
-          return { rowCount: 0, rows: [] };
+          return {
+            rowCount: 1,
+            rows: [
+              {
+                file_path: referencePath,
+                content_type: "text/markdown",
+                size_bytes: referenceBytes.byteLength,
+                content_sha256: Buffer.from(referenceHash, "hex"),
+                content_bytes: referenceBytes,
+              },
+            ],
+          };
         return { rowCount: 0, rows: [] };
       },
       release: () => undefined,
@@ -360,6 +490,12 @@ test("PostgreSQL Skill versions become verified immutable Flue definitions", asy
   assert.equal(definition.name, "shipment-intake");
   assert.equal(definition.description, canonical.description);
   assert.equal(definition.instructions, instructions);
+  assert.equal(
+    definition.metadata,
+    undefined,
+    "empty PostgreSQL metadata must be omitted for Flue 2.0.3 frontmatter compatibility",
+  );
+  assert.deepEqual(definition.files?.[referencePath], referenceBytes);
   assert.equal(
     queries.filter((query) => query.includes("skill_versions version")).length,
     1,

@@ -1,9 +1,21 @@
-import { Plus, Save } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronRight,
+  FilePlus2,
+  FileText,
+  Folder,
+  FolderPlus,
+  Plus,
+  Save,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../api/context";
-import type { CreateSkillInput } from "../api/types";
+import type { SkillDetail, SkillDraft, SkillDraftEntry } from "../api/types";
 import {
   Button,
   Dialog,
@@ -11,16 +23,21 @@ import {
   ErrorState,
   Field,
   FormError,
+  IconButton,
   Input,
   LoadingState,
+  MarkdownContent,
   Page,
   PageHeader,
   Panel,
   StatusChip,
+  Tabs,
   Textarea,
   formatDate,
   useToast,
 } from "../components/ui";
+
+const NAME_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u;
 
 function utf8Base64(value: string): string {
   const bytes = new TextEncoder().encode(value);
@@ -29,24 +46,83 @@ function utf8Base64(value: string): string {
   return btoa(binary);
 }
 
+function base64Utf8(value: string): string {
+  const binary = atob(value);
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+function directoryName(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index < 0 ? "" : path.slice(0, index);
+}
+
+function packagePath(directory: string, name: string): string {
+  return [directory, name]
+    .filter(Boolean)
+    .join("/")
+    .replace(/^\/+|\/+$/gu, "");
+}
+
+function slugify(value: string): string {
+  return value
+    .toLocaleLowerCase("en-US")
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+}
+
+function normalizedMarkdownName(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.toLocaleLowerCase("en-US").endsWith(".md")
+    ? trimmed
+    : `${trimmed}.md`;
+}
+
+function entriesWithInferredDirectories(
+  entries: readonly SkillDraftEntry[],
+): readonly SkillDraftEntry[] {
+  const byPath = new Map(entries.map((entry) => [entry.path, entry] as const));
+  for (const entry of entries) {
+    const segments = entry.path.split("/");
+    for (let index = 1; index < segments.length; index += 1) {
+      const path = segments.slice(0, index).join("/");
+      if (!byPath.has(path))
+        byPath.set(path, {
+          path,
+          kind: "directory",
+          contentType: null,
+          sizeBytes: null,
+          sha256: null,
+        });
+    }
+  }
+  return [...byPath.values()];
+}
+
+function readMarkdownUpload(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result ?? "")));
+    reader.addEventListener("error", () =>
+      reject(reader.error ?? new Error(`Could not read ${file.name}`)),
+    );
+    reader.readAsText(file, "utf-8");
+  });
+}
+
 export function SkillsPage() {
   const api = useApi();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const notify = useToast();
-  const [creating, setCreating] = useState(false);
+  const [draft, setDraft] = useState<SkillDraft | null>(null);
   const query = useQuery({
     queryKey: ["skills"],
     queryFn: () => api.listSkills({}),
   });
-  const create = useMutation({
-    mutationFn: (input: CreateSkillInput) => api.createSkill(input),
-    onSuccess: async (skill) => {
-      await queryClient.invalidateQueries({ queryKey: ["skills"] });
-      setCreating(false);
-      notify("Skill created with immutable version 1.");
-      navigate(`/skills/${skill.id}`);
-    },
+  const createDraft = useMutation({
+    mutationFn: () => api.createSkillDraft(),
+    onSuccess: setDraft,
   });
   return (
     <Page>
@@ -58,12 +134,59 @@ export function SkillsPage() {
           <Button
             variant="primary"
             icon={<Plus size={15} />}
-            onClick={() => setCreating(true)}
+            loading={createDraft.isPending}
+            onClick={() => createDraft.mutate()}
           >
             Create Skill
           </Button>
         }
       />
+      <Panel
+        title="How Skills work"
+        description="Skills are immutable, reusable instruction packages that agents load only when needed."
+      >
+        <div className="skill-explainer">
+          <article>
+            <h3>Publish a version</h3>
+            <p>
+              A Skill version combines a small discovery name and description
+              with full Markdown instructions and optional supporting files.
+              Publishing an update creates a new version; it never changes an
+              existing one.
+            </p>
+          </article>
+          <article>
+            <h3>Attach it to an agent</h3>
+            <p>
+              An agent version stores exact Skill version IDs. New sessions
+              inherit those bindings automatically, so an older agent version
+              continues using the same Skill version after newer ones are
+              published.
+            </p>
+          </article>
+          <article>
+            <h3>Load progressively</h3>
+            <p>
+              The model initially sees only the discovery entry. It activates a
+              relevant Skill to load its instructions, then reads a reference
+              only when those instructions require it.
+            </p>
+          </article>
+          <article>
+            <h3>Understand reference paths</h3>
+            <p>
+              You author a package-relative path such as{" "}
+              <code>references/intake-flow.md</code>. After activation, Flue
+              advertises a runtime-only virtual path shaped like{" "}
+              <code>
+                /.flue/packaged-skills/&lt;Flue-skill-id&gt;/references/intake-flow.md
+              </code>
+              . The file is served from the verified package; it is not a file
+              in the agent sandbox.
+            </p>
+          </article>
+        </div>
+      </Panel>
       {query.isPending ? (
         <LoadingState label="Loading Skills" rows={5} />
       ) : query.isError ? (
@@ -74,7 +197,12 @@ export function SkillsPage() {
           title="No Skills published"
           description="Publish reusable instructions and references, then attach their exact versions to an agent version."
           action={
-            <Button onClick={() => setCreating(true)}>Create Skill</Button>
+            <Button
+              loading={createDraft.isPending}
+              onClick={() => createDraft.mutate()}
+            >
+              Create Skill
+            </Button>
           }
         />
       ) : (
@@ -100,133 +228,715 @@ export function SkillsPage() {
           </div>
         </Panel>
       )}
-      {creating ? (
+      {draft ? (
         <SkillDialog
+          draft={draft}
           title="Create Skill"
-          submitLabel="Create Skill"
-          pending={create.isPending}
-          error={create.error}
-          onClose={() => setCreating(false)}
-          onSubmit={(input) => create.mutate(input)}
+          submitLabel="Publish Skill"
+          onClose={() => {
+            const draftId = draft.id;
+            setDraft(null);
+            void api
+              .discardSkillDraft(draftId)
+              .catch((error: unknown) =>
+                notify(
+                  error instanceof Error
+                    ? error.message
+                    : "Could not discard the Skill draft.",
+                ),
+              );
+          }}
+          onPublished={async (skillId) => {
+            await queryClient.invalidateQueries({ queryKey: ["skills"] });
+            setDraft(null);
+            notify("Skill created with immutable version 1.");
+            navigate(`/skills/${skillId}`);
+          }}
         />
       ) : null}
     </Page>
   );
 }
 
+function MarkdownEditor({
+  label,
+  hint,
+  value,
+  onChange,
+  rows = 10,
+  required = false,
+  autoFocus = false,
+}: {
+  readonly label: string;
+  readonly hint?: string;
+  readonly value: string;
+  readonly onChange: (value: string) => void;
+  readonly rows?: number;
+  readonly required?: boolean;
+  readonly autoFocus?: boolean;
+}) {
+  const [view, setView] = useState<"write" | "preview">("write");
+  return (
+    <div className="md-editor">
+      <div className="md-editor__bar">
+        <span aria-hidden="true">{label}</span>
+        <Tabs
+          label={`${label} view`}
+          variant="segmented"
+          value={view}
+          onChange={setView}
+          tabs={[
+            { value: "write", label: "Write" },
+            { value: "preview", label: "Preview" },
+          ]}
+        />
+      </div>
+      {view === "write" ? (
+        <Field label={label} labelHidden {...(hint ? { hint } : {})}>
+          <Textarea
+            required={required}
+            autoFocus={autoFocus}
+            rows={rows}
+            value={value}
+            onChange={(event) => onChange(event.currentTarget.value)}
+          />
+        </Field>
+      ) : (
+        <div className="skill-markdown-panel md-editor__preview">
+          <MarkdownContent>
+            {value.trim() ? value : "*Nothing to preview yet.*"}
+          </MarkdownContent>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SkillDialog({
+  draft: initialDraft,
   title,
   submitLabel,
-  pending,
-  error,
-  initial,
   onClose,
-  onSubmit,
+  onPublished,
 }: {
+  readonly draft: SkillDraft;
   readonly title: string;
   readonly submitLabel: string;
-  readonly pending: boolean;
-  readonly error: Error | null;
-  readonly initial?: {
-    readonly displayName?: string;
-    readonly name: string;
-    readonly description: string;
-    readonly instructions: string;
-  };
   readonly onClose: () => void;
-  readonly onSubmit: (input: CreateSkillInput) => void;
+  readonly onPublished: (skillId: string) => void | Promise<void>;
 }) {
+  const api = useApi();
+  const isNew = initialDraft.skillId === null;
+  const [draft, setDraft] = useState(initialDraft);
+  const [displayName, setDisplayName] = useState(initialDraft.displayName);
+  const [name, setName] = useState(initialDraft.name);
+  const [nameEdited, setNameEdited] = useState(initialDraft.name.length > 0);
+  const [description, setDescription] = useState(initialDraft.description);
+  const [instructions, setInstructions] = useState(initialDraft.instructions);
+  const [step, setStep] = useState(0);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const mutateResources = useMutation({
+    mutationFn: async (
+      operation:
+        | { readonly kind: "directory"; readonly path: string }
+        | {
+            readonly kind: "file";
+            readonly path: string;
+            readonly content: string;
+          }
+        | {
+            readonly kind: "remove";
+            readonly path: string;
+            readonly recursive: boolean;
+          },
+    ) => {
+      if (operation.kind === "directory")
+        return api.createSkillDraftDirectory(draft.id, operation.path);
+      if (operation.kind === "remove")
+        return api.removeSkillDraftEntry(
+          draft.id,
+          operation.path,
+          operation.recursive,
+        );
+      return api.putSkillDraftFile(draft.id, {
+        path: operation.path,
+        contentType: "text/markdown",
+        dataBase64: utf8Base64(operation.content),
+      });
+    },
+    onSuccess: setDraft,
+  });
+  const publish = useMutation({
+    mutationFn: async () => {
+      const saved = await api.updateSkillDraft(draft.id, {
+        key: isNew ? name : draft.key,
+        displayName,
+        name,
+        description,
+        instructions,
+      });
+      setDraft(saved);
+      await api.validateSkillDraft(draft.id);
+      return api.publishSkillDraft(draft.id);
+    },
+    onSuccess: (published) => onPublished(published.skillId),
+  });
+
+  const fileCount = draft.entries.filter(
+    (entry) => entry.kind === "file",
+  ).length;
+  const busy = uploading || mutateResources.isPending || publish.isPending;
+  const stepReady: readonly boolean[] = [
+    (!isNew || displayName.trim().length > 0) &&
+      NAME_PATTERN.test(name) &&
+      description.trim().length > 0,
+    instructions.trim().length > 0,
+    true,
+  ];
+  const steps = [
+    { label: "Basics" },
+    { label: "Instructions" },
+    { label: fileCount > 0 ? `Files (${fileCount})` : "Files" },
+  ];
+  const lastStep = steps.length - 1;
+  const canEnter = (target: number) =>
+    stepReady.slice(0, target).every(Boolean);
+
+  async function uploadFiles(
+    files: readonly File[],
+    directory: string,
+  ): Promise<void> {
+    setLocalError(null);
+    setUploading(true);
+    let current = draft;
+    try {
+      for (const file of files) {
+        if (!file.name.toLocaleLowerCase("en-US").endsWith(".md"))
+          throw new Error(`${file.name} is not a Markdown file.`);
+        current = await api.putSkillDraftFile(current.id, {
+          path: packagePath(directory, file.name),
+          contentType: "text/markdown",
+          dataBase64: utf8Base64(await readMarkdownUpload(file)),
+        });
+      }
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : "Upload failed");
+    } finally {
+      setDraft(current);
+      setUploading(false);
+    }
+  }
+
   return (
     <Dialog
       title={title}
-      description="The name and description form the small always-visible catalog entry. Full instructions and references load only when activated."
+      description="Name it, write the instructions, and optionally add reference files — then publish one immutable version."
       wide
       onClose={onClose}
       onSubmit={(event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
-        const data = new FormData(event.currentTarget);
-        const referencePath = String(data.get("referencePath") ?? "").trim();
-        const referenceContent = String(data.get("referenceContent") ?? "");
-        onSubmit({
-          displayName: String(
-            data.get("displayName") ?? initial?.displayName ?? "",
-          ),
-          name: String(data.get("name") ?? ""),
-          description: String(data.get("description") ?? ""),
-          instructions: String(data.get("instructions") ?? ""),
-          ...(referencePath && referenceContent
-            ? {
-                files: [
-                  {
-                    path: referencePath,
-                    contentType: "text/markdown",
-                    dataBase64: utf8Base64(referenceContent),
-                  },
-                ],
-              }
-            : {}),
-        });
+        if (step < lastStep) {
+          if (stepReady[step]) setStep(step + 1);
+        } else publish.mutate();
       }}
       footer={
         <>
-          <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" type="submit" loading={pending}>
-            {pending ? "Publishing…" : submitLabel}
+          <Button onClick={onClose} disabled={publish.isPending}>
+            Cancel
           </Button>
+          {step > 0 ? (
+            <Button
+              icon={<ArrowLeft size={15} />}
+              disabled={busy}
+              onClick={() => setStep(step - 1)}
+            >
+              Back
+            </Button>
+          ) : null}
+          {step < lastStep ? (
+            <Button
+              variant="primary"
+              type="submit"
+              disabled={!stepReady[step] || busy}
+            >
+              Next
+            </Button>
+          ) : (
+            <Button
+              variant="primary"
+              type="submit"
+              loading={publish.isPending}
+              disabled={uploading || mutateResources.isPending}
+            >
+              {publish.isPending ? "Publishing…" : submitLabel}
+            </Button>
+          )}
         </>
       }
     >
-      {initial?.displayName === undefined ? (
-        <Field label="Display name">
-          <Input
-            name="displayName"
-            required
-            autoFocus
-            placeholder="Shipment Intake"
-          />
-        </Field>
+      <ol className="skill-steps">
+        {steps.map((item, index) => (
+          <li key={item.label}>
+            <button
+              type="button"
+              aria-current={index === step ? "step" : undefined}
+              disabled={busy || (index > step && !canEnter(index))}
+              onClick={() => setStep(index)}
+            >
+              <span className="skill-steps__num" aria-hidden="true">
+                {index + 1}
+              </span>
+              {item.label}
+            </button>
+          </li>
+        ))}
+      </ol>
+      {step === 0 ? (
+        <>
+          {isNew ? (
+            <Field label="Display name" hint="Shown in the Skill catalog.">
+              <Input
+                required
+                autoFocus
+                placeholder="Shipment Intake"
+                value={displayName}
+                onChange={(event) => {
+                  const next = event.currentTarget.value;
+                  setDisplayName(next);
+                  if (!nameEdited) setName(slugify(next));
+                }}
+              />
+            </Field>
+          ) : null}
+          <Field
+            label="Skill name"
+            hint={
+              isNew
+                ? "Identifier agents use to activate the Skill. Auto-generated from the display name; lowercase letters, numbers, and hyphens."
+                : "Identifier agents use to activate the Skill. Lowercase letters, numbers, and hyphens."
+            }
+          >
+            <Input
+              required
+              pattern="[a-z][a-z0-9]*(?:-[a-z0-9]+)*"
+              value={name}
+              autoFocus={!isNew}
+              placeholder="shipment-intake"
+              onChange={(event) => {
+                const next = event.currentTarget.value;
+                setName(next);
+                setNameEdited(next.length > 0);
+              }}
+            />
+          </Field>
+          <Field
+            label="Description"
+            hint="One or two sentences: what the Skill does and when an agent should use it."
+          >
+            <Textarea
+              required
+              maxLength={1024}
+              rows={3}
+              value={description}
+              onChange={(event) => setDescription(event.currentTarget.value)}
+            />
+          </Field>
+        </>
       ) : null}
-      <Field label="Skill name" hint="Lowercase letters, numbers, and hyphens.">
-        <Input
-          name="name"
+      {step === 1 ? (
+        <MarkdownEditor
+          label="Instructions"
+          hint="The agent receives these full instructions only after it activates the Skill."
+          value={instructions}
+          onChange={setInstructions}
+          rows={12}
           required
-          pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
-          defaultValue={initial?.name}
-          autoFocus={initial?.displayName !== undefined}
-          placeholder="shipment-intake"
+          autoFocus
         />
-      </Field>
-      <Field
-        label="Catalog description"
-        hint="Say what it does and when to use it."
-      >
-        <Textarea
-          name="description"
-          required
-          maxLength={1024}
-          rows={3}
-          defaultValue={initial?.description}
-        />
-      </Field>
-      <Field label="Instructions">
-        <Textarea
-          name="instructions"
-          required
-          rows={10}
-          defaultValue={initial?.instructions}
-        />
-      </Field>
-      <Field
-        label="Optional reference path"
-        hint="For example references/intake-flow.md."
-      >
-        <Input name="referencePath" placeholder="references/reference.md" />
-      </Field>
-      <Field label="Optional Markdown reference">
-        <Textarea name="referenceContent" rows={6} />
-      </Field>
-      {error ? <FormError>{error.message}</FormError> : null}
+      ) : null}
+      {step === 2 ? (
+        <>
+          <p className="skill-finder__intro">
+            Optional supporting Markdown files, organized like a folder on disk.
+            The agent reads a file only when the instructions point to its
+            package path, such as <code>references/intake-flow.md</code>.
+          </p>
+          <SkillFinder
+            entries={entriesWithInferredDirectories(draft.entries)}
+            busy={busy}
+            uploading={uploading}
+            onCreateFolder={(path) =>
+              mutateResources.mutateAsync({ kind: "directory", path })
+            }
+            onWriteFile={(path, content) =>
+              mutateResources.mutateAsync({ kind: "file", path, content })
+            }
+            onRemove={(path, recursive) =>
+              mutateResources.mutateAsync({ kind: "remove", path, recursive })
+            }
+            onUpload={uploadFiles}
+          />
+        </>
+      ) : null}
+      {localError ? <FormError>{localError}</FormError> : null}
+      {mutateResources.error ? (
+        <FormError>{mutateResources.error.message}</FormError>
+      ) : null}
+      {publish.error ? <FormError>{publish.error.message}</FormError> : null}
     </Dialog>
+  );
+}
+
+function SkillFinder({
+  entries,
+  busy,
+  uploading,
+  onCreateFolder,
+  onWriteFile,
+  onRemove,
+  onUpload,
+}: {
+  readonly entries: readonly SkillDraftEntry[];
+  readonly busy: boolean;
+  readonly uploading: boolean;
+  readonly onCreateFolder: (path: string) => Promise<unknown>;
+  readonly onWriteFile: (path: string, content: string) => Promise<unknown>;
+  readonly onRemove: (path: string, recursive: boolean) => Promise<unknown>;
+  readonly onUpload: (
+    files: readonly File[],
+    directory: string,
+  ) => Promise<void>;
+}) {
+  const [directory, setDirectory] = useState("");
+  const [openPath, setOpenPath] = useState<string | null>(null);
+  const [content, setContent] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const [creating, setCreating] = useState<"folder" | "file" | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const [dropping, setDropping] = useState(false);
+
+  const openEntry =
+    openPath === null
+      ? null
+      : (entries.find(
+          (entry) => entry.kind === "file" && entry.path === openPath,
+        ) ?? null);
+  const items = entries
+    .filter((entry) => directoryName(entry.path) === directory)
+    .sort((left, right) =>
+      left.kind === right.kind
+        ? left.path.localeCompare(right.path)
+        : left.kind === "directory"
+          ? -1
+          : 1,
+    );
+  const crumbs = directory ? directory.split("/") : [];
+  const childCount = (path: string) =>
+    entries.filter((entry) => directoryName(entry.path) === path).length;
+
+  function goTo(path: string): void {
+    setDirectory(path);
+    setCreating(null);
+    setDraftName("");
+  }
+
+  function openFile(entry: SkillDraftEntry): void {
+    setOpenPath(entry.path);
+    setContent(entry.dataBase64 ? base64Utf8(entry.dataBase64) : "");
+    setDirty(false);
+  }
+
+  async function commitCreate(): Promise<void> {
+    const value = draftName.trim().replace(/^\/+|\/+$/gu, "");
+    if (!value || creating === null) return;
+    const path = packagePath(
+      directory,
+      creating === "file" ? normalizedMarkdownName(value) : value,
+    );
+    try {
+      if (creating === "folder") {
+        await onCreateFolder(path);
+        setDirectory(path);
+      } else {
+        const heading = (path.split("/").at(-1) ?? "")
+          .replace(/\.md$/iu, "")
+          .replace(/[-_]/gu, " ");
+        const body = `# ${heading}\n`;
+        await onWriteFile(path, body);
+        setDirectory(directoryName(path));
+        setOpenPath(path);
+        setContent(body);
+        setDirty(false);
+      }
+      setCreating(null);
+      setDraftName("");
+    } catch {
+      // The dialog surfaces the API error; keep the input so a corrected
+      // name can be retried.
+    }
+  }
+
+  async function removeEntry(entry: SkillDraftEntry): Promise<void> {
+    if (
+      !globalThis.confirm(
+        `Remove ${entry.path}${entry.kind === "directory" ? " and everything inside it" : ""}?`,
+      )
+    )
+      return;
+    try {
+      await onRemove(entry.path, entry.kind === "directory");
+      if (
+        openPath !== null &&
+        (openPath === entry.path || openPath.startsWith(`${entry.path}/`))
+      )
+        setOpenPath(null);
+      if (directory === entry.path || directory.startsWith(`${entry.path}/`))
+        setDirectory(directoryName(entry.path));
+    } catch {
+      // The dialog surfaces the API error.
+    }
+  }
+
+  async function saveFile(): Promise<void> {
+    if (openPath === null) return;
+    try {
+      await onWriteFile(openPath, content);
+      setDirty(false);
+    } catch {
+      // The dialog surfaces the API error.
+    }
+  }
+
+  async function closeEditor(): Promise<void> {
+    if (dirty && openPath !== null) {
+      try {
+        await onWriteFile(openPath, content);
+      } catch {
+        return;
+      }
+    }
+    setOpenPath(null);
+    setDirty(false);
+  }
+
+  if (openEntry) {
+    return (
+      <div className="skill-finder">
+        <div className="skill-finder__bar">
+          <div className="skill-finder__editor-head">
+            <IconButton
+              label="Back to files"
+              disabled={busy}
+              onClick={() => void closeEditor()}
+            >
+              <ArrowLeft size={15} />
+            </IconButton>
+            <div>
+              <strong>{openEntry.path}</strong>
+              <small>
+                {dirty
+                  ? "Unsaved changes"
+                  : `${openEntry.sizeBytes ?? 0} bytes`}
+              </small>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            icon={<Save size={14} />}
+            disabled={busy || !dirty}
+            onClick={() => void saveFile()}
+          >
+            Save file
+          </Button>
+        </div>
+        <div className="skill-finder__editor">
+          <MarkdownEditor
+            label="Markdown content"
+            value={content}
+            onChange={(next) => {
+              setContent(next);
+              setDirty(true);
+            }}
+            rows={12}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="skill-finder">
+      <div className="skill-finder__bar">
+        <nav className="skill-crumbs" aria-label="Package location">
+          <button
+            type="button"
+            aria-current={directory === "" ? "location" : undefined}
+            onClick={() => goTo("")}
+          >
+            Package root
+          </button>
+          {crumbs.map((segment, index) => {
+            const path = crumbs.slice(0, index + 1).join("/");
+            return (
+              <span key={path} className="skill-crumbs__part">
+                <ChevronRight size={13} aria-hidden="true" />
+                <button
+                  type="button"
+                  aria-current={path === directory ? "location" : undefined}
+                  onClick={() => goTo(path)}
+                >
+                  {segment}
+                </button>
+              </span>
+            );
+          })}
+        </nav>
+        <div className="skill-finder__actions">
+          <Button
+            size="sm"
+            icon={<FolderPlus size={14} />}
+            disabled={busy}
+            onClick={() => {
+              setCreating("folder");
+              setDraftName("");
+            }}
+          >
+            New folder
+          </Button>
+          <Button
+            size="sm"
+            icon={<FilePlus2 size={14} />}
+            disabled={busy}
+            onClick={() => {
+              setCreating("file");
+              setDraftName("");
+            }}
+          >
+            New file
+          </Button>
+          <label className="btn btn--sm">
+            {uploading ? (
+              <span className="spin" aria-hidden="true" />
+            ) : (
+              <Upload size={14} />
+            )}{" "}
+            Upload Markdown
+            <input
+              className="sr-only"
+              type="file"
+              accept=".md,text/markdown"
+              multiple
+              disabled={busy}
+              onChange={(event) => {
+                const files = [...(event.currentTarget.files ?? [])];
+                event.currentTarget.value = "";
+                if (files.length) void onUpload(files, directory);
+              }}
+            />
+          </label>
+        </div>
+      </div>
+      <div
+        className={`skill-finder__list${dropping ? " is-dropping" : ""}`}
+        onDragOver={(event) => {
+          event.preventDefault();
+          if (!busy) setDropping(true);
+        }}
+        onDragLeave={() => setDropping(false)}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDropping(false);
+          if (busy) return;
+          const files = [...event.dataTransfer.files];
+          if (files.length) void onUpload(files, directory);
+        }}
+      >
+        {creating ? (
+          <div className="skill-finder__new">
+            {creating === "folder" ? (
+              <Folder size={15} aria-hidden="true" />
+            ) : (
+              <FileText size={15} aria-hidden="true" />
+            )}
+            <Input
+              autoFocus
+              aria-label={creating === "folder" ? "Folder name" : "File name"}
+              placeholder={
+                creating === "folder" ? "references" : "business-rules.md"
+              }
+              value={draftName}
+              onChange={(event) => setDraftName(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void commitCreate();
+                } else if (event.key === "Escape") {
+                  event.stopPropagation();
+                  setCreating(null);
+                }
+              }}
+            />
+            <Button
+              size="sm"
+              disabled={busy || !draftName.trim()}
+              onClick={() => void commitCreate()}
+            >
+              Add
+            </Button>
+            <IconButton label="Cancel" onClick={() => setCreating(null)}>
+              <X size={14} />
+            </IconButton>
+          </div>
+        ) : null}
+        {items.map((entry) => (
+          <div key={entry.path} className="skill-finder__row">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                if (entry.kind === "directory") goTo(entry.path);
+                else openFile(entry);
+              }}
+            >
+              {entry.kind === "directory" ? (
+                <Folder size={15} aria-hidden="true" />
+              ) : (
+                <FileText size={15} aria-hidden="true" />
+              )}
+              <span className="skill-finder__name">
+                {entry.path.split("/").at(-1)}
+              </span>
+            </button>
+            <span className="skill-finder__meta">
+              {entry.kind === "directory"
+                ? `${childCount(entry.path)} ${childCount(entry.path) === 1 ? "item" : "items"}`
+                : `${entry.sizeBytes ?? 0} bytes`}
+            </span>
+            <button
+              type="button"
+              className="skill-finder__remove"
+              aria-label={`Remove ${entry.path}`}
+              disabled={busy}
+              onClick={() => void removeEntry(entry)}
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+        {items.length === 0 && !creating ? (
+          <div className="skill-finder__empty">
+            <Folder size={24} aria-hidden="true" />
+            <strong>
+              {directory === ""
+                ? "No supporting files yet"
+                : "This folder is empty"}
+            </strong>
+            <p>Create a Markdown file, or drop .md files here to upload.</p>
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -235,30 +945,15 @@ export function SkillDetailPage() {
   const api = useApi();
   const queryClient = useQueryClient();
   const notify = useToast();
-  const [publishing, setPublishing] = useState(false);
+  const [draft, setDraft] = useState<SkillDraft | null>(null);
   const query = useQuery({
     queryKey: ["skill", skillId],
     queryFn: () => api.getSkill(skillId),
   });
-  const publish = useMutation({
-    mutationFn: async (input: CreateSkillInput) => {
-      const latest = query.data?.versions[0];
-      const exported = latest
-        ? await api.exportSkillVersion(skillId, latest.id)
-        : { files: [] };
-      return api.publishSkillVersion(skillId, {
-        name: input.name,
-        description: input.description,
-        instructions: input.instructions,
-        files: input.files ?? exported.files,
-      });
-    },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["skill", skillId] });
-      await queryClient.invalidateQueries({ queryKey: ["skills"] });
-      setPublishing(false);
-      notify("New immutable Skill version published.");
-    },
+  const createDraft = useMutation({
+    mutationFn: (sourceSkillVersionId: string) =>
+      api.createSkillDraft({ skillId, sourceSkillVersionId }),
+    onSuccess: setDraft,
   });
   const lifecycle = useMutation({
     mutationFn: (input: {
@@ -299,7 +994,11 @@ export function SkillDetailPage() {
           <Button
             variant="primary"
             icon={<Save size={15} />}
-            onClick={() => setPublishing(true)}
+            loading={createDraft.isPending}
+            disabled={!latest}
+            onClick={() => {
+              if (latest) createDraft.mutate(latest.id);
+            }}
           >
             Publish new version
           </Button>
@@ -359,10 +1058,19 @@ export function SkillDetailPage() {
                 resources
               </small>
               <code>{version.contentHash}</code>
-              <details>
+              <details className="skill-content-details">
                 <summary>Instructions</summary>
-                <pre className="code-block">{version.instructions}</pre>
+                <div className="skill-markdown-panel">
+                  <MarkdownContent>{version.instructions}</MarkdownContent>
+                </div>
               </details>
+              {version.files.length > 0 ? (
+                <SkillVersionResources
+                  skillId={skillId}
+                  versionId={version.id}
+                  files={version.files}
+                />
+              ) : null}
             </article>
           ))}
         </div>
@@ -370,22 +1078,103 @@ export function SkillDetailPage() {
           <FormError>{lifecycle.error.message}</FormError>
         ) : null}
       </Panel>
-      {publishing && latest ? (
+      {draft ? (
         <SkillDialog
+          draft={draft}
           title="Publish new Skill version"
           submitLabel="Publish version"
-          pending={publish.isPending}
-          error={publish.error}
-          initial={{
-            displayName: query.data.displayName,
-            name: latest.name,
-            description: latest.description,
-            instructions: latest.instructions,
+          onClose={() => {
+            const draftId = draft.id;
+            setDraft(null);
+            void api
+              .discardSkillDraft(draftId)
+              .catch((error: unknown) =>
+                notify(
+                  error instanceof Error
+                    ? error.message
+                    : "Could not discard the Skill draft.",
+                ),
+              );
           }}
-          onClose={() => setPublishing(false)}
-          onSubmit={(input) => publish.mutate(input)}
+          onPublished={async () => {
+            await queryClient.invalidateQueries({
+              queryKey: ["skill", skillId],
+            });
+            await queryClient.invalidateQueries({ queryKey: ["skills"] });
+            setDraft(null);
+            notify("New immutable Skill version published.");
+          }}
         />
       ) : null}
     </Page>
+  );
+}
+
+function SkillVersionResources({
+  skillId,
+  versionId,
+  files,
+}: {
+  readonly skillId: string;
+  readonly versionId: string;
+  readonly files: SkillDetail["versions"][number]["files"];
+}) {
+  const api = useApi();
+  const [open, setOpen] = useState(false);
+  const query = useQuery({
+    queryKey: ["skill", skillId, "version", versionId, "export"],
+    queryFn: () => api.exportSkillVersion(skillId, versionId),
+    enabled: open,
+  });
+  const exportedByPath = new Map(
+    query.data?.files.map((file) => [file.path, file] as const) ?? [],
+  );
+
+  return (
+    <details
+      className="skill-content-details"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>
+        Reference resources <span>({files.length})</span>
+      </summary>
+      <div className="skill-resource-list">
+        {files.map((file) => {
+          const exported = exportedByPath.get(file.path);
+          const isMarkdown = file.contentType
+            .toLowerCase()
+            .startsWith("text/markdown");
+          return (
+            <section className="skill-resource" key={file.path}>
+              <header>
+                <strong>{file.path}</strong>
+                <small>
+                  {file.contentType} · {file.sizeBytes} bytes
+                </small>
+              </header>
+              <p className="skill-runtime-path">
+                Runtime path:{" "}
+                <code>
+                  /.flue/packaged-skills/&lt;Flue-skill-id&gt;/{file.path}
+                </code>
+              </p>
+              {query.isPending ? (
+                <p role="status">Loading reference…</p>
+              ) : query.isError ? (
+                <FormError>{query.error.message}</FormError>
+              ) : isMarkdown && exported ? (
+                <div className="skill-markdown-panel">
+                  <MarkdownContent>
+                    {base64Utf8(exported.dataBase64)}
+                  </MarkdownContent>
+                </div>
+              ) : (
+                <p>This resource is not rendered as Markdown.</p>
+              )}
+            </section>
+          );
+        })}
+      </div>
+    </details>
   );
 }

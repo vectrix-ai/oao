@@ -143,13 +143,15 @@ provider error payloads. `available` is true only when Daytona reports the
 snapshot as `active`.
 
 An agent version's sandbox object requires `enabled`, `provider`, `network`, and
-`capabilities`, and may include an active snapshot UUID as `snapshotId`.
+`capabilities`. When `enabled` is true, it also requires an active snapshot UUID
+as `snapshotId`.
 Capabilities are unique values from `filesystem_read`,
 `filesystem_write`, `shell`, and `browser`. Publishing an enabled sandbox
-rejects an unknown project provider, missing encryption setup, or a
-restricted network policy whose selected connection has no allowlist.
+rejects an unknown project provider, missing encryption setup, a snapshot that
+is not active for the selected Daytona connection, or a restricted network
+policy whose selected connection has no allowlist.
 
-## Workspace storage providers
+## Object storage providers
 
 S3-compatible storage connections are project scoped. Writes require
 `project:admin`; list reads use `agent:read`. Credentials are encrypted with
@@ -161,6 +163,7 @@ the platform credential key and are accepted only as write-only input.
 | `POST` | `/projects/{projectId}/storage-providers`                 | Add an encrypted S3-compatible connection    |
 | `PUT`  | `/projects/{projectId}/storage-providers/{id}/credential` | Rotate write-only S3 credentials             |
 | `PUT`  | `/projects/{projectId}/storage-providers/{id}/default`    | Make the connection the project default      |
+| `GET`  | `/projects/{projectId}/storage-providers/{id}/objects`    | List one folder level of stored objects      |
 
 Create input contains `key`, `displayName`, `providerType: "s3"`, nullable
 HTTP(S) `endpoint`, `region`, `bucket`, nullable safe relative `prefix`,
@@ -171,11 +174,22 @@ optional `sessionToken`. The first connection becomes default even when
 Responses contain connection coordinates, default state, a 12-character
 credential fingerprint, and credential version. They never contain S3
 credentials or encryption material. Provider configuration is immutable;
-credentials can rotate and the default can change. A thread with an existing
-backup stays bound to that provider.
+credentials can rotate and the default can change. Each uploaded attachment and
+each thread with an existing backup stays bound to the provider selected when
+that object was first written.
 
-See [Workspace backups](/storage/workspace-backups) for the automatic backup,
-checksum verification, replacement-sandbox restore, and failure contracts.
+The `objects` read lists one folder level under the project's tenant-scoped
+storage root and uses `agent:read`. Optional query parameters are a safe
+relative folder `prefix`, an opaque `cursor` from a previous truncated page,
+and a `limit` from 1 through 1000. The response contains the normalized
+`prefix`, `folders` (common prefixes ending in `/`), `objects` with `key`,
+`sizeBytes`, and optional `lastModifiedAt`, plus `truncated` and, when
+truncated, the next `cursor`. Keys are logical: they exclude the bucket,
+configured provider prefix, and tenant path segments.
+
+See [Send files to an agent](/integrations/files) and [Workspace
+backups](/storage/workspace-backups) for object keys, checksum verification,
+replacement-sandbox restore, and failure contracts.
 
 ## Skills
 
@@ -183,14 +197,24 @@ Skills are PostgreSQL-authoritative, immutable procedural packages. Reads use
 `skill:read`, package writes use `skill:write`, agent publication additionally
 uses `skill:bind`, and lifecycle changes use `skill:revoke`.
 
-| Method  | Path                                                                    | Purpose                                       |
-| ------- | ----------------------------------------------------------------------- | --------------------------------------------- |
-| `GET`   | `/projects/{projectId}/skills`                                          | List Skills and their latest versions.        |
-| `POST`  | `/projects/{projectId}/skills`                                          | Create a Skill and immutable version 1.       |
-| `GET`   | `/projects/{projectId}/skills/{skillId}`                                | Read all immutable versions and manifests.    |
-| `POST`  | `/projects/{projectId}/skills/{skillId}/versions`                       | Publish the next immutable version.           |
-| `GET`   | `/projects/{projectId}/skills/{skillId}/versions/{versionId}/export`    | Export exact instructions and resource bytes. |
-| `PATCH` | `/projects/{projectId}/skills/{skillId}/versions/{versionId}/lifecycle` | Deprecate or revoke one version.              |
+| Method   | Path                                                                    | Purpose                                        |
+| -------- | ----------------------------------------------------------------------- | ---------------------------------------------- |
+| `GET`    | `/projects/{projectId}/skill-drafts`                                    | List editable package drafts.                  |
+| `POST`   | `/projects/{projectId}/skill-drafts`                                    | Create a blank draft or clone a Skill version. |
+| `GET`    | `/projects/{projectId}/skill-drafts/{draftId}`                          | Read draft metadata, folders, and file bytes.  |
+| `PATCH`  | `/projects/{projectId}/skill-drafts/{draftId}`                          | Save draft metadata and instructions.          |
+| `DELETE` | `/projects/{projectId}/skill-drafts/{draftId}`                          | Discard an editable draft.                     |
+| `POST`   | `/projects/{projectId}/skill-drafts/{draftId}/directories`              | Create a package folder and missing parents.   |
+| `PUT`    | `/projects/{projectId}/skill-drafts/{draftId}/files`                    | Create or replace one Markdown file.           |
+| `DELETE` | `/projects/{projectId}/skill-drafts/{draftId}/entries`                  | Remove one file or folder tree.                |
+| `POST`   | `/projects/{projectId}/skill-drafts/{draftId}/validate`                 | Validate the complete staged package.          |
+| `POST`   | `/projects/{projectId}/skill-drafts/{draftId}/publish`                  | Atomically publish an immutable version.       |
+| `GET`    | `/projects/{projectId}/skills`                                          | List Skills and their latest versions.         |
+| `POST`   | `/projects/{projectId}/skills`                                          | Create a Skill and immutable version 1.        |
+| `GET`    | `/projects/{projectId}/skills/{skillId}`                                | Read all immutable versions and manifests.     |
+| `POST`   | `/projects/{projectId}/skills/{skillId}/versions`                       | Publish the next immutable version.            |
+| `GET`    | `/projects/{projectId}/skills/{skillId}/versions/{versionId}/export`    | Export exact instructions and resource bytes.  |
+| `PATCH`  | `/projects/{projectId}/skills/{skillId}/versions/{versionId}/lifecycle` | Deprecate or revoke one version.               |
 
 Create and version bodies contain `name`, `description`, `instructions`,
 optional `license`, `compatibility`, string-valued `metadata`, informational
@@ -198,6 +222,18 @@ optional `license`, `compatibility`, string-valued `metadata`, informational
 `displayName`. Each file is `{ path, contentType, dataBase64 }`. See
 [Versioned Skills](/concepts/skills) for validation, package hashing,
 progressive disclosure, lifecycle, and script-execution boundaries.
+
+Create a blank draft with `{}`. To edit an existing package, pass exact
+`skillId` and `sourceSkillVersionId` values; OAO copies that version's metadata
+and files into the mutable draft. Directory bodies are `{ "path":
+"references/customers" }`. File bodies use the same
+`{ path, contentType, dataBase64 }` representation as direct publication and
+currently require UTF-8 `.md` content with `text/markdown`. Entry deletion uses
+`?path=references/customers&recursive=true` for a non-empty folder.
+
+Draft paths are package-relative. They never address the API host filesystem or
+a Daytona workspace. Published versions continue to use the existing direct
+create/version endpoints, so API clients do not need to migrate to drafts.
 
 Lifecycle accepts `{ "status": "deprecated" }` or
 `{ "status": "revoked" }`. A deprecated version can later be revoked; a
@@ -219,8 +255,8 @@ Creating an agent accepts `name`, optional `key` and `description`, and requires
 Agent list and detail responses include the latest immutable `sandbox` policy
 so operators can determine delegate compatibility before publication.
 See [Create an agent](/agents/create-agent) for the exact configuration shape.
-Set `initialConfig.sandbox.enabled`, `provider`, optional `snapshotId`,
-`network`, and `capabilities`
+Set `initialConfig.sandbox.enabled`, `provider`, `snapshotId`, `network`, and
+`capabilities`
 to make the same sandbox selection available in API-driven creation as in the
 console. `provider` must be a key returned by the sandbox provider list route;
 there is no public fake-sandbox provider.
@@ -288,16 +324,24 @@ session detail record.
 
 A later turn accepts either `{ "message": "..." }` or the SDK-compatible
 `{ "redactedInput": "..." }`, plus the same optional `files` array used during
-session creation. Message text is limited to 100,000 characters and decoded or
-extracted file context to 200,000 characters per turn. A text field may be
-omitted only when `files` is non-empty. See
+session creation. Message text is limited to 100,000 characters and raw file
+bytes to 10 MiB per file and 20 MiB per turn. A text field may be
+omitted only when `files` is non-empty. File submissions require a
+sandbox-enabled agent with read tooling, plus a default project storage
+provider; binary formats require `shell`. The API uploads the original bytes to
+that S3-compatible provider and stores only the safe run manifest and object
+binding in PostgreSQL. See
 [Send files to an agent](/integrations/files) for accepted media types, base64
 encoding, and per-turn limits. Only one run can be active in a session thread;
 submitting while its latest run is unsettled returns a conflict.
 
 Session transcript messages and run-message pages include safe file metadata:
 ID, filename, content type, byte size, SHA-256, and creation time. Stored bytes
-and base64 are never returned from those endpoints.
+and base64 are never stored in PostgreSQL or returned from those endpoints. The
+runtime downloads and verifies the bound object, then copies the original bytes to
+`.oao/attachments/{runId}/{filename}` under the sandbox's writable working
+directory before the first model turn;
+it does not extract file content into the prompt.
 
 The session detail response includes `debug.sandboxCommands`. Each item returns
 the recorded `safeCommand` and `safeResult`, including model-facing arguments,

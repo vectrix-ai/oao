@@ -10,8 +10,8 @@ project event stream to resume after disconnects.
 
 The current MVP supports three code-context patterns:
 
-1. Attach up to eight supported text/code files or extracted documents directly
-   to an initial or later turn. See
+1. Attach up to eight supported files directly to an initial or later turn.
+   OAO copies their original bytes into the agent sandbox. See
    [Send files to an agent](/integrations/files) for media types and limits.
 2. Put a small, trusted text excerpt directly in `initialMessage` or a later
    turn. The complete message must be no more than 100,000 JavaScript
@@ -100,10 +100,10 @@ different body returns `409 idempotency_conflict`.
 
 ## Pattern 1: attach a small trusted text file
 
-Read the selected file on your server and send canonical base64. The API
-validates text or extracts a supported document, stores the bytes and bounded
-model text durably with the run, and exposes only safe metadata in transcript
-reads:
+Read the selected file on your server and send canonical base64. The API stores
+the original bytes durably with the run, verifies them by SHA-256 at dispatch,
+copies them into the sandbox, and exposes only safe metadata in transcript
+reads. It does not inject the file content into the model prompt:
 
 ```ts
 const source = await readFile(operatorSelectedPath);

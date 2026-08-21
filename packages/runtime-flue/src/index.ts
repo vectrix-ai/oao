@@ -13,6 +13,7 @@ import {
   observe,
   setProvider,
   useAgentFinish,
+  useAgentStart,
   useDelivery,
   useInitialData,
   useModel,
@@ -22,7 +23,6 @@ import {
 } from "@flue/runtime";
 import type {
   DispatchReceipt,
-  DeliveredAttachment,
   DeliveredMessage,
   FlueObservation,
   Sandbox,
@@ -53,6 +53,7 @@ import { withTenantTransaction } from "@oao/db-postgres";
 import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import type {
   OrganizationId,
+  ProjectArtifactStoreResolverPort,
   ProjectId,
   PublicValue,
   RunId,
@@ -164,11 +165,13 @@ export function registerRuntimeModelProvider(provider: Provider): void {
 }
 
 interface ManagedAgentRuntimeConfig {
+  readonly pool: PgPool;
   readonly presets: ModelPresetResolverPort;
   readonly broker: PostgresToolBroker;
   readonly platformTools: ReadonlyMap<string, PlatformToolHandler>;
   readonly skills?: SkillDefinitionResolverPort;
   readonly delegations?: AgentDelegationPort;
+  readonly runFileStorage?: ProjectArtifactStoreResolverPort;
   readonly sandboxFactory?: (
     initial: ManagedAgentInstanceData,
     delivery: ManagedRunDelivery,
@@ -276,12 +279,6 @@ function safeArguments(value: unknown): Readonly<Record<string, PublicValue>> {
   return redacted as Readonly<Record<string, PublicValue>>;
 }
 
-const IMAGE_CONTENT_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-  "image/gif",
-]);
 const DELIVERY_FILENAME_PREFIX = "oao-run-v1.";
 
 function deliveryContext(delivered: DeliveredMessage): ManagedRunDelivery {
@@ -308,46 +305,124 @@ function deliveryContext(delivered: DeliveredMessage): ManagedRunDelivery {
 
 function inputBody(
   message: string,
-  files: readonly ManagedRunFileContent[],
+  delivery: ManagedRunDelivery,
+  files: readonly ManagedRunFileManifest[],
 ): string {
   if (files.length === 0) return message;
-  const sections = files.map((file) => {
-    if (IMAGE_CONTENT_TYPES.has(file.contentType))
-      return `[Attached image: ${file.name} (${file.contentType}, ${file.sizeBytes} bytes)]`;
-    if (!file.modelText)
-      throw new Error("Run file is missing its admitted model text");
-    return [
-      `[Attached file: ${file.name} (${file.contentType}, ${file.sizeBytes} bytes)]`,
-      file.modelText,
-      `[End attached file: ${file.name}]`,
-    ].join("\n");
-  });
-  return [message, "", ...sections].join("\n\n");
+  const entries = files.map((file) =>
+    [
+      `- path: ${JSON.stringify(managedRunFileSandboxPath(delivery.runId, file.name))}`,
+      `  name: ${JSON.stringify(file.name)}`,
+      `  content type: ${file.contentType}`,
+      `  size: ${file.sizeBytes} bytes`,
+      `  SHA-256: ${file.sha256}`,
+    ].join("\n"),
+  );
+  return [
+    message,
+    "",
+    "The following original files were copied into the sandbox without preprocessing. Inspect the files with sandbox tools before answering; their contents are not included in this message.",
+    ...entries,
+  ].join("\n");
+}
+
+const MANAGED_RUN_FILE_DIRECTORY = ".oao/attachments";
+
+export function managedRunFileSandboxPath(runId: string, name: string): string {
+  if (
+    name === "." ||
+    name === ".." ||
+    /[/\\]/u.test(name) ||
+    [...name].some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint < 32 || codePoint === 127;
+    })
+  )
+    throw new Error("Run file name cannot be materialized safely");
+  return `${MANAGED_RUN_FILE_DIRECTORY}/${runId}/${name}`;
+}
+
+export async function materializeManagedRunFiles(
+  sandbox: Sandbox,
+  delivery: ManagedRunDelivery,
+  files: readonly ManagedRunFileContent[],
+): Promise<void> {
+  for (const file of files) {
+    const digest = createHash("sha256").update(file.bytes).digest("hex");
+    if (digest !== file.sha256 || file.bytes.byteLength !== file.sizeBytes)
+      throw new Error("Run file integrity validation failed");
+    await sandbox.writeFile(
+      managedRunFileSandboxPath(delivery.runId, file.name),
+      file.bytes,
+    );
+  }
+}
+
+async function loadManagedRunFiles(
+  pool: PgPool,
+  resolver: ProjectArtifactStoreResolverPort | undefined,
+  tenant: TenantContext & { readonly runId: RunId },
+): Promise<readonly ManagedRunFileContent[]> {
+  const expectedFiles = await withTenantTransaction(
+    pool,
+    tenant,
+    async (transaction) => {
+      const runResult = await transaction.query<{ input_public: unknown }>(
+        `SELECT input_public FROM oao.runs
+       WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+        [tenant.organizationId, tenant.projectId, tenant.runId],
+      );
+      const row = runResult.rows[0];
+      if (!row) throw new Error("Run not found");
+      return v.parse(ManagedRunInputV1Schema, row.input_public).files ?? [];
+    },
+  );
+  if (expectedFiles.length === 0) return [];
+  if (!resolver) throw new Error("Run file object storage is unavailable");
+  const stores = new Map<
+    string,
+    Awaited<ReturnType<ProjectArtifactStoreResolverPort["resolve"]>>
+  >();
+  const files: ManagedRunFileContent[] = [];
+  for (const expected of expectedFiles) {
+    let resolution = stores.get(expected.storageProviderId);
+    if (resolution === undefined) {
+      resolution = await resolver.resolve({
+        tenant,
+        providerId: expected.storageProviderId,
+      });
+      stores.set(expected.storageProviderId, resolution);
+    }
+    if (!resolution)
+      throw new Error("Run file storage provider is unavailable");
+    const stored = await resolution.store.get({
+      tenant,
+      key: expected.objectKey,
+    });
+    if (!stored) throw new Error("Run file is missing from object storage");
+    const bytes = Buffer.from(stored.bytes);
+    const actualDigest = createHash("sha256").update(bytes).digest("hex");
+    if (
+      stored.contentType !== expected.contentType ||
+      bytes.byteLength !== expected.sizeBytes ||
+      actualDigest !== expected.sha256
+    )
+      throw new Error("Run file integrity validation failed");
+    files.push({ ...expected, bytes });
+  }
+  return files;
 }
 
 export function createManagedRunDeliveredMessage(input: {
   readonly delivery: ManagedRunDelivery;
   readonly message: string;
-  readonly files: readonly ManagedRunFileContent[];
+  readonly files: readonly ManagedRunFileManifest[];
 }): DeliveredMessage {
-  const images: DeliveredAttachment[] = input.files
-    .filter((file) => IMAGE_CONTENT_TYPES.has(file.contentType))
-    .map((file, index) => ({
-      type: "image",
-      data: file.bytes.toString("base64"),
-      mimeType: file.contentType,
-      filename:
-        index === 0
-          ? `${DELIVERY_FILENAME_PREFIX}${Buffer.from(JSON.stringify(input.delivery), "utf8").toString("base64url")}`
-          : file.name,
-    }));
-  const body = inputBody(input.message, input.files);
-  if (images.length > 0) return { kind: "user", body, attachments: images };
   return {
     kind: "signal",
     type: "oao.run.v1",
     tagName: "oao-run",
-    body,
+    body: inputBody(input.message, input.delivery, input.files),
     attributes: input.delivery,
   };
 }
@@ -374,6 +449,33 @@ export function ManagedAgent(): string {
         sandbox.persistWorkspace?.(harness.sandbox),
       );
   }
+  useAgentStart(async ({ harness, log }) => {
+    const files = await loadManagedRunFiles(
+      config.pool,
+      config.runFileStorage,
+      {
+        organizationId: initial.organizationId as OrganizationId,
+        projectId: initial.projectId as ProjectId,
+        runId: delivery.runId as RunId,
+      },
+    );
+    if (files.length === 0) return;
+    if (!initial.snapshot.sandbox.enabled || !config.sandboxFactory)
+      throw new Error("Run files require a sandbox-enabled agent");
+    if (
+      !initial.snapshot.sandbox.capabilities.some((capability) =>
+        ["filesystem_read", "shell"].includes(capability),
+      )
+    )
+      throw new Error(
+        "Run files require the filesystem_read or shell sandbox capability",
+      );
+    await materializeManagedRunFiles(harness.sandbox, delivery, files);
+    log.info("Materialized run files in the sandbox", {
+      runId: delivery.runId,
+      fileCount: files.length,
+    });
+  });
 
   if (initial.snapshot.skills.length > 0 && !config.skills)
     throw new Error("ManagedAgent Skill registry is not configured");
@@ -609,20 +711,18 @@ interface RunContext extends TenantContext {
   readonly state: string;
   readonly cancellationRequested: boolean;
   readonly inputPublic: ManagedRunInputV1;
-  readonly files: readonly ManagedRunFileContent[];
+  readonly files: readonly ManagedRunFileManifest[];
   readonly snapshot: ManagedAgentSnapshot;
   readonly workspace: NonNullable<ManagedAgentInstanceData["workspace"]>;
 }
 
-export interface ManagedRunFileContent {
-  readonly id: string;
-  readonly name: string;
-  readonly contentType: string;
-  readonly sizeBytes: number;
-  readonly sha256: string;
+export type ManagedRunFileManifest = NonNullable<
+  ManagedRunInputV1["files"]
+>[number];
+
+export type ManagedRunFileContent = ManagedRunFileManifest & {
   readonly bytes: Buffer;
-  readonly modelText?: string;
-}
+};
 
 interface DispatchRow {
   organization_id: OrganizationId;
@@ -2091,56 +2191,6 @@ export class ManagedRuntimeOrchestrator {
           }) satisfies ManagedSkillBindingSnapshot,
       );
       const runInput = v.parse(ManagedRunInputV1Schema, row.input_public);
-      const fileResult = await transaction.query<{
-        id: string;
-        file_name: string;
-        content_type: string;
-        size_bytes: number;
-        content_sha256: Buffer;
-        content_bytes: Buffer;
-        extracted_text: string | null;
-      }>(
-        `SELECT id,file_name,content_type,size_bytes,content_sha256,content_bytes,extracted_text
-         FROM oao.run_files
-         WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
-         ORDER BY created_at,id`,
-        [tenant.organizationId, tenant.projectId, tenant.runId],
-      );
-      const expectedFiles = runInput.files ?? [];
-      if (fileResult.rows.length !== expectedFiles.length)
-        throw new Error("Run file records do not match the admitted input");
-      const files = expectedFiles.map((expected) => {
-        const stored = fileResult.rows.find((file) => file.id === expected.id);
-        if (!stored) throw new Error("Run file record is missing");
-        const actualDigest = createHash("sha256")
-          .update(stored.content_bytes)
-          .digest("hex");
-        const expectsModelText = !IMAGE_CONTENT_TYPES.has(expected.contentType);
-        if (
-          stored.file_name !== expected.name ||
-          stored.content_type !== expected.contentType ||
-          stored.size_bytes !== expected.sizeBytes ||
-          stored.content_bytes.byteLength !== expected.sizeBytes ||
-          Buffer.from(stored.content_sha256).toString("hex") !==
-            expected.sha256 ||
-          actualDigest !== expected.sha256 ||
-          (expectsModelText
-            ? !stored.extracted_text
-            : stored.extracted_text !== null)
-        )
-          throw new Error("Run file integrity validation failed");
-        return {
-          id: expected.id,
-          name: expected.name,
-          contentType: expected.contentType,
-          sizeBytes: expected.sizeBytes,
-          sha256: expected.sha256,
-          bytes: Buffer.from(stored.content_bytes),
-          ...(stored.extracted_text === null
-            ? {}
-            : { modelText: stored.extracted_text }),
-        } satisfies ManagedRunFileContent;
-      });
       const runtimeConfig = {
         systemPrompt: publication.systemPrompt,
         modelPreset: publication.modelPreset,
@@ -2164,7 +2214,7 @@ export class ManagedRuntimeOrchestrator {
         state: row.state as string,
         cancellationRequested: row.cancellation_requested_at !== null,
         inputPublic: runInput,
-        files,
+        files: runInput.files ?? [],
         snapshot: parsed,
         workspace: {
           id: row.workspace_id as string,
@@ -3083,6 +3133,8 @@ export class PostgresSkillRegistry
         throw new Error(
           "Stored Skill package hash failed integrity validation",
         );
+      // Flue 2.0.3 serializes an empty metadata object as a bare YAML key,
+      // which reloads as null and fails its own frontmatter validation.
       const definition = defineSkill({
         name: loaded.version.skill_name,
         description: loaded.version.description,
@@ -3091,7 +3143,9 @@ export class PostgresSkillRegistry
         ...(loaded.version.compatibility
           ? { compatibility: loaded.version.compatibility }
           : {}),
-        metadata: metadata as Record<string, string>,
+        ...(Object.keys(metadata).length > 0
+          ? { metadata: metadata as Record<string, string> }
+          : {}),
         ...(loaded.version.allowed_tools
           ? { allowedTools: loaded.version.allowed_tools }
           : {}),
@@ -3113,6 +3167,7 @@ export async function startManagedFlueRuntime(input: {
   readonly broker: PostgresToolBroker;
   readonly skills?: SkillDefinitionResolverPort;
   readonly delegations?: AgentDelegationPort;
+  readonly runFileStorage?: ProjectArtifactStoreResolverPort;
   readonly platformTools?: ReadonlyMap<string, PlatformToolHandler>;
   readonly sandboxFactory?: (
     initial: ManagedAgentInstanceData,
@@ -3120,11 +3175,13 @@ export async function startManagedFlueRuntime(input: {
   ) => PersistableSandboxFactory;
 }): Promise<Flue> {
   configureManagedAgentRuntime({
+    pool: input.pool,
     presets: input.presets,
     broker: input.broker,
     platformTools: input.platformTools ?? new Map(),
     ...(input.skills ? { skills: input.skills } : {}),
     ...(input.delegations ? { delegations: input.delegations } : {}),
+    ...(input.runFileStorage ? { runFileStorage: input.runFileStorage } : {}),
     ...(input.sandboxFactory ? { sandboxFactory: input.sandboxFactory } : {}),
   });
   return start({
@@ -3141,4 +3198,5 @@ export const runtimeTesting = {
   turnThinking,
   threadInstanceId,
   compileObjectSchema,
+  loadManagedRunFiles,
 };

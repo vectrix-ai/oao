@@ -510,9 +510,9 @@ adapter to the agent:
 
 `provider` is the key of a project Daytona connection, such as
 `daytona-primary`.
-`snapshotId` is an optional active snapshot UUID returned by that provider's
-snapshot discovery route. The selected UUID is immutable version data; omit it
-to use OAO's default `debian:12.9` image.
+`snapshotId` is required when the sandbox is enabled and must be an active
+snapshot UUID returned by that provider's snapshot discovery route. The
+selected UUID is immutable version data. OAO does not provide an image fallback.
 `network: "none"` blocks external egress. `restricted` uses that connection's
 domain/CIDR allowlist and is rejected at publication when the allowlist is
 empty. Capabilities map to tools as follows: `filesystem_read` adds `read`;
@@ -524,9 +524,14 @@ The selected provider, snapshot, network policy, and capabilities are immutable
 version data. The API key, target, and allowlist remain mutable project
 connection configuration. See [Daytona sandboxes](/sandboxes/daytona).
 
+When a coordinator version has delegates, its sandbox enabled state, provider,
+snapshot, and network policy must match every selected child version because
+their threads share one workspace sandbox. After changing the coordinator
+snapshot, publish compatible child versions first or remove the incompatible
+delegate bindings before publishing.
+
 The publication contract does not expose arbitrary CPU, memory, disk, image, or
-target selection. Those settings come from the selected Daytona snapshot or
-the adapter default.
+target selection. Those settings come from the selected Daytona snapshot.
 
 ## Create and continue a session through the API
 
@@ -598,8 +603,10 @@ Both this route and later-turn routes accept an optional `files` array. Each
 file contains `name`, `contentType`, and canonical `dataBase64`; bytes are never
 returned in the response, transcript, audit log, or SSE. See
 [Send files to an agent](/integrations/files) for supported types, limits, and
-complete SDK/API examples. A session or turn may omit its text field only when
-at least one file is present.
+complete SDK/API examples. The agent version must enable a sandbox with read
+tooling, and binary files require `shell`. OAO copies the original bytes into
+that sandbox without preprocessing. A session or turn may omit its text field
+only when at least one file is present.
 
 ### 2. Wait for the run to settle
 

@@ -1,5 +1,8 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { extractBytes } from "@kreuzberg/node";
+import {
+  parseWorkspaceBackupManifest,
+  workspaceBackupManifestObjectKey,
+} from "@oao/artifact-s3";
 import type { AuthSession, AuthTenantAdapter } from "@oao/auth-core";
 import { readCookie } from "@oao/auth-core";
 import {
@@ -23,7 +26,12 @@ import {
   type SandboxSnapshotEntry,
   type UpdateProjectSandboxProviderConfigurationInput,
 } from "@oao/contracts";
-import type { ArtifactPort, Principal, PublicValue } from "@oao/domain";
+import type {
+  ArtifactPort,
+  Principal,
+  ProjectArtifactStoreResolverPort,
+  PublicValue,
+} from "@oao/domain";
 import { assertPublicPayload, AUTHORIZATION_ACTIONS } from "@oao/domain";
 import { decodeEventCursor, encodeEventCursor } from "@oao/events";
 import type { WakeOnlyNotifier } from "@oao/events";
@@ -34,7 +42,6 @@ import type { PgClient, Queryable } from "@oao/db-postgres";
 import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import type { PostgresApiStore } from "./store.js";
 import type { RuntimeCommandPort } from "./runtime-commands.js";
-import { extractOpenDocumentText } from "./open-document.js";
 import { errorEnvelope, HttpApiError } from "./errors.js";
 import {
   decodeListCursor,
@@ -98,6 +105,7 @@ export interface ApiDependencies {
   readonly auth: RequestAuthenticator;
   readonly webhookAuth?: WebhookAuthenticationAdapter;
   readonly artifacts?: ArtifactPort;
+  readonly runFileStorage?: ProjectArtifactStoreResolverPort;
   readonly notifier?: WakeOnlyNotifier;
   readonly runtimeCommands: RuntimeCommandPort;
   readonly credentialCipher?: ProviderCredentialCipher;
@@ -126,7 +134,6 @@ const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const MAX_RUN_FILES = 8;
 const MAX_RUN_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_RUN_FILES_BYTES = 20 * 1024 * 1024;
-const MAX_RUN_TEXT_CHARACTERS = 200_000;
 const MAX_SKILL_FILES = 128;
 const MAX_SKILL_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_SKILL_PACKAGE_BYTES = 10 * 1024 * 1024;
@@ -215,7 +222,33 @@ interface ParsedRunFile {
   readonly bytes: Buffer;
   readonly sizeBytes: number;
   readonly sha256: string;
-  readonly modelText?: string;
+}
+
+interface StoredRunFileManifest {
+  readonly id: string;
+  readonly name: string;
+  readonly contentType: string;
+  readonly sizeBytes: number;
+  readonly sha256: string;
+  readonly storageProviderId: string;
+  readonly objectKey: string;
+}
+
+interface WorkspaceBackupReadRow {
+  readonly thread_id: string;
+  readonly session_id: string;
+  readonly last_run_id: string;
+  readonly storage_provider_id: string;
+  readonly provider_key: string;
+  readonly display_name: string;
+  readonly provider_type: string;
+  readonly bucket: string;
+  readonly object_key: string;
+  readonly content_length: string;
+  readonly archive_sha256: string;
+  readonly generation: string;
+  readonly backed_up_at: Date;
+  readonly last_restored_at: Date | null;
 }
 
 interface ParsedSkillFile {
@@ -254,41 +287,6 @@ const DOCUMENT_CONTENT_TYPE_ALIASES: Readonly<
   key: ["application/vnd.apple.keynote"],
   eml: ["application/eml", "text/plain"],
 });
-const OPEN_DOCUMENT_EXTENSIONS = new Set([
-  "odt",
-  "ott",
-  "fodt",
-  "ods",
-  "ots",
-  "fods",
-  "odp",
-  "otp",
-  "fodp",
-  "odg",
-  "otg",
-  "fodg",
-  "odf",
-]);
-
-function imageBytesMatch(contentType: string, bytes: Buffer): boolean {
-  if (contentType === "image/png")
-    return bytes
-      .subarray(0, 8)
-      .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-  if (contentType === "image/jpeg")
-    return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
-  if (contentType === "image/gif") {
-    const signature = bytes.subarray(0, 6).toString("ascii");
-    return signature === "GIF87a" || signature === "GIF89a";
-  }
-  if (contentType === "image/webp")
-    return (
-      bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
-      bytes.subarray(8, 12).toString("ascii") === "WEBP"
-    );
-  return false;
-}
-
 function fileExtension(name: string): string {
   const dot = name.lastIndexOf(".");
   return dot < 0 ? "" : name.slice(dot + 1).toLowerCase();
@@ -308,37 +306,7 @@ function declaredDocumentContentTypeMatches(
   );
 }
 
-async function extractRunDocumentText(
-  name: string,
-  bytes: Buffer,
-  contentType: string,
-): Promise<string> {
-  let content: string;
-  try {
-    if (OPEN_DOCUMENT_EXTENSIONS.has(fileExtension(name))) {
-      content = extractOpenDocumentText(bytes);
-    } else {
-      const extracted = await extractBytes(bytes, contentType, {
-        outputFormat: "markdown",
-        useCache: false,
-      });
-      content = extracted.content.trim();
-    }
-  } catch {
-    throw new HttpApiError(
-      "bad_request",
-      `File ${name} could not be read as a supported document. It may be malformed, encrypted, or password-protected.`,
-    );
-  }
-  if (!content)
-    throw new HttpApiError(
-      "bad_request",
-      `File ${name} did not contain extractable text`,
-    );
-  return content;
-}
-
-async function parseRunFiles(value: unknown): Promise<ParsedRunFile[]> {
+function parseRunFiles(value: unknown): ParsedRunFile[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length < 1 || value.length > MAX_RUN_FILES)
     throw new HttpApiError(
@@ -348,7 +316,6 @@ async function parseRunFiles(value: unknown): Promise<ParsedRunFile[]> {
   const files: ParsedRunFile[] = [];
   const names = new Set<string>();
   let totalBytes = 0;
-  let totalTextCharacters = 0;
   for (const raw of value) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw))
       throw new HttpApiError("bad_request", "Each file must be an object");
@@ -434,43 +401,12 @@ async function parseRunFiles(value: unknown): Promise<ParsedRunFile[]> {
         "bad_request",
         `Each file must contain from 1 through ${MAX_RUN_FILE_BYTES} bytes`,
       );
-    if (isImage && !imageBytesMatch(contentType, bytes))
-      throw new HttpApiError(
-        "bad_request",
-        `File ${name} does not match its declared image content type`,
-      );
     totalBytes += bytes.byteLength;
     if (totalBytes > MAX_RUN_FILES_BYTES)
       throw new HttpApiError(
         "bad_request",
         `Combined file data must not exceed ${MAX_RUN_FILES_BYTES} bytes`,
       );
-    let modelText: string | undefined;
-    if (isText) {
-      try {
-        modelText = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      } catch {
-        throw new HttpApiError(
-          "bad_request",
-          `Text file ${name} must contain valid UTF-8`,
-        );
-      }
-      if (modelText.includes("\0"))
-        throw new HttpApiError(
-          "bad_request",
-          `Text file ${name} must not contain NUL bytes`,
-        );
-    } else if (isDocument) {
-      modelText = await extractRunDocumentText(name, bytes, contentType);
-    }
-    if (modelText !== undefined) {
-      totalTextCharacters += modelText.length;
-      if (totalTextCharacters > MAX_RUN_TEXT_CHARACTERS)
-        throw new HttpApiError(
-          "bad_request",
-          `Combined extracted file content must not exceed ${MAX_RUN_TEXT_CHARACTERS} characters`,
-        );
-    }
     files.push({
       id: randomUUID(),
       name,
@@ -478,7 +414,6 @@ async function parseRunFiles(value: unknown): Promise<ParsedRunFile[]> {
       bytes,
       sizeBytes: bytes.byteLength,
       sha256: createHash("sha256").update(bytes).digest("hex"),
-      ...(modelText === undefined ? {} : { modelText }),
     });
   }
   return files;
@@ -500,51 +435,163 @@ function parseRunMessage(
   return requiredString(value, field, 100_000);
 }
 
-function publicRunFiles(files: readonly ParsedRunFile[]) {
+function publicRunFiles(files: readonly StoredRunFileManifest[]) {
   return files.map((file) => ({
     id: file.id,
     name: file.name,
     contentType: file.contentType,
     sizeBytes: file.sizeBytes,
     sha256: file.sha256,
+    storageProviderId: file.storageProviderId,
+    objectKey: file.objectKey,
   }));
 }
 
-async function insertRunFiles(
-  transaction: Queryable,
+async function storeRunFiles(
+  resolver: ProjectArtifactStoreResolverPort | undefined,
   actor: Principal,
   runId: string,
-  messageId: string,
+  files: readonly ParsedRunFile[],
+): Promise<{
+  readonly files: readonly StoredRunFileManifest[];
+  cleanup(): Promise<void>;
+}> {
+  if (files.length === 0)
+    return { files: [], cleanup: () => Promise.resolve() };
+  if (!resolver)
+    throw new HttpApiError(
+      "conflict",
+      "File attachments require configured project object storage",
+    );
+  const resolution = await resolver.resolve({ tenant: actor });
+  if (!resolution)
+    throw new HttpApiError(
+      "conflict",
+      "File attachments require a default project storage provider",
+    );
+  const stored: StoredRunFileManifest[] = [];
+  const storedKeys: string[] = [];
+  const cleanup = async (): Promise<void> => {
+    await Promise.allSettled(
+      storedKeys.map((key) => resolution.store.delete({ tenant: actor, key })),
+    );
+  };
+  try {
+    for (const file of files) {
+      const objectKey = `run-files/runs/${runId}/${file.id}/${file.name}`;
+      await resolution.store.put({
+        tenant: actor,
+        key: objectKey,
+        bytes: file.bytes,
+        contentType: file.contentType,
+      });
+      storedKeys.push(objectKey);
+      stored.push({
+        id: file.id,
+        name: file.name,
+        contentType: file.contentType,
+        sizeBytes: file.sizeBytes,
+        sha256: file.sha256,
+        storageProviderId: resolution.providerId,
+        objectKey,
+      });
+    }
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+  return { files: stored, cleanup };
+}
+
+async function publicWorkspaceBackups(
+  resolver: ProjectArtifactStoreResolverPort | undefined,
+  actor: Principal,
+  backups: readonly WorkspaceBackupReadRow[],
+): Promise<readonly Readonly<Record<string, unknown>>[]> {
+  return Promise.all(
+    backups.map(async (backup) => {
+      const { archive_sha256: archiveSha256, ...publicBackup } = backup;
+      const storageProviderId = backup.storage_provider_id;
+      const base = publicValue(publicBackup) as Readonly<
+        Record<string, unknown>
+      >;
+      if (!resolver)
+        return { ...base, manifestState: "unavailable", files: [] };
+      try {
+        const resolution = await resolver.resolve({
+          tenant: actor,
+          providerId: storageProviderId,
+        });
+        if (!resolution)
+          return { ...base, manifestState: "unavailable", files: [] };
+        const stored = await resolution.store.get({
+          tenant: actor,
+          key: workspaceBackupManifestObjectKey(backup.object_key),
+        });
+        if (!stored) return { ...base, manifestState: "missing", files: [] };
+        const manifest = parseWorkspaceBackupManifest(stored.bytes, {
+          archiveSha256,
+          archiveSizeBytes: Number(backup.content_length),
+        });
+        return {
+          ...base,
+          manifestState: "available",
+          files: manifest.files,
+        };
+      } catch {
+        return { ...base, manifestState: "invalid", files: [] };
+      }
+    }),
+  );
+}
+
+async function assertAgentCanInspectRunFiles(
+  transaction: Queryable,
+  actor: Principal,
+  agentVersionId: string,
   files: readonly ParsedRunFile[],
 ): Promise<void> {
-  for (const file of files) {
-    await transaction.query(
-      `INSERT INTO oao.run_files (
-         organization_id,project_id,id,run_id,message_id,file_name,content_type,
-         size_bytes,content_sha256,content_bytes,extracted_text
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,decode($9,'hex'),$10,$11)`,
-      [
-        actor.organizationId,
-        actor.projectId,
-        file.id,
-        runId,
-        messageId,
-        file.name,
-        file.contentType,
-        file.sizeBytes,
-        file.sha256,
-        file.bytes,
-        file.modelText ?? null,
-      ],
+  if (files.length === 0) return;
+  const result = await transaction.query(
+    `SELECT config FROM oao.agent_versions
+     WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+    [actor.organizationId, actor.projectId, agentVersionId],
+  );
+  const row = result.rows[0] as { config: unknown } | undefined;
+  if (!row) throw new HttpApiError("not_found", "Agent version not found");
+  const sandbox = parseManagedAgentSnapshotForPublication(row.config).sandbox;
+  if (!sandbox.enabled)
+    throw new HttpApiError(
+      "conflict",
+      "File attachments require a sandbox-enabled agent",
     );
-  }
+  const capabilities = new Set(sandbox.capabilities);
+  const requiresShell = files.some(
+    (file) =>
+      !file.contentType.startsWith("text/") &&
+      !TEXT_CONTENT_TYPES.has(file.contentType),
+  );
+  if (requiresShell && !capabilities.has("shell"))
+    throw new HttpApiError(
+      "conflict",
+      "Binary file attachments require the shell sandbox capability",
+    );
+  if (
+    !requiresShell &&
+    !capabilities.has("filesystem_read") &&
+    !capabilities.has("shell")
+  )
+    throw new HttpApiError(
+      "conflict",
+      "Text file attachments require the filesystem_read or shell sandbox capability",
+    );
 }
 
 function parseSkillFilePath(value: unknown): string {
   const path = requiredString(value, "files[].path", 240).normalize("NFC");
   const segments = path.split("/");
   if (
-    path === "SKILL.md" ||
+    path.toLocaleLowerCase("en-US") === "skill.md" ||
     path.startsWith("/") ||
     path.endsWith("/") ||
     path.includes("\\") ||
@@ -565,6 +612,32 @@ function parseSkillFilePath(value: unknown): string {
       "Skill file paths must be safe relative paths and must not be SKILL.md",
     );
   return path;
+}
+
+function optionalUuid(value: unknown, name: string): string | undefined {
+  if (value === undefined) return undefined;
+  const parsed = requiredString(value, name, 36);
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      parsed,
+    )
+  )
+    throw new HttpApiError("bad_request", `${name} must be a UUID`);
+  return parsed;
+}
+
+function optionalDraftString(
+  value: unknown,
+  name: string,
+  maximum: number,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length > maximum)
+    throw new HttpApiError(
+      "bad_request",
+      `${name} must be a string of at most ${maximum} characters`,
+    );
+  return value;
 }
 
 function parseSkillVersionInput(
@@ -704,6 +777,204 @@ function parseSkillVersionInput(
     files,
     totalBytes,
     contentHash: Buffer.from(requestHash(canonical)).toString("hex"),
+  };
+}
+
+async function readSkillDraft(
+  transaction: Queryable,
+  actor: Principal,
+  draftId: string,
+): Promise<Readonly<Record<string, unknown>>> {
+  const result = await transaction.query(
+    `SELECT id,organization_id,project_id,skill_id,source_skill_version_id,
+            skill_key AS key,display_name,skill_name AS name,description,
+            instructions,license,compatibility,metadata,allowed_tools,revision,
+            status,published_skill_version_id,created_by_principal_id,
+            created_at,updated_at
+       FROM oao.skill_package_drafts
+      WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+    [actor.organizationId, actor.projectId, draftId],
+  );
+  const draft = publicValue(result.rows[0]) as
+    Readonly<Record<string, unknown>> | undefined;
+  if (!draft) throw new HttpApiError("not_found", "Skill draft not found");
+  const entries = await transaction.query(
+    `SELECT entry_path,entry_kind,content_type,size_bytes,
+            content_sha256,content_bytes
+       FROM oao.skill_package_draft_entries
+      WHERE organization_id=$1 AND project_id=$2 AND draft_id=$3
+      ORDER BY entry_path`,
+    [actor.organizationId, actor.projectId, draftId],
+  );
+  const entryRows = entries.rows as readonly {
+    entry_path: string;
+    entry_kind: "directory" | "file";
+    content_type: string | null;
+    size_bytes: number | null;
+    content_sha256: Buffer | null;
+    content_bytes: Buffer | null;
+  }[];
+  return {
+    ...draft,
+    entries: entryRows.map((entry) => ({
+      path: entry.entry_path,
+      kind: entry.entry_kind,
+      contentType: entry.content_type,
+      sizeBytes: entry.size_bytes,
+      sha256: entry.content_sha256
+        ? Buffer.from(entry.content_sha256).toString("hex")
+        : null,
+      ...(entry.content_bytes
+        ? {
+            dataBase64: Buffer.from(entry.content_bytes).toString("base64"),
+          }
+        : {}),
+    })),
+  };
+}
+
+async function assertEditingSkillDraft(
+  transaction: Queryable,
+  actor: Principal,
+  draftId: string,
+): Promise<void> {
+  const result = await transaction.query(
+    `SELECT id FROM oao.skill_package_drafts
+      WHERE organization_id=$1 AND project_id=$2 AND id=$3
+        AND status='editing' FOR UPDATE`,
+    [actor.organizationId, actor.projectId, draftId],
+  );
+  if (!result.rowCount)
+    throw new HttpApiError(
+      "conflict",
+      "Skill draft is missing or is no longer editable",
+    );
+}
+
+function skillDraftParentPaths(path: string): readonly string[] {
+  const segments = path.split("/");
+  return segments
+    .slice(0, -1)
+    .map((_segment, index) => segments.slice(0, index + 1).join("/"));
+}
+
+function parseMarkdownSkillDraftFile(
+  value: Readonly<Record<string, unknown>>,
+): ParsedSkillFile {
+  const path = parseSkillFilePath(value.path);
+  if (!path.toLocaleLowerCase("en-US").endsWith(".md"))
+    throw new HttpApiError(
+      "bad_request",
+      "Skill draft files must use the .md extension",
+    );
+  const contentType = requiredString(
+    value.contentType ?? "text/markdown",
+    "contentType",
+    200,
+  )
+    .split(";", 1)[0]!
+    .trim()
+    .toLocaleLowerCase("en-US");
+  if (contentType !== "text/markdown")
+    throw new HttpApiError(
+      "bad_request",
+      "Skill draft files must use text/markdown",
+    );
+  const dataBase64 = requiredString(
+    value.dataBase64,
+    "dataBase64",
+    Math.ceil((MAX_SKILL_FILE_BYTES * 4) / 3) + 8,
+  );
+  if (
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(
+      dataBase64,
+    )
+  )
+    throw new HttpApiError("bad_request", "File data must be canonical base64");
+  const bytes = Buffer.from(dataBase64, "base64");
+  if (bytes.byteLength < 1 || bytes.byteLength > MAX_SKILL_FILE_BYTES)
+    throw new HttpApiError(
+      "bad_request",
+      `Each Skill file must contain from 1 through ${MAX_SKILL_FILE_BYTES} bytes`,
+    );
+  try {
+    const markdown = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (markdown.includes("\0")) throw new Error("NUL");
+  } catch {
+    throw new HttpApiError(
+      "bad_request",
+      "Skill draft Markdown must be valid UTF-8 without NUL characters",
+    );
+  }
+  return {
+    path,
+    contentType,
+    bytes,
+    sizeBytes: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
+async function loadSkillDraftPublication(
+  transaction: Queryable,
+  actor: Principal,
+  draftId: string,
+): Promise<{
+  readonly draft: Readonly<Record<string, unknown>>;
+  readonly input: ParsedSkillVersionInput;
+  readonly key: string;
+  readonly displayName: string;
+}> {
+  const draftResult = await transaction.query(
+    `SELECT id,skill_id,skill_key,display_name,skill_name,description,
+            instructions,license,compatibility,metadata,allowed_tools,status
+       FROM oao.skill_package_drafts
+      WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
+    [actor.organizationId, actor.projectId, draftId],
+  );
+  const draft = draftResult.rows[0] as
+    Readonly<Record<string, unknown>> | undefined;
+  if (!draft) throw new HttpApiError("not_found", "Skill draft not found");
+  if (draft.status !== "editing")
+    throw new HttpApiError("conflict", "Skill draft is no longer editable");
+  const files = await transaction.query(
+    `SELECT entry_path,content_type,content_bytes
+       FROM oao.skill_package_draft_entries
+      WHERE organization_id=$1 AND project_id=$2 AND draft_id=$3
+        AND entry_kind='file'
+      ORDER BY entry_path`,
+    [actor.organizationId, actor.projectId, draftId],
+  );
+  const fileRows = files.rows as readonly {
+    entry_path: string;
+    content_type: string;
+    content_bytes: Buffer;
+  }[];
+  const input = parseSkillVersionInput({
+    name: draft.skill_name,
+    description: draft.description,
+    instructions: draft.instructions,
+    ...(draft.license ? { license: draft.license } : {}),
+    ...(draft.compatibility ? { compatibility: draft.compatibility } : {}),
+    metadata: draft.metadata,
+    ...(draft.allowed_tools ? { allowedTools: draft.allowed_tools } : {}),
+    files: fileRows.map((file) => ({
+      path: file.entry_path,
+      contentType: file.content_type,
+      dataBase64: Buffer.from(file.content_bytes).toString("base64"),
+    })),
+  });
+  const key = requiredString(draft.skill_key, "key", 120);
+  if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(key))
+    throw new HttpApiError(
+      "bad_request",
+      "Skill key must use lowercase letters, numbers, and single hyphens",
+    );
+  return {
+    draft,
+    input,
+    key,
+    displayName: requiredString(draft.display_name, "displayName", 200),
   };
 }
 
@@ -976,20 +1247,36 @@ async function assertSandboxProviderApproved(
   actor: Principal,
   config: ManagedAgentPublicationConfig["sandbox"],
   projectProvidersEnabled: boolean,
+  credentialCipher: ProviderCredentialCipher | undefined,
+  snapshotCatalog: SandboxSnapshotCatalogPort | undefined,
 ): Promise<void> {
   if (!config.enabled) return;
+  if (!config.snapshotId)
+    throw new HttpApiError(
+      "bad_request",
+      "config.sandbox.snapshotId is required when the sandbox is enabled",
+    );
   if (!projectProvidersEnabled)
     throw new HttpApiError(
       "bad_request",
       "config.sandbox.provider is not available until credential encryption is configured",
     );
   const result = await transaction.query<{
+    id: string;
+    provider_type: "daytona";
+    encrypted_api_key: Buffer;
+    encryption_nonce: Buffer;
+    encryption_tag: Buffer;
+    encryption_key_version: number;
+    target: string | null;
     restricted_egress: {
       allowedDomains?: readonly string[];
       allowedCidrs?: readonly string[];
     };
   }>(
-    `SELECT restricted_egress FROM oao.project_sandbox_providers
+    `SELECT id,provider_type,encrypted_api_key,encryption_nonce,
+            encryption_tag,encryption_key_version,target,restricted_egress
+       FROM oao.project_sandbox_providers
      WHERE organization_id=$1 AND project_id=$2 AND provider_key=$3`,
     [actor.organizationId, actor.projectId, config.provider],
   );
@@ -998,6 +1285,38 @@ async function assertSandboxProviderApproved(
     throw new HttpApiError(
       "bad_request",
       "config.sandbox.provider is not configured for this project",
+    );
+  if (!credentialCipher || !snapshotCatalog)
+    throw new HttpApiError(
+      "internal_error",
+      "Sandbox snapshot discovery is not configured",
+    );
+  const apiKey = credentialCipher.decrypt(
+    {
+      ciphertext: provider.encrypted_api_key,
+      nonce: provider.encryption_nonce,
+      tag: provider.encryption_tag,
+      keyVersion: provider.encryption_key_version,
+    },
+    {
+      organizationId: actor.organizationId,
+      projectId: actor.projectId,
+      providerId: provider.id,
+      providerType: provider.provider_type,
+    },
+  );
+  const snapshots = await snapshotCatalog.listSnapshots({
+    apiKey,
+    ...(provider.target ? { target: provider.target } : {}),
+  });
+  if (
+    !snapshots.some(
+      (snapshot) => snapshot.id === config.snapshotId && snapshot.available,
+    )
+  )
+    throw new HttpApiError(
+      "bad_request",
+      "config.sandbox.snapshotId is not an active snapshot for this Daytona connection",
     );
   if (
     config.network === "restricted" &&
@@ -2409,6 +2728,76 @@ function registerStorageProviderRoutes(
       );
     },
   );
+
+  app.get(
+    "/v1/projects/:projectId/storage-providers/:providerId/objects",
+    async (c) => {
+      const actor = assertProject(c);
+      const prefix = parseStorageObjectPrefix(c.req.query("prefix"));
+      const cursor = c.req.query("cursor");
+      if (cursor !== undefined && (cursor.length < 1 || cursor.length > 2_048))
+        throw new HttpApiError("bad_request", "cursor is invalid");
+      const rawLimit = c.req.query("limit");
+      const limit = rawLimit === undefined ? undefined : Number(rawLimit);
+      if (
+        limit !== undefined &&
+        (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000)
+      )
+        throw new HttpApiError(
+          "bad_request",
+          "limit must be an integer from 1 through 1000",
+        );
+      return dependencies.store.transaction(actor, "agent:read", async () => {
+        if (!dependencies.runFileStorage)
+          throw new HttpApiError(
+            "conflict",
+            "Project object storage is not configured",
+          );
+        const resolution = await dependencies.runFileStorage.resolve({
+          tenant: actor,
+          providerId: c.req.param("providerId"),
+        });
+        if (!resolution)
+          throw new HttpApiError("not_found", "Storage provider not found");
+        const listing = await resolution.store.list({
+          tenant: actor,
+          ...(prefix ? { prefix } : {}),
+          ...(cursor ? { cursor } : {}),
+          ...(limit === undefined ? {} : { limit }),
+        });
+        return c.json({
+          providerId: resolution.providerId,
+          prefix: listing.prefix,
+          folders: listing.folders,
+          objects: listing.objects,
+          truncated: listing.truncated,
+          ...(listing.cursor ? { cursor: listing.cursor } : {}),
+        });
+      });
+    },
+  );
+}
+
+function parseStorageObjectPrefix(value: string | undefined): string {
+  if (value === undefined || value === "") return "";
+  if (value.length > 1_024 || value.startsWith("/") || value.includes("\\"))
+    throw new HttpApiError("bad_request", "prefix is not a safe folder path");
+  const withoutSlash = value.endsWith("/") ? value.slice(0, -1) : value;
+  const segments = withoutSlash.split("/");
+  if (
+    segments.some(
+      (segment) =>
+        !segment ||
+        segment === "." ||
+        segment === ".." ||
+        [...segment].some((character) => {
+          const codePoint = character.codePointAt(0) ?? 0;
+          return codePoint < 32 || codePoint === 127;
+        }),
+    )
+  )
+    throw new HttpApiError("bad_request", "prefix is not a safe folder path");
+  return `${withoutSlash}/`;
 }
 
 function registerModelPresetRoutes(
@@ -2919,6 +3308,656 @@ function registerSkillRoutes(
      AND lifecycle.project_id=v.project_id
      AND lifecycle.skill_version_id=v.id`;
 
+  app.get("/v1/projects/:projectId/skill-drafts", async (c) => {
+    const actor = assertProject(c);
+    return dependencies.store.transaction(actor, "skill:read", async (tx) => {
+      const result = await tx.query<{ id: string }>(
+        `SELECT id FROM oao.skill_package_drafts
+          WHERE organization_id=$1 AND project_id=$2 AND status='editing'
+          ORDER BY updated_at DESC,id DESC LIMIT 100`,
+        [actor.organizationId, actor.projectId],
+      );
+      const drafts = [];
+      for (const row of result.rows)
+        drafts.push(await readSkillDraft(tx, actor, row.id));
+      return c.json({ data: drafts });
+    });
+  });
+
+  app.post("/v1/projects/:projectId/skill-drafts", async (c) => {
+    const actor = assertProject(c);
+    const body = await readJsonObject(c.req.raw);
+    const idem = idempotencyKey(c.req.raw);
+    const requestedSkillId = optionalUuid(body.skillId, "skillId");
+    const requestedSourceVersionId = optionalUuid(
+      body.sourceSkillVersionId,
+      "sourceSkillVersionId",
+    );
+    if (requestedSourceVersionId && !requestedSkillId)
+      throw new HttpApiError(
+        "bad_request",
+        "sourceSkillVersionId requires skillId",
+      );
+    return dependencies.store.transaction(actor, "skill:write", async (tx) => {
+      const response = await dependencies.store.idempotent(tx, actor, {
+        scope: "POST:/skill-drafts",
+        key: idem,
+        hash: requestHash(body),
+        status: 201,
+        execute: async () => {
+          let source:
+            | Readonly<{
+                skill_id: string;
+                version_id: string;
+                skill_key: string;
+                display_name: string;
+                skill_name: string;
+                description: string;
+                instructions: string;
+                license: string | null;
+                compatibility: string | null;
+                metadata: Readonly<Record<string, string>>;
+                allowed_tools: string | null;
+              }>
+            | undefined;
+          if (requestedSkillId) {
+            const sourceResult = await tx.query<NonNullable<typeof source>>(
+              `SELECT skill.id AS skill_id,version.id AS version_id,
+                      skill.skill_key,skill.display_name,version.skill_name,
+                      version.description,version.instructions,version.license,
+                      version.compatibility,version.metadata,version.allowed_tools
+                 FROM oao.skills skill
+                 JOIN oao.skill_versions version
+                   ON version.organization_id=skill.organization_id
+                  AND version.project_id=skill.project_id
+                  AND version.skill_id=skill.id
+                  AND version.id=COALESCE($4::uuid,skill.latest_version_id)
+                WHERE skill.organization_id=$1 AND skill.project_id=$2
+                  AND skill.id=$3`,
+              [
+                actor.organizationId,
+                actor.projectId,
+                requestedSkillId,
+                requestedSourceVersionId ?? null,
+              ],
+            );
+            source = sourceResult.rows[0];
+            if (!source)
+              throw new HttpApiError(
+                "not_found",
+                "Skill or source Skill version not found",
+              );
+          }
+          const draftId = randomUUID();
+          await tx.query(
+            `INSERT INTO oao.skill_package_drafts (
+               organization_id,project_id,id,skill_id,source_skill_version_id,
+               skill_key,display_name,skill_name,description,instructions,
+               license,compatibility,metadata,allowed_tools,
+               created_by_principal_id
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+            [
+              actor.organizationId,
+              actor.projectId,
+              draftId,
+              source?.skill_id ?? null,
+              source?.version_id ?? null,
+              source?.skill_key ??
+                optionalDraftString(body.key, "key", 120) ??
+                "",
+              source?.display_name ??
+                optionalDraftString(body.displayName, "displayName", 200) ??
+                "",
+              source?.skill_name ??
+                optionalDraftString(body.name, "name", 64) ??
+                "",
+              source?.description ??
+                optionalDraftString(body.description, "description", 1_024) ??
+                "",
+              source?.instructions ??
+                optionalDraftString(
+                  body.instructions,
+                  "instructions",
+                  200_000,
+                ) ??
+                "",
+              source?.license ?? null,
+              source?.compatibility ?? null,
+              source?.metadata ?? {},
+              source?.allowed_tools ?? null,
+              actor.id,
+            ],
+          );
+          if (source)
+            await tx.query(
+              `INSERT INTO oao.skill_package_draft_entries (
+                 organization_id,project_id,draft_id,entry_path,entry_kind,
+                 content_type,size_bytes,content_sha256,content_bytes
+               )
+               SELECT organization_id,project_id,$4,file_path,'file',content_type,
+                      size_bytes,content_sha256,content_bytes
+                 FROM oao.skill_version_files
+                WHERE organization_id=$1 AND project_id=$2
+                  AND skill_version_id=$3`,
+              [
+                actor.organizationId,
+                actor.projectId,
+                source.version_id,
+                draftId,
+              ],
+            );
+          await dependencies.store.appendEvent(tx, actor, {
+            aggregateType: "skill_draft",
+            aggregateId: draftId,
+            kind: "skill.draft_created",
+            payload: {
+              ...(source ? { sourceSkillVersionId: source.version_id } : {}),
+            },
+          });
+          await dependencies.store.appendAudit(tx, actor, {
+            action: "skill.draft_created",
+            resourceType: "skill_draft",
+            resourceId: draftId,
+            detail: {
+              ...(source ? { sourceSkillVersionId: source.version_id } : {}),
+            },
+          });
+          return readSkillDraft(tx, actor, draftId);
+        },
+      });
+      c.header("idempotency-replayed", String(response.replayed));
+      return c.json(response.body, 201);
+    });
+  });
+
+  app.get("/v1/projects/:projectId/skill-drafts/:draftId", async (c) => {
+    const actor = assertProject(c);
+    return dependencies.store.transaction(actor, "skill:read", async (tx) =>
+      c.json(await readSkillDraft(tx, actor, c.req.param("draftId"))),
+    );
+  });
+
+  app.patch("/v1/projects/:projectId/skill-drafts/:draftId", async (c) => {
+    const actor = assertProject(c);
+    const body = await readJsonObject(c.req.raw);
+    const idem = idempotencyKey(c.req.raw);
+    const fields = {
+      key: optionalDraftString(body.key, "key", 120),
+      displayName: optionalDraftString(body.displayName, "displayName", 200),
+      name: optionalDraftString(body.name, "name", 64),
+      description: optionalDraftString(body.description, "description", 1_024),
+      instructions: optionalDraftString(
+        body.instructions,
+        "instructions",
+        200_000,
+      ),
+    };
+    return dependencies.store.transaction(actor, "skill:write", async (tx) => {
+      const response = await dependencies.store.idempotent(tx, actor, {
+        scope: `PATCH:/skill-drafts/${c.req.param("draftId")}`,
+        key: idem,
+        hash: requestHash(body),
+        status: 200,
+        execute: async () => {
+          await assertEditingSkillDraft(tx, actor, c.req.param("draftId"));
+          await tx.query(
+            `UPDATE oao.skill_package_drafts
+                SET skill_key=COALESCE($4,skill_key),
+                    display_name=COALESCE($5,display_name),
+                    skill_name=COALESCE($6,skill_name),
+                    description=COALESCE($7,description),
+                    instructions=COALESCE($8,instructions),
+                    revision=revision+1,updated_at=clock_timestamp()
+              WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+            [
+              actor.organizationId,
+              actor.projectId,
+              c.req.param("draftId"),
+              fields.key ?? null,
+              fields.displayName ?? null,
+              fields.name ?? null,
+              fields.description ?? null,
+              fields.instructions ?? null,
+            ],
+          );
+          return readSkillDraft(tx, actor, c.req.param("draftId"));
+        },
+      });
+      c.header("idempotency-replayed", String(response.replayed));
+      return c.json(response.body);
+    });
+  });
+
+  app.post(
+    "/v1/projects/:projectId/skill-drafts/:draftId/directories",
+    async (c) => {
+      const actor = assertProject(c);
+      const body = await readJsonObject(c.req.raw);
+      const idem = idempotencyKey(c.req.raw);
+      const path = parseSkillFilePath(body.path);
+      return dependencies.store.transaction(
+        actor,
+        "skill:write",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `POST:/skill-drafts/${c.req.param("draftId")}/directories`,
+            key: idem,
+            hash: requestHash(body),
+            status: 201,
+            execute: async () => {
+              await assertEditingSkillDraft(tx, actor, c.req.param("draftId"));
+              for (const directory of [...skillDraftParentPaths(path), path]) {
+                const existing = await tx.query<{ entry_kind: string }>(
+                  `SELECT entry_kind FROM oao.skill_package_draft_entries
+                  WHERE organization_id=$1 AND project_id=$2
+                    AND draft_id=$3 AND lower(entry_path)=lower($4)`,
+                  [
+                    actor.organizationId,
+                    actor.projectId,
+                    c.req.param("draftId"),
+                    directory,
+                  ],
+                );
+                if (existing.rows[0]?.entry_kind === "file")
+                  throw new HttpApiError(
+                    "conflict",
+                    `A file already occupies ${directory}`,
+                  );
+                if (!existing.rowCount)
+                  await tx.query(
+                    `INSERT INTO oao.skill_package_draft_entries (
+                     organization_id,project_id,draft_id,entry_path,entry_kind
+                   ) VALUES ($1,$2,$3,$4,'directory')`,
+                    [
+                      actor.organizationId,
+                      actor.projectId,
+                      c.req.param("draftId"),
+                      directory,
+                    ],
+                  );
+              }
+              await tx.query(
+                `UPDATE oao.skill_package_drafts
+                  SET revision=revision+1,updated_at=clock_timestamp()
+                WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+                [actor.organizationId, actor.projectId, c.req.param("draftId")],
+              );
+              return readSkillDraft(tx, actor, c.req.param("draftId"));
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body, 201);
+        },
+      );
+    },
+  );
+
+  app.put("/v1/projects/:projectId/skill-drafts/:draftId/files", async (c) => {
+    const actor = assertProject(c);
+    const body = await readJsonObject(c.req.raw);
+    const idem = idempotencyKey(c.req.raw);
+    const file = parseMarkdownSkillDraftFile(body);
+    return dependencies.store.transaction(actor, "skill:write", async (tx) => {
+      const response = await dependencies.store.idempotent(tx, actor, {
+        scope: `PUT:/skill-drafts/${c.req.param("draftId")}/files`,
+        key: idem,
+        hash: requestHash(body),
+        status: 200,
+        execute: async () => {
+          await assertEditingSkillDraft(tx, actor, c.req.param("draftId"));
+          for (const directory of skillDraftParentPaths(file.path)) {
+            const parent = await tx.query<{ entry_kind: string }>(
+              `SELECT entry_kind FROM oao.skill_package_draft_entries
+                  WHERE organization_id=$1 AND project_id=$2
+                    AND draft_id=$3 AND lower(entry_path)=lower($4)`,
+              [
+                actor.organizationId,
+                actor.projectId,
+                c.req.param("draftId"),
+                directory,
+              ],
+            );
+            if (parent.rows[0]?.entry_kind !== "directory")
+              if (parent.rowCount)
+                throw new HttpApiError(
+                  "conflict",
+                  `A file already occupies ${directory}`,
+                );
+              else
+                await tx.query(
+                  `INSERT INTO oao.skill_package_draft_entries (
+                       organization_id,project_id,draft_id,entry_path,entry_kind
+                     ) VALUES ($1,$2,$3,$4,'directory')`,
+                  [
+                    actor.organizationId,
+                    actor.projectId,
+                    c.req.param("draftId"),
+                    directory,
+                  ],
+                );
+          }
+          const current = await tx.query<{
+            file_count: number;
+            total_bytes: number;
+            existing_bytes: number;
+            existing_kind: string | null;
+            existing_path: string | null;
+            descendant_count: number;
+          }>(
+            `SELECT
+                 count(*) FILTER (WHERE entry_kind='file')::int AS file_count,
+                 COALESCE(sum(size_bytes) FILTER (WHERE entry_kind='file'),0)::int AS total_bytes,
+                 COALESCE(max(size_bytes) FILTER (WHERE lower(entry_path)=lower($4)),0)::int AS existing_bytes,
+                 max(entry_kind) FILTER (WHERE lower(entry_path)=lower($4)) AS existing_kind,
+                 max(entry_path) FILTER (WHERE lower(entry_path)=lower($4)) AS existing_path,
+                 count(*) FILTER (WHERE lower(entry_path) LIKE lower($4) || '/%')::int AS descendant_count
+               FROM oao.skill_package_draft_entries
+               WHERE organization_id=$1 AND project_id=$2 AND draft_id=$3`,
+            [
+              actor.organizationId,
+              actor.projectId,
+              c.req.param("draftId"),
+              file.path,
+            ],
+          );
+          const totals = current.rows[0]!;
+          if (totals.existing_kind === "directory")
+            throw new HttpApiError(
+              "conflict",
+              `A directory already occupies ${file.path}`,
+            );
+          if (totals.existing_path && totals.existing_path !== file.path)
+            throw new HttpApiError(
+              "conflict",
+              "Skill draft paths must be unique after case folding",
+            );
+          if (totals.descendant_count > 0)
+            throw new HttpApiError(
+              "conflict",
+              `A directory tree already occupies ${file.path}`,
+            );
+          if (!totals.existing_kind && totals.file_count >= MAX_SKILL_FILES)
+            throw new HttpApiError(
+              "bad_request",
+              `A Skill draft can contain at most ${MAX_SKILL_FILES} files`,
+            );
+          if (
+            totals.total_bytes - totals.existing_bytes + file.sizeBytes >
+            MAX_SKILL_PACKAGE_BYTES
+          )
+            throw new HttpApiError(
+              "bad_request",
+              `Skill draft files must not exceed ${MAX_SKILL_PACKAGE_BYTES} bytes`,
+            );
+          await tx.query(
+            `INSERT INTO oao.skill_package_draft_entries (
+                 organization_id,project_id,draft_id,entry_path,entry_kind,
+                 content_type,size_bytes,content_sha256,content_bytes
+               ) VALUES ($1,$2,$3,$4,'file',$5,$6,decode($7,'hex'),$8)
+               ON CONFLICT (organization_id,project_id,draft_id,entry_path)
+               DO UPDATE SET content_type=EXCLUDED.content_type,
+                 size_bytes=EXCLUDED.size_bytes,
+                 content_sha256=EXCLUDED.content_sha256,
+                 content_bytes=EXCLUDED.content_bytes,
+                 updated_at=clock_timestamp()`,
+            [
+              actor.organizationId,
+              actor.projectId,
+              c.req.param("draftId"),
+              file.path,
+              file.contentType,
+              file.sizeBytes,
+              file.sha256,
+              file.bytes,
+            ],
+          );
+          await tx.query(
+            `UPDATE oao.skill_package_drafts
+                  SET revision=revision+1,updated_at=clock_timestamp()
+                WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+            [actor.organizationId, actor.projectId, c.req.param("draftId")],
+          );
+          return readSkillDraft(tx, actor, c.req.param("draftId"));
+        },
+      });
+      c.header("idempotency-replayed", String(response.replayed));
+      return c.json(response.body);
+    });
+  });
+
+  app.delete(
+    "/v1/projects/:projectId/skill-drafts/:draftId/entries",
+    async (c) => {
+      const actor = assertProject(c);
+      const path = parseSkillFilePath(c.req.query("path"));
+      const recursive = c.req.query("recursive") === "true";
+      const idem = idempotencyKey(c.req.raw);
+      return dependencies.store.transaction(
+        actor,
+        "skill:write",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `DELETE:/skill-drafts/${c.req.param("draftId")}/entries`,
+            key: idem,
+            hash: requestHash({ path, recursive }),
+            status: 200,
+            execute: async () => {
+              await assertEditingSkillDraft(tx, actor, c.req.param("draftId"));
+              const descendants = await tx.query<{ count: number }>(
+                `SELECT count(*)::int AS count
+                 FROM oao.skill_package_draft_entries
+                WHERE organization_id=$1 AND project_id=$2 AND draft_id=$3
+                  AND entry_path LIKE $4 || '/%'`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  c.req.param("draftId"),
+                  path,
+                ],
+              );
+              if ((descendants.rows[0]?.count ?? 0) > 0 && !recursive)
+                throw new HttpApiError(
+                  "conflict",
+                  "Directory is not empty; pass recursive=true to remove it",
+                );
+              const removed = await tx.query(
+                `DELETE FROM oao.skill_package_draft_entries
+                WHERE organization_id=$1 AND project_id=$2 AND draft_id=$3
+                  AND (entry_path=$4 OR ($5 AND entry_path LIKE $4 || '/%'))`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  c.req.param("draftId"),
+                  path,
+                  recursive,
+                ],
+              );
+              if (!removed.rowCount)
+                throw new HttpApiError("not_found", "Draft entry not found");
+              await tx.query(
+                `UPDATE oao.skill_package_drafts
+                  SET revision=revision+1,updated_at=clock_timestamp()
+                WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+                [actor.organizationId, actor.projectId, c.req.param("draftId")],
+              );
+              return readSkillDraft(tx, actor, c.req.param("draftId"));
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body);
+        },
+      );
+    },
+  );
+
+  app.post(
+    "/v1/projects/:projectId/skill-drafts/:draftId/validate",
+    async (c) => {
+      const actor = assertProject(c);
+      return dependencies.store.transaction(
+        actor,
+        "skill:write",
+        async (tx) => {
+          const publication = await loadSkillDraftPublication(
+            tx,
+            actor,
+            c.req.param("draftId"),
+          );
+          return c.json({
+            valid: true,
+            contentHash: publication.input.contentHash,
+            totalBytes: publication.input.totalBytes,
+            fileCount: publication.input.files.length,
+          });
+        },
+      );
+    },
+  );
+
+  app.post(
+    "/v1/projects/:projectId/skill-drafts/:draftId/publish",
+    async (c) => {
+      const actor = assertProject(c);
+      const body = await readJsonObject(c.req.raw);
+      const idem = idempotencyKey(c.req.raw);
+      return dependencies.store.transaction(
+        actor,
+        "skill:write",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `POST:/skill-drafts/${c.req.param("draftId")}/publish`,
+            key: idem,
+            hash: requestHash(body),
+            status: 201,
+            execute: async () => {
+              const publication = await loadSkillDraftPublication(
+                tx,
+                actor,
+                c.req.param("draftId"),
+              );
+              let skillId = publication.draft.skill_id as string | null;
+              const isNewSkill = !skillId;
+              if (!skillId) {
+                skillId = randomUUID();
+                await tx.query(
+                  `INSERT INTO oao.skills (
+                   organization_id,project_id,id,skill_key,display_name,
+                   created_by_principal_id
+                 ) VALUES ($1,$2,$3,$4,$5,$6)`,
+                  [
+                    actor.organizationId,
+                    actor.projectId,
+                    skillId,
+                    publication.key,
+                    publication.displayName,
+                    actor.id,
+                  ],
+                );
+              }
+              const version = await insertSkillVersion(
+                tx,
+                actor,
+                skillId,
+                publication.input,
+              );
+              await tx.query(
+                `UPDATE oao.skill_package_drafts
+                  SET skill_id=$4,status='published',
+                      published_skill_version_id=$5,revision=revision+1,
+                      updated_at=clock_timestamp()
+                WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  c.req.param("draftId"),
+                  skillId,
+                  String(version.id),
+                ],
+              );
+              if (isNewSkill)
+                await dependencies.store.appendEvent(tx, actor, {
+                  aggregateType: "skill",
+                  aggregateId: skillId,
+                  kind: "skill.created",
+                  payload: { skillVersionId: String(version.id), version: 1 },
+                });
+              await dependencies.store.appendEvent(tx, actor, {
+                aggregateType: "skill",
+                aggregateId: skillId,
+                kind: "skill.version_published",
+                payload: {
+                  skillVersionId: String(version.id),
+                  version: Number(version.version),
+                  contentHash: publication.input.contentHash,
+                },
+              });
+              await dependencies.store.appendAudit(tx, actor, {
+                action: isNewSkill
+                  ? "skill.created"
+                  : "skill.version_published",
+                resourceType: isNewSkill ? "skill" : "skill_version",
+                resourceId: isNewSkill ? skillId : String(version.id),
+                detail: {
+                  draftId: c.req.param("draftId"),
+                  skillId,
+                  skillVersionId: String(version.id),
+                  version: Number(version.version),
+                  fileCount: publication.input.files.length,
+                },
+              });
+              return { skillId, version };
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body, 201);
+        },
+      );
+    },
+  );
+
+  app.delete("/v1/projects/:projectId/skill-drafts/:draftId", async (c) => {
+    const actor = assertProject(c);
+    const idem = idempotencyKey(c.req.raw);
+    return dependencies.store.transaction(actor, "skill:write", async (tx) => {
+      const response = await dependencies.store.idempotent(tx, actor, {
+        scope: `DELETE:/skill-drafts/${c.req.param("draftId")}`,
+        key: idem,
+        hash: requestHash({ draftId: c.req.param("draftId") }),
+        status: 200,
+        execute: async () => {
+          const result = await tx.query(
+            `UPDATE oao.skill_package_drafts
+                SET status='discarded',revision=revision+1,
+                    updated_at=clock_timestamp()
+              WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                AND status='editing' RETURNING id`,
+            [actor.organizationId, actor.projectId, c.req.param("draftId")],
+          );
+          if (!result.rowCount)
+            throw new HttpApiError(
+              "conflict",
+              "Skill draft is missing or is no longer editable",
+            );
+          await dependencies.store.appendEvent(tx, actor, {
+            aggregateType: "skill_draft",
+            aggregateId: c.req.param("draftId"),
+            kind: "skill.draft_discarded",
+            payload: {},
+          });
+          await dependencies.store.appendAudit(tx, actor, {
+            action: "skill.draft_discarded",
+            resourceType: "skill_draft",
+            resourceId: c.req.param("draftId"),
+            detail: {},
+          });
+          return { id: c.req.param("draftId"), status: "discarded" };
+        },
+      });
+      c.header("idempotency-replayed", String(response.replayed));
+      return c.json(response.body);
+    });
+  });
+
   app.get("/v1/projects/:projectId/skills", async (c) => {
     const actor = assertProject(c);
     const limit = parseLimit(c.req.query("limit"));
@@ -3317,6 +4356,8 @@ function registerAgentRoutes(
           actor,
           config.sandbox,
           projectModelsEnabled,
+          dependencies.credentialCipher,
+          dependencies.sandboxSnapshotCatalog,
         );
         await assertAgentDelegatesCompatible(tx, actor, undefined, config);
         const response = await dependencies.store.idempotent(tx, actor, {
@@ -3492,6 +4533,8 @@ function registerAgentRoutes(
           actor,
           config.sandbox,
           projectModelsEnabled,
+          dependencies.credentialCipher,
+          dependencies.sandboxSnapshotCatalog,
         );
         await assertAgentDelegatesCompatible(
           tx,
@@ -3622,51 +4665,71 @@ function registerRunRoutes(
         "bad_request",
         "agentVersionId or agentId is required",
       );
-    const files = await parseRunFiles(body.files);
+    const files = parseRunFiles(body.files);
     const initialMessage = parseRunMessage(
       body.initialMessage,
       "initialMessage",
       files,
     );
     const title = optionalString(body.title, "title", 500);
-    return dependencies.store.transaction(
-      actor,
-      ["session:write", "run:create"],
-      async (tx) => {
-        const response = await dependencies.store.idempotent(tx, actor, {
-          scope: "POST:/sessions",
-          key: idem,
-          hash: requestHash(body),
-          status: 201,
-          execute: async () => {
-            const threadId = randomUUID();
-            const sessionId = randomUUID();
-            const runId = randomUUID();
-            const messageId = randomUUID();
-            let agentVersionId = submittedAgentVersionId;
-            if (submittedAgentId) {
-              const definition = await tx.query<{
-                latest_version_id: string | null;
-              }>(
-                `SELECT latest_version_id FROM oao.agent_definitions
+    let cleanupUploadedFiles: (() => Promise<void>) | undefined;
+    try {
+      return await dependencies.store.transaction(
+        actor,
+        ["session:write", "run:create"],
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: "POST:/sessions",
+            key: idem,
+            hash: requestHash(body),
+            status: 201,
+            execute: async () => {
+              const threadId = randomUUID();
+              const sessionId = randomUUID();
+              const runId = randomUUID();
+              const messageId = randomUUID();
+              let agentVersionId = submittedAgentVersionId;
+              if (submittedAgentId) {
+                const definition = await tx.query<{
+                  latest_version_id: string | null;
+                }>(
+                  `SELECT latest_version_id FROM oao.agent_definitions
                  WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
-                [actor.organizationId, actor.projectId, submittedAgentId],
-              );
-              const latestVersionId = definition.rows[0]?.latest_version_id;
-              if (!latestVersionId)
+                  [actor.organizationId, actor.projectId, submittedAgentId],
+                );
+                const latestVersionId = definition.rows[0]?.latest_version_id;
+                if (!latestVersionId)
+                  throw new HttpApiError(
+                    "conflict",
+                    "Agent does not have a published version",
+                  );
+                if (agentVersionId && agentVersionId !== latestVersionId)
+                  throw new HttpApiError(
+                    "bad_request",
+                    "agentVersionId is not the agent's latest published version",
+                  );
+                agentVersionId = latestVersionId;
+              }
+              if (!agentVersionId)
                 throw new HttpApiError(
                   "conflict",
                   "Agent does not have a published version",
                 );
-              if (agentVersionId && agentVersionId !== latestVersionId)
-                throw new HttpApiError(
-                  "bad_request",
-                  "agentVersionId is not the agent's latest published version",
-                );
-              agentVersionId = latestVersionId;
-            }
-            const result = await tx.query(
-              `WITH thread AS (
+              await assertAgentCanInspectRunFiles(
+                tx,
+                actor,
+                agentVersionId,
+                files,
+              );
+              const uploaded = await storeRunFiles(
+                dependencies.runFileStorage,
+                actor,
+                runId,
+                files,
+              );
+              cleanupUploadedFiles = uploaded.cleanup;
+              const result = await tx.query(
+                `WITH thread AS (
                  INSERT INTO oao.threads (organization_id,project_id,id,title)
                  VALUES ($1,$2,$3,$4) RETURNING id
                ), session AS (
@@ -3682,32 +4745,34 @@ function registerRunRoutes(
                  VALUES ($1,$2,$11,$3,$7,'user',$12)
                )
                SELECT row_to_json(session) AS session,row_to_json(run) AS run FROM session,run`,
-              [
-                actor.organizationId,
-                actor.projectId,
-                threadId,
-                title ?? null,
-                sessionId,
-                agentVersionId,
-                runId,
-                actor.id,
-                idem,
-                {
-                  message: initialMessage,
-                  ...(files.length ? { files: publicRunFiles(files) } : {}),
-                },
-                messageId,
-                initialMessage,
-              ],
-            );
-            const session = publicValue(result.rows[0]?.session) as Readonly<
-              Record<string, unknown>
-            >;
-            const run = publicValue(result.rows[0]?.run) as Readonly<
-              Record<string, unknown>
-            >;
-            const skillBindings = await tx.query(
-              `INSERT INTO oao.session_skill_bindings (
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  threadId,
+                  title ?? null,
+                  sessionId,
+                  agentVersionId,
+                  runId,
+                  actor.id,
+                  idem,
+                  {
+                    message: initialMessage,
+                    ...(uploaded.files.length
+                      ? { files: publicRunFiles(uploaded.files) }
+                      : {}),
+                  },
+                  messageId,
+                  initialMessage,
+                ],
+              );
+              const session = publicValue(result.rows[0]?.session) as Readonly<
+                Record<string, unknown>
+              >;
+              const run = publicValue(result.rows[0]?.run) as Readonly<
+                Record<string, unknown>
+              >;
+              const skillBindings = await tx.query(
+                `INSERT INTO oao.session_skill_bindings (
                  organization_id,project_id,session_id,agent_version_id,
                  skill_version_id,skill_name
                )
@@ -3717,55 +4782,58 @@ function registerRunRoutes(
                WHERE organization_id=$1 AND project_id=$2
                  AND agent_version_id=$4
                RETURNING skill_version_id`,
-              [
-                actor.organizationId,
-                actor.projectId,
-                sessionId,
-                agentVersionId,
-              ],
-            );
-            await insertRunFiles(tx, actor, runId, messageId, files);
-            await dependencies.store.appendEvent(tx, actor, {
-              aggregateType: "run",
-              aggregateId: runId,
-              kind: "run.created",
-              payload: { state: "queued", sessionId },
-            });
-            await dependencies.store.appendEvent(tx, actor, {
-              aggregateType: "thread",
-              aggregateId: threadId,
-              kind: "message.created",
-              payload: {
-                messageId,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  sessionId,
+                  agentVersionId,
+                ],
+              );
+              await dependencies.store.appendEvent(tx, actor, {
+                aggregateType: "run",
+                aggregateId: runId,
+                kind: "run.created",
+                payload: { state: "queued", sessionId },
+              });
+              await dependencies.store.appendEvent(tx, actor, {
+                aggregateType: "thread",
+                aggregateId: threadId,
+                kind: "message.created",
+                payload: {
+                  messageId,
+                  runId,
+                  role: "user",
+                  fileCount: files.length,
+                },
+              });
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "session.created",
+                resourceType: "session",
+                resourceId: sessionId,
+                detail: {
+                  initialRunId: runId,
+                  fileCount: files.length,
+                  skillCount: skillBindings.rowCount ?? 0,
+                },
+              });
+              await dependencies.runtimeCommands.enqueue(tx, {
+                organizationId: actor.organizationId,
+                projectId: actor.projectId,
                 runId,
-                role: "user",
-                fileCount: files.length,
-              },
-            });
-            await dependencies.store.appendAudit(tx, actor, {
-              action: "session.created",
-              resourceType: "session",
-              resourceId: sessionId,
-              detail: {
-                initialRunId: runId,
-                fileCount: files.length,
-                skillCount: skillBindings.rowCount ?? 0,
-              },
-            });
-            await dependencies.runtimeCommands.enqueue(tx, {
-              organizationId: actor.organizationId,
-              projectId: actor.projectId,
-              runId,
-              kind: "admit",
-              payload: { reason: "api_session_created" },
-            });
-            return { ...session, run, latestRunId: runId, status: "queued" };
-          },
-        });
-        c.header("idempotency-replayed", String(response.replayed));
-        return c.json(response.body, 201);
-      },
-    );
+                kind: "admit",
+                payload: { reason: "api_session_created" },
+              });
+              return { ...session, run, latestRunId: runId, status: "queued" };
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body, 201);
+        },
+      );
+    } catch (error) {
+      await cleanupUploadedFiles?.();
+      throw error;
+    }
   });
 
   app.get("/v1/projects/:projectId/sessions/:sessionId", async (c) => {
@@ -3823,18 +4891,20 @@ function registerRunRoutes(
       );
       const transcript = await tx.query(
         `SELECT m.id,m.organization_id,m.project_id,m.thread_id,m.run_id,m.role,
-                  m.redacted_content,m.created_at,
-                  COALESCE((
+                m.redacted_content,m.created_at,
+                  CASE WHEN m.role='user' THEN COALESCE((
                     SELECT jsonb_agg(jsonb_build_object(
-                      'id',f.id,'organization_id',f.organization_id,'project_id',f.project_id,
-                      'run_id',f.run_id,'message_id',f.message_id,'name',f.file_name,
-                      'content_type',f.content_type,'size_bytes',f.size_bytes,
-                      'sha256',encode(f.content_sha256,'hex'),'created_at',f.created_at
-                    ) ORDER BY f.created_at,f.id)
-                    FROM oao.run_files f
-                    WHERE f.organization_id=m.organization_id AND f.project_id=m.project_id
-                      AND f.message_id=m.id
-                  ),'[]'::jsonb) AS files
+                      'id',f.value->>'id','organization_id',m.organization_id,
+                      'project_id',m.project_id,'run_id',m.run_id,'message_id',m.id,
+                      'name',f.value->>'name','content_type',f.value->>'contentType',
+                      'size_bytes',(f.value->>'sizeBytes')::int,
+                      'sha256',f.value->>'sha256',
+                      'storage_provider_id',f.value->>'storageProviderId',
+                      'object_key',f.value->>'objectKey','created_at',m.created_at
+                    ) ORDER BY f.ordinality)
+                    FROM jsonb_array_elements(COALESCE(r.input_public->'files','[]'::jsonb))
+                      WITH ORDINALITY AS f(value,ordinality)
+                  ),'[]'::jsonb) ELSE '[]'::jsonb END AS files
              FROM oao.messages m JOIN oao.runs r
                ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id
              WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
@@ -3909,9 +4979,11 @@ function registerRunRoutes(
              ORDER BY created_at,id`,
         values,
       );
-      const workspaceBackups = await tx.query(
-        `SELECT b.thread_id,b.session_id,b.last_run_id,p.provider_key,p.display_name,
-                  p.provider_type,p.bucket,b.object_key,b.content_length,b.generation,
+      const workspaceBackups = await tx.query<WorkspaceBackupReadRow>(
+        `SELECT b.thread_id,b.session_id,b.last_run_id,b.storage_provider_id,
+                  p.provider_key,p.display_name,p.provider_type,p.bucket,
+                  b.object_key,b.content_length::text,
+                  encode(b.content_sha256,'hex') AS archive_sha256,b.generation::text,
                   b.backed_up_at,b.last_restored_at
              FROM oao.thread_workspace_backups b
              JOIN oao.project_storage_providers p
@@ -3993,7 +5065,11 @@ function registerRunRoutes(
           approvals: rows(approvals),
           sandboxCommands: rows(sandboxCommands),
           sandboxes: rows(sandboxes),
-          workspaceBackups: rows(workspaceBackups),
+          workspaceBackups: await publicWorkspaceBackups(
+            dependencies.runFileStorage,
+            actor,
+            workspaceBackups.rows,
+          ),
         },
       });
     });
@@ -4363,7 +5439,7 @@ function registerRunRoutes(
     const actor = assertProject(c);
     const body = await readJsonObject(c.req.raw);
     const idem = idempotencyKey(c.req.raw);
-    const files = await parseRunFiles(body.files);
+    const files = parseRunFiles(body.files);
     const messageField =
       body.message === undefined ? "redactedInput" : "message";
     const redactedInput = parseRunMessage(
@@ -4374,78 +5450,97 @@ function registerRunRoutes(
     const submittedSessionId = resumeRunId
       ? undefined
       : requiredString(c.req.param("sessionId"), "sessionId", 50);
-    return dependencies.store.transaction(actor, "run:create", async (tx) => {
-      const response = await dependencies.store.idempotent(tx, actor, {
-        scope: resumeRunId
-          ? `POST:/runs/${resumeRunId}/resume`
-          : `POST:/sessions/${submittedSessionId}/runs`,
-        key: idem,
-        hash: requestHash(body),
-        status: 202,
-        execute: async () => {
-          let sessionId = submittedSessionId;
-          let parent:
-            | {
-                readonly thread_id: string;
-                readonly agent_version_id: string;
-                readonly latest_run_state?: string | null;
-              }
-            | undefined;
-          if (resumeRunId) {
-            const previous = await tx.query<{
-              state: string;
-              session_id: string;
-              thread_id: string;
-              agent_version_id: string;
-            }>(
-              `SELECT state,session_id,thread_id,agent_version_id FROM oao.runs
+    let cleanupUploadedFiles: (() => Promise<void>) | undefined;
+    try {
+      return await dependencies.store.transaction(
+        actor,
+        "run:create",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: resumeRunId
+              ? `POST:/runs/${resumeRunId}/resume`
+              : `POST:/sessions/${submittedSessionId}/runs`,
+            key: idem,
+            hash: requestHash(body),
+            status: 202,
+            execute: async () => {
+              let sessionId = submittedSessionId;
+              let parent:
+                | {
+                    readonly thread_id: string;
+                    readonly agent_version_id: string;
+                    readonly latest_run_state?: string | null;
+                  }
+                | undefined;
+              if (resumeRunId) {
+                const previous = await tx.query<{
+                  state: string;
+                  session_id: string;
+                  thread_id: string;
+                  agent_version_id: string;
+                }>(
+                  `SELECT state,session_id,thread_id,agent_version_id FROM oao.runs
                WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
-              [actor.organizationId, actor.projectId, resumeRunId],
-            );
-            const prior = previous.rows[0];
-            if (!prior) throw new HttpApiError("not_found", "Run not found");
-            if (
-              !["completed", "failed", "cancelled", "timed_out"].includes(
-                prior.state,
-              )
-            )
-              throw new HttpApiError(
-                "conflict",
-                "Only a settled run can be resumed",
-              );
-            sessionId = prior.session_id;
-            parent = prior;
-          } else {
-            const session = await tx.query<{
-              thread_id: string;
-              agent_version_id: string;
-              latest_run_state: string | null;
-            }>(
-              `SELECT s.thread_id,s.agent_version_id,
+                  [actor.organizationId, actor.projectId, resumeRunId],
+                );
+                const prior = previous.rows[0];
+                if (!prior)
+                  throw new HttpApiError("not_found", "Run not found");
+                if (
+                  !["completed", "failed", "cancelled", "timed_out"].includes(
+                    prior.state,
+                  )
+                )
+                  throw new HttpApiError(
+                    "conflict",
+                    "Only a settled run can be resumed",
+                  );
+                sessionId = prior.session_id;
+                parent = prior;
+              } else {
+                const session = await tx.query<{
+                  thread_id: string;
+                  agent_version_id: string;
+                  latest_run_state: string | null;
+                }>(
+                  `SELECT s.thread_id,s.agent_version_id,
                       (SELECT r.state::text FROM oao.runs r
                        WHERE r.organization_id=s.organization_id AND r.project_id=s.project_id
                          AND r.session_id=s.id ORDER BY r.created_at DESC,r.id DESC LIMIT 1) AS latest_run_state
                FROM oao.sessions s WHERE s.organization_id=$1 AND s.project_id=$2 AND s.id=$3 FOR UPDATE`,
-              [actor.organizationId, actor.projectId, sessionId],
-            );
-            parent = session.rows[0];
-            if (
-              parent?.latest_run_state &&
-              !["completed", "failed", "cancelled", "timed_out"].includes(
-                parent.latest_run_state,
-              )
-            )
-              throw new HttpApiError(
-                "conflict",
-                "The session's latest run must settle before another message",
+                  [actor.organizationId, actor.projectId, sessionId],
+                );
+                parent = session.rows[0];
+                if (
+                  parent?.latest_run_state &&
+                  !["completed", "failed", "cancelled", "timed_out"].includes(
+                    parent.latest_run_state,
+                  )
+                )
+                  throw new HttpApiError(
+                    "conflict",
+                    "The session's latest run must settle before another message",
+                  );
+              }
+              if (!parent || !sessionId)
+                throw new HttpApiError("not_found", "Session not found");
+              await assertAgentCanInspectRunFiles(
+                tx,
+                actor,
+                parent.agent_version_id,
+                files,
               );
-          }
-          if (!parent || !sessionId)
-            throw new HttpApiError("not_found", "Session not found");
-          const runId = randomUUID();
-          const messageId = randomUUID();
-          const result = await tx.query(
-            `WITH run AS (
+              const runId = randomUUID();
+              const messageId = randomUUID();
+              const uploaded = await storeRunFiles(
+                dependencies.runFileStorage,
+                actor,
+                runId,
+                files,
+              );
+              cleanupUploadedFiles = uploaded.cleanup;
+              const result = await tx.query(
+                `WITH run AS (
                INSERT INTO oao.runs
                  (organization_id,project_id,id,thread_id,session_id,agent_version_id,created_by_principal_id,idempotency_key,input_public)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
@@ -4457,64 +5552,70 @@ function registerRunRoutes(
              UPDATE oao.sessions SET last_activity_at=clock_timestamp()
              WHERE organization_id=$1 AND project_id=$2 AND id=$5
              RETURNING (SELECT row_to_json(run) FROM run) AS run`,
-            [
-              actor.organizationId,
-              actor.projectId,
-              runId,
-              parent.thread_id,
-              sessionId,
-              parent.agent_version_id,
-              actor.id,
-              idem,
-              {
-                message: redactedInput,
-                ...(files.length ? { files: publicRunFiles(files) } : {}),
-              },
-              messageId,
-              redactedInput,
-            ],
-          );
-          await insertRunFiles(tx, actor, runId, messageId, files);
-          await dependencies.store.appendEvent(tx, actor, {
-            aggregateType: "run",
-            aggregateId: runId,
-            kind: "run.created",
-            payload: { state: "queued", sessionId },
-          });
-          await dependencies.store.appendEvent(tx, actor, {
-            aggregateType: "thread",
-            aggregateId: parent.thread_id,
-            kind: "message.created",
-            payload: {
-              messageId,
-              runId,
-              role: "user",
-              fileCount: files.length,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  runId,
+                  parent.thread_id,
+                  sessionId,
+                  parent.agent_version_id,
+                  actor.id,
+                  idem,
+                  {
+                    message: redactedInput,
+                    ...(uploaded.files.length
+                      ? { files: publicRunFiles(uploaded.files) }
+                      : {}),
+                  },
+                  messageId,
+                  redactedInput,
+                ],
+              );
+              await dependencies.store.appendEvent(tx, actor, {
+                aggregateType: "run",
+                aggregateId: runId,
+                kind: "run.created",
+                payload: { state: "queued", sessionId },
+              });
+              await dependencies.store.appendEvent(tx, actor, {
+                aggregateType: "thread",
+                aggregateId: parent.thread_id,
+                kind: "message.created",
+                payload: {
+                  messageId,
+                  runId,
+                  role: "user",
+                  fileCount: files.length,
+                },
+              });
+              await dependencies.store.appendAudit(tx, actor, {
+                action: resumeRunId ? "run.resumed" : "run.created",
+                resourceType: "run",
+                resourceId: runId,
+                detail: resumeRunId
+                  ? { previousRunId: resumeRunId, fileCount: files.length }
+                  : { fileCount: files.length },
+              });
+              await dependencies.runtimeCommands.enqueue(tx, {
+                organizationId: actor.organizationId,
+                projectId: actor.projectId,
+                runId,
+                kind: "admit",
+                payload: { reason: resumeRunId ? "api_resume" : "api_submit" },
+              });
+              return publicValue(result.rows[0]?.run) as Readonly<
+                Record<string, unknown>
+              >;
             },
           });
-          await dependencies.store.appendAudit(tx, actor, {
-            action: resumeRunId ? "run.resumed" : "run.created",
-            resourceType: "run",
-            resourceId: runId,
-            detail: resumeRunId
-              ? { previousRunId: resumeRunId, fileCount: files.length }
-              : { fileCount: files.length },
-          });
-          await dependencies.runtimeCommands.enqueue(tx, {
-            organizationId: actor.organizationId,
-            projectId: actor.projectId,
-            runId,
-            kind: "admit",
-            payload: { reason: resumeRunId ? "api_resume" : "api_submit" },
-          });
-          return publicValue(result.rows[0]?.run) as Readonly<
-            Record<string, unknown>
-          >;
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body, 202);
         },
-      });
-      c.header("idempotency-replayed", String(response.replayed));
-      return c.json(response.body, 202);
-    });
+      );
+    } catch (error) {
+      await cleanupUploadedFiles?.();
+      throw error;
+    }
   };
 
   app.post("/v1/projects/:projectId/sessions/:sessionId/runs", (c) =>
@@ -4621,18 +5722,20 @@ function registerRunRoutes(
       const result = await tx.query(
         `SELECT m.id,m.organization_id,m.project_id,m.thread_id,m.run_id,m.role,
                 m.redacted_content,m.created_at,
-                COALESCE((
+                CASE WHEN m.role='user' THEN COALESCE((
                   SELECT jsonb_agg(jsonb_build_object(
-                    'id',f.id,'organization_id',f.organization_id,'project_id',f.project_id,
-                    'run_id',f.run_id,'message_id',f.message_id,'name',f.file_name,
-                    'content_type',f.content_type,'size_bytes',f.size_bytes,
-                    'sha256',encode(f.content_sha256,'hex'),'created_at',f.created_at
-                  ) ORDER BY f.created_at,f.id)
-                  FROM oao.run_files f
-                  WHERE f.organization_id=m.organization_id AND f.project_id=m.project_id
-                    AND f.message_id=m.id
-                ),'[]'::jsonb) AS files
+                    'id',f.value->>'id','organization_id',m.organization_id,
+                    'project_id',m.project_id,'run_id',m.run_id,'message_id',m.id,
+                    'name',f.value->>'name','content_type',f.value->>'contentType',
+                    'size_bytes',(f.value->>'sizeBytes')::int,
+                    'sha256',f.value->>'sha256','created_at',m.created_at
+                  ) ORDER BY f.ordinality)
+                  FROM jsonb_array_elements(COALESCE(r.input_public->'files','[]'::jsonb))
+                    WITH ORDINALITY AS f(value,ordinality)
+                ),'[]'::jsonb) ELSE '[]'::jsonb END AS files
          FROM oao.messages m
+         JOIN oao.runs r ON r.organization_id=m.organization_id
+          AND r.project_id=m.project_id AND r.id=m.run_id
          WHERE m.organization_id=$1 AND m.project_id=$2 AND m.run_id=$3${condition.sql}
          ORDER BY created_at DESC,id DESC LIMIT $${4 + condition.values.length}`,
         [

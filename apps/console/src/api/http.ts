@@ -23,11 +23,13 @@ import type {
   ProjectStorageProvider,
   SandboxProviderList,
   SandboxSnapshotList,
+  StorageObjectList,
   StorageProviderList,
   SessionDetail,
   SessionSummary,
   SkillDetail,
   SkillFileInput,
+  SkillDraft,
   SkillSummary,
   SettingsData,
   TimelineEvent,
@@ -230,13 +232,19 @@ const FILE_ARGUMENT_KEYS = new Set([
   "destination",
 ]);
 const SHELL_FILE_PATH =
-  /(?:^|[\s"'=])((?:\/|\.{1,2}\/)[^\s"'`|;&<>]+\.[a-z0-9][a-z0-9._-]*)/giu;
+  /(?:^|[\s"'=])((?:\/|\.{1,2}\/|\.oao\/)[^\s"'`|;&<>]+\.[a-z0-9][a-z0-9._-]*)/giu;
 
 function workspacePath(
   value: string,
 ): { readonly name: string; readonly path: string } | null {
   const path = value.trim().replace(/[),:]+$/u, "");
-  if (!path || path.includes("\0") || path.includes("\n") || path.endsWith("/"))
+  if (
+    !path ||
+    path.includes("\0") ||
+    path.includes("\n") ||
+    path.endsWith("/") ||
+    /[*?[\]]/u.test(path)
+  )
     return null;
   const name = path.split("/").filter(Boolean).at(-1);
   if (!name || name === "." || name === "..") return null;
@@ -264,15 +272,87 @@ function argumentFilePaths(value: unknown, key = ""): readonly string[] {
 
 function workspaceFiles(
   debug: Readonly<Record<string, unknown>>,
+  transcript: readonly Readonly<Record<string, unknown>>[],
 ): SessionDetail["workspaceFiles"] {
-  const backups = (
+  const backupRecords = (
     Array.isArray(debug.workspaceBackups) ? debug.workspaceBackups : []
-  )
-    .map(record)
+  ).map(record);
+  const backups = backupRecords
     .map((backup) => text(backup.backedUpAt))
     .filter(Boolean)
     .sort();
+  const latestBackup = [...backupRecords]
+    .filter(
+      (backup) => text(backup.storageProviderId) && text(backup.objectKey),
+    )
+    .sort((left, right) =>
+      text(left.backedUpAt).localeCompare(text(right.backedUpAt)),
+    )
+    .at(-1);
+  const latestBackupLocation = latestBackup
+    ? {
+        storageProviderId: text(latestBackup.storageProviderId),
+        objectKey: text(latestBackup.objectKey),
+      }
+    : undefined;
   const files = new Map<string, SessionDetail["workspaceFiles"][number]>();
+  let hasAuthoritativeManifest = false;
+  for (const backup of backupRecords) {
+    if (text(backup.manifestState) !== "available") continue;
+    hasAuthoritativeManifest = true;
+    const backedUpAt = text(backup.backedUpAt);
+    const backupProviderId = text(backup.storageProviderId);
+    const backupObjectKey = text(backup.objectKey);
+    const manifestFiles = Array.isArray(backup.files) ? backup.files : [];
+    for (const item of manifestFiles) {
+      const manifestFile = record(item);
+      const file = workspacePath(text(manifestFile.path));
+      if (!file) continue;
+      files.set(file.path, {
+        ...file,
+        sizeBytes: numeric(manifestFile.sizeBytes),
+        backedUp: true,
+        ...(backedUpAt ? { backedUpAt } : {}),
+        ...(backupProviderId ? { storageProviderId: backupProviderId } : {}),
+        ...(backupObjectKey ? { objectKey: backupObjectKey } : {}),
+      });
+    }
+  }
+  for (const message of transcript) {
+    const runId = text(message.runId);
+    if (!runId) continue;
+    const attachments = Array.isArray(message.files) ? message.files : [];
+    for (const item of attachments) {
+      const attachment = record(item);
+      const name = text(attachment.fileName ?? attachment.name);
+      const file = workspacePath(`.oao/attachments/${runId}/${name}`);
+      if (!file) continue;
+      const existing = files.get(file.path);
+      const storageProviderId = text(attachment.storageProviderId);
+      const objectKey = text(attachment.objectKey);
+      files.set(file.path, {
+        ...file,
+        sizeBytes: numeric(attachment.sizeBytes),
+        uploaded: true,
+        backedUp: existing?.backedUp ?? false,
+        ...(existing?.backedUpAt ? { backedUpAt: existing.backedUpAt } : {}),
+        ...(storageProviderId
+          ? { storageProviderId }
+          : existing?.storageProviderId
+            ? { storageProviderId: existing.storageProviderId }
+            : {}),
+        ...(objectKey
+          ? { objectKey }
+          : existing?.objectKey
+            ? { objectKey: existing.objectKey }
+            : {}),
+      });
+    }
+  }
+  if (hasAuthoritativeManifest)
+    return [...files.values()].sort((left, right) =>
+      left.name.localeCompare(right.name),
+    );
   const commands = Array.isArray(debug.sandboxCommands)
     ? debug.sandboxCommands
     : [];
@@ -289,14 +369,28 @@ function workspaceFiles(
       const file = workspacePath(candidate);
       if (!file) continue;
       const existing = files.get(file.path);
+      const backedUp = Boolean(backedUpAt) || Boolean(existing?.backedUp);
+      const location = existing?.storageProviderId
+        ? {
+            storageProviderId: existing.storageProviderId,
+            ...(existing.objectKey ? { objectKey: existing.objectKey } : {}),
+          }
+        : backedUp && latestBackupLocation
+          ? latestBackupLocation
+          : {};
       files.set(file.path, {
         ...file,
-        backedUp: Boolean(backedUpAt) || Boolean(existing?.backedUp),
+        ...(existing?.sizeBytes === undefined
+          ? {}
+          : { sizeBytes: existing.sizeBytes }),
+        ...(existing?.uploaded ? { uploaded: true } : {}),
+        backedUp,
         ...(backedUpAt
           ? { backedUpAt }
           : existing?.backedUpAt
             ? { backedUpAt: existing.backedUpAt }
             : {}),
+        ...location,
       });
     }
   }
@@ -569,7 +663,7 @@ function sessionDetail(
     events: [...transcript, ...timeline, ...debugEvents].sort((left, right) =>
       left.createdAt.localeCompare(right.createdAt),
     ),
-    workspaceFiles: workspaceFiles(debug),
+    workspaceFiles: workspaceFiles(debug, transcriptRecords),
     capabilities: {
       canCancel: !settled,
       canResume: false,
@@ -848,6 +942,77 @@ export class HttpConsoleApi implements ConsoleApi {
     this.#projectRequest<{ readonly files: readonly SkillFileInput[] }>(
       `/skills/${encodeURIComponent(skillId)}/versions/${encodeURIComponent(versionId)}/export`,
     );
+
+  createSkillDraft = async (
+    input: {
+      readonly skillId?: string;
+      readonly sourceSkillVersionId?: string;
+    } = {},
+  ) =>
+    this.#projectRequest<SkillDraft>("/skill-drafts", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+
+  updateSkillDraft = async (
+    draftId: string,
+    input: Parameters<ConsoleApi["updateSkillDraft"]>[1],
+  ) =>
+    this.#projectRequest<SkillDraft>(
+      `/skill-drafts/${encodeURIComponent(draftId)}`,
+      { method: "PATCH", body: JSON.stringify(input) },
+    );
+
+  createSkillDraftDirectory = async (draftId: string, path: string) =>
+    this.#projectRequest<SkillDraft>(
+      `/skill-drafts/${encodeURIComponent(draftId)}/directories`,
+      { method: "POST", body: JSON.stringify({ path }) },
+    );
+
+  putSkillDraftFile = async (draftId: string, file: SkillFileInput) =>
+    this.#projectRequest<SkillDraft>(
+      `/skill-drafts/${encodeURIComponent(draftId)}/files`,
+      { method: "PUT", body: JSON.stringify(file) },
+    );
+
+  removeSkillDraftEntry = async (
+    draftId: string,
+    path: string,
+    recursive: boolean,
+  ) => {
+    const query = new URLSearchParams({ path, recursive: String(recursive) });
+    return this.#projectRequest<SkillDraft>(
+      `/skill-drafts/${encodeURIComponent(draftId)}/entries?${query.toString()}`,
+      { method: "DELETE" },
+    );
+  };
+
+  validateSkillDraft = async (draftId: string) =>
+    this.#projectRequest<{
+      readonly valid: true;
+      readonly contentHash: string;
+      readonly totalBytes: number;
+      readonly fileCount: number;
+    }>(`/skill-drafts/${encodeURIComponent(draftId)}/validate`, {
+      method: "POST",
+    });
+
+  publishSkillDraft = async (draftId: string) => {
+    const published = await this.#projectRequest<{
+      readonly skillId: string;
+      readonly version: { readonly id: string };
+    }>(`/skill-drafts/${encodeURIComponent(draftId)}/publish`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    return { skillId: published.skillId, versionId: published.version.id };
+  };
+
+  discardSkillDraft = async (draftId: string) => {
+    await this.#projectRequest(`/skill-drafts/${encodeURIComponent(draftId)}`, {
+      method: "DELETE",
+    });
+  };
 
   updateSkillVersionLifecycle = async (
     skillId: string,
@@ -1149,6 +1314,19 @@ export class HttpConsoleApi implements ConsoleApi {
       `/storage-providers/${encodeURIComponent(providerId)}/default`,
       { method: "PUT", body: JSON.stringify({}) },
     );
+
+  listStorageObjects = async (
+    providerId: string,
+    query?: { readonly prefix?: string; readonly cursor?: string },
+  ): Promise<StorageObjectList> => {
+    const params = new URLSearchParams();
+    if (query?.prefix) params.set("prefix", query.prefix);
+    if (query?.cursor) params.set("cursor", query.cursor);
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return this.#projectRequest<StorageObjectList>(
+      `/storage-providers/${encodeURIComponent(providerId)}/objects${suffix}`,
+    );
+  };
 
   listModelCatalog = async (
     providerId: string,

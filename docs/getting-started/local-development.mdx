@@ -254,7 +254,7 @@ optional target preference, and the domain/CIDR allowlist agents may use with
 `network: "restricted"`. The key is a write-only input encrypted in PostgreSQL
 for the current project.
 
-Choose the connection, an active Daytona snapshot (or OAO's default image),
+Choose the connection, one of the active snapshots returned by Daytona, the
 network policy, and exact sandbox capabilities while creating an agent or
 before publishing a later version. No process restart is needed for later
 connection, credential, target, or allowlist changes.
@@ -267,13 +267,14 @@ restricted egress policy must contain at least one allowed domain or CIDR;
 See [Daytona sandboxes](/sandboxes/daytona) for the API and tool-capability
 contracts.
 
-### S3-compatible workspace backups
+### S3-compatible attachments and workspace backups
 
-To preserve Daytona files after a sandbox is deleted, open **Storage
-providers** and add a project-scoped S3-compatible connection. The API and
-runtime use the same `OAO_CREDENTIAL_ENCRYPTION_KEY` to protect its write-only
-credentials. The first connection becomes the project default automatically;
-you can explicitly select another default later.
+To submit run attachments or preserve Daytona files after a sandbox is deleted,
+open **Storage providers** and add a project-scoped S3-compatible connection.
+The API and runtime use the same `OAO_CREDENTIAL_ENCRYPTION_KEY` to protect its
+write-only credentials. The first connection becomes the project default
+automatically; you can explicitly select another default later. Attachment
+bytes go directly to this object store and are never persisted in PostgreSQL.
 
 OAO asks Daytona for the thread sandbox's active workdir, archives that directory
 after each completed agent run, and restores the latest verified archive into a

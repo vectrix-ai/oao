@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 import { Daytona, SandboxState } from "@daytona/sdk";
 import type { Sandbox as DaytonaSandbox } from "@daytona/sdk";
 import { Type } from "@earendil-works/pi-ai";
@@ -18,6 +19,7 @@ import type {
   SandboxFactory,
 } from "@flue/runtime";
 import type {
+  WorkspaceBackupFile,
   WorkspaceBackupIdentity,
   WorkspaceBackupStore,
 } from "@oao/artifact-s3";
@@ -33,9 +35,10 @@ import {
   resolveDaytonaWorkspaceDirectory,
 } from "./flue-daytona-blueprint.js";
 
-export const DEFAULT_DAYTONA_IMAGE = "debian:12.9";
 const MAX_WORKSPACE_ARCHIVE_BYTES = 512 * 1024 * 1024;
 const MAX_EXPANDED_WORKSPACE_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_WORKSPACE_MANIFEST_FILES = 10_000;
+const MAX_WORKSPACE_MANIFEST_DEPTH = 100;
 const workspacePersistenceBySandbox = new WeakMap<
   Sandbox,
   () => Promise<void>
@@ -180,8 +183,7 @@ export interface SandboxProviderPort {
   findByCreationKey(key: string): Promise<SandboxHandle | undefined>;
   create(input: {
     readonly creationKey: string;
-    readonly image: string;
-    readonly snapshotId?: string;
+    readonly snapshotId: string;
     readonly targetPreference?: string;
     readonly egress: SandboxEgressPolicy;
   }): Promise<SandboxHandle>;
@@ -202,6 +204,9 @@ export interface FlueSandboxProviderPort extends SandboxProviderPort {
     },
   ): SandboxFactory;
   captureWorkspace?(sandbox: SandboxHandle): Promise<Uint8Array>;
+  listWorkspaceFiles?(
+    sandbox: SandboxHandle,
+  ): Promise<readonly WorkspaceBackupFile[]>;
   restoreWorkspace?(sandbox: SandboxHandle, archive: Uint8Array): Promise<void>;
 }
 
@@ -740,8 +745,7 @@ export class ManagedSandboxLifecycle {
       readonly threadId: ThreadId;
       readonly sessionId: SessionId;
       readonly creationKey: string;
-      readonly image: string;
-      readonly snapshotId?: string;
+      readonly snapshotId: string;
       readonly egress: SandboxEgressPolicy;
       readonly targetPreference?: string;
     },
@@ -764,8 +768,7 @@ export class ManagedSandboxLifecycle {
         created = true;
         handle = await this.provider.create({
           creationKey: input.creationKey,
-          image: input.image,
-          ...(input.snapshotId ? { snapshotId: input.snapshotId } : {}),
+          snapshotId: input.snapshotId,
           egress: input.egress,
           ...(input.targetPreference
             ? { targetPreference: input.targetPreference }
@@ -1264,8 +1267,7 @@ export class DaytonaManagedProvider implements FlueSandboxProviderPort {
 
   async create(input: {
     readonly creationKey: string;
-    readonly image: string;
-    readonly snapshotId?: string;
+    readonly snapshotId: string;
     readonly targetPreference?: string;
     readonly egress: SandboxEgressPolicy;
   }): Promise<SandboxHandle> {
@@ -1281,9 +1283,10 @@ export class DaytonaManagedProvider implements FlueSandboxProviderPort {
       autoStopInterval: 15,
       autoDeleteInterval: 60,
     };
-    const sandbox = input.snapshotId
-      ? await this.#client.create({ ...options, snapshot: input.snapshotId })
-      : await this.#client.create({ ...options, image: input.image });
+    const sandbox = await this.#client.create({
+      ...options,
+      snapshot: input.snapshotId,
+    });
     return this.wrap(sandbox);
   }
 
@@ -1339,6 +1342,50 @@ export class DaytonaManagedProvider implements FlueSandboxProviderPort {
         .executeCommand(`rm -f ${archivePath}`, undefined, undefined, 30)
         .catch(() => undefined);
     }
+  }
+
+  async listWorkspaceFiles(
+    sandbox: SandboxHandle,
+  ): Promise<readonly WorkspaceBackupFile[]> {
+    const native = this.native(sandbox);
+    const workspaceDirectory = await resolveDaytonaWorkspaceDirectory(native);
+    const entries = await native.fs.listFiles(workspaceDirectory, {
+      depth: MAX_WORKSPACE_MANIFEST_DEPTH,
+    });
+    const files: WorkspaceBackupFile[] = [];
+    for (const entry of entries) {
+      if (entry.isDir) continue;
+      const reportedPath =
+        entry.path ?? posix.join(workspaceDirectory, entry.name);
+      const relative = posix.isAbsolute(reportedPath)
+        ? posix.relative(workspaceDirectory, reportedPath)
+        : reportedPath.replace(/^\.\//u, "");
+      const path = posix.normalize(relative);
+      if (
+        !path ||
+        path === "." ||
+        path === ".." ||
+        path.startsWith("../") ||
+        path.startsWith("/") ||
+        path.includes("\0") ||
+        path.includes("\n") ||
+        path.includes("\r") ||
+        path.length > 1_024
+      )
+        throw new Error("Daytona returned an invalid workspace file path");
+      const name = posix.basename(path);
+      if (
+        name.length < 1 ||
+        name.length > 255 ||
+        !Number.isSafeInteger(entry.size) ||
+        entry.size < 0
+      )
+        throw new Error("Daytona returned invalid workspace file metadata");
+      files.push({ name, path, sizeBytes: entry.size });
+      if (files.length > MAX_WORKSPACE_MANIFEST_FILES)
+        throw new Error("Workspace contains too many files to back up safely");
+    }
+    return files.sort((left, right) => left.path.localeCompare(right.path));
   }
 
   async restoreWorkspace(
@@ -1464,8 +1511,7 @@ export function createManagedDaytonaFlueSandbox(input: {
   readonly workspaceOwnerRunId?: RunId;
   readonly workspaceOwnerThreadId?: ThreadId;
   readonly workspaceOwnerSessionId?: SessionId;
-  readonly image?: string;
-  readonly snapshotId?: string;
+  readonly snapshotId: string;
   readonly egress: SandboxEgressPolicy;
   readonly targetPreference?: string;
   readonly capabilities?: readonly SandboxCapability[];
@@ -1487,7 +1533,10 @@ export function createManagedDaytonaFlueSandbox(input: {
     const archive = await input.provider.captureWorkspace(
       managedInstance.handle,
     );
-    await input.workspaceBackupStore.save(archive);
+    const files = input.provider.listWorkspaceFiles
+      ? await input.provider.listWorkspaceFiles(managedInstance.handle)
+      : [];
+    await input.workspaceBackupStore.save(archive, files);
   };
   return {
     async createSandbox({ id }) {
@@ -1507,8 +1556,7 @@ export function createManagedDaytonaFlueSandbox(input: {
         sessionId: ownerSessionId,
         sandboxId: stableUuid(lifecycleIdentity),
         creationKey: lifecycleIdentity,
-        image: input.image ?? DEFAULT_DAYTONA_IMAGE,
-        ...(input.snapshotId ? { snapshotId: input.snapshotId } : {}),
+        snapshotId: input.snapshotId,
         egress: input.egress,
         ...(input.targetPreference
           ? { targetPreference: input.targetPreference }
@@ -1564,6 +1612,31 @@ export function createManagedDaytonaFlueSandbox(input: {
   };
 }
 
+export function workspaceBackupIdentityForRun(input: {
+  readonly organizationId: TenantContext["organizationId"];
+  readonly projectId: TenantContext["projectId"];
+  readonly runId: RunId;
+  readonly threadId: ThreadId;
+  readonly sessionId: SessionId;
+  readonly workspaceOwnerRunId?: RunId;
+  readonly workspaceOwnerThreadId?: ThreadId;
+  readonly workspaceOwnerSessionId?: SessionId;
+}): WorkspaceBackupIdentity {
+  const threadId = input.workspaceOwnerThreadId ?? input.threadId;
+  const sessionId = input.workspaceOwnerSessionId ?? input.sessionId;
+  const currentRunOwnsWorkspace =
+    threadId === input.threadId && sessionId === input.sessionId;
+  return {
+    organizationId: input.organizationId,
+    projectId: input.projectId,
+    threadId,
+    sessionId,
+    runId: currentRunOwnsWorkspace
+      ? input.runId
+      : (input.workspaceOwnerRunId ?? input.runId),
+  };
+}
+
 export function createProjectDaytonaFlueSandbox(input: {
   readonly pool: PgPool;
   readonly credentialCipher: ProviderCredentialCipher;
@@ -1576,8 +1649,7 @@ export function createProjectDaytonaFlueSandbox(input: {
   readonly workspaceOwnerRunId?: RunId;
   readonly workspaceOwnerThreadId?: ThreadId;
   readonly workspaceOwnerSessionId?: SessionId;
-  readonly image?: string;
-  readonly snapshotId?: string;
+  readonly snapshotId: string;
   readonly network: "none" | "restricted";
   readonly capabilities: readonly SandboxCapability[];
   readonly workspaceBackupResolver?: {
@@ -1653,13 +1725,7 @@ export function createProjectDaytonaFlueSandbox(input: {
           : {}),
       });
       const workspaceBackupStore = await input.workspaceBackupResolver?.resolve(
-        {
-          organizationId: input.organizationId,
-          projectId: input.projectId,
-          threadId: input.workspaceOwnerThreadId ?? input.threadId,
-          sessionId: input.workspaceOwnerSessionId ?? input.sessionId,
-          runId: input.workspaceOwnerRunId ?? input.runId,
-        },
+        workspaceBackupIdentityForRun(input),
       );
       resolved = createManagedDaytonaFlueSandbox({
         ...input,

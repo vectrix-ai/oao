@@ -206,9 +206,9 @@ test(
           "0013_sandbox_provider_target.sql",
           "0014_agent_sandbox_snapshot.sql",
           "0015_workspace_storage.sql",
-          "0016_run_files.sql",
           "0017_skills.sql",
           "0018_multi_agent_orchestration.sql",
+          "0019_skill_package_drafts.sql",
         ]);
         await seed(pool);
       });
@@ -236,6 +236,7 @@ test(
               sandbox: {
                 enabled: true,
                 provider: "daytona-primary",
+                snapshotId: uuid(310),
                 network: "none",
                 capabilities: ["filesystem_read", "filesystem_write", "shell"],
               },

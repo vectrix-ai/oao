@@ -51,14 +51,18 @@ import type {
   ReadinessStatus,
   RequestOptions,
   SkillDetail,
+  SkillDraft,
+  SkillDraftValidation,
   SkillExport,
   SkillSummary,
   SkillVersionView,
+  UpdateSkillDraftInput,
   RunInput,
   RunTimelineEntry,
   SandboxPolicyInput,
   SandboxProviderPage,
   SandboxSnapshotList,
+  StorageObjectList,
   StorageProviderList,
   ToolClaim,
   ToolResultEnvelope,
@@ -438,6 +442,26 @@ export class OaoClient {
     );
   }
 
+  /** Lists objects and folder prefixes stored under a storage provider. */
+  listStorageObjects(
+    projectId: string,
+    providerId: string,
+    query: {
+      readonly prefix?: string;
+      readonly cursor?: string;
+      readonly limit?: number;
+    } = {},
+    options?: RequestOptions,
+  ): Promise<StorageObjectList> {
+    return this.#request(
+      this.#path(
+        this.routes.storageProviderObjects(projectId, providerId),
+        query,
+      ),
+      options,
+    );
+  }
+
   updateSandboxProviderConfiguration(
     projectId: string,
     providerId: string,
@@ -472,6 +496,142 @@ export class OaoClient {
   ): Promise<Page<SkillSummary>> {
     return this.#request(
       this.#path(this.routes.skills(projectId), pagination),
+      options,
+    );
+  }
+
+  async listSkillDrafts(
+    projectId: string,
+    options?: RequestOptions,
+  ): Promise<readonly SkillDraft[]> {
+    const response = await this.#request<{
+      readonly data: readonly SkillDraft[];
+    }>(this.routes.skillDrafts(projectId), options);
+    return response.data;
+  }
+
+  createSkillDraft(
+    projectId: string,
+    input: {
+      readonly skillId?: string;
+      readonly sourceSkillVersionId?: string;
+    },
+    options: WriteOptions,
+  ): Promise<SkillDraft> {
+    return this.#write(
+      this.routes.skillDrafts(projectId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
+  getSkillDraft(
+    projectId: string,
+    draftId: string,
+    options?: RequestOptions,
+  ): Promise<SkillDraft> {
+    return this.#request(this.routes.skillDraft(projectId, draftId), options);
+  }
+
+  updateSkillDraft(
+    projectId: string,
+    draftId: string,
+    input: UpdateSkillDraftInput,
+    options: WriteOptions,
+  ): Promise<SkillDraft> {
+    return this.#write(
+      this.routes.skillDraft(projectId, draftId),
+      "PATCH",
+      input,
+      options,
+    );
+  }
+
+  createSkillDraftDirectory(
+    projectId: string,
+    draftId: string,
+    path: string,
+    options: WriteOptions,
+  ): Promise<SkillDraft> {
+    return this.#write(
+      this.routes.skillDraftDirectories(projectId, draftId),
+      "POST",
+      { path },
+      options,
+    );
+  }
+
+  putSkillDraftFile(
+    projectId: string,
+    draftId: string,
+    input: {
+      readonly path: string;
+      readonly contentType?: "text/markdown";
+      readonly dataBase64: string;
+    },
+    options: WriteOptions,
+  ): Promise<SkillDraft> {
+    return this.#write(
+      this.routes.skillDraftFiles(projectId, draftId),
+      "PUT",
+      input,
+      options,
+    );
+  }
+
+  removeSkillDraftEntry(
+    projectId: string,
+    draftId: string,
+    path: string,
+    recursive: boolean,
+    options: WriteOptions,
+  ): Promise<SkillDraft> {
+    const query = new URLSearchParams({ path, recursive: String(recursive) });
+    return this.#write(
+      `${this.routes.skillDraftEntries(projectId, draftId)}?${query.toString()}`,
+      "DELETE",
+      undefined,
+      options,
+    );
+  }
+
+  validateSkillDraft(
+    projectId: string,
+    draftId: string,
+    options?: RequestOptions,
+  ): Promise<SkillDraftValidation> {
+    return this.#request(this.routes.validateSkillDraft(projectId, draftId), {
+      ...options,
+      method: "POST",
+    });
+  }
+
+  publishSkillDraft(
+    projectId: string,
+    draftId: string,
+    options: WriteOptions,
+  ): Promise<{
+    readonly skillId: string;
+    readonly version: SkillVersionView;
+  }> {
+    return this.#write(
+      this.routes.publishSkillDraft(projectId, draftId),
+      "POST",
+      {},
+      options,
+    );
+  }
+
+  discardSkillDraft(
+    projectId: string,
+    draftId: string,
+    options: WriteOptions,
+  ): Promise<{ readonly id: string; readonly status: "discarded" }> {
+    return this.#write(
+      this.routes.skillDraft(projectId, draftId),
+      "DELETE",
+      undefined,
       options,
     );
   }

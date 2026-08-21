@@ -11,6 +11,7 @@ import { PendingWorkPage } from "./pages/pending-work";
 import { SessionDetailPage, SessionsPage } from "./pages/sessions";
 import { SkillDetailPage, SkillsPage } from "./pages/skills";
 import { SettingsPage } from "./pages/settings";
+import { StorageBrowserPage } from "./pages/storage-browser";
 
 export function ConsoleApp({
   api,
@@ -44,6 +45,10 @@ export function ConsoleApp({
         <Route path="api-keys" element={<SettingsPage />} />
         <Route path="sandbox-providers" element={<SettingsPage />} />
         <Route path="storage-providers" element={<SettingsPage />} />
+        <Route
+          path="storage-providers/:providerId"
+          element={<StorageBrowserPage />}
+        />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="settings/hosting" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/agents" replace />} />

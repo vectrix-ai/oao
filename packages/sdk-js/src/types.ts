@@ -151,6 +151,47 @@ export interface SkillFileInput {
   readonly dataBase64: string;
 }
 
+export interface SkillDraftEntry {
+  readonly path: string;
+  readonly kind: "directory" | "file";
+  readonly contentType: string | null;
+  readonly sizeBytes: number | null;
+  readonly sha256: string | null;
+  readonly dataBase64?: string;
+}
+
+export interface SkillDraft {
+  readonly id: string;
+  readonly skillId: string | null;
+  readonly sourceSkillVersionId: string | null;
+  readonly key: string;
+  readonly displayName: string;
+  readonly name: string;
+  readonly description: string;
+  readonly instructions: string;
+  readonly revision: number;
+  readonly status: "editing" | "published" | "discarded";
+  readonly publishedSkillVersionId: string | null;
+  readonly entries: readonly SkillDraftEntry[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface UpdateSkillDraftInput {
+  readonly key?: string;
+  readonly displayName?: string;
+  readonly name?: string;
+  readonly description?: string;
+  readonly instructions?: string;
+}
+
+export interface SkillDraftValidation {
+  readonly valid: true;
+  readonly contentHash: string;
+  readonly totalBytes: number;
+  readonly fileCount: number;
+}
+
 export interface PublishSkillVersionInput {
   readonly name: string;
   readonly description: string;
@@ -305,6 +346,21 @@ export interface RotateProjectStorageProviderCredentialInput {
 export interface StorageProviderList {
   readonly data: readonly ProjectStorageProvider[];
   readonly credentialEncryptionConfigured: boolean;
+}
+
+export interface StorageObjectEntry {
+  readonly key: string;
+  readonly sizeBytes: number;
+  readonly lastModifiedAt?: string;
+}
+
+export interface StorageObjectList {
+  readonly providerId: string;
+  readonly prefix: string;
+  readonly folders: readonly string[];
+  readonly objects: readonly StorageObjectEntry[];
+  readonly truncated: boolean;
+  readonly cursor?: string;
 }
 
 export interface CreateAgentInput {

@@ -1,5 +1,8 @@
 import { serve } from "@hono/node-server";
-import { InMemoryArtifactAdapter } from "@oao/artifact-s3";
+import {
+  InMemoryArtifactAdapter,
+  ProjectArtifactStoreResolver,
+} from "@oao/artifact-s3";
 import { createPool, migrate, PostgresWakeNotifier } from "@oao/db-postgres";
 import {
   isApprovedCatalogModel,
@@ -20,22 +23,29 @@ const pool = createPool(configuration.databaseUrl);
 await migrate(pool);
 
 const { auth, webhookAuth } = await composeAuthentication(configuration, pool);
+const credentialCipher = process.env.OAO_CREDENTIAL_ENCRYPTION_KEY
+  ? ProviderCredentialCipher.fromBase64(
+      process.env.OAO_CREDENTIAL_ENCRYPTION_KEY,
+    )
+  : undefined;
 
 const app = createApiApp({
   store: new PostgresApiStore(pool, configuration.apiKeyPepper),
   auth,
   ...(webhookAuth === undefined ? {} : { webhookAuth }),
   artifacts: new InMemoryArtifactAdapter(),
-  notifier: new PostgresWakeNotifier(pool),
-  runtimeCommands: new PostgresRuntimeCommandPort(),
-  activeModelPresetKeys: new Set(),
-  ...(process.env.OAO_CREDENTIAL_ENCRYPTION_KEY
+  ...(credentialCipher
     ? {
-        credentialCipher: ProviderCredentialCipher.fromBase64(
-          process.env.OAO_CREDENTIAL_ENCRYPTION_KEY,
+        runFileStorage: new ProjectArtifactStoreResolver(
+          pool,
+          credentialCipher,
         ),
       }
     : {}),
+  notifier: new PostgresWakeNotifier(pool),
+  runtimeCommands: new PostgresRuntimeCommandPort(),
+  activeModelPresetKeys: new Set(),
+  ...(credentialCipher ? { credentialCipher } : {}),
   modelCatalog: {
     deploymentPresets: [],
     listCatalog: (input) => {

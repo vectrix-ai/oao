@@ -157,6 +157,34 @@ export const SkillVersionFileManifestSchema = v.object({
   sha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
 });
 
+export const SkillDraftEntrySchema = v.object({
+  path: v.pipe(v.string(), v.minLength(1), v.maxLength(240)),
+  kind: v.picklist(["directory", "file"]),
+  contentType: v.nullable(v.pipe(v.string(), v.minLength(1), v.maxLength(200))),
+  sizeBytes: v.nullable(v.pipe(v.number(), v.integer(), v.minValue(1))),
+  sha256: v.nullable(v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u))),
+  dataBase64: v.optional(v.string()),
+});
+
+export const SkillDraftSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  skillId: v.nullable(IdSchema),
+  sourceSkillVersionId: v.nullable(IdSchema),
+  key: v.string(),
+  displayName: v.string(),
+  name: v.string(),
+  description: v.string(),
+  instructions: v.string(),
+  revision: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  status: v.picklist(["editing", "published", "discarded"]),
+  publishedSkillVersionId: v.nullable(IdSchema),
+  entries: v.array(SkillDraftEntrySchema),
+  createdAt: TimestampSchema,
+  updatedAt: TimestampSchema,
+});
+
 export const SkillVersionSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
@@ -382,6 +410,8 @@ export const ProductEventKindSchema = v.picklist([
   "delegation.completed",
   "delegation.failed",
   "delegation.cancelled",
+  "skill.draft_created",
+  "skill.draft_discarded",
   "skill.created",
   "skill.version_published",
   "skill.version_deprecated",
@@ -498,36 +528,43 @@ const ManagedAgentDelegatesSchema = v.pipe(
   ),
 );
 
-export const ManagedAgentPublicationConfigSchema = v.strictObject({
-  systemPrompt: v.pipe(v.string(), v.minLength(1), v.maxLength(100_000)),
-  modelPreset: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
-  tools: v.pipe(
-    v.array(RuntimeToolSnapshotSchema),
-    v.check(
-      (tools) =>
-        tools.every(
-          (tool) =>
-            tool.name !== "delegate_agent" && tool.name !== "message_agent",
-        ),
-      "delegate_agent and message_agent are reserved platform tools",
+export const ManagedAgentPublicationConfigSchema = v.pipe(
+  v.strictObject({
+    systemPrompt: v.pipe(v.string(), v.minLength(1), v.maxLength(100_000)),
+    modelPreset: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
+    tools: v.pipe(
+      v.array(RuntimeToolSnapshotSchema),
+      v.check(
+        (tools) =>
+          tools.every(
+            (tool) =>
+              tool.name !== "delegate_agent" && tool.name !== "message_agent",
+          ),
+        "delegate_agent and message_agent are reserved platform tools",
+      ),
     ),
+    skillVersionIds: v.optional(v.array(IdSchema), []),
+    delegates: v.optional(ManagedAgentDelegatesSchema, []),
+    sandbox: v.strictObject({
+      enabled: v.boolean(),
+      provider: ProjectSandboxProviderKeySchema,
+      snapshotId: v.optional(IdSchema),
+      network: v.picklist(["none", "restricted"]),
+      capabilities: v.optional(SandboxCapabilitiesSchema, [
+        ...DEFAULT_SANDBOX_CAPABILITIES,
+      ]),
+    }),
+    limits: v.strictObject({
+      maxTurns: v.literal(PLATFORM_MAX_TURNS),
+      timeoutMs: v.pipe(v.number(), v.integer(), v.minValue(1_000)),
+    }),
+  }),
+  v.check(
+    (config) =>
+      !config.sandbox.enabled || config.sandbox.snapshotId !== undefined,
+    "sandbox.snapshotId is required when the sandbox is enabled",
   ),
-  skillVersionIds: v.optional(v.array(IdSchema), []),
-  delegates: v.optional(ManagedAgentDelegatesSchema, []),
-  sandbox: v.strictObject({
-    enabled: v.boolean(),
-    provider: ProjectSandboxProviderKeySchema,
-    snapshotId: v.optional(IdSchema),
-    network: v.picklist(["none", "restricted"]),
-    capabilities: v.optional(SandboxCapabilitiesSchema, [
-      ...DEFAULT_SANDBOX_CAPABILITIES,
-    ]),
-  }),
-  limits: v.strictObject({
-    maxTurns: v.literal(PLATFORM_MAX_TURNS),
-    timeoutMs: v.pipe(v.number(), v.integer(), v.minValue(1_000)),
-  }),
-});
+);
 
 export function parseManagedAgentSnapshotForPublication(
   input: unknown,
@@ -611,6 +648,8 @@ export const ManagedRunInputV1Schema = v.object({
           contentType: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
           sizeBytes: v.pipe(v.number(), v.integer(), v.minValue(1)),
           sha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
+          storageProviderId: IdSchema,
+          objectKey: v.pipe(v.string(), v.minLength(1), v.maxLength(1_024)),
         }),
       ),
       v.maxLength(8),
@@ -699,6 +738,8 @@ export type AgentDefinition = v.InferOutput<typeof AgentDefinitionSchema>;
 export type AgentVersion = v.InferOutput<typeof AgentVersionSchema>;
 export type Skill = v.InferOutput<typeof SkillSchema>;
 export type SkillVersion = v.InferOutput<typeof SkillVersionSchema>;
+export type SkillDraft = v.InferOutput<typeof SkillDraftSchema>;
+export type SkillDraftEntry = v.InferOutput<typeof SkillDraftEntrySchema>;
 export type SkillLifecycleStatus = v.InferOutput<
   typeof SkillLifecycleStatusSchema
 >;

@@ -10,7 +10,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && cp -R migrations dist/migrations",
+    "build": "tsc -p tsconfig.build.json && rm -rf dist/migrations && cp -R migrations dist/migrations",
     "lint": "eslint src test",
     "migrate": "node --import tsx src/cli.ts",
     "test": "node --import tsx --test test/unit/**/*.test.ts",

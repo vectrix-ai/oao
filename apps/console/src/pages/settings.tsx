@@ -93,7 +93,7 @@ const copy: Record<
     eyebrow: "Configure",
     title: "Storage providers",
     description:
-      "S3-compatible project storage for durable per-thread workspace backups.",
+      "S3-compatible project storage for run attachments and per-thread workspace backups.",
   },
   settings: {
     eyebrow: "Configure",
@@ -855,8 +855,8 @@ function StorageConnections() {
   });
   return (
     <Panel
-      title="Workspace storage"
-      description="The default S3-compatible connection automatically receives a compressed workspace backup after every completed agent run."
+      title="Object storage"
+      description="The default S3-compatible connection stores raw run attachments and receives a compressed workspace backup after every completed agent run."
       actions={
         <Button
           variant="primary"
@@ -888,21 +888,21 @@ function StorageConnections() {
               credentials.
             </Alert>
           ) : null}
-          <Alert tone="warning" role="status" title="Private workspace data">
-            Workspace archives may contain user files and generated secrets.
-            Restrict bucket access and enable server-side encryption and
-            retention controls on the storage provider.
+          <Alert tone="warning" role="status" title="Private stored data">
+            Attachments and workspace archives may contain user files and
+            generated secrets. Restrict bucket access and enable server-side
+            encryption and retention controls on the storage provider.
           </Alert>
           {query.data.data.length === 0 ? (
             <EmptyState
               icon="▤"
               title="No storage providers"
-              description="Without a default storage provider, Daytona filesystem changes are not recoverable after sandbox deletion."
+              description="Without a default storage provider, file attachments are unavailable and Daytona filesystem changes are not recoverable after sandbox deletion."
             />
           ) : (
             <TableCard
               label="Storage providers table"
-              caption="Configured S3-compatible workspace storage"
+              caption="Configured S3-compatible project storage"
             >
               <thead>
                 <tr>
@@ -917,7 +917,14 @@ function StorageConnections() {
                 {query.data.data.map((provider) => (
                   <tr key={provider.id}>
                     <td>
-                      <strong>{provider.displayName}</strong>{" "}
+                      <strong>
+                        <Link
+                          to={`/storage-providers/${encodeURIComponent(provider.id)}`}
+                          title="Browse the files and folders stored with this provider"
+                        >
+                          {provider.displayName}
+                        </Link>
+                      </strong>{" "}
                       {provider.default ? <StatusChip value="default" /> : null}
                       <br />
                       <code>{provider.key}</code>

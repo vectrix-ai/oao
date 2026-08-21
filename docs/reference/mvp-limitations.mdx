@@ -14,13 +14,18 @@ and should shape integrations:
   published or distributed from a registry you control.
 - **Run files are deliberately bounded.** Initial and later turns accept up to
   eight UTF-8 text/code/data files, supported images, PDFs, common Microsoft
-  Office/OpenDocument/iWork documents, or EML/MSG emails. Extracted content is
-  capped at 200,000 characters per turn. Password-protected or text-free
-  documents, standalone archives, audio, video, Access/Publisher/OneNote/Visio/
-  Project files, and arbitrary binaries are not accepted. Files are submitted
-  inline as base64; presigned/direct-to-object storage uploads and reusable
-  artifact references remain future work. For full codebases, use narrow
-  caller-owned read/search tools instead of attaching the repository.
+  Office/OpenDocument/iWork documents, or EML/MSG emails. OAO uploads the
+  original bytes to the project's default S3-compatible storage provider and
+  copies them into a sandbox without extraction, OCR, or format validation.
+  PostgreSQL stores only the run manifest, not file bytes or extracted text. A
+  configured default storage provider and sandbox-enabled agent are therefore
+  required; binary formats require `shell` and suitable software in the
+  selected image or snapshot.
+  Standalone archives, audio, video, Access/Publisher/OneNote/Visio/Project
+  files, and arbitrary binaries are not accepted. Files are submitted inline
+  as base64 through the API; browser-to-object presigned uploads and reusable
+  artifact references remain future work. For full codebases, use narrow caller-owned
+  read/search tools instead of attaching the repository.
 - **One run executes at a time per session thread.** Submit the next turn only
   after the latest run is completed, failed, cancelled, or timed out.
 - **Delegate rosters are publication-time and exact.** A coordinator version

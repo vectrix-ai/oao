@@ -1,5 +1,8 @@
 import { serve } from "@hono/node-server";
-import { ProjectWorkspaceBackupResolver } from "@oao/artifact-s3";
+import {
+  ProjectArtifactStoreResolver,
+  ProjectWorkspaceBackupResolver,
+} from "@oao/artifact-s3";
 import type { ServerType } from "@hono/node-server";
 import { createPool, migrate } from "@oao/db-postgres";
 import type {
@@ -101,6 +104,9 @@ export async function startRuntimeWorker(input: {
   const workspaceBackupResolver = credentialCipher
     ? new ProjectWorkspaceBackupResolver(pool, credentialCipher)
     : undefined;
+  const runFileStorage = credentialCipher
+    ? new ProjectArtifactStoreResolver(pool, credentialCipher)
+    : undefined;
   const presetActivator = createProjectModelPresetActivator({
     pool,
     registry: presets,
@@ -118,9 +124,14 @@ export async function startRuntimeWorker(input: {
     broker,
     skills,
     delegations,
+    ...(runFileStorage ? { runFileStorage } : {}),
     ...(input.platformTools ? { platformTools: input.platformTools } : {}),
     sandboxFactory: (initial, delivery) => {
       const sandbox = initial.snapshot.sandbox;
+      if (!sandbox.snapshotId)
+        throw new Error(
+          "Sandbox-enabled agent versions must select a Daytona snapshot",
+        );
       if (sandbox.provider === "local-fake") {
         throw new Error(
           "The local-fake sandbox is no longer supported; publish a new agent version with a Daytona provider",
@@ -146,7 +157,7 @@ export async function startRuntimeWorker(input: {
             : {}),
           egress: { mode: "none" },
           capabilities: sandbox.capabilities,
-          ...(sandbox.snapshotId ? { snapshotId: sandbox.snapshotId } : {}),
+          snapshotId: sandbox.snapshotId,
         });
       if (!credentialCipher)
         throw new Error(
@@ -172,7 +183,7 @@ export async function startRuntimeWorker(input: {
           : {}),
         network: sandbox.network,
         capabilities: sandbox.capabilities,
-        ...(sandbox.snapshotId ? { snapshotId: sandbox.snapshotId } : {}),
+        snapshotId: sandbox.snapshotId,
         ...(workspaceBackupResolver ? { workspaceBackupResolver } : {}),
       });
     },

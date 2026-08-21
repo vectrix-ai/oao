@@ -1,6 +1,6 @@
 import { Bot, Plus, Save, Wrench } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../api/context";
 import type {
@@ -85,7 +85,11 @@ function presetOptions(
 
 function snapshotLabel(snapshot: SandboxSnapshotEntry): string {
   const resources = `${snapshot.cpu} CPU · ${snapshot.memoryGiB} GiB · ${snapshot.diskGiB} GiB disk`;
-  return `${snapshot.name} · ${resources}${snapshot.available ? "" : ` · ${snapshot.state}`}`;
+  const image =
+    snapshot.imageName && snapshot.imageName !== snapshot.name
+      ? ` · ${snapshot.imageName}`
+      : "";
+  return `${snapshot.name}${image} · ${resources}${snapshot.available ? "" : ` · ${snapshot.state}`}`;
 }
 
 function delegateSandboxMismatch(
@@ -402,7 +406,12 @@ function CreateAgentDialog({
     availablePresets.some((preset) => preset.key === modelPreset) &&
     !sandboxProvidersPending &&
     !sandboxProvidersError &&
-    sandboxProviders.some((provider) => provider.key === sandboxProvider);
+    sandboxProviders.some((provider) => provider.key === sandboxProvider) &&
+    (!sandboxEnabled ||
+      (snapshotId.length > 0 &&
+        (snapshots.data?.data ?? []).some(
+          (snapshot) => snapshot.id === snapshotId && snapshot.available,
+        )));
 
   return (
     <Dialog
@@ -579,7 +588,7 @@ function CreateAgentDialog({
           </Field>
           <Field
             label="Daytona snapshot"
-            hint="Use an active snapshot, or keep OAO's default image."
+            hint="Select an active snapshot returned by the connected Daytona account."
           >
             <Select
               value={snapshotId}
@@ -592,7 +601,9 @@ function CreateAgentDialog({
               }
               onChange={(event) => setSnapshotId(event.target.value)}
             >
-              <option value="">OAO default image · debian:12.9</option>
+              <option value="" disabled>
+                Select an active Daytona snapshot
+              </option>
               {(snapshots.data?.data ?? []).map((snapshot) => (
                 <option
                   key={snapshot.id}
@@ -625,6 +636,15 @@ function CreateAgentDialog({
         ) : snapshots.isPending && sandboxEnabled ? (
           <Alert tone="info" role="status">
             <strong>Loading Daytona snapshots</strong>
+          </Alert>
+        ) : sandboxEnabled &&
+          snapshots.data &&
+          !snapshots.data.data.some((snapshot) => snapshot.available) ? (
+          <Alert tone="warning" role="alert">
+            <strong>No active Daytona snapshots are available.</strong>
+            <span>
+              Create or activate a snapshot in Daytona, then try again.
+            </span>
           </Alert>
         ) : null}
         {sandboxProvidersError ? (
@@ -789,84 +809,6 @@ function AgentEditor({
     enabled: Boolean(selectedSandboxProvider),
   });
   const isLatest = !selected || selectedVersion === agent.version;
-  const validation = useMemo(() => {
-    const errors: string[] = [];
-    if (instructions.trim().length < 20)
-      errors.push("System instructions must contain at least 20 characters.");
-    if (timeout < 1_000 || timeout > 3_600_000)
-      errors.push("Run timeout must be between 1,000 and 3,600,000 ms.");
-    if (!modelPreset) errors.push("An approved model preset is required.");
-    else if (
-      modelPresets.length > 0 &&
-      !modelPresets.some((preset) => preset.key === modelPreset)
-    )
-      errors.push(
-        `${modelPreset} is not an approved model preset for this project.`,
-      );
-    else if (
-      modelPresets.some(
-        (preset) => preset.key === modelPreset && !preset.available,
-      )
-    )
-      errors.push(`${modelPreset} is not available in this deployment.`);
-    if (!sandboxProviders.some((provider) => provider.key === sandboxProvider))
-      errors.push(
-        `${sandboxProvider} is not a configured Daytona connection for this project.`,
-      );
-    if (sandboxProvidersError)
-      errors.push("Sandbox connections could not be verified.");
-    if (sandboxEnabled && snapshotId) {
-      if (snapshots.isError)
-        errors.push("The selected Daytona snapshot could not be verified.");
-      else if (
-        snapshots.data &&
-        !snapshots.data.data.some(
-          (snapshot) => snapshot.id === snapshotId && snapshot.available,
-        )
-      )
-        errors.push(
-          `${snapshotId} is not an active snapshot for this Daytona connection.`,
-        );
-    }
-    const coordinatorSandbox: AgentVersionConfig["sandbox"] = {
-      enabled: sandboxEnabled,
-      provider: sandboxProvider,
-      ...(snapshotId ? { snapshotId } : {}),
-      network,
-      capabilities: sandboxCapabilities,
-    };
-    for (const delegate of delegates) {
-      const candidate = availableAgents.find(
-        (item) => item.latestVersionId === delegate.agentVersionId,
-      );
-      if (!candidate) continue;
-      const mismatch = delegateSandboxMismatch(
-        coordinatorSandbox,
-        candidate.sandbox,
-      );
-      if (mismatch)
-        errors.push(
-          `${candidate.name} cannot be delegated: ${mismatch}. Publish a compatible child version first.`,
-        );
-    }
-    return errors;
-  }, [
-    availableAgents,
-    delegates,
-    instructions,
-    modelPreset,
-    modelPresets,
-    network,
-    sandboxCapabilities,
-    sandboxEnabled,
-    sandboxProvider,
-    sandboxProviders,
-    sandboxProvidersError,
-    snapshotId,
-    snapshots.data,
-    snapshots.isError,
-    timeout,
-  ]);
   const selectedPreset = modelPresets.find(
     (preset) => preset.key === modelPreset,
   );
@@ -900,6 +842,57 @@ function AgentEditor({
     },
     limits: { maxTurns: 32, timeoutMs: timeout },
   };
+  const incompatibleSelectedDelegates = delegates.flatMap((delegate) => {
+    const candidate = availableAgents.find(
+      (item) => item.latestVersionId === delegate.agentVersionId,
+    );
+    if (!candidate) return [];
+    const mismatch = delegateSandboxMismatch(config.sandbox, candidate.sandbox);
+    return mismatch ? [{ delegate, candidate, mismatch }] : [];
+  });
+  const validation: string[] = [];
+  if (instructions.trim().length < 20)
+    validation.push("System instructions must contain at least 20 characters.");
+  if (timeout < 1_000 || timeout > 3_600_000)
+    validation.push("Run timeout must be between 1,000 and 3,600,000 ms.");
+  if (!modelPreset) validation.push("An approved model preset is required.");
+  else if (
+    modelPresets.length > 0 &&
+    !modelPresets.some((preset) => preset.key === modelPreset)
+  )
+    validation.push(
+      `${modelPreset} is not an approved model preset for this project.`,
+    );
+  else if (
+    modelPresets.some(
+      (preset) => preset.key === modelPreset && !preset.available,
+    )
+  )
+    validation.push(`${modelPreset} is not available in this deployment.`);
+  if (!sandboxProviders.some((provider) => provider.key === sandboxProvider))
+    validation.push(
+      `${sandboxProvider} is not a configured Daytona connection for this project.`,
+    );
+  if (sandboxProvidersError)
+    validation.push("Sandbox connections could not be verified.");
+  if (sandboxEnabled) {
+    if (!snapshotId) validation.push("Select an active Daytona snapshot.");
+    else if (snapshots.isError)
+      validation.push("The selected Daytona snapshot could not be verified.");
+    else if (
+      snapshots.data &&
+      !snapshots.data.data.some(
+        (snapshot) => snapshot.id === snapshotId && snapshot.available,
+      )
+    )
+      validation.push(
+        `${snapshotId} is not an active snapshot for this Daytona connection.`,
+      );
+  }
+  for (const { candidate, mismatch } of incompatibleSelectedDelegates)
+    validation.push(
+      `${candidate.name} cannot be delegated: ${mismatch}. Publish a compatible child version first or remove it from this version.`,
+    );
 
   return (
     <Page>
@@ -1129,6 +1122,38 @@ function AgentEditor({
                   same sandbox enabled state, provider, snapshot, and network
                   policy as this coordinator. Tool capabilities may differ.
                 </Alert>
+                {incompatibleSelectedDelegates.length > 0 ? (
+                  <Alert
+                    tone="warning"
+                    title="Selected delegates do not match the draft sandbox"
+                    role="alert"
+                  >
+                    <p>
+                      Publish compatible child versions first, or remove the
+                      incompatible bindings from this new coordinator version.
+                    </p>
+                    <Button
+                      size="sm"
+                      onClick={() =>
+                        setDelegates((current) =>
+                          current.filter(
+                            (delegate) =>
+                              !incompatibleSelectedDelegates.some(
+                                (entry) =>
+                                  entry.delegate.agentVersionId ===
+                                  delegate.agentVersionId,
+                              ),
+                          ),
+                        )
+                      }
+                    >
+                      Remove incompatible{" "}
+                      {incompatibleSelectedDelegates.length === 1
+                        ? "delegate"
+                        : "delegates"}
+                    </Button>
+                  </Alert>
+                ) : null}
                 {availableAgents.map((candidate) => {
                   const checked = delegates.some(
                     (delegate) =>
@@ -1226,7 +1251,9 @@ function AgentEditor({
                     snapshots.isError
                   }
                 >
-                  <option value="">OAO default image · debian:12.9</option>
+                  <option value="" disabled>
+                    Select an active Daytona snapshot
+                  </option>
                   {snapshotId &&
                   snapshots.data &&
                   !snapshots.data.data.some(

@@ -8,6 +8,12 @@ This is separate from Daytona's own sandbox lifecycle: if Daytona no longer has
 the sandbox, OAO creates a replacement and restores the latest verified archive
 before the agent receives any sandbox tools.
 
+The same project storage connections also hold raw run attachments. Attachment
+objects use separate deterministic keys, bind to the selected provider at
+upload time, and are downloaded and integrity-checked before Daytona receives
+them. PostgreSQL stores their run manifest but never their bytes or extracted
+text. See [Send files to an agent](/integrations/files).
+
 ## Add a storage provider
 
 1. Configure the same `OAO_CREDENTIAL_ENCRYPTION_KEY` for the API and runtime.
@@ -40,10 +46,16 @@ At each awaited agent-finish seam, OAO:
 
 1. asks Daytona for the sandbox workdir used by the agent and creates a
    gzip-compressed tar archive of that directory inside the sandbox;
-2. uploads it to the thread's deterministic tenant-scoped object key;
-3. stores the byte length, SHA-256 digest, latest run, timestamp, and generation
+2. lists the regular files in that workdir and uploads a bounded JSON manifest
+   beside the archive in the same tenant-scoped object-storage prefix;
+3. uploads the archive to the thread's deterministic tenant-scoped object key;
+4. stores the archive byte length, SHA-256 digest, latest owning run, timestamp, and generation
    in PostgreSQL; and
-4. overwrites the previous latest archive for that thread.
+5. overwrites the previous latest archive and manifest for that thread.
+
+The file manifest contains relative paths, names, and byte sizes. It is bound to
+the archive's byte length and SHA-256, and it stays in object storage. PostgreSQL
+does not store the workspace file list or any file contents.
 
 The finish hook is at least once. Repeating it is safe because the object key is
 stable and PostgreSQL advances the recorded generation. A backup failure fails
@@ -59,7 +71,7 @@ sandbox after upload or restore.
 When another run uses the thread, OAO first asks Daytona for the recorded
 sandbox. A running or restartable sandbox is reused normally. If the recorded
 sandbox is gone, OAO creates a replacement with the agent version's selected
-snapshot or default image, then:
+snapshot, then:
 
 1. downloads the latest thread archive;
 2. verifies tenant metadata, byte length, and SHA-256 against PostgreSQL;
@@ -76,10 +88,15 @@ The session detail response exposes safe backup diagnostics under
 length, generation, backup time, and last restore time. Credentials and archive
 contents are never returned.
 
-The console session panel also lists filenames observed in completed sandbox
-tool arguments. A file is marked **Backed up** when the thread workspace backup
-was recorded after that tool completed. The panel exposes the audited path and
-backup state only; it does not read or return archive contents.
+The console session panel reads the authoritative object-storage manifest and
+lists every regular file captured in the latest workspace archive, including
+files created indirectly by shell commands or APIs. Uploaded run attachments
+are also taken from their durable upload manifest and merged by their exact
+`.oao/attachments/{runId}/{filename}` path. An uploaded file can therefore show
+**Uploaded + backed up**, while a generated workspace file shows **Backed up**.
+Legacy archives without a sidecar manifest retain the earlier command-audit
+fallback until a later run writes a new backup. The panel never downloads or
+returns archive contents.
 
 ## API example
 

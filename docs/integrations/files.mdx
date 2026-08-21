@@ -1,17 +1,20 @@
 ---
 title: "Send files to an agent"
-description: "Attach durable text, images, Office documents, PDFs, and email files when creating or continuing an OAO session."
+description: "Copy durable text, images, Office documents, PDFs, and email files into an agent's sandbox without preprocessing."
 ---
 
 OAO accepts files on both the initial session request and every later session
-turn. A file is submitted inline as canonical base64, stored with the durable
-run under tenant row-level security, and integrity-bound to that run by its
-SHA-256 digest.
+turn. A file is submitted inline as canonical base64, uploaded byte-for-byte to
+the project's default S3-compatible storage provider, integrity-bound to the
+run by its SHA-256 digest, and copied into the thread's sandbox before the model
+runs. PostgreSQL stores only the run manifest and object-storage binding; it
+does not store attachment bytes or extracted text.
 
 The current file input supports:
 
-- UTF-8 `text/*`, JSON, JSON-LD, NDJSON, XML, YAML, JavaScript, and TypeScript.
-- PNG, JPEG, WebP, and GIF images. The selected model must support vision.
+- Files declared as `text/*`, JSON, JSON-LD, NDJSON, XML, YAML, JavaScript,
+  and TypeScript.
+- PNG, JPEG, WebP, and GIF images.
 - PDF and RTF documents.
 - Microsoft Word `.doc`, `.dot`, `.docx`, `.docm`, `.dotx`, and `.dotm`.
 - Microsoft Excel `.xls`, `.xlt`, `.xla`, `.xlsx`, `.xlsm`, `.xlsb`,
@@ -24,14 +27,24 @@ The current file input supports:
 - Apple iWork `.pages`, `.numbers`, and `.key` documents.
 - RFC 822 `.eml` and Outlook `.msg` email files.
 - Up to 8 files per turn, 10 MiB per file, and 20 MiB combined.
-- Up to 200,000 decoded or extracted characters across files on one turn.
 
-Office documents, PDFs, and email files are converted to bounded Markdown
-during API admission. A malformed, encrypted, password-protected, or
-text-free document is rejected before a run is queued. Office macros and email
-attachments are never executed. Standalone archives, audio, video,
-executables, Microsoft Access/Publisher/OneNote/Visio/Project files, and other
-arbitrary binaries remain unsupported.
+OAO does not decode, extract, OCR, summarize, or otherwise preprocess file
+contents. A malformed, encrypted, password-protected, or text-free document is
+still admitted as raw bytes; the agent's sandbox tools decide how to inspect
+it. Standalone archives, audio, video, executables, Microsoft
+Access/Publisher/OneNote/Visio/Project files, and other arbitrary binaries
+remain unsupported by the upload contract.
+
+The selected agent version must enable a sandbox. Text inputs require either
+`filesystem_read` or `shell`; binary inputs require `shell`. Choose a Daytona
+snapshot with the software needed for the formats the agent will receive. New
+sandbox-enabled agent versions cannot be published without selecting an active
+snapshot returned by Daytona. OAO does not substitute or build an image.
+
+The project must also have a default [S3-compatible storage
+provider](/storage/workspace-backups). OAO rejects a file submission before
+queueing the run when object storage or its credential-encryption configuration
+is unavailable. Message-only runs do not require object storage.
 
 ## API file contract
 
@@ -47,11 +60,10 @@ interface RunFileInput {
 
 `name` is a plain filename, not a path, and must be unique within the message.
 The API normalizes the media type, verifies that known document extensions and
-declared types agree, validates or extracts the content, computes the digest
-itself, and never accepts a caller-supplied storage reference or checksum as
-proof of content. `application/octet-stream` is accepted for a recognized
-document extension; the server still parses the bytes as that format before
-admitting the run.
+declared types agree, computes the digest itself, and never accepts a
+caller-supplied storage reference or checksum as proof of content. It does not
+parse the bytes. `application/octet-stream` is accepted for a recognized
+document extension and normalized from that extension.
 
 ## Start a session with files
 
@@ -137,30 +149,23 @@ The same `files` field is accepted by
 `POST /projects/{projectId}/sessions/{sessionId}/runs` and
 `POST /projects/{projectId}/runs/{runId}/resume`. A turn may contain only files.
 
-## Send an email file
+## Inspect an Excel file with pandas
 
-Use `message/rfc822` for an `.eml` file. OAO extracts the sender, recipients,
-subject, date, and readable message body as model context:
+The runtime places every file under a deterministic per-run path. An agent with
+the `shell` capability can use pandas directly:
 
-```ts
-const email = await readFile("customer-renewal.eml");
+```python
+import pandas as pd
 
-await client.submitRun(
-  projectId,
-  sessionId,
-  {
-    message: "Summarize the renewal request and list the stated value.",
-    files: [
-      {
-        name: "customer-renewal.eml",
-        contentType: "message/rfc822",
-        dataBase64: email.toString("base64"),
-      },
-    ],
-  },
-  { idempotencyKey: "renewal-email-1" },
-);
+path = ".oao/attachments/<run-id>/tasks.xlsx"
+workbook = pd.ExcelFile(path)
+print(workbook.sheet_names)
+print(pd.read_excel(path, sheet_name=workbook.sheet_names[0]).head())
 ```
+
+The model receives the exact path, filename, content type, byte size, and
+SHA-256. It does not receive a parsed preview, so reading the file produces a
+normal visible `read` or `bash` tool call.
 
 ## Use the console
 
@@ -169,25 +174,41 @@ submitting. On an existing settled session, use **Attach files** under the
 message composer. Selected files are read in the browser and sent through the
 authenticated API request; the browser never receives an S3 credential.
 
-The transcript shows the filename, normalized content type, and size next to the
-user message. It never returns the stored base64 or raw bytes.
+The transcript shows the filename, normalized content type, and size next to
+the user message. It never returns the stored base64 or raw bytes. If the
+selected agent lacks the required sandbox capability, the API rejects the run
+before queueing it.
+
+The session sidebar lists each uploaded attachment from the run's durable
+manifest. After a successful workspace backup it shows **Uploaded + backed up**
+when the exact sandbox path is also present in the archive's object-storage
+manifest. This is an authoritative path comparison rather than an inference
+from shell command text.
 
 ## Runtime and event behavior
 
-UTF-8 content and admission-time document/email extraction are framed with the
-filename and normalized content type in the model-visible turn. Images use
-Flue's native image attachment input. Image use therefore also depends on the
-selected provider model's vision support. Scanned PDFs and image-only office
-documents are not OCRed by this API path.
+Before the first model turn, the runtime downloads the original object from the
+storage provider bound at upload time, verifies its content type, size, and
+SHA-256, and writes it to
+`.oao/attachments/{runId}/{filename}` relative to the sandbox's writable
+working directory. Re-running the same intake
+hook safely overwrites the same path with the same verified bytes. Later turns
+use their own run directory, while earlier attachment paths remain available
+in the persistent thread workspace.
 
-File bytes are not copied into `runs.inputPublic`, product events, SSE, audit
-details, or ordinary transcript responses. Those surfaces contain only IDs,
-safe metadata, count, size, and SHA-256. Consume the normal resumable project
-event stream and re-fetch the session when a relevant message or run event
-arrives.
+The model-visible message contains only paths and safe metadata. The runtime
+does not read the files on the model's behalf. The agent must call its sandbox
+tools, so those reads and commands appear in the normal tool timeline.
+
+File bytes are not copied into PostgreSQL, `runs.inputPublic`, product events,
+SSE, audit details, or ordinary transcript responses. The run manifest contains
+only IDs, the bound storage provider and logical object key, safe metadata,
+size, and SHA-256. Consume the normal resumable project event stream and
+re-fetch the session when a relevant message or run event arrives.
 
 <Warning>
-  Treat attached and extracted text as untrusted user input. It can contain
-  prompt injection, secrets, or misleading instructions. Keep authorization in
-  tool handlers and never let file text override execution-time policy.
+  Treat every uploaded file as untrusted user input. OAO does not execute it,
+  but a shell-capable agent can choose tools that do. Agent instructions should
+  inspect data files without executing embedded macros, scripts, or binaries,
+  and must never let file content override execution-time authorization.
 </Warning>

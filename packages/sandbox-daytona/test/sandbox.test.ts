@@ -12,7 +12,6 @@ import type {
 import type { SandboxRepository } from "../src/index.js";
 import {
   DAYTONA_TARGET_POSTURE,
-  DEFAULT_DAYTONA_IMAGE,
   DaytonaManagedProvider,
   FakeSandboxProvider,
   ManagedSandboxLifecycle,
@@ -20,6 +19,7 @@ import {
   daytonaSandboxRecoveryAction,
   safeSandboxToolCommand,
   sandboxWorkspaceLifecycleIdentity,
+  workspaceBackupIdentityForRun,
 } from "../src/index.js";
 import { isReservedWorkspaceSkillPath } from "../src/flue-daytona-blueprint.js";
 
@@ -41,7 +41,7 @@ test("project Daytona credentials use the encrypted provider schema", async () =
     source,
     /credential_(?:ciphertext|nonce|tag|key_version)/u,
   );
-  assert.equal(DEFAULT_DAYTONA_IMAGE, "debian:12.9");
+  assert.doesNotMatch(source, /DEFAULT_DAYTONA_IMAGE/u);
   assert.doesNotMatch(source, /flue-daytona:2\.0\.3/u);
 });
 
@@ -71,6 +71,34 @@ test("coordinator and child threads derive one sandbox lifecycle from the worksp
   });
   assert.equal(root, childUsingRoot);
   assert.notEqual(root, isolatedChild);
+});
+
+test("workspace backups record the current owning run and preserve shared-owner identity", () => {
+  const current = workspaceBackupIdentityForRun({
+    ...tenant,
+    runId: "00000000-0000-4000-8000-000000000021" as RunId,
+    threadId: "00000000-0000-4000-8000-000000000022" as ThreadId,
+    sessionId: "00000000-0000-4000-8000-000000000023" as SessionId,
+    workspaceOwnerRunId: "00000000-0000-4000-8000-000000000020" as RunId,
+    workspaceOwnerThreadId: "00000000-0000-4000-8000-000000000022" as ThreadId,
+    workspaceOwnerSessionId:
+      "00000000-0000-4000-8000-000000000023" as SessionId,
+  });
+  assert.equal(current.runId, "00000000-0000-4000-8000-000000000021");
+
+  const shared = workspaceBackupIdentityForRun({
+    ...tenant,
+    runId: "00000000-0000-4000-8000-000000000031" as RunId,
+    threadId: "00000000-0000-4000-8000-000000000032" as ThreadId,
+    sessionId: "00000000-0000-4000-8000-000000000033" as SessionId,
+    workspaceOwnerRunId: "00000000-0000-4000-8000-000000000020" as RunId,
+    workspaceOwnerThreadId: "00000000-0000-4000-8000-000000000022" as ThreadId,
+    workspaceOwnerSessionId:
+      "00000000-0000-4000-8000-000000000023" as SessionId,
+  });
+  assert.equal(shared.runId, "00000000-0000-4000-8000-000000000020");
+  assert.equal(shared.threadId, "00000000-0000-4000-8000-000000000022");
+  assert.equal(shared.sessionId, "00000000-0000-4000-8000-000000000023");
 });
 
 test("mutable workspace Skills are hidden from Flue discovery", () => {
@@ -156,6 +184,26 @@ test("workspace backup and restore use Daytona's model-facing workdir", async ()
     },
     fs: {
       downloadFile: async () => Buffer.from([31, 139, 8, 0]),
+      listFiles: async () => [
+        {
+          name: ".oao",
+          path: "/root/.oao",
+          isDir: true,
+          size: 0,
+        },
+        {
+          name: "input.xlsx",
+          path: "/root/.oao/attachments/run/input.xlsx",
+          isDir: false,
+          size: 10858,
+        },
+        {
+          name: "result.csv",
+          path: "/root/output/result.csv",
+          isDir: false,
+          size: 42,
+        },
+      ],
       uploadFile: async (bytes: Buffer, path: string) => {
         uploads.push({ path, bytes: Buffer.from(bytes) });
       },
@@ -177,6 +225,14 @@ test("workspace backup and restore use Daytona's model-facing workdir", async ()
   );
   assert.equal(capture?.cwd, "/root");
   assert.doesNotMatch(capture?.command ?? "", /home\/daytona/u);
+  assert.deepEqual(await provider.listWorkspaceFiles(handle), [
+    {
+      name: "input.xlsx",
+      path: ".oao/attachments/run/input.xlsx",
+      sizeBytes: 10858,
+    },
+    { name: "result.csv", path: "output/result.csv", sizeBytes: 42 },
+  ]);
 
   commands.length = 0;
   await provider.restoreWorkspace(handle, new Uint8Array([31, 139, 8, 0]));
@@ -257,7 +313,7 @@ test("fake sandbox creation, recovery and command results are fenced", async () 
     threadId: "00000000-0000-4000-8000-000000000011" as ThreadId,
     sessionId: "00000000-0000-4000-8000-000000000012" as SessionId,
     creationKey: "sandbox:run-10",
-    image: "daytonaio/sandbox:latest",
+    snapshotId: "00000000-0000-4000-8000-000000000099",
     egress: { mode: "none" as const },
   };
   const first = await manager.ensure(input);

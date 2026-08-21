@@ -34,6 +34,68 @@ const runId = "00000000-0000-4000-8000-000000000302" as RunId;
 const threadId = "00000000-0000-4000-8000-000000000006" as ThreadId;
 const sessionId = "00000000-0000-4000-8000-000000000007" as SessionId;
 
+async function seedTenantFixture(
+  pool: ReturnType<typeof createPool>,
+): Promise<void> {
+  const principalId = "00000000-0000-4000-8000-000000000003";
+  const agentId = "00000000-0000-4000-8000-000000000004";
+  const agentVersionId = "00000000-0000-4000-8000-000000000005";
+  const config = {
+    systemPrompt: "Run the sandbox integration fixture.",
+    modelPreset: "integration-model",
+    tools: [],
+    sandbox: {
+      enabled: false,
+      provider: "test-daytona",
+      network: "none",
+      capabilities: [],
+    },
+    limits: { maxTurns: 32, timeoutMs: 60_000 },
+  };
+  await pool.query(
+    `INSERT INTO oao.organizations (id,slug,name)
+     VALUES ($1,'sandbox-integration','Sandbox integration')
+     ON CONFLICT DO NOTHING`,
+    [tenant.organizationId],
+  );
+  await pool.query(
+    `INSERT INTO oao.projects (organization_id,id,slug,name)
+     VALUES ($1,$2,'sandbox-integration','Sandbox integration')
+     ON CONFLICT DO NOTHING`,
+    [tenant.organizationId, tenant.projectId],
+  );
+  await pool.query(
+    `INSERT INTO oao.principals (
+       organization_id,project_id,id,kind,subject,scopes
+     ) VALUES ($1,$2,$3,'human','sandbox-integration',ARRAY['*'])
+     ON CONFLICT DO NOTHING`,
+    [tenant.organizationId, tenant.projectId, principalId],
+  );
+  await pool.query(
+    `INSERT INTO oao.agent_definitions (
+       organization_id,project_id,id,agent_key,name
+     ) VALUES ($1,$2,$3,'sandbox-integration','Sandbox integration')
+     ON CONFLICT DO NOTHING`,
+    [tenant.organizationId, tenant.projectId, agentId],
+  );
+  await pool.query(
+    `INSERT INTO oao.agent_versions (
+       organization_id,project_id,id,agent_definition_id,version,config,
+       content_hash,created_by_principal_id
+     ) VALUES ($1,$2,$3,$4,1,$5,$6,$7)
+     ON CONFLICT DO NOTHING`,
+    [
+      tenant.organizationId,
+      tenant.projectId,
+      agentVersionId,
+      agentId,
+      config,
+      createHash("sha256").update(JSON.stringify(config)).digest(),
+      principalId,
+    ],
+  );
+}
+
 class FailOnceSandboxProvider extends FakeSandboxProvider {
   #shouldFail = true;
 
@@ -108,6 +170,16 @@ class WorkspaceSandboxProvider extends FakeSandboxProvider {
     return new Uint8Array([31, 139, 8, 0, 1, 2, 3]);
   }
 
+  async listWorkspaceFiles() {
+    return [
+      {
+        name: "result.csv",
+        path: "output/result.csv",
+        sizeBytes: 42,
+      },
+    ];
+  }
+
   async restoreWorkspace(
     _sandbox: SandboxHandle,
     archive: Uint8Array,
@@ -123,12 +195,24 @@ test(
     assert.ok(databaseUrl);
     const pool = createPool(databaseUrl);
     try {
+      await seedTenantFixture(pool);
       await withTenantTransaction(pool, tenant, (transaction) =>
         transaction.query(
-          `INSERT INTO oao.runs (
-            organization_id,project_id,id,thread_id,session_id,agent_version_id,
-            created_by_principal_id,idempotency_key
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,'sandbox-integration')`,
+          `WITH thread AS (
+             INSERT INTO oao.threads (organization_id,project_id,id,title)
+             VALUES ($1,$2,$4,'Sandbox integration')
+             ON CONFLICT DO NOTHING
+           ), session AS (
+             INSERT INTO oao.sessions (
+               organization_id,project_id,id,thread_id,agent_version_id
+             ) VALUES ($1,$2,$5,$4,$6)
+             ON CONFLICT DO NOTHING
+           )
+           INSERT INTO oao.runs (
+             organization_id,project_id,id,thread_id,session_id,agent_version_id,
+             created_by_principal_id,idempotency_key
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,'sandbox-integration')
+           ON CONFLICT DO NOTHING`,
           [
             tenant.organizationId,
             tenant.projectId,
@@ -151,7 +235,7 @@ test(
         threadId,
         sessionId,
         creationKey: `sandbox:${runId}`,
-        image: "fake/local",
+        snapshotId: "00000000-0000-4000-8000-000000000099",
         egress: { mode: "none" },
       } as const;
       await assert.rejects(
@@ -296,6 +380,7 @@ test(
         pool,
         provider: firstProvider,
         ...identity,
+        snapshotId: "00000000-0000-4000-8000-000000000099",
         egress: { mode: "none" },
         workspaceBackupStore: firstStore,
       });
@@ -306,6 +391,7 @@ test(
         pool,
         provider: firstProvider,
         ...identity,
+        snapshotId: "00000000-0000-4000-8000-000000000099",
         egress: { mode: "none" },
         workspaceBackupStore: firstStore,
       });
@@ -313,11 +399,21 @@ test(
 
       const replacementStore = await backupResolver.resolve(identity);
       assert.ok(replacementStore);
+      const storedManifest = await replacementStore.loadManifest();
+      assert.equal(storedManifest?.version, 1);
+      assert.deepEqual(storedManifest?.files, [
+        {
+          name: "result.csv",
+          path: "output/result.csv",
+          sizeBytes: 42,
+        },
+      ]);
       const replacementProvider = new WorkspaceSandboxProvider();
       const replacementFactory = createManagedDaytonaFlueSandbox({
         pool,
         provider: replacementProvider,
         ...identity,
+        snapshotId: "00000000-0000-4000-8000-000000000099",
         egress: { mode: "none" },
         workspaceBackupStore: replacementStore,
       });

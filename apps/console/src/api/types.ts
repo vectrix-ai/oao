@@ -99,6 +99,21 @@ export interface StorageProviderList {
   readonly credentialEncryptionConfigured: boolean;
 }
 
+export interface StorageObjectEntry {
+  readonly key: string;
+  readonly sizeBytes: number;
+  readonly lastModifiedAt?: string;
+}
+
+export interface StorageObjectList {
+  readonly providerId: string;
+  readonly prefix: string;
+  readonly folders: readonly string[];
+  readonly objects: readonly StorageObjectEntry[];
+  readonly truncated: boolean;
+  readonly cursor?: string;
+}
+
 export type AgentStatus = "published" | "draft" | "archived";
 
 export interface AgentSummary {
@@ -154,6 +169,32 @@ export interface SkillFileInput {
   readonly path: string;
   readonly contentType: string;
   readonly dataBase64: string;
+}
+
+export interface SkillDraftEntry {
+  readonly path: string;
+  readonly kind: "directory" | "file";
+  readonly contentType: string | null;
+  readonly sizeBytes: number | null;
+  readonly sha256: string | null;
+  readonly dataBase64?: string;
+}
+
+export interface SkillDraft {
+  readonly id: string;
+  readonly skillId: string | null;
+  readonly sourceSkillVersionId: string | null;
+  readonly key: string;
+  readonly displayName: string;
+  readonly name: string;
+  readonly description: string;
+  readonly instructions: string;
+  readonly revision: number;
+  readonly status: "editing" | "published" | "discarded";
+  readonly publishedSkillVersionId: string | null;
+  readonly entries: readonly SkillDraftEntry[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
 }
 
 export interface SkillVersionView {
@@ -290,8 +331,12 @@ export interface SessionDetail extends SessionSummary {
   readonly workspaceFiles: readonly {
     readonly name: string;
     readonly path: string;
+    readonly sizeBytes?: number;
+    readonly uploaded?: boolean;
     readonly backedUp: boolean;
     readonly backedUpAt?: string;
+    readonly storageProviderId?: string;
+    readonly objectKey?: string;
   }[];
   readonly capabilities: {
     readonly canCancel: boolean;
@@ -465,6 +510,34 @@ export interface ConsoleApi {
     skillId: string,
     versionId: string,
   ): Promise<{ readonly files: readonly SkillFileInput[] }>;
+  createSkillDraft(input?: {
+    readonly skillId?: string;
+    readonly sourceSkillVersionId?: string;
+  }): Promise<SkillDraft>;
+  updateSkillDraft(
+    draftId: string,
+    input: Pick<
+      SkillDraft,
+      "key" | "displayName" | "name" | "description" | "instructions"
+    >,
+  ): Promise<SkillDraft>;
+  createSkillDraftDirectory(draftId: string, path: string): Promise<SkillDraft>;
+  putSkillDraftFile(draftId: string, file: SkillFileInput): Promise<SkillDraft>;
+  removeSkillDraftEntry(
+    draftId: string,
+    path: string,
+    recursive: boolean,
+  ): Promise<SkillDraft>;
+  validateSkillDraft(draftId: string): Promise<{
+    readonly valid: true;
+    readonly contentHash: string;
+    readonly totalBytes: number;
+    readonly fileCount: number;
+  }>;
+  publishSkillDraft(
+    draftId: string,
+  ): Promise<{ readonly skillId: string; readonly versionId: string }>;
+  discardSkillDraft(draftId: string): Promise<void>;
   updateSkillVersionLifecycle(
     skillId: string,
     versionId: string,
@@ -533,6 +606,13 @@ export interface ConsoleApi {
   setDefaultStorageProvider(
     providerId: string,
   ): Promise<ProjectStorageProvider>;
+  listStorageObjects(
+    providerId: string,
+    query?: {
+      readonly prefix?: string;
+      readonly cursor?: string;
+    },
+  ): Promise<StorageObjectList>;
   listModelCatalog(
     providerId: string,
     search?: string,

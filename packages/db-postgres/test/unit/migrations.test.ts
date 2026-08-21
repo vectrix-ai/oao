@@ -255,6 +255,19 @@ test("agent sandbox snapshot migration preserves validation guards", async () =>
   assert.doesNotMatch(sql, /DROP|DELETE|UPDATE/u);
 });
 
+test("sandbox-enabled agent versions require an explicit snapshot", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0020_agent_sandbox_snapshot_required.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(sql, /sandbox_key_count <> 5/u);
+  assert.match(sql, /snapshotId/u);
+  assert.doesNotMatch(sql, /DROP|DELETE|UPDATE/u);
+});
+
 test("workspace storage migration keeps backups tenant-correlated and credentials encrypted", async () => {
   const sql = await readFile(
     new URL("../../migrations/0015_workspace_storage.sql", import.meta.url),
@@ -270,25 +283,6 @@ test("workspace storage migration keeps backups tenant-correlated and credential
   assert.match(sql, /project_storage_providers_one_default_idx/u);
   assert.match(sql, /FORCE ROW LEVEL SECURITY/gmu);
   assert.doesNotMatch(sql, /DROP|DELETE/u);
-});
-
-test("run file migration keeps bytes private, immutable, and tenant correlated", async () => {
-  const sql = await readFile(
-    new URL("../../migrations/0016_run_files.sql", import.meta.url),
-    "utf8",
-  );
-  assert.match(sql, /CREATE TABLE oao\.run_files/u);
-  assert.match(sql, /content_bytes bytea NOT NULL/u);
-  assert.match(sql, /extracted_text text CHECK/u);
-  assert.match(sql, /FOREIGN KEY \(organization_id, project_id, run_id\)/u);
-  assert.match(sql, /FOREIGN KEY \(organization_id, project_id, message_id\)/u);
-  assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
-  assert.match(
-    sql,
-    /CREATE TRIGGER run_files_immutable\nBEFORE UPDATE OR DELETE ON oao\.run_files/u,
-  );
-  assert.match(sql, /GRANT SELECT, INSERT ON oao\.run_files TO oao_app/u);
-  assert.doesNotMatch(sql, /GRANT[^;]*(?:UPDATE|DELETE)/u);
 });
 
 test("skill migration keeps packages immutable and copies exact version bindings", async () => {
@@ -310,6 +304,22 @@ test("skill migration keeps packages immutable and copies exact version bindings
   assert.match(sql, /skill\.activated/u);
   assert.match(sql, /skill\.resource_read/u);
   assert.doesNotMatch(sql, /DROP TABLE|DELETE FROM/u);
+});
+
+test("Skill package drafts are mutable, tenant-isolated staging resources", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0019_skill_package_drafts.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE oao\.skill_package_drafts/u);
+  assert.match(sql, /CREATE TABLE oao\.skill_package_draft_entries/u);
+  assert.match(sql, /entry_kind IN \('directory', 'file'\)/u);
+  assert.match(sql, /source_skill_version_id/u);
+  assert.match(sql, /published_skill_version_id/u);
+  assert.match(sql, /FORCE ROW LEVEL SECURITY/gmu);
+  assert.match(sql, /ON DELETE CASCADE/u);
+  assert.match(sql, /skill\.draft_created/u);
+  assert.doesNotMatch(sql, /DROP TABLE/u);
 });
 
 test("multi-agent migration pins delegates and isolates child threads in one workspace", async () => {

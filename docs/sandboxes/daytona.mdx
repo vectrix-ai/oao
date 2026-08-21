@@ -28,17 +28,29 @@ target/allowlist do not require republishing an agent version.
 ## Select the sandbox on an agent
 
 When creating an agent, enable **Sandbox**, choose a project Daytona connection,
-choose an active snapshot or OAO's default image, then choose `none` or
+choose one of the active snapshots returned by Daytona, then choose `none` or
 `restricted` network access and the capabilities to publish. The same controls
 remain available on the latest agent version. OAO does not expose a local fake
-sandbox in the runnable product.
+sandbox or a built-in image in the runnable product.
 
 The snapshot picker calls
 `GET /projects/{projectId}/sandbox-providers/{providerId}/snapshots`. It shows
 every snapshot visible to that Daytona credential with state and resource
 metadata; only snapshots in `active` state are selectable. OAO stores the
-selected snapshot UUID as immutable `sandbox.snapshotId` version data. If no
-snapshot is selected, creation uses `debian:12.9`.
+selected snapshot UUID as immutable `sandbox.snapshotId` version data. The API
+re-queries Daytona during publication and rejects a missing, unknown, or
+inactive selection. Runtime creation always sends that snapshot ID to Daytona;
+there is no image-based fallback or OAO-owned package. Daytona-managed default
+snapshots and custom snapshots are treated identically. See [Daytona's snapshot
+documentation](https://www.daytona.io/docs/en/snapshots/) for their lifecycle
+and contents.
+
+Coordinator and child-agent versions that share a workspace must select the
+same sandbox enabled state, provider, snapshot, and network policy. Changing
+one of those fields can therefore make an already-selected delegate
+incompatible. Publish a matching child version and select it, or use **Remove
+incompatible delegate(s)** in the coordinator editor before publishing the new
+version. The UI never silently removes an immutable delegate binding.
 
 | Capability         | Model-facing tools                                         |
 | ------------------ | ---------------------------------------------------------- |
@@ -52,8 +64,16 @@ Use, launch Chromium, navigate to allowlisted HTTP(S) URLs, return a bounded
 accessibility tree plus compressed screenshot, and interact by accessibility
 node, key press, or scroll. The sandbox image must contain `chromium`,
 `chromium-browser`, or `google-chrome` when browser capability is enabled.
-When no snapshot is selected, OAO uses the public `debian:12.9` base image;
-browser-capable agents therefore need a selected snapshot that adds Chromium.
+Browser-capable agents need a selected snapshot that includes Chromium.
+
+Run attachments are copied byte-for-byte to
+`.oao/attachments/{runId}/{filename}` relative to Daytona's reported writable
+workdir before the model starts. They
+are downloaded from the run's bound project object-storage provider, verified,
+and never converted to prompt text or stored as PostgreSQL bytes. Text files
+need `filesystem_read` or `shell`; Excel, Office, PDF, email, image, and other
+binary formats need `shell` plus the corresponding software in the selected
+image or snapshot.
 
 Every hosted sandbox tool call reserves a fenced `sandbox_commands` record and
 emits safe start/completion/failure events. The record keeps the model-facing

@@ -195,6 +195,18 @@ async function runFiles(form: HTMLFormElement): Promise<RunFileUpload[]> {
   );
 }
 
+function storageObjectHref(providerId: string, objectKey: string): string {
+  const segments = objectKey.split("/");
+  const name = segments.pop() ?? "";
+  const params = new URLSearchParams();
+  if (segments.length > 0) params.set("prefix", `${segments.join("/")}/`);
+  if (name) params.set("highlight", name);
+  const query = params.toString();
+  return `/storage-providers/${encodeURIComponent(providerId)}${
+    query ? `?${query}` : ""
+  }`;
+}
+
 function costLabel(provenance: string): string {
   return provenance === "provider_observed"
     ? "Reported by the model provider and stored with the run."
@@ -585,7 +597,7 @@ function CreateSessionDialog({
       </Field>
       <Field
         label="Files"
-        hint="Up to 8 text, image, Office, PDF, or email files; 10 MiB each and 20 MiB combined."
+        hint="Stored in the project's default object storage and copied unmodified into the agent sandbox. Requires sandbox read tools; binary formats require shell tooling. Up to 8 files, 10 MiB each and 20 MiB combined."
       >
         <Input name="files" type="file" multiple accept={RUN_FILE_ACCEPT} />
       </Field>
@@ -1140,6 +1152,34 @@ function CostChart({
 }
 
 /**
+ * Which bound Skills the run actually activated.
+ *
+ * The runtime reports usage as redacted `skill.activated` and
+ * `skill.resource_read` timeline events whose safe payload carries the Skill's
+ * name (and possibly identifiers), so matching scans every rendered payload
+ * value rather than assuming one argument key.
+ */
+function skillWasUsed(
+  session: SessionDetail,
+): (skill: SessionDetail["skills"][number]) => boolean {
+  const haystack: string[] = [];
+  for (const event of session.events) {
+    if (!event.title.toLowerCase().startsWith("skill.")) continue;
+    const rendered = JSON.stringify(event.payload?.rendered ?? {}) ?? "";
+    // A failed activation attempt did not load the Skill, so it does not
+    // count as used.
+    if (event.status === "error" || rendered.includes('"success":false'))
+      continue;
+    haystack.push(event.summary, rendered);
+  }
+  return (skill) =>
+    haystack.some(
+      (value) =>
+        value.includes(skill.name) || value.includes(skill.skillVersionId),
+    );
+}
+
+/**
  * Right-hand session panel, in the spirit of hosted agent consoles: identity,
  * cumulative cost, and usage beside the conversation rather than above it.
  */
@@ -1151,6 +1191,8 @@ function SessionSidebar({
   readonly onClose: () => void;
 }) {
   const points = costSeries(session);
+  const isUsed = skillWasUsed(session);
+  const usedCount = session.skills.filter(isUsed).length;
   const start = Date.parse(session.startedAt ?? session.createdAt);
   const end = Math.max(
     Date.parse(session.lastActivityAt ?? session.createdAt),
@@ -1196,6 +1238,53 @@ function SessionSidebar({
           </div>
         ) : null}
       </dl>
+      {session.skills.length > 0 ? (
+        <section>
+          <header className="panel-row">
+            <h3>Skills</h3>
+            <span className="panel-sub">
+              {usedCount} of {session.skills.length} used
+            </span>
+          </header>
+          <ul className="skill-usage-list">
+            {session.skills.map((skill) => {
+              const used = isUsed(skill);
+              return (
+                <li
+                  key={skill.skillVersionId}
+                  className={used ? "skill-usage--used" : undefined}
+                >
+                  <BookOpen size={15} aria-hidden="true" />
+                  <span className="skill-usage-name">
+                    <strong>
+                      <Link
+                        to={`/skills/${skill.skillId}`}
+                        title={skill.description}
+                      >
+                        {skill.name}
+                      </Link>
+                    </strong>
+                    <span>
+                      v{skill.version}
+                      {skill.status === "active" ? "" : ` · ${skill.status}`}
+                    </span>
+                  </span>
+                  <span
+                    className={`skill-usage-state${used ? " skill-usage-state--used" : ""}`}
+                    title={
+                      used
+                        ? "The agent activated this Skill during the session."
+                        : "Available to the agent, but it was not activated in this session."
+                    }
+                  >
+                    {used ? "Used" : "Not used"}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
       {session.workspaceFiles.length > 0 ? (
         <section>
           <header className="panel-row">
@@ -1209,7 +1298,21 @@ function SessionSidebar({
               <li key={file.path}>
                 <FileText size={15} aria-hidden="true" />
                 <span className="workspace-file-name">
-                  <strong>{file.name}</strong>
+                  {file.storageProviderId && file.objectKey ? (
+                    <strong>
+                      <Link
+                        to={storageObjectHref(
+                          file.storageProviderId,
+                          file.objectKey,
+                        )}
+                        title={`${file.name} — open in storage provider`}
+                      >
+                        {file.name}
+                      </Link>
+                    </strong>
+                  ) : (
+                    <strong title={file.name}>{file.name}</strong>
+                  )}
                   <span className="mono" title={file.path}>
                     {file.path}
                   </span>
@@ -1217,12 +1320,22 @@ function SessionSidebar({
                 <span
                   className={`workspace-file-state${file.backedUp ? " workspace-file-state--backed-up" : ""}`}
                   title={
-                    file.backedUpAt
-                      ? `Backed up ${formatDate(file.backedUpAt)}`
-                      : "Not present in a recorded workspace backup"
+                    file.uploaded && file.backedUpAt
+                      ? `Original upload is stored in object storage. Workspace backed up ${formatDate(file.backedUpAt)}`
+                      : file.uploaded
+                        ? "Original upload is stored in project object storage"
+                        : file.backedUpAt
+                          ? `Backed up ${formatDate(file.backedUpAt)}`
+                          : "Not present in a recorded workspace backup"
                   }
                 >
-                  {file.backedUp ? "Backed up" : "Sandbox only"}
+                  {file.uploaded
+                    ? file.backedUp
+                      ? "Uploaded + backed up"
+                      : "Uploaded"
+                    : file.backedUp
+                      ? "Backed up"
+                      : "Sandbox only"}
                 </span>
               </li>
             ))}
@@ -2257,7 +2370,7 @@ function Composer({
       </Field>
       <Field
         label="Attach files"
-        hint="Text, images, Word, Excel, PowerPoint, PDF, OpenDocument, iWork, EML, or MSG."
+        hint="Stored in the project's default object storage and copied unmodified into the session sandbox. The agent must inspect them with read or shell tools."
       >
         <Input name="files" type="file" multiple accept={RUN_FILE_ACCEPT} />
       </Field>

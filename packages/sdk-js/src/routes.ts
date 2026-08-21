@@ -62,8 +62,23 @@ export function createRoutes(apiPrefix = "/v1") {
       `${project(projectId)}/storage-providers/${segment(providerId)}/credential`,
     defaultStorageProvider: (projectId: string, providerId: string) =>
       `${project(projectId)}/storage-providers/${segment(providerId)}/default`,
+    storageProviderObjects: (projectId: string, providerId: string) =>
+      `${project(projectId)}/storage-providers/${segment(providerId)}/objects`,
     modelCatalog: (projectId: string) => `${project(projectId)}/model-catalog`,
     skills: (projectId: string) => `${project(projectId)}/skills`,
+    skillDrafts: (projectId: string) => `${project(projectId)}/skill-drafts`,
+    skillDraft: (projectId: string, draftId: string) =>
+      `${project(projectId)}/skill-drafts/${segment(draftId)}`,
+    skillDraftDirectories: (projectId: string, draftId: string) =>
+      `${project(projectId)}/skill-drafts/${segment(draftId)}/directories`,
+    skillDraftFiles: (projectId: string, draftId: string) =>
+      `${project(projectId)}/skill-drafts/${segment(draftId)}/files`,
+    skillDraftEntries: (projectId: string, draftId: string) =>
+      `${project(projectId)}/skill-drafts/${segment(draftId)}/entries`,
+    validateSkillDraft: (projectId: string, draftId: string) =>
+      `${project(projectId)}/skill-drafts/${segment(draftId)}/validate`,
+    publishSkillDraft: (projectId: string, draftId: string) =>
+      `${project(projectId)}/skill-drafts/${segment(draftId)}/publish`,
     skill: (projectId: string, skillId: string) =>
       `${project(projectId)}/skills/${segment(skillId)}`,
     skillVersions: (projectId: string, skillId: string) =>

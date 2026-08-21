@@ -76,6 +76,12 @@ test("sandbox publication and Daytona connections expose only safe policy", () =
   assert.throws(() =>
     parseManagedAgentSnapshotForPublication({
       ...config,
+      sandbox: { ...config.sandbox, snapshotId: undefined },
+    }),
+  );
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...config,
       sandbox: { ...config.sandbox, snapshotId: "not-a-snapshot-id" },
     }),
   );
@@ -316,6 +322,7 @@ test("agent publications pin a unique, bounded delegate roster", () => {
     sandbox: {
       enabled: true,
       provider: "daytona-primary",
+      snapshotId: id,
       network: "none" as const,
     },
     limits: { maxTurns: PLATFORM_MAX_TURNS, timeoutMs: 60_000 },

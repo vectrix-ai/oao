@@ -95,6 +95,11 @@ describe("management console", () => {
       dialog.getByLabelText("Sandbox provider"),
       "daytona-primary",
     );
+    await dialog.findByRole("option", { name: /daytona-small/u });
+    await user.selectOptions(
+      dialog.getByLabelText("Daytona snapshot"),
+      "77777777-7777-4777-8777-777777777777",
+    );
     await user.selectOptions(
       dialog.getByLabelText("Network policy"),
       "restricted",
@@ -117,6 +122,7 @@ describe("management console", () => {
     expect(detail.versions[0]?.config.sandbox).toEqual({
       enabled: true,
       provider: "daytona-primary",
+      snapshotId: "77777777-7777-4777-8777-777777777777",
       network: "restricted",
       capabilities: ["filesystem_read", "filesystem_write", "shell"],
     });
@@ -125,35 +131,59 @@ describe("management console", () => {
     ]);
   });
 
-  it("publishes a reusable Skill with an immutable first version", async () => {
+  it("publishes a reusable Skill with nested Markdown resources", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     renderConsole("/skills", api);
     expect(
       await screen.findByRole("heading", { name: "Skills" }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "How Skills work" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/sessions inherit those bindings automatically/u),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/\.flue\/packaged-skills\//u)).toBeInTheDocument();
     expect(await screen.findByText("Shipment Intake")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Create Skill" }));
-    const dialog = within(screen.getByRole("dialog", { name: "Create Skill" }));
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "Create Skill" }),
+    );
     await user.type(dialog.getByLabelText("Display name"), "Business Rules");
-    await user.type(dialog.getByLabelText("Skill name"), "business-rules");
+    expect(dialog.getByLabelText("Skill name")).toHaveValue("business-rules");
     await user.type(
-      dialog.getByLabelText("Catalog description"),
+      dialog.getByLabelText("Description"),
       "Apply the approved customer operating rules.",
     );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
     await user.type(
       dialog.getByLabelText("Instructions"),
       "Load the relevant customer reference only when a rule applies.",
     );
-    await user.type(
-      dialog.getByLabelText("Optional reference path"),
-      "references/rules.md",
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    await user.click(dialog.getByRole("button", { name: "New folder" }));
+    await user.type(dialog.getByLabelText("Folder name"), "references{Enter}");
+    await waitFor(() =>
+      expect(dialog.getAllByText("references").length).toBeGreaterThan(0),
     );
+    await user.click(dialog.getByRole("button", { name: "New file" }));
+    await user.type(dialog.getByLabelText("File name"), "rules.md{Enter}");
+    const rules = await dialog.findByLabelText("Markdown content");
+    await user.clear(rules);
+    await user.type(rules, "# Approved rules");
+    await user.click(dialog.getByRole("button", { name: "Save file" }));
+    await user.click(dialog.getByRole("button", { name: "Back to files" }));
+    await user.click(dialog.getByRole("button", { name: "New file" }));
     await user.type(
-      dialog.getByLabelText("Optional Markdown reference"),
-      "# Approved rules",
+      dialog.getByLabelText("File name"),
+      "examples/checklist.md{Enter}",
     );
-    await user.click(dialog.getByRole("button", { name: "Create Skill" }));
+    expect(
+      await dialog.findByText("references/examples/checklist.md"),
+    ).toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "Back to files" }));
+    await user.click(dialog.getByRole("button", { name: "Publish Skill" }));
     expect(
       await screen.findByRole("heading", { name: "Business Rules" }),
     ).toBeInTheDocument();
@@ -162,8 +192,168 @@ describe("management console", () => {
       (skill) => skill.name === "business-rules",
     );
     expect(created?.versionIds).toHaveLength(1);
+    expect(created?.fileCount).toBe(2);
     await user.click(screen.getByRole("button", { name: "Deprecate" }));
     expect(await screen.findByText("deprecated")).toBeInTheDocument();
+  });
+
+  it("uploads multiple Markdown files into the selected package folder", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/skills", api);
+    await user.click(
+      await screen.findByRole("button", { name: "Create Skill" }),
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "Create Skill" }),
+    );
+    await user.type(dialog.getByLabelText("Display name"), "Upload check");
+    expect(dialog.getByLabelText("Skill name")).toHaveValue("upload-check");
+    await user.type(
+      dialog.getByLabelText("Description"),
+      "Checks uploaded reference files.",
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    await user.type(
+      dialog.getByLabelText("Instructions"),
+      "Read the relevant uploaded reference.",
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    await user.click(dialog.getByRole("button", { name: "New folder" }));
+    await user.type(
+      dialog.getByLabelText("Folder name"),
+      "references/imported{Enter}",
+    );
+    await waitFor(() =>
+      expect(dialog.getByText("imported")).toBeInTheDocument(),
+    );
+    const upload = dialog.getByLabelText("Upload Markdown");
+    await user.upload(upload, [
+      new File(["# Alpha"], "alpha.md", { type: "text/markdown" }),
+      new File(["# Beta"], "beta.md", { type: "text/markdown" }),
+    ]);
+    expect(await dialog.findByText("alpha.md")).toBeInTheDocument();
+    expect(await dialog.findByText("beta.md")).toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "Publish Skill" }));
+    expect(
+      await screen.findByRole("heading", { name: "Upload check" }),
+    ).toBeInTheDocument();
+    const created = (await api.listSkills({})).data.find(
+      (skill) => skill.name === "upload-check",
+    );
+    expect(created?.fileCount).toBe(2);
+  });
+
+  it("clones all existing resources when publishing a new Skill version", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const original = await api.createSkill({
+      displayName: "Versioned references",
+      name: "versioned-references",
+      description: "Keeps exact reference versions.",
+      instructions: "Read the appropriate customer reference.",
+      files: [
+        {
+          path: "references/customers/acme.md",
+          contentType: "text/markdown",
+          dataBase64: "IyBBY21lIHYx",
+        },
+        {
+          path: "references/customers/globex.md",
+          contentType: "text/markdown",
+          dataBase64: "IyBHbG9iZXggdjE=",
+        },
+      ],
+    });
+    renderConsole(`/skills/${original.id}`, api);
+    await user.click(
+      await screen.findByRole("button", { name: "Publish new version" }),
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", {
+        name: "Publish new Skill version",
+      }),
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    await user.click(dialog.getByRole("button", { name: "references" }));
+    await user.click(dialog.getByRole("button", { name: "customers" }));
+    expect(dialog.getByText("acme.md")).toBeInTheDocument();
+    expect(dialog.getByText("globex.md")).toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "Publish version" }));
+    expect(await screen.findByText("Version 2")).toBeInTheDocument();
+    const updated = await api.getSkill(original.id);
+    expect(updated.versions).toHaveLength(2);
+    expect(updated.versions[0]?.files).toHaveLength(2);
+    expect(updated.versions[1]?.files).toHaveLength(2);
+  });
+
+  it("renders complete Skill instructions and Markdown references", async () => {
+    class MarkdownSkillApi extends DemoConsoleApi {
+      override async getSkill(id: string) {
+        const skill = await super.getSkill(id);
+        const version = skill.versions[0];
+        if (!version) return skill;
+        return {
+          ...skill,
+          fileCount: 1,
+          versions: [
+            {
+              ...version,
+              instructions:
+                "# Complete instructions\n\nFollow **every step** in this procedure.",
+              files: [
+                {
+                  path: "references/checklist.md",
+                  contentType: "text/markdown",
+                  sizeBytes: 55,
+                  sha256: "a".repeat(64),
+                },
+              ],
+            },
+          ],
+        };
+      }
+
+      override async exportSkillVersion() {
+        return {
+          files: [
+            {
+              path: "references/checklist.md",
+              contentType: "text/markdown",
+              dataBase64:
+                "IyBSZWZlcmVuY2UgY2hlY2tsaXN0CgotIFVzZSB0aGUgZXhhY3QgcmVmZXJlbmNlIGFuc3dlci4=",
+            },
+          ],
+        };
+      }
+    }
+
+    const user = userEvent.setup();
+    renderConsole(
+      "/skills/44444444-4444-4444-8444-444444444444",
+      new MarkdownSkillApi({ eventDelayMs: 60_000 }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Shipment Intake" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByText("Instructions"));
+    expect(
+      await screen.findByRole("heading", { name: "Complete instructions" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("every step").tagName).toBe("STRONG");
+
+    await user.click(screen.getByText(/Reference resources/u));
+    expect(
+      await screen.findByRole("heading", { name: "Reference checklist" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Use the exact reference answer."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/\.flue\/packaged-skills\/.*references\/checklist\.md/u),
+    ).toBeInTheDocument();
   });
 
   it("keeps the default query cache stable across app rerenders", async () => {
@@ -243,6 +433,16 @@ describe("management console", () => {
         return {
           ...session,
           workspaceFiles: [
+            {
+              name: "input.xlsx",
+              path: ".oao/attachments/run/input.xlsx",
+              sizeBytes: 12,
+              uploaded: true,
+              backedUp: true,
+              backedUpAt: "2026-08-20T19:21:49.000Z",
+              storageProviderId: "88888888-8888-4888-8888-000000000001",
+              objectKey: "run-files/runs/run/file-1/input.xlsx",
+            },
             {
               name: "test.csv",
               path: "/root/test.csv",
@@ -348,7 +548,21 @@ describe("management console", () => {
     const panel = screen.getByRole("complementary", {
       name: "Session details",
     });
-    expect(within(panel).getByText("test.csv")).toBeInTheDocument();
+    const uploadedFile = within(panel).getByRole("link", {
+      name: "input.xlsx",
+    });
+    expect(uploadedFile).toHaveAttribute(
+      "href",
+      "/storage-providers/88888888-8888-4888-8888-000000000001?prefix=run-files%2Fruns%2Frun%2Ffile-1%2F&highlight=input.xlsx",
+    );
+    expect(uploadedFile).toHaveAttribute(
+      "title",
+      "input.xlsx — open in storage provider",
+    );
+    expect(within(panel).getByText("Uploaded + backed up")).toBeInTheDocument();
+    const sandboxFile = within(panel).getByText("test.csv");
+    expect(sandboxFile).toHaveAttribute("title", "test.csv");
+    expect(sandboxFile.closest("a")).toBeNull();
     expect(within(panel).getByText("Backed up")).toBeInTheDocument();
   });
 
@@ -436,9 +650,9 @@ describe("management console", () => {
     });
     expect(elapsed).toHaveTextContent("0s");
     expect(within(elapsed).getAllByText(/s$/u)).toHaveLength(5);
-    // The strip is contiguous states: user, agent, tool, error, retry,
-    // approval — plus striped idle for the wait before the approval.
-    expect(within(minimap).getAllByRole("button")).toHaveLength(6);
+    // The strip is contiguous states: user, agent, skill activation, tool,
+    // error, retry, approval — plus striped idle before the approval.
+    expect(within(minimap).getAllByRole("button")).toHaveLength(7);
     expect(
       within(minimap).getAllByRole("img", { name: /^Idle for/u }).length,
     ).toBeGreaterThan(0);
@@ -500,10 +714,26 @@ describe("management console", () => {
     ).toBeInTheDocument();
     expect(within(panel).getByText("$0.0184")).toBeInTheDocument();
     expect(within(panel).getByText("2,841")).toBeInTheDocument();
-    expect(screen.getByText("1 Skill")).toHaveAttribute(
+    expect(screen.getByText("2 Skills")).toHaveAttribute(
       "title",
-      "shipment-intake v1",
+      "shipment-intake v1, carrier-codes v1",
     );
+    // Bound Skills are listed with the activated ones highlighted.
+    expect(within(panel).getByText("1 of 2 used")).toBeInTheDocument();
+    const usedRow = within(panel)
+      .getByRole("link", { name: "shipment-intake" })
+      .closest("li");
+    expect(usedRow?.className).toContain("skill-usage--used");
+    expect(
+      within(usedRow as HTMLElement).getByText("Used"),
+    ).toBeInTheDocument();
+    const unusedRow = within(panel)
+      .getByRole("link", { name: "carrier-codes" })
+      .closest("li");
+    expect(unusedRow?.className).not.toContain("skill-usage--used");
+    expect(
+      within(unusedRow as HTMLElement).getByText("Not used"),
+    ).toBeInTheDocument();
     expect(
       within(panel).getByRole("img", {
         name: /Cumulative cost over the session/u,
@@ -877,6 +1107,69 @@ describe("management console", () => {
     expect(document.body.textContent).not.toContain("secret-access-key-value");
   });
 
+  it("browses a storage provider's folders and files from settings", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    await api.createStorageProvider({
+      key: "workspace-eu",
+      displayName: "Workspace EU",
+      providerType: "s3",
+      endpoint: "https://objects.example.test",
+      region: "eu-test-1",
+      bucket: "oao-workspaces",
+      prefix: "oao",
+      forcePathStyle: false,
+      setDefault: true,
+      accessKeyId: "access-key-value",
+      secretAccessKey: "secret-access-key-value",
+    });
+    renderConsole("/storage-providers", api);
+    await user.click(await screen.findByRole("link", { name: "Workspace EU" }));
+    expect(
+      await screen.findByRole("heading", { name: "Workspace EU" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("link", { name: "run-files/" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "workspace-backups/" }));
+    await user.click(await screen.findByRole("link", { name: "threads/" }));
+    await user.click(
+      await screen.findByRole("link", { name: "thread-demo-0001/" }),
+    );
+    expect(await screen.findByText("workspace.tar.gz")).toBeInTheDocument();
+    expect(screen.getByText("1.1 MiB")).toBeInTheDocument();
+    expect(screen.getByText("workspace.manifest.json")).toBeInTheDocument();
+  });
+
+  it("highlights the linked object when arriving from a session file", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const provider = await api.createStorageProvider({
+      key: "workspace-eu",
+      displayName: "Workspace EU",
+      providerType: "s3",
+      endpoint: null,
+      region: "eu-test-1",
+      bucket: "oao-workspaces",
+      prefix: null,
+      forcePathStyle: false,
+      setDefault: true,
+      accessKeyId: "access-key-value",
+      secretAccessKey: "secret-access-key-value",
+    });
+    renderConsole(
+      `/storage-providers/${provider.id}?prefix=${encodeURIComponent(
+        "workspace-backups/threads/thread-demo-0001/",
+      )}&highlight=workspace.tar.gz`,
+      api,
+    );
+    expect(await screen.findByText("workspace.tar.gz")).toBeInTheDocument();
+    expect(screen.getByText("selected")).toBeInTheDocument();
+    const highlighted = screen
+      .getByText("workspace.tar.gz")
+      .closest("tr") as HTMLElement;
+    expect(highlighted.className).toContain("storage-row--highlight");
+  });
+
   it("publishes the selected Daytona snapshot and exact tool capabilities", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
@@ -884,7 +1177,7 @@ describe("management console", () => {
     const provider = await screen.findByLabelText("Sandbox provider");
     expect(provider).toHaveValue("daytona-primary");
     const snapshot = await screen.findByLabelText("Daytona snapshot");
-    await user.selectOptions(snapshot, "77777777-7777-4777-8777-777777777777");
+    await user.selectOptions(snapshot, "78787878-7878-4787-8787-787878787878");
     const shell = screen.getByRole("checkbox", {
       name: /^Shell and search/u,
     });
@@ -897,9 +1190,72 @@ describe("management console", () => {
     const updated = await api.getAgent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
     expect(updated.versions[0]?.config.sandbox).toMatchObject({
       provider: "daytona-primary",
-      snapshotId: "77777777-7777-4777-8777-777777777777",
+      snapshotId: "78787878-7878-4787-8787-787878787878",
       capabilities: ["filesystem_read", "filesystem_write", "browser"],
     });
+  });
+
+  it("can remove delegates made incompatible by a snapshot change and publish", async () => {
+    class CoordinatorApi extends DemoConsoleApi {
+      override async getAgent(id: string) {
+        const agent = await super.getAgent(id);
+        if (
+          id !== "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" ||
+          agent.version !== 3
+        )
+          return agent;
+        return {
+          ...agent,
+          versions: agent.versions.map((version, index) =>
+            index === 0
+              ? {
+                  ...version,
+                  config: {
+                    ...version.config,
+                    delegates: [
+                      {
+                        key: "document-analyst",
+                        description: "Extract facts from documents.",
+                        agentVersionId: "bbbbbbb5-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                        maxParallel: 1,
+                      },
+                    ],
+                  },
+                }
+              : version,
+          ),
+        };
+      }
+    }
+
+    const user = userEvent.setup();
+    const api = new CoordinatorApi({ eventDelayMs: 60_000 });
+    renderConsole("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", api);
+    await screen.findByRole("option", { name: /daytona-small/u });
+    await user.selectOptions(
+      await screen.findByLabelText("Daytona snapshot"),
+      "78787878-7878-4787-8787-787878787878",
+    );
+    expect(
+      screen.getByText(/Selected delegates do not match the draft sandbox/u),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Publish new version" }),
+    ).toBeDisabled();
+    await user.click(
+      screen.getByRole("button", { name: "Remove incompatible delegate" }),
+    );
+    const publish = screen.getByRole("button", {
+      name: "Publish new version",
+    });
+    expect(publish).toBeEnabled();
+    await user.click(publish);
+    expect(await screen.findByText("Version 4")).toBeInTheDocument();
+    const updated = await api.getAgent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    expect(updated.versions[0]?.config.sandbox.snapshotId).toBe(
+      "78787878-7878-4787-8787-787878787878",
+    );
+    expect(updated.versions[0]?.config.delegates).toEqual([]);
   });
 
   it("blocks sandbox-incompatible delegates before publication", async () => {
