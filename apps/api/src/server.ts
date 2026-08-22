@@ -9,6 +9,7 @@ import {
   listApprovedModelCatalog,
   listOpenRouterModelCatalog,
 } from "@oao/models-openrouter";
+import { McpRemoteClient } from "@oao/mcp-remote";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { listDaytonaSnapshots } from "@oao/sandbox-daytona";
 import { createApiApp } from "./app.js";
@@ -46,6 +47,7 @@ const app = createApiApp({
   runtimeCommands: new PostgresRuntimeCommandPort(),
   activeModelPresetKeys: new Set(),
   ...(credentialCipher ? { credentialCipher } : {}),
+  ...(credentialCipher ? { mcpRemote: new McpRemoteClient() } : {}),
   modelCatalog: {
     deploymentPresets: [],
     listCatalog: (input) => {

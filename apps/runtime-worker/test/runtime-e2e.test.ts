@@ -296,13 +296,17 @@ async function waitFor(
   timeoutMs = 20_000,
 ): Promise<readonly Record<string, unknown>[]> {
   const deadline = Date.now() + timeoutMs;
+  let lastRows: readonly Record<string, unknown>[];
   for (;;) {
     const result = await pool.query<Record<string, unknown>>(query, [
       ...values,
     ]);
+    lastRows = result.rows;
     if (predicate(result.rows)) return result.rows;
     if (Date.now() >= deadline)
-      throw new Error(`Timed out waiting for: ${query}`);
+      throw new Error(
+        `Timed out waiting for: ${query}; last rows: ${JSON.stringify(lastRows)}`,
+      );
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }

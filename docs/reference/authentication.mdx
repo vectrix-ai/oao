@@ -49,6 +49,12 @@ run:read
 Add `tool_call:claim` and `tool_call:submit` only when the integration executes
 caller-owned tools. Add `run:cancel` only when it should cancel runs.
 
+MCP administration uses separate least-privilege scopes: `mcp:read`,
+`mcp:write`, `mcp:discover`, and `mcp:bind`. Credential metadata, creation,
+rotation, and revocation use `credential:read_metadata`, `credential:write`,
+`credential:rotate`, and `credential:revoke`. A run creator needs `mcp:execute`
+at call time; OAO rechecks this live before decrypting the bound credential.
+
 Create and capture the key once:
 
 ```bash

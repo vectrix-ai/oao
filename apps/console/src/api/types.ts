@@ -10,6 +10,16 @@ import type {
   RunState,
   ToolOwner,
   ToolStage,
+  McpServer,
+  McpCredential,
+  McpCredentialPolicy,
+  McpToolset,
+  CreateMcpServerInput,
+  DiscoverMcpServerInput,
+  CreateMcpCredentialInput,
+  RotateMcpCredentialInput,
+  CreateMcpCredentialPolicyInput,
+  CreateMcpToolsetInput,
 } from "@oao/contracts";
 
 export type {
@@ -20,7 +30,35 @@ export type {
   ProjectSandboxProvider,
   ProjectStorageProvider,
   SandboxSnapshotEntry,
+  McpServer,
+  McpCredential,
+  McpCredentialPolicy,
+  McpToolset,
+  CreateMcpServerInput,
+  DiscoverMcpServerInput,
+  CreateMcpCredentialInput,
+  RotateMcpCredentialInput,
+  CreateMcpCredentialPolicyInput,
+  CreateMcpToolsetInput,
 };
+
+export interface McpServerList {
+  readonly data: readonly McpServer[];
+  readonly credentialEncryptionConfigured: boolean;
+}
+
+export interface McpCredentialList {
+  readonly data: readonly McpCredential[];
+  readonly credentialEncryptionConfigured: boolean;
+}
+
+export interface McpCredentialPolicyList {
+  readonly data: readonly McpCredentialPolicy[];
+}
+
+export interface McpToolsetList {
+  readonly data: readonly McpToolset[];
+}
 
 export interface ModelPresetList {
   readonly data: readonly ModelPreset[];
@@ -144,6 +182,11 @@ export interface AgentVersionConfig {
   readonly modelPreset: string;
   readonly tools: readonly ToolDefinition[];
   readonly skillVersionIds?: readonly string[];
+  readonly mcpBindings?: readonly {
+    readonly toolsetVersionId: string;
+    readonly credentialPolicyVersionId: string;
+    readonly namespace: string;
+  }[];
   readonly delegates?: readonly {
     readonly key: string;
     readonly description: string;
@@ -550,6 +593,25 @@ export interface ConsoleApi {
     versionId: string,
     status: "deprecated" | "revoked",
   ): Promise<SkillDetail>;
+  listMcpServers(): Promise<McpServerList>;
+  createMcpServer(input: CreateMcpServerInput): Promise<McpServer>;
+  discoverMcpServer(
+    serverId: string,
+    input: DiscoverMcpServerInput,
+  ): Promise<McpServer>;
+  listMcpCredentials(): Promise<McpCredentialList>;
+  createMcpCredential(input: CreateMcpCredentialInput): Promise<McpCredential>;
+  rotateMcpCredential(
+    credentialId: string,
+    input: RotateMcpCredentialInput,
+  ): Promise<McpCredential>;
+  revokeMcpCredential(credentialId: string): Promise<McpCredential>;
+  listMcpCredentialPolicies(): Promise<McpCredentialPolicyList>;
+  createMcpCredentialPolicy(
+    input: CreateMcpCredentialPolicyInput,
+  ): Promise<McpCredentialPolicy>;
+  listMcpToolsets(): Promise<McpToolsetList>;
+  createMcpToolset(input: CreateMcpToolsetInput): Promise<McpToolset>;
   listSessions(filters: ListFilters): Promise<PageResult<SessionSummary>>;
   getSession(id: string): Promise<SessionDetail>;
   createSession(input: {

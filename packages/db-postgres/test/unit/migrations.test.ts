@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -361,5 +362,48 @@ test("multi-agent migration pins delegates and isolates child threads in one wor
   assert.match(sql, /FORCE ROW LEVEL SECURITY/gmu);
   assert.match(sql, /delegate_agent/u);
   assert.match(sql, /message_agent/u);
+  assert.doesNotMatch(sql, /DROP TABLE|DELETE FROM/u);
+});
+
+test("MCP migration keeps versioned resources tenant scoped and credentials encrypted", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0022_mcp_toolsets_credentials.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE oao\.mcp_server_versions/u);
+  assert.match(sql, /CREATE TABLE oao\.mcp_toolset_versions/u);
+  assert.match(sql, /CREATE TABLE oao\.mcp_credential_versions/u);
+  assert.match(sql, /encrypted_secret bytea NOT NULL/u);
+  assert.match(sql, /CREATE TABLE oao\.agent_version_mcp_bindings/u);
+  assert.match(sql, /CREATE TABLE oao\.session_mcp_bindings/u);
+  assert.match(sql, /FORCE ROW LEVEL SECURITY/gmu);
+  assert.match(sql, /mcp_endpoint_matches_policy/u);
+  assert.match(sql, /mcp_server_versions_immutable/u);
+  assert.doesNotMatch(sql, /plaintext|raw_secret|authorization_header/iu);
+  assert.equal(
+    createHash("sha256").update(sql).digest("hex"),
+    "1c344743792fbd3aedd9c41b985f261cdc97d98c406f31402c9d9bb69abb5030",
+  );
+});
+
+test("MCP runtime hardening remains additive after the immutable base migration", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0023_mcp_runtime_hardening.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /ADD COLUMN credential_version_id uuid/u);
+  assert.match(sql, /mcp_call_attempts_credential_version_fkey/u);
+  assert.match(
+    sql,
+    /CREATE OR REPLACE FUNCTION oao\.enforce_mcp_lifecycle_transition/u,
+  );
+  assert.match(
+    sql,
+    /CREATE OR REPLACE FUNCTION oao\.mcp_endpoint_matches_policy/u,
+  );
+  assert.match(sql, /CREATE FUNCTION oao\.mcp_tool_name/u);
   assert.doesNotMatch(sql, /DROP TABLE|DELETE FROM/u);
 });

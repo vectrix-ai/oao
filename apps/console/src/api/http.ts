@@ -35,6 +35,14 @@ import type {
   TimelineEvent,
   TimelineKind,
   UpdateSandboxProviderConfigurationInput,
+  McpServer,
+  McpCredential,
+  McpCredentialPolicy,
+  McpToolset,
+  McpServerList,
+  McpCredentialList,
+  McpCredentialPolicyList,
+  McpToolsetList,
 } from "./types";
 import { parseProductEvent, parseSseFrames } from "./sse";
 
@@ -1048,6 +1056,76 @@ export class HttpConsoleApi implements ConsoleApi {
     );
     return this.getSkill(skillId);
   };
+
+  listMcpServers = async (): Promise<McpServerList> =>
+    this.#projectRequest("/mcp-servers");
+
+  createMcpServer = async (
+    input: Parameters<ConsoleApi["createMcpServer"]>[0],
+  ): Promise<McpServer> =>
+    this.#projectRequest("/mcp-servers", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+
+  discoverMcpServer = async (
+    serverId: string,
+    input: Parameters<ConsoleApi["discoverMcpServer"]>[1],
+  ): Promise<McpServer> =>
+    this.#projectRequest(
+      `/mcp-servers/${encodeURIComponent(serverId)}/discover`,
+      { method: "POST", body: JSON.stringify(input) },
+    );
+
+  listMcpCredentials = async (): Promise<McpCredentialList> =>
+    this.#projectRequest("/mcp-credentials");
+
+  createMcpCredential = async (
+    input: Parameters<ConsoleApi["createMcpCredential"]>[0],
+  ): Promise<McpCredential> =>
+    this.#projectRequest("/mcp-credentials", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+
+  rotateMcpCredential = async (
+    credentialId: string,
+    input: Parameters<ConsoleApi["rotateMcpCredential"]>[1],
+  ): Promise<McpCredential> =>
+    this.#projectRequest(
+      `/mcp-credentials/${encodeURIComponent(credentialId)}/rotate`,
+      { method: "POST", body: JSON.stringify(input) },
+    );
+
+  revokeMcpCredential = async (credentialId: string): Promise<McpCredential> =>
+    this.#projectRequest(
+      `/mcp-credentials/${encodeURIComponent(credentialId)}`,
+      {
+        method: "DELETE",
+      },
+    );
+
+  listMcpCredentialPolicies = async (): Promise<McpCredentialPolicyList> =>
+    this.#projectRequest("/mcp-credential-policies");
+
+  createMcpCredentialPolicy = async (
+    input: Parameters<ConsoleApi["createMcpCredentialPolicy"]>[0],
+  ): Promise<McpCredentialPolicy> =>
+    this.#projectRequest("/mcp-credential-policies", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+
+  listMcpToolsets = async (): Promise<McpToolsetList> =>
+    this.#projectRequest("/mcp-toolsets");
+
+  createMcpToolset = async (
+    input: Parameters<ConsoleApi["createMcpToolset"]>[0],
+  ): Promise<McpToolset> =>
+    this.#projectRequest("/mcp-toolsets", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
 
   listSessions = async (filters: ListFilters) => {
     const response = await this.#projectRequest<

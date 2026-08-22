@@ -30,6 +30,7 @@
     "@oao/domain": "workspace:*",
     "@oao/events": "workspace:*",
     "@oao/models-openrouter": "workspace:*",
+    "@oao/mcp-remote": "workspace:*",
     "@oao/provider-credentials": "workspace:*",
     "@oao/sandbox-daytona": "workspace:*",
     "hono": "4.13.3",

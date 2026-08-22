@@ -599,20 +599,23 @@
   margin: 0;
 }
 
-/* Skill wizard steps */
-.skill-steps {
+/* Setup wizard steps */
+.skill-steps,
+.setup-steps {
   display: flex;
   gap: var(--sp-2);
   margin: 0;
   padding: 0;
   list-style: none;
 }
-.skill-steps li {
+.skill-steps li,
+.setup-steps li {
   display: flex;
   flex: 1;
   min-width: 0;
 }
-.skill-steps button {
+.skill-steps button,
+.setup-steps button {
   display: flex;
   flex: 1;
   align-items: center;
@@ -628,16 +631,19 @@
   font-weight: 500;
   cursor: pointer;
 }
-.skill-steps button[aria-current="step"] {
+.skill-steps button[aria-current="step"],
+.setup-steps button[aria-current="step"] {
   border-color: var(--accent-weak-border);
   background: var(--accent-weak);
   color: var(--accent-on-weak);
 }
-.skill-steps button:disabled {
+.skill-steps button:disabled,
+.setup-steps button:disabled {
   color: var(--text-3);
   cursor: not-allowed;
 }
-.skill-steps__num {
+.skill-steps__num,
+.setup-steps__num {
   display: inline-grid;
   flex: none;
   width: 18px;
@@ -647,6 +653,38 @@
   border-radius: var(--radius-pill);
   font-size: 10px;
   font-weight: 600;
+}
+
+.mcp-connection-card code {
+  overflow-wrap: anywhere;
+}
+.mcp-connection-card dl,
+.wizard-review {
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0;
+}
+.mcp-connection-card dl > div,
+.wizard-review > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  min-width: 0;
+  font-size: 13px;
+}
+.mcp-connection-card dt,
+.wizard-review dt {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.mcp-connection-card dd,
+.wizard-review dd {
+  min-width: 0;
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 /* Markdown write/preview editor */
@@ -874,7 +912,8 @@
   .skill-explainer {
     grid-template-columns: 1fr;
   }
-  .skill-steps {
+  .skill-steps,
+  .setup-steps {
     flex-direction: column;
   }
   .skill-finder__bar {

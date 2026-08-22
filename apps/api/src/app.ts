@@ -9,11 +9,17 @@ import {
   parseCreateProjectSandboxProviderInput,
   parseCreateProjectStorageProviderInput,
   parseCreateProjectModelProviderInput,
+  parseCreateMcpCredentialInput,
+  parseCreateMcpCredentialPolicyInput,
+  parseCreateMcpServerInput,
+  parseCreateMcpToolsetInput,
+  parseDiscoverMcpServerInput,
   parseCreateModelPresetInput,
   parseManagedAgentSnapshotForPublication,
   parseRotateProjectModelProviderCredentialInput,
   parseRotateProjectSandboxProviderCredentialInput,
   parseRotateProjectStorageProviderCredentialInput,
+  parseRotateMcpCredentialInput,
   parseUpdateProjectSandboxProviderConfigurationInput,
   parseToolResultEnvelope,
   RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION,
@@ -30,6 +36,7 @@ import {
   type ToolResultEnvelope,
   type UpdateProjectSandboxProviderConfigurationInput,
 } from "@oao/contracts";
+import type { McpRemotePort } from "@oao/mcp-remote";
 import type {
   ArtifactPort,
   Principal,
@@ -47,6 +54,7 @@ import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import type { PostgresApiStore } from "./store.js";
 import type { RuntimeCommandPort } from "./runtime-commands.js";
 import { errorEnvelope, HttpApiError } from "./errors.js";
+import { McpAdminService } from "./mcp.js";
 import {
   decodeListCursor,
   encodeListCursor,
@@ -113,6 +121,7 @@ export interface ApiDependencies {
   readonly notifier?: WakeOnlyNotifier;
   readonly runtimeCommands: RuntimeCommandPort;
   readonly credentialCipher?: ProviderCredentialCipher;
+  readonly mcpRemote?: McpRemotePort;
   readonly activeModelPresetKeys?: ReadonlySet<string>;
   readonly modelCatalog?: ModelCatalogPort;
   readonly sandboxSnapshotCatalog?: SandboxSnapshotCatalogPort;
@@ -1374,6 +1383,13 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     dependencies.authConfiguration ?? DEFAULT_AUTH_CONFIGURATION;
   const activeModelPresetKeys =
     dependencies.activeModelPresetKeys ?? new Set<string>();
+  const mcp =
+    dependencies.credentialCipher && dependencies.mcpRemote
+      ? new McpAdminService(
+          dependencies.credentialCipher,
+          dependencies.mcpRemote,
+        )
+      : undefined;
 
   app.use("*", async (c, next) => {
     const incoming = c.req.header("x-request-id");
@@ -2008,6 +2024,7 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   });
 
   registerModelPresetRoutes(app, dependencies);
+  registerMcpRoutes(app, dependencies, mcp);
   registerSandboxProviderRoutes(app, dependencies);
   registerStorageProviderRoutes(app, dependencies);
   registerSkillRoutes(app, dependencies);
@@ -2116,6 +2133,421 @@ function safeStringEqual(left: string, right: string): boolean {
     leftBytes.length === rightBytes.length &&
     timingSafeEqual(leftBytes, rightBytes)
   );
+}
+
+function registerMcpRoutes(
+  app: Hono<{ Variables: Variables }>,
+  dependencies: ApiDependencies,
+  mcp: McpAdminService | undefined,
+): void {
+  const requiredService = (): McpAdminService => {
+    if (!mcp)
+      throw new HttpApiError(
+        "internal_error",
+        "MCP credential encryption or remote client support is not configured",
+      );
+    return mcp;
+  };
+
+  app.get("/v1/projects/:projectId/mcp-servers", async (c) => {
+    const actor = assertProject(c);
+    return dependencies.store.transaction(actor, "mcp:read", async (tx) =>
+      c.json({
+        data: mcp ? await mcp.listServers(tx, actor) : [],
+        credentialEncryptionConfigured:
+          dependencies.credentialCipher !== undefined,
+      }),
+    );
+  });
+
+  app.post("/v1/projects/:projectId/mcp-servers", async (c) => {
+    const actor = assertProject(c);
+    const body = await readJsonObject(c.req.raw);
+    const input = parseCreateMcpServerInput(body);
+    const key = idempotencyKey(c.req.raw);
+    const service = requiredService();
+    return dependencies.store.transaction(actor, "mcp:write", async (tx) => {
+      const response = await dependencies.store.idempotent(tx, actor, {
+        scope: "POST:/mcp-servers",
+        key,
+        hash: requestHash(body),
+        status: 201,
+        execute: async () => {
+          const created = await service.createServer(tx, actor, input);
+          await dependencies.store.appendAudit(tx, actor, {
+            action: "mcp.server_created",
+            resourceType: "mcp_server",
+            resourceId: created.id,
+            detail: {
+              key: created.key,
+              serverVersionId: created.latestVersionId,
+              origin: new URL(created.endpointUrl).origin,
+              transport: created.transport,
+            },
+          });
+          await dependencies.store.appendEvent(tx, actor, {
+            aggregateType: "mcp_server",
+            aggregateId: created.id,
+            kind: "mcp.server_created",
+            payload: {
+              key: created.key,
+              serverVersionId: created.latestVersionId,
+              origin: new URL(created.endpointUrl).origin,
+              transport: created.transport,
+            },
+          });
+          await dependencies.store.appendEvent(tx, actor, {
+            aggregateType: "mcp_server",
+            aggregateId: created.id,
+            kind: "mcp.server_version_published",
+            payload: {
+              serverVersionId: created.latestVersionId,
+              version: created.version,
+            },
+          });
+          return created;
+        },
+      });
+      return c.json(response.body, response.status as 201);
+    });
+  });
+
+  app.post(
+    "/v1/projects/:projectId/mcp-servers/:serverId/discover",
+    async (c) => {
+      const actor = assertProject(c);
+      const body = await readJsonObject(c.req.raw);
+      const input = parseDiscoverMcpServerInput(body);
+      const service = requiredService();
+      const loaded = await dependencies.store.transaction(
+        actor,
+        "mcp:discover",
+        (tx) =>
+          service.loadConnection(
+            tx,
+            actor,
+            c.req.param("serverId"),
+            input.credentialPolicyVersionId,
+          ),
+      );
+      let tools;
+      try {
+        tools = await service.discover(loaded.connection, c.req.raw.signal);
+      } catch {
+        await dependencies.store.transaction(
+          actor,
+          "mcp:discover",
+          async (tx) => {
+            await dependencies.store.appendEvent(tx, actor, {
+              aggregateType: "mcp_server",
+              aggregateId: c.req.param("serverId"),
+              kind: "mcp.discovery_failed",
+              payload: {
+                serverVersionId: loaded.serverVersionId,
+                errorCode: "remote_discovery_failed",
+              },
+            });
+          },
+        );
+        throw new HttpApiError(
+          "bad_request",
+          "MCP discovery failed; inspect the redacted discovery event and server configuration",
+        );
+      }
+      return dependencies.store.transaction(
+        actor,
+        "mcp:discover",
+        async (tx) => {
+          const updated = await service.storeDiscovery(
+            tx,
+            actor,
+            loaded.serverVersionId,
+            tools,
+          );
+          const publishedNewVersion =
+            updated.latestVersionId !== loaded.serverVersionId;
+          if (publishedNewVersion) {
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "mcp.server_version_published",
+              resourceType: "mcp_server_version",
+              resourceId: updated.latestVersionId,
+              detail: {
+                serverId: updated.id,
+                previousServerVersionId: loaded.serverVersionId,
+                version: updated.version,
+                reason: "discovery_drift",
+              },
+            });
+            await dependencies.store.appendEvent(tx, actor, {
+              aggregateType: "mcp_server",
+              aggregateId: updated.id,
+              kind: "mcp.server_version_published",
+              payload: {
+                serverVersionId: updated.latestVersionId,
+                previousServerVersionId: loaded.serverVersionId,
+                version: updated.version,
+                reason: "discovery_drift",
+              },
+            });
+          }
+          await dependencies.store.appendAudit(tx, actor, {
+            action: "mcp.discovery_completed",
+            resourceType: "mcp_server_version",
+            resourceId: updated.latestVersionId,
+            detail: { toolCount: tools.length, serverId: updated.id },
+          });
+          await dependencies.store.appendEvent(tx, actor, {
+            aggregateType: "mcp_server",
+            aggregateId: updated.id,
+            kind: "mcp.discovery_completed",
+            payload: {
+              serverVersionId: updated.latestVersionId,
+              toolCount: tools.length,
+            },
+          });
+          return c.json(updated);
+        },
+      );
+    },
+  );
+
+  app.get("/v1/projects/:projectId/mcp-credentials", async (c) => {
+    const actor = assertProject(c);
+    return dependencies.store.transaction(
+      actor,
+      "credential:read_metadata",
+      async (tx) =>
+        c.json({
+          data: mcp ? await mcp.listCredentials(tx, actor) : [],
+          credentialEncryptionConfigured:
+            dependencies.credentialCipher !== undefined,
+        }),
+    );
+  });
+
+  app.post("/v1/projects/:projectId/mcp-credentials", async (c) => {
+    const actor = assertProject(c);
+    const body = await readJsonObject(c.req.raw);
+    const input = parseCreateMcpCredentialInput(body);
+    const key = idempotencyKey(c.req.raw);
+    const service = requiredService();
+    return dependencies.store.transaction(
+      actor,
+      "credential:write",
+      async (tx) => {
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: "POST:/mcp-credentials",
+          key,
+          hash: requestHash(body),
+          status: 201,
+          execute: async () => {
+            const created = await service.createCredential(tx, actor, input);
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "mcp.credential_created",
+              resourceType: "mcp_credential",
+              resourceId: created.id,
+              detail: {
+                key: created.key,
+                kind: created.kind,
+                fingerprint: created.credentialFingerprint,
+                credentialVersion: created.credentialVersion,
+              },
+            });
+            await dependencies.store.appendEvent(tx, actor, {
+              aggregateType: "mcp_credential",
+              aggregateId: created.id,
+              kind: "mcp.credential_created",
+              payload: {
+                kind: created.kind,
+                fingerprint: created.credentialFingerprint,
+                credentialVersion: created.credentialVersion,
+              },
+            });
+            return created;
+          },
+        });
+        return c.json(response.body, response.status as 201);
+      },
+    );
+  });
+
+  app.post(
+    "/v1/projects/:projectId/mcp-credentials/:credentialId/rotate",
+    async (c) => {
+      const actor = assertProject(c);
+      const body = await readJsonObject(c.req.raw);
+      const input = parseRotateMcpCredentialInput(body);
+      const key = idempotencyKey(c.req.raw);
+      const service = requiredService();
+      return dependencies.store.transaction(
+        actor,
+        "credential:rotate",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `POST:/mcp-credentials/${c.req.param("credentialId")}/rotate`,
+            key,
+            hash: requestHash(body),
+            status: 200,
+            execute: async () => {
+              const rotated = await service.rotateCredential(
+                tx,
+                actor,
+                c.req.param("credentialId"),
+                input.secret,
+              );
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "mcp.credential_rotated",
+                resourceType: "mcp_credential",
+                resourceId: rotated.id,
+                detail: {
+                  fingerprint: rotated.credentialFingerprint,
+                  credentialVersion: rotated.credentialVersion,
+                },
+              });
+              await dependencies.store.appendEvent(tx, actor, {
+                aggregateType: "mcp_credential",
+                aggregateId: rotated.id,
+                kind: "mcp.credential_rotated",
+                payload: {
+                  fingerprint: rotated.credentialFingerprint,
+                  credentialVersion: rotated.credentialVersion,
+                },
+              });
+              return rotated;
+            },
+          });
+          return c.json(response.body);
+        },
+      );
+    },
+  );
+
+  app.delete(
+    "/v1/projects/:projectId/mcp-credentials/:credentialId",
+    async (c) => {
+      const actor = assertProject(c);
+      const key = idempotencyKey(c.req.raw);
+      const service = requiredService();
+      return dependencies.store.transaction(
+        actor,
+        "credential:revoke",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `DELETE:/mcp-credentials/${c.req.param("credentialId")}`,
+            method: "DELETE",
+            key,
+            hash: requestHash({ credentialId: c.req.param("credentialId") }),
+            status: 200,
+            execute: async () => {
+              const revoked = await service.revokeCredential(
+                tx,
+                actor,
+                c.req.param("credentialId"),
+              );
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "mcp.credential_revoked",
+                resourceType: "mcp_credential",
+                resourceId: c.req.param("credentialId"),
+              });
+              await dependencies.store.appendEvent(tx, actor, {
+                aggregateType: "mcp_credential",
+                aggregateId: c.req.param("credentialId"),
+                kind: "mcp.credential_revoked",
+              });
+              return revoked;
+            },
+          });
+          return c.json(response.body);
+        },
+      );
+    },
+  );
+
+  app.get("/v1/projects/:projectId/mcp-credential-policies", async (c) => {
+    const actor = assertProject(c);
+    return dependencies.store.transaction(actor, "mcp:read", async (tx) =>
+      c.json({ data: mcp ? await mcp.listPolicies(tx, actor) : [] }),
+    );
+  });
+
+  app.post("/v1/projects/:projectId/mcp-credential-policies", async (c) => {
+    const actor = assertProject(c);
+    const body = await readJsonObject(c.req.raw);
+    const input = parseCreateMcpCredentialPolicyInput(body);
+    const key = idempotencyKey(c.req.raw);
+    const service = requiredService();
+    return dependencies.store.transaction(actor, "mcp:write", async (tx) => {
+      const response = await dependencies.store.idempotent(tx, actor, {
+        scope: "POST:/mcp-credential-policies",
+        key,
+        hash: requestHash(body),
+        status: 201,
+        execute: async () => {
+          const created = await service.createPolicy(tx, actor, input);
+          await dependencies.store.appendAudit(tx, actor, {
+            action: "mcp.credential_policy_created",
+            resourceType: "mcp_credential_policy",
+            resourceId: created.id,
+            detail: {
+              credentialId: created.credentialId,
+              exactOrigin: created.exactOrigin,
+              pathPrefix: created.pathPrefix,
+            },
+          });
+          return created;
+        },
+      });
+      return c.json(response.body, response.status as 201);
+    });
+  });
+
+  app.get("/v1/projects/:projectId/mcp-toolsets", async (c) => {
+    const actor = assertProject(c);
+    return dependencies.store.transaction(actor, "mcp:read", async (tx) =>
+      c.json({ data: mcp ? await mcp.listToolsets(tx, actor) : [] }),
+    );
+  });
+
+  app.post("/v1/projects/:projectId/mcp-toolsets", async (c) => {
+    const actor = assertProject(c);
+    const body = await readJsonObject(c.req.raw);
+    const input = parseCreateMcpToolsetInput(body);
+    const key = idempotencyKey(c.req.raw);
+    const service = requiredService();
+    return dependencies.store.transaction(actor, "mcp:write", async (tx) => {
+      const response = await dependencies.store.idempotent(tx, actor, {
+        scope: "POST:/mcp-toolsets",
+        key,
+        hash: requestHash(body),
+        status: 201,
+        execute: async () => {
+          const created = await service.createToolset(tx, actor, input);
+          await dependencies.store.appendAudit(tx, actor, {
+            action: "mcp.toolset_published",
+            resourceType: "mcp_toolset",
+            resourceId: created.id,
+            detail: {
+              toolsetVersionId: created.latestVersionId,
+              serverVersionId: created.serverVersionId,
+              toolCount: created.tools.length,
+            },
+          });
+          await dependencies.store.appendEvent(tx, actor, {
+            aggregateType: "mcp_toolset",
+            aggregateId: created.id,
+            kind: "mcp.toolset_published",
+            payload: {
+              toolsetVersionId: created.latestVersionId,
+              serverVersionId: created.serverVersionId,
+              toolCount: created.tools.length,
+            },
+          });
+          return created;
+        },
+      });
+      return c.json(response.body, response.status as 201);
+    });
+  });
 }
 
 function registerSandboxProviderRoutes(
@@ -4367,9 +4799,11 @@ function registerAgentRoutes(
     const config = parseAgentConfig(body.initialConfig ?? body.config);
     return dependencies.store.transaction(
       actor,
-      config.skillVersionIds.length
-        ? (["agent:write", "skill:bind"] as const)
-        : "agent:write",
+      [
+        "agent:write",
+        ...(config.skillVersionIds.length ? (["skill:bind"] as const) : []),
+        ...(config.mcpBindings.length ? (["mcp:bind"] as const) : []),
+      ],
       async (tx) => {
         await assertModelPresetApproved(
           tx,
@@ -4544,9 +4978,11 @@ function registerAgentRoutes(
     const config = parseAgentConfig(body.config ?? body);
     return dependencies.store.transaction(
       actor,
-      config.skillVersionIds.length
-        ? (["agent:write", "skill:bind"] as const)
-        : "agent:write",
+      [
+        "agent:write",
+        ...(config.skillVersionIds.length ? (["skill:bind"] as const) : []),
+        ...(config.mcpBindings.length ? (["mcp:bind"] as const) : []),
+      ],
       async (tx) => {
         await assertModelPresetApproved(
           tx,
@@ -4816,6 +5252,33 @@ function registerRunRoutes(
                   agentVersionId,
                 ],
               );
+              const mcpBindings = await tx.query(
+                `INSERT INTO oao.session_mcp_bindings (
+                   organization_id,project_id,session_id,agent_version_id,
+                   toolset_version_id,credential_policy_version_id,namespace
+                 )
+                 SELECT organization_id,project_id,$3,agent_version_id,
+                        toolset_version_id,credential_policy_version_id,namespace
+                   FROM oao.agent_version_mcp_bindings
+                  WHERE organization_id=$1 AND project_id=$2
+                    AND agent_version_id=$4
+                 RETURNING toolset_version_id`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  sessionId,
+                  agentVersionId,
+                ],
+              );
+              if (
+                (mcpBindings.rowCount ?? 0) > 0 &&
+                !actor.scopes.has("*") &&
+                !actor.scopes.has("mcp:execute")
+              )
+                throw new HttpApiError(
+                  "forbidden",
+                  "mcp:execute is required to create a session for this agent version",
+                );
               await dependencies.store.appendEvent(tx, actor, {
                 aggregateType: "run",
                 aggregateId: runId,
@@ -4841,6 +5304,7 @@ function registerRunRoutes(
                   initialRunId: runId,
                   fileCount: files.length,
                   skillCount: skillBindings.rowCount ?? 0,
+                  mcpBindingCount: mcpBindings.rowCount ?? 0,
                 },
               });
               await dependencies.runtimeCommands.enqueue(tx, {
@@ -4879,6 +5343,30 @@ function registerRunRoutes(
                   ) ORDER BY tool.ordinality)
                   FROM jsonb_array_elements(COALESCE(v.config->'tools','[]'::jsonb))
                     WITH ORDINALITY AS tool(value,ordinality)
+                ),'[]'::jsonb) || COALESCE((
+                  SELECT jsonb_agg(jsonb_build_object(
+                    'name',oao.mcp_tool_name(binding.namespace,selection.remote_tool_name),
+                    'description',tool.description,
+                    'owner','platform',
+                    'approval',selection.approval
+                  ) ORDER BY binding.namespace,selection.remote_tool_name)
+                  FROM oao.session_mcp_bindings binding
+                  JOIN oao.mcp_toolset_versions toolset
+                    ON toolset.organization_id=binding.organization_id
+                   AND toolset.project_id=binding.project_id
+                   AND toolset.id=binding.toolset_version_id
+                  JOIN oao.mcp_toolset_version_tools selection
+                    ON selection.organization_id=toolset.organization_id
+                   AND selection.project_id=toolset.project_id
+                   AND selection.toolset_version_id=toolset.id
+                  JOIN oao.mcp_server_version_tools tool
+                    ON tool.organization_id=selection.organization_id
+                   AND tool.project_id=selection.project_id
+                   AND tool.server_version_id=selection.server_version_id
+                   AND tool.remote_tool_name=selection.remote_tool_name
+                  WHERE binding.organization_id=s.organization_id
+                    AND binding.project_id=s.project_id
+                    AND binding.session_id=s.id
                 ),'[]'::jsonb) AS tools,
                 lr.id AS latest_run_id,
                 COALESCE(lr.state::text,'queued') AS status,

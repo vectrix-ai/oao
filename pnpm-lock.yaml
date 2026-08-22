@@ -59,6 +59,9 @@ importers:
       '@oao/events':
         specifier: workspace:*
         version: link:../../packages/events
+      '@oao/mcp-remote':
+        specifier: workspace:*
+        version: link:../../packages/mcp-remote
       '@oao/models-openrouter':
         specifier: workspace:*
         version: link:../../packages/models-openrouter
@@ -160,6 +163,9 @@ importers:
       '@oao/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@oao/mcp-remote':
+        specifier: workspace:*
+        version: link:../../packages/mcp-remote
       '@oao/models-openrouter':
         specifier: workspace:*
         version: link:../../packages/models-openrouter
@@ -245,6 +251,15 @@ importers:
         specifier: workspace:*
         version: link:../domain
 
+  packages/mcp-remote:
+    dependencies:
+      '@modelcontextprotocol/client':
+        specifier: 2.0.0
+        version: 2.0.0
+      '@oao/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+
   packages/models-openrouter:
     dependencies:
       '@earendil-works/pi-ai':
@@ -291,6 +306,9 @@ importers:
       '@oao/domain':
         specifier: workspace:*
         version: link:../domain
+      '@oao/mcp-remote':
+        specifier: workspace:*
+        version: link:../mcp-remote
       '@oao/models-openrouter':
         specifier: workspace:*
         version: link:../models-openrouter

@@ -39,6 +39,18 @@ test("runtime projections use deterministic ids and redact unsafe arguments", ()
   );
 });
 
+test("MCP tool names are namespaced, bounded, and deterministic", () => {
+  assert.equal(
+    runtimeTesting.mcpToolName("traces", "lookup_trace"),
+    "mcp__traces__lookup_trace",
+  );
+  const first = runtimeTesting.mcpToolName("traces", "x".repeat(500));
+  const second = runtimeTesting.mcpToolName("traces", "x".repeat(500));
+  assert.equal(first, second);
+  assert.equal(first.length, 200);
+  assert.match(first, /_[a-f0-9]{12}$/u);
+});
+
 test("rich tool schemas guide the model and fail closed at execution", () => {
   const compiled = runtimeTesting.compileToolInputSchema({
     type: "object",

@@ -22,6 +22,16 @@ import type {
   Thread,
   ToolCall,
   ToolResultEnvelope,
+  McpServer,
+  McpCredential,
+  McpCredentialPolicy,
+  McpToolset,
+  CreateMcpServerInput,
+  DiscoverMcpServerInput,
+  CreateMcpCredentialInput,
+  RotateMcpCredentialInput,
+  CreateMcpCredentialPolicyInput,
+  CreateMcpToolsetInput,
 } from "@oao/contracts";
 
 export type {
@@ -48,7 +58,35 @@ export type {
   Thread,
   ToolCall,
   ToolResultEnvelope,
+  McpServer,
+  McpCredential,
+  McpCredentialPolicy,
+  McpToolset,
+  CreateMcpServerInput,
+  DiscoverMcpServerInput,
+  CreateMcpCredentialInput,
+  RotateMcpCredentialInput,
+  CreateMcpCredentialPolicyInput,
+  CreateMcpToolsetInput,
 };
+
+export interface McpServerList {
+  readonly data: readonly McpServer[];
+  readonly credentialEncryptionConfigured: boolean;
+}
+
+export interface McpCredentialList {
+  readonly data: readonly McpCredential[];
+  readonly credentialEncryptionConfigured: boolean;
+}
+
+export interface McpCredentialPolicyList {
+  readonly data: readonly McpCredentialPolicy[];
+}
+
+export interface McpToolsetList {
+  readonly data: readonly McpToolset[];
+}
 
 export interface HealthStatus {
   readonly status: "ok";
@@ -167,6 +205,11 @@ export interface PublishAgentVersionInput {
   readonly modelPreset: string;
   readonly tools: readonly AgentToolInput[];
   readonly skillVersionIds?: readonly string[];
+  readonly mcpBindings?: readonly {
+    readonly toolsetVersionId: string;
+    readonly credentialPolicyVersionId: string;
+    readonly namespace: string;
+  }[];
   readonly delegates?: readonly {
     readonly key: string;
     readonly description: string;

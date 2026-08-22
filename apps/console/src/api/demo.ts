@@ -31,6 +31,10 @@ import type {
   StorageObjectEntry,
   StorageObjectList,
   UpdateSandboxProviderConfigurationInput,
+  McpServer,
+  McpCredential,
+  McpCredentialPolicy,
+  McpToolset,
 } from "./types";
 
 const ORG_ID = "11111111-1111-4111-8111-111111111111";
@@ -802,6 +806,10 @@ export interface DemoApiOptions {
 export class DemoConsoleApi implements ConsoleApi {
   #agents = structuredClone(agentsSeed);
   #skills = structuredClone(skillsSeed);
+  #mcpServers: McpServer[] = [];
+  #mcpCredentials: McpCredential[] = [];
+  #mcpPolicies: McpCredentialPolicy[] = [];
+  #mcpToolsets: McpToolset[] = [];
   #skillDrafts: SkillDraft[] = [];
   #skillFiles = new Map<string, readonly SkillFileInput[]>();
   #apiKeys = structuredClone(settingsSeed.apiKeys) as ApiKeySummary[];
@@ -1389,6 +1397,219 @@ export class DemoConsoleApi implements ConsoleApi {
       item.id === skillId ? updated : item,
     );
     return structuredClone(updated);
+  }
+
+  async listMcpServers() {
+    return {
+      data: structuredClone(this.#mcpServers),
+      credentialEncryptionConfigured: true,
+    };
+  }
+
+  async createMcpServer(input: Parameters<ConsoleApi["createMcpServer"]>[0]) {
+    const now = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const created: McpServer = {
+      id,
+      organizationId: ORG_ID,
+      projectId: PROJECT_ID,
+      key: input.key,
+      displayName: input.displayName,
+      latestVersionId: crypto.randomUUID(),
+      version: 1,
+      endpointUrl: input.endpointUrl,
+      transport: input.transport ?? "streamable_http",
+      status: "active",
+      tools: [],
+      lastDiscoveredAt: null,
+      createdByPrincipalId: principalId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.#mcpServers.unshift(created);
+    return structuredClone(created);
+  }
+
+  async discoverMcpServer(serverId: string) {
+    const server = this.#mcpServers.find((item) => item.id === serverId);
+    if (!server) throw new Error("MCP server not found");
+    const discovered: McpServer = {
+      ...server,
+      tools: [
+        {
+          name: "lookup_trace",
+          title: "Look up trace",
+          description: "Find an observability trace by its immutable ID.",
+          inputSchema: {
+            type: "object",
+            properties: { traceId: { type: "string" } },
+            required: ["traceId"],
+            additionalProperties: false,
+          },
+          outputSchema: null,
+          schemaHash:
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        },
+        {
+          name: "search_runs",
+          title: "Search runs",
+          description: "Search recent runs using a bounded text query.",
+          inputSchema: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+            additionalProperties: false,
+          },
+          outputSchema: null,
+          schemaHash:
+            "2222222222222222222222222222222222222222222222222222222222222222",
+        },
+      ],
+      lastDiscoveredAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    this.#mcpServers = this.#mcpServers.map((item) =>
+      item.id === serverId ? discovered : item,
+    );
+    return structuredClone(discovered);
+  }
+
+  async listMcpCredentials() {
+    return {
+      data: structuredClone(this.#mcpCredentials),
+      credentialEncryptionConfigured: true,
+    };
+  }
+
+  async createMcpCredential(
+    input: Parameters<ConsoleApi["createMcpCredential"]>[0],
+  ) {
+    const now = new Date().toISOString();
+    const created: McpCredential = {
+      id: crypto.randomUUID(),
+      organizationId: ORG_ID,
+      projectId: PROJECT_ID,
+      key: input.key,
+      displayName: input.displayName,
+      kind: input.kind,
+      headerName: input.headerName ?? null,
+      credentialConfigured: true,
+      credentialFingerprint: "000000000000",
+      credentialVersion: 1,
+      status: "active",
+      createdByPrincipalId: principalId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.#mcpCredentials.unshift(created);
+    return structuredClone(created);
+  }
+
+  async rotateMcpCredential(credentialId: string) {
+    const credential = this.#mcpCredentials.find(
+      (item) => item.id === credentialId,
+    );
+    if (!credential) throw new Error("MCP credential not found");
+    const rotated = {
+      ...credential,
+      credentialVersion: credential.credentialVersion + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    this.#mcpCredentials = this.#mcpCredentials.map((item) =>
+      item.id === credentialId ? rotated : item,
+    );
+    return structuredClone(rotated);
+  }
+
+  async revokeMcpCredential(credentialId: string) {
+    const credential = this.#mcpCredentials.find(
+      (item) => item.id === credentialId,
+    );
+    if (!credential) throw new Error("MCP credential not found");
+    const revoked = {
+      ...credential,
+      status: "revoked" as const,
+      updatedAt: new Date().toISOString(),
+    };
+    this.#mcpCredentials = this.#mcpCredentials.map((item) =>
+      item.id === credentialId ? revoked : item,
+    );
+    return structuredClone(revoked);
+  }
+
+  async listMcpCredentialPolicies() {
+    return { data: structuredClone(this.#mcpPolicies) };
+  }
+
+  async createMcpCredentialPolicy(
+    input: Parameters<ConsoleApi["createMcpCredentialPolicy"]>[0],
+  ) {
+    const now = new Date().toISOString();
+    const created: McpCredentialPolicy = {
+      id: crypto.randomUUID(),
+      organizationId: ORG_ID,
+      projectId: PROJECT_ID,
+      key: input.key,
+      displayName: input.displayName,
+      latestVersionId: crypto.randomUUID(),
+      version: 1,
+      credentialId: input.credentialId,
+      exactOrigin: input.exactOrigin,
+      pathPrefix: input.pathPrefix,
+      timeoutMs: input.timeoutMs ?? 30_000,
+      maximumResponseBytes: input.maximumResponseBytes ?? 1_048_576,
+      status: "active",
+      createdByPrincipalId: principalId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.#mcpPolicies.unshift(created);
+    return structuredClone(created);
+  }
+
+  async listMcpToolsets() {
+    return { data: structuredClone(this.#mcpToolsets) };
+  }
+
+  async createMcpToolset(input: Parameters<ConsoleApi["createMcpToolset"]>[0]) {
+    const server = this.#mcpServers.find(
+      (item) => item.latestVersionId === input.serverVersionId,
+    );
+    if (!server) throw new Error("MCP server version not found");
+    const now = new Date().toISOString();
+    const created: McpToolset = {
+      id: crypto.randomUUID(),
+      organizationId: ORG_ID,
+      projectId: PROJECT_ID,
+      key: input.key,
+      displayName: input.displayName,
+      latestVersionId: crypto.randomUUID(),
+      version: 1,
+      serverVersionId: input.serverVersionId,
+      status: "active",
+      tools: input.tools.map((selected) => {
+        const tool = server.tools.find(
+          (item) => item.name === selected.remoteToolName,
+        );
+        return {
+          remoteToolName: selected.remoteToolName,
+          description: tool?.description ?? selected.remoteToolName,
+          inputSchema: tool?.inputSchema ?? {
+            type: "object",
+            properties: {},
+            required: [],
+            additionalProperties: false,
+          },
+          outputSchema: tool?.outputSchema ?? null,
+          approval: selected.approval ?? "always",
+        };
+      }),
+      createdByPrincipalId: principalId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.#mcpToolsets.unshift(created);
+    return structuredClone(created);
   }
 
   async listSessions(filters: ListFilters) {

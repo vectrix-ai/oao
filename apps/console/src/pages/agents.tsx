@@ -20,6 +20,8 @@ import type {
   SandboxSnapshotEntry,
   SkillSummary,
   ToolDefinition,
+  McpCredentialPolicy,
+  McpToolset,
 } from "../api/types";
 import { describePresetRouting } from "../model-presets";
 import type { ComboboxOption } from "../components/ui";
@@ -201,6 +203,7 @@ function initialAgentConfig(
     modelPreset,
     tools: [],
     skillVersionIds: [],
+    mcpBindings: [],
     delegates: [],
     sandbox: {
       enabled: false,
@@ -796,6 +799,14 @@ export function AgentDetailPage() {
     queryKey: ["agents", "delegate-roster"],
     queryFn: () => api.listAgents({}),
   });
+  const mcpToolsets = useQuery({
+    queryKey: ["mcp-toolsets"],
+    queryFn: () => api.listMcpToolsets(),
+  });
+  const mcpPolicies = useQuery({
+    queryKey: ["mcp-credential-policies"],
+    queryFn: () => api.listMcpCredentialPolicies(),
+  });
   const publish = useMutation({
     mutationFn: (config: AgentVersionConfig) =>
       api.publishAgentVersion(agentId, config),
@@ -828,6 +839,8 @@ export function AgentDetailPage() {
       sandboxProviders={sandboxProviders.data?.data ?? []}
       sandboxProvidersError={sandboxProviders.error}
       skills={skills.data?.data ?? []}
+      mcpToolsets={mcpToolsets.data?.data ?? []}
+      mcpPolicies={mcpPolicies.data?.data ?? []}
       availableAgents={(agents.data?.data ?? []).filter(
         (candidate) => candidate.id !== query.data.id,
       )}
@@ -844,6 +857,8 @@ function AgentEditor({
   sandboxProviders,
   sandboxProvidersError,
   skills,
+  mcpToolsets,
+  mcpPolicies,
   availableAgents,
 }: {
   readonly agent: Awaited<ReturnType<ReturnType<typeof useApi>["getAgent"]>>;
@@ -854,6 +869,8 @@ function AgentEditor({
   readonly sandboxProviders: readonly ProjectSandboxProvider[];
   readonly sandboxProvidersError: Error | null;
   readonly skills: readonly SkillSummary[];
+  readonly mcpToolsets: readonly McpToolset[];
+  readonly mcpPolicies: readonly McpCredentialPolicy[];
   readonly availableAgents: readonly AgentSummary[];
 }) {
   const api = useApi();
@@ -881,6 +898,7 @@ function AgentEditor({
   const [skillVersionIds, setSkillVersionIds] = useState(
     baseConfig.skillVersionIds ?? [],
   );
+  const [mcpBindings, setMcpBindings] = useState(baseConfig.mcpBindings ?? []);
   const [delegates, setDelegates] = useState(baseConfig.delegates ?? []);
   const [tools, setTools] = useState<readonly ToolDefinition[]>(
     baseConfig.tools,
@@ -912,6 +930,7 @@ function AgentEditor({
     setSandboxCapabilities(next.config.sandbox.capabilities);
     setTimeoutValue(next.config.limits.timeoutMs);
     setSkillVersionIds(next.config.skillVersionIds ?? []);
+    setMcpBindings(next.config.mcpBindings ?? []);
     setDelegates(next.config.delegates ?? []);
     setTools(next.config.tools);
   };
@@ -921,6 +940,7 @@ function AgentEditor({
     modelPreset,
     tools,
     skillVersionIds,
+    mcpBindings,
     delegates,
     sandbox: {
       enabled: sandboxEnabled,
@@ -969,11 +989,14 @@ function AgentEditor({
     )
   )
     validation.push(`${modelPreset} is not available in this deployment.`);
-  if (!sandboxProviders.some((provider) => provider.key === sandboxProvider))
+  if (
+    sandboxEnabled &&
+    !sandboxProviders.some((provider) => provider.key === sandboxProvider)
+  )
     validation.push(
       `${sandboxProvider} is not a configured Daytona connection for this project.`,
     );
-  if (sandboxProvidersError)
+  if (sandboxEnabled && sandboxProvidersError)
     validation.push("Sandbox connections could not be verified.");
   if (sandboxEnabled) {
     if (!snapshotId) validation.push("Select an active Daytona snapshot.");
@@ -1210,6 +1233,96 @@ function AgentEditor({
                       })
                     }
                   />
+                );
+              })}
+            </div>
+          )}
+        </Panel>
+        <Panel
+          title="MCP toolsets"
+          description="Pin an immutable restricted toolset and an exact-origin credential policy into this agent version."
+          actions={<Link to="/mcp">Manage MCP connections</Link>}
+        >
+          {mcpToolsets.length === 0 ? (
+            <EmptyState
+              icon="⌘"
+              title="No MCP toolsets available"
+              description="Discover a remote MCP server and publish a restricted toolset before binding it."
+            />
+          ) : mcpPolicies.length === 0 ? (
+            <Alert tone="warning" role="status">
+              Create an exact-origin credential policy before attaching an MCP
+              toolset.
+            </Alert>
+          ) : (
+            <div className="stack">
+              {mcpToolsets.map((toolset) => {
+                const binding = mcpBindings.find(
+                  (item) => item.toolsetVersionId === toolset.latestVersionId,
+                );
+                return (
+                  <div className="resource-card" key={toolset.id}>
+                    <CheckboxRow
+                      label={`${toolset.displayName} · v${toolset.version}`}
+                      description={`${toolset.tools.length} allowed tools: ${toolset.tools.map((tool) => tool.remoteToolName).join(", ")}`}
+                      checked={binding !== undefined}
+                      disabled={!isLatest || toolset.status !== "active"}
+                      onChange={(event) =>
+                        setMcpBindings((current) =>
+                          event.target.checked
+                            ? [
+                                ...current,
+                                {
+                                  toolsetVersionId: toolset.latestVersionId,
+                                  credentialPolicyVersionId:
+                                    mcpPolicies[0]!.latestVersionId,
+                                  namespace: toolset.key
+                                    .replaceAll("-", "_")
+                                    .slice(0, 64),
+                                },
+                              ]
+                            : current.filter(
+                                (item) =>
+                                  item.toolsetVersionId !==
+                                  toolset.latestVersionId,
+                              ),
+                        )
+                      }
+                    />
+                    {binding ? (
+                      <Field
+                        label={`Credential policy for ${toolset.displayName}`}
+                      >
+                        <Select
+                          value={binding.credentialPolicyVersionId}
+                          disabled={!isLatest}
+                          onChange={(event) =>
+                            setMcpBindings((current) =>
+                              current.map((item) =>
+                                item.toolsetVersionId ===
+                                toolset.latestVersionId
+                                  ? {
+                                      ...item,
+                                      credentialPolicyVersionId:
+                                        event.target.value,
+                                    }
+                                  : item,
+                              ),
+                            )
+                          }
+                        >
+                          {mcpPolicies.map((policy) => (
+                            <option
+                              key={policy.latestVersionId}
+                              value={policy.latestVersionId}
+                            >
+                              {policy.displayName} · {policy.exactOrigin}
+                            </option>
+                          ))}
+                        </Select>
+                      </Field>
+                    ) : null}
+                  </div>
                 );
               })}
             </div>

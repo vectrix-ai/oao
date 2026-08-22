@@ -54,6 +54,14 @@ and should shape integrations:
 - **Provider credentials are project-scoped encrypted records.** The console can
   create connections and rotate write-only keys. The API never returns a key,
   and encryption-key-ring rotation is not included in this MVP.
+- **Remote MCP is HTTPS and static-credential only.** OAO supports Streamable
+  HTTP and legacy SSE with static bearer or safe API-key headers, immutable
+  discovery snapshots, restricted toolsets, and exact-origin credential
+  injection. Stdio, OAuth/refresh, dynamic client registration, per-user
+  delegated credentials, automatic retry of outcome-unknown calls, and sandbox
+  secret substitution are deferred. Tool results are untrusted remote content;
+  OAO bounds and validates them but cannot prove they are free of prompt
+  injection.
 - **Workspace backup stores only the latest archive per thread.** OAO backs up
   the active Daytona workdir to the configured S3-compatible provider, but
   historical rollback requires bucket versioning and there is no generation

@@ -203,6 +203,98 @@ describe("management console", () => {
     expect(await screen.findByText("deprecated")).toBeInTheDocument();
   });
 
+  it("guides MCP setup from server details through an agent binding", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/mcp", api);
+    expect(
+      await screen.findByRole("heading", { name: "MCP connections" }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getAllByRole("button", { name: "Add MCP server" })[0]!,
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "Add MCP server" }),
+    );
+    await user.type(
+      dialog.getByLabelText("Display name"),
+      "Trace observability",
+    );
+    expect(dialog.getByLabelText("Connection key")).toHaveValue(
+      "trace-observability",
+    );
+    await user.type(
+      dialog.getByLabelText("HTTPS MCP endpoint"),
+      "https://mcp.example.test/rpc",
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    await user.type(dialog.getByLabelText("Secret"), "fake-secret-value");
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    expect(
+      dialog.getAllByText("https://mcp.example.test/rpc").length,
+    ).toBeGreaterThan(0);
+    await user.click(dialog.getByRole("button", { name: "Test and discover" }));
+    await user.click(
+      await dialog.findByRole("checkbox", { name: /Look up trace/u }),
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    await user.selectOptions(
+      dialog.getByLabelText("Attach to agent"),
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    );
+    expect(dialog.getByLabelText("Tool namespace")).toHaveValue(
+      "trace_observability",
+    );
+    await user.click(dialog.getByRole("button", { name: "Finish setup" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Trace observability" }),
+    ).toBeInTheDocument();
+    const toolsets = await api.listMcpToolsets();
+    expect(toolsets.data[0]?.tools.map((tool) => tool.remoteToolName)).toEqual([
+      "lookup_trace",
+    ]);
+    const agent = await api.getAgent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    expect(agent.versions[0]?.config.mcpBindings).toEqual([
+      expect.objectContaining({ namespace: "trace_observability" }),
+    ]);
+
+    await user.click(
+      screen.getByRole("button", { name: "Advanced resources" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Create toolset" }));
+    const toolsetDialog = within(
+      await screen.findByRole("dialog", { name: "Create MCP toolset" }),
+    );
+    await user.type(toolsetDialog.getByLabelText("Key"), "trace-read-only");
+    await user.type(
+      toolsetDialog.getByLabelText("Display name"),
+      "Trace read only",
+    );
+    await user.selectOptions(
+      toolsetDialog.getByLabelText("Approval policy"),
+      "never",
+    );
+    await user.click(
+      toolsetDialog.getByRole("checkbox", { name: /Look up trace/u }),
+    );
+    await user.click(toolsetDialog.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    const manualToolset = (await api.listMcpToolsets()).data.find(
+      (toolset) => toolset.key === "trace-read-only",
+    );
+    expect(manualToolset?.tools).toEqual([
+      expect.objectContaining({
+        remoteToolName: "lookup_trace",
+        approval: "never",
+      }),
+    ]);
+  });
+
   it("uploads multiple Markdown files into the selected package folder", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });

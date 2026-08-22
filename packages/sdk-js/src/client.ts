@@ -69,6 +69,20 @@ import type {
   ToolResultSubmission,
   UpdateProjectSandboxProviderConfigurationInput,
   WriteOptions,
+  McpServer,
+  McpCredential,
+  McpCredentialPolicy,
+  McpToolset,
+  McpServerList,
+  McpCredentialList,
+  McpCredentialPolicyList,
+  McpToolsetList,
+  CreateMcpServerInput,
+  DiscoverMcpServerInput,
+  CreateMcpCredentialInput,
+  RotateMcpCredentialInput,
+  CreateMcpCredentialPolicyInput,
+  CreateMcpToolsetInput,
 } from "./types.js";
 
 type Credential =
@@ -689,6 +703,127 @@ export class OaoClient {
       this.routes.skillVersionLifecycle(projectId, skillId, versionId),
       "PATCH",
       { status },
+      options,
+    );
+  }
+
+  listMcpServers(
+    projectId: string,
+    options?: RequestOptions,
+  ): Promise<McpServerList> {
+    return this.#request(this.routes.mcpServers(projectId), options);
+  }
+
+  createMcpServer(
+    projectId: string,
+    input: CreateMcpServerInput,
+    options: WriteOptions,
+  ): Promise<McpServer> {
+    return this.#write(
+      this.routes.mcpServers(projectId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
+  discoverMcpServer(
+    projectId: string,
+    serverId: string,
+    input: DiscoverMcpServerInput,
+    options: WriteOptions,
+  ): Promise<McpServer> {
+    return this.#write(
+      this.routes.mcpServerDiscovery(projectId, serverId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
+  listMcpCredentials(
+    projectId: string,
+    options?: RequestOptions,
+  ): Promise<McpCredentialList> {
+    return this.#request(this.routes.mcpCredentials(projectId), options);
+  }
+
+  createMcpCredential(
+    projectId: string,
+    input: CreateMcpCredentialInput,
+    options: WriteOptions,
+  ): Promise<McpCredential> {
+    return this.#write(
+      this.routes.mcpCredentials(projectId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
+  rotateMcpCredential(
+    projectId: string,
+    credentialId: string,
+    input: RotateMcpCredentialInput,
+    options: WriteOptions,
+  ): Promise<McpCredential> {
+    return this.#write(
+      this.routes.rotateMcpCredential(projectId, credentialId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
+  revokeMcpCredential(
+    projectId: string,
+    credentialId: string,
+    options: WriteOptions,
+  ): Promise<McpCredential> {
+    return this.#write(
+      this.routes.mcpCredential(projectId, credentialId),
+      "DELETE",
+      undefined,
+      options,
+    );
+  }
+
+  listMcpCredentialPolicies(
+    projectId: string,
+    options?: RequestOptions,
+  ): Promise<McpCredentialPolicyList> {
+    return this.#request(this.routes.mcpCredentialPolicies(projectId), options);
+  }
+
+  createMcpCredentialPolicy(
+    projectId: string,
+    input: CreateMcpCredentialPolicyInput,
+    options: WriteOptions,
+  ): Promise<McpCredentialPolicy> {
+    return this.#write(
+      this.routes.mcpCredentialPolicies(projectId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
+  listMcpToolsets(
+    projectId: string,
+    options?: RequestOptions,
+  ): Promise<McpToolsetList> {
+    return this.#request(this.routes.mcpToolsets(projectId), options);
+  }
+
+  createMcpToolset(
+    projectId: string,
+    input: CreateMcpToolsetInput,
+    options: WriteOptions,
+  ): Promise<McpToolset> {
+    return this.#write(
+      this.routes.mcpToolsets(projectId),
+      "POST",
+      input,
       options,
     );
   }

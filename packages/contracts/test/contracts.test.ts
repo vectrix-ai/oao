@@ -15,6 +15,9 @@ import {
   parseModelRoutingPolicy,
   validateToolJsonSchema,
   validateToolJsonValue,
+  parseCreateMcpServerInput,
+  parseCreateMcpCredentialInput,
+  parseCreateMcpCredentialPolicyInput,
 } from "../src/index.js";
 
 const id = "00000000-0000-4000-8000-000000000001";
@@ -428,6 +431,71 @@ test("agent publications pin a unique, bounded delegate roster", () => {
             required: [],
             additionalProperties: false,
           },
+        },
+      ],
+    }),
+  );
+});
+
+test("MCP contracts require HTTPS, safe credential headers, and unique bindings", () => {
+  assert.equal(
+    parseCreateMcpServerInput({
+      key: "trace-server",
+      displayName: "Trace server",
+      endpointUrl: "https://mcp.example.test/mcp",
+      transport: "streamable_http",
+    }).transport,
+    "streamable_http",
+  );
+  assert.throws(() =>
+    parseCreateMcpServerInput({
+      key: "metadata",
+      displayName: "Metadata",
+      endpointUrl: "http://169.254.169.254/latest",
+    }),
+  );
+  assert.throws(() =>
+    parseCreateMcpCredentialInput({
+      key: "unsafe",
+      displayName: "Unsafe",
+      kind: "api_key_header",
+      headerName: "Host",
+      secret: "secret-value",
+    }),
+  );
+  assert.throws(() =>
+    parseCreateMcpCredentialPolicyInput({
+      key: "unsafe-origin",
+      displayName: "Unsafe origin",
+      credentialId: id,
+      exactOrigin: "https://mcp.example.test/path",
+      pathPrefix: "/mcp",
+    }),
+  );
+  const base = {
+    systemPrompt: "Use only the exact approved MCP toolset binding.",
+    modelPreset: "mcp-agent-v1",
+    tools: [],
+    sandbox: {
+      enabled: false,
+      provider: "daytona-primary",
+      network: "none" as const,
+    },
+    limits: { maxTurns: PLATFORM_MAX_TURNS, timeoutMs: 60_000 },
+  };
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...base,
+      mcpBindings: [
+        {
+          toolsetVersionId: id,
+          credentialPolicyVersionId: id,
+          namespace: "traces",
+        },
+        {
+          toolsetVersionId: "00000000-0000-4000-8000-000000000002",
+          credentialPolicyVersionId: "00000000-0000-4000-8000-000000000003",
+          namespace: "traces",
         },
       ],
     }),

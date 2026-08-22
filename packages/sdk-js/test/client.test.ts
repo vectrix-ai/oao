@@ -26,6 +26,51 @@ test("route builders scope resources to a project and allow a custom prefix", ()
     routes.delegationMessages("project/one", "delegation one"),
     "/platform/v2/projects/project%2Fone/delegations/delegation%20one/messages",
   );
+  assert.equal(
+    routes.mcpServerDiscovery("project/one", "server one"),
+    "/platform/v2/projects/project%2Fone/mcp-servers/server%20one/discover",
+  );
+});
+
+test("client manages redacted MCP resources", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({ id: "mcp-1", credentialConfigured: true });
+    },
+  });
+  await client.createMcpCredential(
+    "project-1",
+    {
+      key: "langsmith-proxy",
+      displayName: "LangSmith proxy",
+      kind: "static_bearer",
+      headerName: null,
+      secret: "secret-value",
+    },
+    { idempotencyKey: "credential-1" },
+  );
+  await client.discoverMcpServer(
+    "project-1",
+    "server-1",
+    { credentialPolicyVersionId: "policy-version-1" },
+    { idempotencyKey: "discover-1" },
+  );
+  assert.equal(requests[0]?.url.endsWith("/mcp-credentials"), true);
+  assert.equal(requests[0]?.headers.get("idempotency-key"), "credential-1");
+  assert.deepEqual(await requests[0]?.json(), {
+    key: "langsmith-proxy",
+    displayName: "LangSmith proxy",
+    kind: "static_bearer",
+    headerName: null,
+    secret: "secret-value",
+  });
+  assert.equal(
+    requests[1]?.url.endsWith("/mcp-servers/server-1/discover"),
+    true,
+  );
 });
 
 test("client follows up with and cancels a persistent child delegation", async () => {

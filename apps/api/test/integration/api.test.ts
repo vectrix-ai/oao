@@ -13,6 +13,7 @@ import {
   listApprovedModelCatalog,
 } from "@oao/models-openrouter";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
+import type { McpRemotePort } from "@oao/mcp-remote";
 import {
   brandedId,
   type AuthorizationScope,
@@ -87,6 +88,36 @@ class TransactionalTestRuntimeCommands implements RuntimeCommandPort {
     }
   }
 }
+
+let fakeMcpDiscoveryRevision = 1;
+const fakeMcpRemote: McpRemotePort = {
+  discover: () =>
+    Promise.resolve([
+      {
+        name: "lookup_trace",
+        title: "Lookup trace",
+        description: `Find an approved trace by identifier. Revision ${fakeMcpDiscoveryRevision}.`,
+        inputSchema: {
+          type: "object",
+          properties: { traceId: { type: "string" } },
+          required: ["traceId"],
+          additionalProperties: false,
+        },
+        outputSchema: {
+          type: "object",
+          properties: { found: { type: "boolean" } },
+          required: ["found"],
+          additionalProperties: false,
+        },
+      },
+    ]),
+  call: () =>
+    Promise.resolve({
+      content: '{"found":true}',
+      isError: false,
+      responseBytes: 14,
+    }),
+};
 
 function jsonRequest(
   body: Readonly<Record<string, unknown>>,
@@ -196,6 +227,7 @@ test(
       runFileStorage,
       runtimeCommands,
       credentialCipher: new ProviderCredentialCipher(Buffer.alloc(32, 5)),
+      mcpRemote: fakeMcpRemote,
       modelCatalog: {
         deploymentPresets: [],
         listCatalog: (input) => listApprovedModelCatalog(input?.providerType),
@@ -297,6 +329,207 @@ test(
     let runId = "";
     let skillId = "";
     let skillVersionId = "";
+
+    await t.test(
+      "MCP credentials remain redacted while immutable toolsets bind to agent versions",
+      async () => {
+        const credentialResponse = await app.request(
+          `${projectPath}/mcp-credentials`,
+          jsonRequest(
+            {
+              key: "integration-mcp-token",
+              displayName: "Integration MCP token",
+              kind: "static_bearer",
+              headerName: null,
+              secret: "integration-mcp-secret",
+            },
+            "mcp-credential-1",
+          ),
+        );
+        assert.equal(credentialResponse.status, 201);
+        const credentialText = await credentialResponse.text();
+        assert.doesNotMatch(credentialText, /integration-mcp-secret/u);
+        const credential = JSON.parse(credentialText) as { id: string };
+        const rotationResponse = await app.request(
+          `${projectPath}/mcp-credentials/${credential.id}/rotate`,
+          jsonRequest(
+            { secret: "rotated-integration-mcp-secret" },
+            "mcp-credential-rotate-1",
+          ),
+        );
+        assert.equal(rotationResponse.status, 200);
+        const rotationText = await rotationResponse.text();
+        assert.doesNotMatch(rotationText, /rotated-integration-mcp-secret/u);
+        assert.equal(
+          (JSON.parse(rotationText) as { credentialVersion: number })
+            .credentialVersion,
+          2,
+        );
+
+        const policyResponse = await app.request(
+          `${projectPath}/mcp-credential-policies`,
+          jsonRequest(
+            {
+              key: "integration-mcp-egress",
+              displayName: "Integration MCP egress",
+              credentialId: credential.id,
+              exactOrigin: "https://mcp.example.test",
+              pathPrefix: "/mcp",
+              timeoutMs: 10_000,
+              maximumResponseBytes: 65_536,
+            },
+            "mcp-policy-1",
+          ),
+        );
+        assert.equal(policyResponse.status, 201);
+        const policy = (await policyResponse.json()) as {
+          latestVersionId: string;
+        };
+
+        const serverResponse = await app.request(
+          `${projectPath}/mcp-servers`,
+          jsonRequest(
+            {
+              key: "integration-mcp",
+              displayName: "Integration MCP",
+              endpointUrl: "https://mcp.example.test/mcp",
+              transport: "streamable_http",
+            },
+            "mcp-server-1",
+          ),
+        );
+        assert.equal(serverResponse.status, 201);
+        const server = (await serverResponse.json()) as {
+          id: string;
+          latestVersionId: string;
+        };
+        const discovery = await app.request(
+          `${projectPath}/mcp-servers/${server.id}/discover`,
+          jsonRequest(
+            { credentialPolicyVersionId: policy.latestVersionId },
+            "mcp-discovery-1",
+          ),
+        );
+        assert.equal(discovery.status, 200);
+        assert.equal(
+          ((await discovery.json()) as { tools: readonly unknown[] }).tools
+            .length,
+          1,
+        );
+
+        const toolsetResponse = await app.request(
+          `${projectPath}/mcp-toolsets`,
+          jsonRequest(
+            {
+              key: "trace-readonly",
+              displayName: "Trace read-only",
+              serverVersionId: server.latestVersionId,
+              tools: [{ remoteToolName: "lookup_trace", approval: "always" }],
+            },
+            "mcp-toolset-1",
+          ),
+        );
+        assert.equal(toolsetResponse.status, 201);
+        const toolset = (await toolsetResponse.json()) as {
+          latestVersionId: string;
+        };
+
+        const agentResponse = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "mcp-agent",
+              name: "MCP agent",
+              config: {
+                systemPrompt: "Use the approved remote trace lookup tool only.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                mcpBindings: [
+                  {
+                    toolsetVersionId: toolset.latestVersionId,
+                    credentialPolicyVersionId: policy.latestVersionId,
+                    namespace: "traces",
+                  },
+                ],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "mcp-agent-1",
+          ),
+        );
+        assert.equal(agentResponse.status, 201);
+        const agent = (await agentResponse.json()) as {
+          id: string;
+          latestVersionId: string;
+        };
+        const binding = await pool.query(
+          `SELECT namespace FROM oao.agent_version_mcp_bindings
+            WHERE organization_id=$1 AND project_id=$2 AND agent_version_id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            agent.latestVersionId,
+          ],
+        );
+        assert.deepEqual(binding.rows, [{ namespace: "traces" }]);
+
+        const generatedName = await pool.query<{ name: string }>(
+          "SELECT oao.mcp_tool_name('traces','lookup_trace') AS name",
+        );
+        assert.equal(generatedName.rows[0]?.name, "mcp__traces__lookup_trace");
+
+        fakeMcpDiscoveryRevision = 2;
+        const driftDiscovery = await app.request(
+          `${projectPath}/mcp-servers/${server.id}/discover`,
+          jsonRequest(
+            { credentialPolicyVersionId: policy.latestVersionId },
+            "mcp-discovery-drift-1",
+          ),
+        );
+        assert.equal(driftDiscovery.status, 200);
+        const driftedServer = (await driftDiscovery.json()) as {
+          latestVersionId: string;
+          version: number;
+          tools: readonly { description: string }[];
+        };
+        assert.equal(driftedServer.version, 2);
+        assert.notEqual(driftedServer.latestVersionId, server.latestVersionId);
+        assert.match(driftedServer.tools[0]?.description ?? "", /Revision 2/u);
+        const pinnedToolset = await pool.query<{ server_version_id: string }>(
+          `SELECT server_version_id FROM oao.mcp_toolset_versions
+            WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            toolset.latestVersionId,
+          ],
+        );
+        assert.equal(
+          pinnedToolset.rows[0]?.server_version_id,
+          server.latestVersionId,
+        );
+
+        const revokeResponse = await app.request(
+          `${projectPath}/mcp-credentials/${credential.id}`,
+          {
+            method: "DELETE",
+            headers: { "idempotency-key": "mcp-credential-revoke-1" },
+          },
+        );
+        assert.equal(revokeResponse.status, 200);
+        assert.equal(
+          ((await revokeResponse.json()) as { status: string }).status,
+          "revoked",
+        );
+
+        const audit = await app.request(`${projectPath}/audit?limit=100`);
+        assert.doesNotMatch(
+          await audit.text(),
+          /rotated-integration-mcp-secret|"authorization"\s*:/iu,
+        );
+      },
+    );
 
     await t.test(
       "Skill packages publish immutable versions and export exact contents",

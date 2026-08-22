@@ -12,6 +12,7 @@ import { SessionDetailPage, SessionsPage } from "./pages/sessions";
 import { SkillDetailPage, SkillsPage } from "./pages/skills";
 import { SettingsPage } from "./pages/settings";
 import { StorageBrowserPage } from "./pages/storage-browser";
+import { McpPage } from "./pages/mcp";
 
 export function ConsoleApp({
   api,
@@ -45,6 +46,7 @@ export function ConsoleApp({
         <Route path="api-keys" element={<SettingsPage />} />
         <Route path="sandbox-providers" element={<SettingsPage />} />
         <Route path="storage-providers" element={<SettingsPage />} />
+        <Route path="mcp" element={<McpPage />} />
         <Route
           path="storage-providers/:providerId"
           element={<StorageBrowserPage />}

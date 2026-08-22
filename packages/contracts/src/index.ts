@@ -1057,6 +1057,18 @@ export const ProductEventKindSchema = v.picklist([
   "skill.version_revoked",
   "skill.activated",
   "skill.resource_read",
+  "mcp.server_created",
+  "mcp.server_version_published",
+  "mcp.discovery_completed",
+  "mcp.discovery_failed",
+  "mcp.toolset_published",
+  "mcp.credential_created",
+  "mcp.credential_rotated",
+  "mcp.credential_revoked",
+  "mcp.call_started",
+  "mcp.call_completed",
+  "mcp.call_failed",
+  "mcp.call_cancelled",
   "run.created",
   "run.state_changed",
   "run.cancellation_requested",
@@ -1093,6 +1105,47 @@ export const RuntimeToolSnapshotSchema = v.strictObject({
   approval: v.picklist(["never", "always"]),
   inputSchema: PublishedObjectSchema,
   outputSchema: PublishedObjectSchema,
+});
+
+export const ManagedMcpBindingSchema = v.strictObject({
+  toolsetVersionId: IdSchema,
+  credentialPolicyVersionId: IdSchema,
+  namespace: v.pipe(
+    v.string(),
+    v.minLength(1),
+    v.maxLength(64),
+    v.regex(/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/u),
+  ),
+});
+
+export const ManagedMcpToolSnapshotSchema = v.strictObject({
+  serverVersionId: IdSchema,
+  toolsetVersionId: IdSchema,
+  credentialPolicyVersionId: IdSchema,
+  namespace: ManagedMcpBindingSchema.entries.namespace,
+  remoteToolName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  name: v.pipe(
+    v.string(),
+    v.minLength(1),
+    v.maxLength(200),
+    v.regex(/^[a-zA-Z0-9_:-]+$/u),
+  ),
+  description: v.pipe(v.string(), v.minLength(1), v.maxLength(2_000)),
+  approval: v.picklist(["never", "always"]),
+  inputSchema: PublishedObjectSchema,
+  outputSchema: v.nullable(PublishedObjectSchema),
+  timeoutMs: v.pipe(
+    v.number(),
+    v.integer(),
+    v.minValue(1_000),
+    v.maxValue(120_000),
+  ),
+  maximumResponseBytes: v.pipe(
+    v.number(),
+    v.integer(),
+    v.minValue(1_024),
+    v.maxValue(10_485_760),
+  ),
 });
 
 export const PLATFORM_MAX_TURNS = 32;
@@ -1185,6 +1238,25 @@ export const ManagedAgentPublicationConfigSchema = v.pipe(
       ),
     ),
     skillVersionIds: v.optional(v.array(IdSchema), []),
+    mcpBindings: v.optional(
+      v.pipe(
+        v.array(ManagedMcpBindingSchema),
+        v.maxLength(16),
+        v.check(
+          (bindings) =>
+            new Set(bindings.map((binding) => binding.namespace)).size ===
+              bindings.length &&
+            new Set(
+              bindings.map(
+                (binding) =>
+                  `${binding.toolsetVersionId}:${binding.credentialPolicyVersionId}`,
+              ),
+            ).size === bindings.length,
+          "MCP namespaces and toolset-policy bindings must be unique",
+        ),
+      ),
+      [],
+    ),
     delegates: v.optional(ManagedAgentDelegatesSchema, []),
     sandbox: v.strictObject({
       enabled: v.boolean(),
@@ -1220,6 +1292,7 @@ export const ManagedAgentSnapshotSchema = v.strictObject({
   modelPreset: ManagedAgentPublicationConfigSchema.entries.modelPreset,
   tools: ManagedAgentPublicationConfigSchema.entries.tools,
   skills: v.optional(v.array(ManagedSkillBindingSnapshotSchema), []),
+  mcpTools: v.optional(v.array(ManagedMcpToolSnapshotSchema), []),
   delegates: v.optional(ManagedAgentDelegatesSchema, []),
   sandbox: v.strictObject({
     enabled: v.boolean(),
@@ -1395,6 +1468,10 @@ export type ManagedSkillBindingSnapshot = v.InferOutput<
 export type ManagedAgentDelegate = v.InferOutput<
   typeof ManagedAgentDelegateSchema
 >;
+export type ManagedMcpBinding = v.InferOutput<typeof ManagedMcpBindingSchema>;
+export type ManagedMcpToolSnapshot = v.InferOutput<
+  typeof ManagedMcpToolSnapshotSchema
+>;
 export type Thread = v.InferOutput<typeof ThreadSchema>;
 export type Session = v.InferOutput<typeof SessionSchema>;
 export type RunState = v.InferOutput<typeof RunStateSchema>;
@@ -1480,6 +1557,236 @@ export const ModelRoutingPolicySchema = v.strictObject({
 
 export const ModelPresetOriginSchema = v.picklist(["deployment", "project"]);
 export const ModelProviderTypeSchema = v.picklist(["openrouter", "openai"]);
+
+const McpResourceKeySchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(120),
+  v.regex(
+    /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u,
+    "key must be lowercase and hyphen separated",
+  ),
+);
+
+const McpEndpointSchema = v.pipe(
+  v.string(),
+  v.maxLength(2_048),
+  v.url(),
+  v.check((value) => {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" && !url.username && !url.password && !url.hash
+    );
+  }, "MCP endpoint must be an HTTPS URL without user information or a fragment"),
+);
+
+export const McpTransportSchema = v.picklist(["streamable_http", "legacy_sse"]);
+export const McpLifecycleStatusSchema = v.picklist([
+  "active",
+  "deprecated",
+  "revoked",
+]);
+export const McpCredentialKindSchema = v.picklist([
+  "static_bearer",
+  "api_key_header",
+]);
+
+const McpCredentialHeaderSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(64),
+  v.regex(/^[a-zA-Z0-9!#$%&'*+.^_`|~-]+$/u),
+  v.check(
+    (value) =>
+      !new Set([
+        "connection",
+        "content-length",
+        "cookie",
+        "host",
+        "proxy-authorization",
+        "set-cookie",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+      ]).has(value.toLowerCase()),
+    "credential header is not allowed",
+  ),
+);
+
+export const McpDiscoveredToolSchema = v.object({
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  title: v.nullable(v.pipe(v.string(), v.minLength(1), v.maxLength(200))),
+  description: v.pipe(v.string(), v.minLength(1), v.maxLength(2_000)),
+  inputSchema: PublishedObjectSchema,
+  outputSchema: v.nullable(PublishedObjectSchema),
+  schemaHash: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
+});
+
+export const McpServerSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  key: McpResourceKeySchema,
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  latestVersionId: IdSchema,
+  version: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  endpointUrl: McpEndpointSchema,
+  transport: McpTransportSchema,
+  status: McpLifecycleStatusSchema,
+  tools: v.array(McpDiscoveredToolSchema),
+  lastDiscoveredAt: v.nullable(TimestampSchema),
+  createdByPrincipalId: IdSchema,
+  createdAt: TimestampSchema,
+  updatedAt: TimestampSchema,
+});
+
+export const CreateMcpServerInputSchema = v.strictObject({
+  key: McpResourceKeySchema,
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  endpointUrl: McpEndpointSchema,
+  transport: v.optional(McpTransportSchema, "streamable_http"),
+});
+
+export const DiscoverMcpServerInputSchema = v.strictObject({
+  credentialPolicyVersionId: v.optional(IdSchema),
+});
+
+export const McpCredentialSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  key: McpResourceKeySchema,
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  kind: McpCredentialKindSchema,
+  headerName: v.nullable(McpCredentialHeaderSchema),
+  credentialConfigured: v.literal(true),
+  credentialFingerprint: v.pipe(v.string(), v.regex(/^[a-f0-9]{12}$/u)),
+  credentialVersion: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  status: McpLifecycleStatusSchema,
+  createdByPrincipalId: IdSchema,
+  createdAt: TimestampSchema,
+  updatedAt: TimestampSchema,
+});
+
+export const CreateMcpCredentialInputSchema = v.pipe(
+  v.strictObject({
+    key: McpResourceKeySchema,
+    displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+    kind: McpCredentialKindSchema,
+    headerName: v.optional(v.nullable(McpCredentialHeaderSchema), null),
+    secret: v.pipe(v.string(), v.minLength(8), v.maxLength(16_384)),
+  }),
+  v.check(
+    (value) =>
+      (value.kind === "static_bearer" && value.headerName === null) ||
+      (value.kind === "api_key_header" && value.headerName !== null),
+    "headerName is required only for API-key-header credentials",
+  ),
+);
+
+export const RotateMcpCredentialInputSchema = v.strictObject({
+  secret: v.pipe(v.string(), v.minLength(8), v.maxLength(16_384)),
+});
+
+export const McpCredentialPolicySchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  key: McpResourceKeySchema,
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  latestVersionId: IdSchema,
+  version: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  credentialId: IdSchema,
+  exactOrigin: v.pipe(v.string(), v.url()),
+  pathPrefix: v.pipe(v.string(), v.minLength(1), v.maxLength(1_024)),
+  timeoutMs: v.pipe(v.number(), v.integer(), v.minValue(1_000)),
+  maximumResponseBytes: v.pipe(v.number(), v.integer(), v.minValue(1_024)),
+  status: McpLifecycleStatusSchema,
+  createdByPrincipalId: IdSchema,
+  createdAt: TimestampSchema,
+  updatedAt: TimestampSchema,
+});
+
+export const CreateMcpCredentialPolicyInputSchema = v.strictObject({
+  key: McpResourceKeySchema,
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  credentialId: IdSchema,
+  exactOrigin: v.pipe(
+    v.string(),
+    v.url(),
+    v.check((value) => {
+      const url = new URL(value);
+      return (
+        url.protocol === "https:" &&
+        url.pathname === "/" &&
+        !url.search &&
+        !url.hash &&
+        !url.username &&
+        !url.password
+      );
+    }, "exactOrigin must be an HTTPS origin without a path, query, user information or fragment"),
+  ),
+  pathPrefix: v.pipe(
+    v.string(),
+    v.minLength(1),
+    v.maxLength(1_024),
+    v.check((value) => value.startsWith("/"), "pathPrefix must be absolute"),
+  ),
+  timeoutMs: v.optional(
+    v.pipe(v.number(), v.integer(), v.minValue(1_000), v.maxValue(120_000)),
+    30_000,
+  ),
+  maximumResponseBytes: v.optional(
+    v.pipe(v.number(), v.integer(), v.minValue(1_024), v.maxValue(10_485_760)),
+    1_048_576,
+  ),
+});
+
+export const McpToolsetToolSchema = v.object({
+  remoteToolName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  description: v.pipe(v.string(), v.minLength(1), v.maxLength(2_000)),
+  inputSchema: PublishedObjectSchema,
+  outputSchema: v.nullable(PublishedObjectSchema),
+  approval: v.picklist(["never", "always"]),
+});
+
+export const McpToolsetSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  key: McpResourceKeySchema,
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  latestVersionId: IdSchema,
+  version: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  serverVersionId: IdSchema,
+  status: McpLifecycleStatusSchema,
+  tools: v.array(McpToolsetToolSchema),
+  createdByPrincipalId: IdSchema,
+  createdAt: TimestampSchema,
+  updatedAt: TimestampSchema,
+});
+
+export const CreateMcpToolsetInputSchema = v.strictObject({
+  key: McpResourceKeySchema,
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  serverVersionId: IdSchema,
+  tools: v.pipe(
+    v.array(
+      v.strictObject({
+        remoteToolName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+        approval: v.optional(v.picklist(["never", "always"]), "always"),
+      }),
+    ),
+    v.minLength(1),
+    v.maxLength(64),
+    v.check(
+      (tools) =>
+        new Set(tools.map((tool) => tool.remoteToolName)).size === tools.length,
+      "toolset tool names must be unique",
+    ),
+  ),
+});
 
 export const ProjectModelProviderSchema = v.object({
   id: IdSchema,
@@ -1774,6 +2081,42 @@ export function parseRotateProjectStorageProviderCredentialInput(
   return v.parse(RotateProjectStorageProviderCredentialInputSchema, input);
 }
 
+export function parseCreateMcpServerInput(
+  input: unknown,
+): CreateMcpServerInput {
+  return v.parse(CreateMcpServerInputSchema, input);
+}
+
+export function parseDiscoverMcpServerInput(
+  input: unknown,
+): DiscoverMcpServerInput {
+  return v.parse(DiscoverMcpServerInputSchema, input);
+}
+
+export function parseCreateMcpCredentialInput(
+  input: unknown,
+): CreateMcpCredentialInput {
+  return v.parse(CreateMcpCredentialInputSchema, input);
+}
+
+export function parseRotateMcpCredentialInput(
+  input: unknown,
+): RotateMcpCredentialInput {
+  return v.parse(RotateMcpCredentialInputSchema, input);
+}
+
+export function parseCreateMcpCredentialPolicyInput(
+  input: unknown,
+): CreateMcpCredentialPolicyInput {
+  return v.parse(CreateMcpCredentialPolicyInputSchema, input);
+}
+
+export function parseCreateMcpToolsetInput(
+  input: unknown,
+): CreateMcpToolsetInput {
+  return v.parse(CreateMcpToolsetInputSchema, input);
+}
+
 export function parseModelRoutingPolicy(input: unknown): ModelRoutingPolicy {
   return v.parse(ModelRoutingPolicySchema, input);
 }
@@ -1781,6 +2124,35 @@ export function parseModelRoutingPolicy(input: unknown): ModelRoutingPolicy {
 export type ModelRoutingPolicy = v.InferOutput<typeof ModelRoutingPolicySchema>;
 export type ModelPresetOrigin = v.InferOutput<typeof ModelPresetOriginSchema>;
 export type ModelProviderType = v.InferOutput<typeof ModelProviderTypeSchema>;
+export type McpTransport = v.InferOutput<typeof McpTransportSchema>;
+export type McpLifecycleStatus = v.InferOutput<typeof McpLifecycleStatusSchema>;
+export type McpCredentialKind = v.InferOutput<typeof McpCredentialKindSchema>;
+export type McpDiscoveredTool = v.InferOutput<typeof McpDiscoveredToolSchema>;
+export type McpServer = v.InferOutput<typeof McpServerSchema>;
+export type CreateMcpServerInput = v.InferOutput<
+  typeof CreateMcpServerInputSchema
+>;
+export type DiscoverMcpServerInput = v.InferOutput<
+  typeof DiscoverMcpServerInputSchema
+>;
+export type McpCredential = v.InferOutput<typeof McpCredentialSchema>;
+export type CreateMcpCredentialInput = v.InferOutput<
+  typeof CreateMcpCredentialInputSchema
+>;
+export type RotateMcpCredentialInput = v.InferOutput<
+  typeof RotateMcpCredentialInputSchema
+>;
+export type McpCredentialPolicy = v.InferOutput<
+  typeof McpCredentialPolicySchema
+>;
+export type CreateMcpCredentialPolicyInput = v.InferOutput<
+  typeof CreateMcpCredentialPolicyInputSchema
+>;
+export type McpToolsetTool = v.InferOutput<typeof McpToolsetToolSchema>;
+export type McpToolset = v.InferOutput<typeof McpToolsetSchema>;
+export type CreateMcpToolsetInput = v.InferOutput<
+  typeof CreateMcpToolsetInputSchema
+>;
 export type ProjectModelProvider = v.InferOutput<
   typeof ProjectModelProviderSchema
 >;

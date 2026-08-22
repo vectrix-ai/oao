@@ -63,6 +63,12 @@ OTel SDK -> optional Collector -> configured OTLP backend
     while an immutable thread binding points coordinator and child threads at
     one PostgreSQL-authoritative workspace identity. Tool replay is keyed and
     hashed; parent cancellation cascades to unsettled child runs.
+14. Remote MCP access is pinned by immutable server, toolset, and credential
+    policy versions. Session bindings copy those exact IDs. The runtime performs
+    live authorization/lifecycle checks before decrypting a credential, and the
+    egress broker injects it only for the policy's exact HTTPS origin and path
+    prefix. MCP secrets never enter Flue state, prompts, events, logs, or the
+    sandbox.
 
 ## Public run states
 
@@ -89,6 +95,8 @@ OTel SDK -> optional Collector -> configured OTLP backend
 - `@oao/provider-credentials`: AES-256-GCM encryption and decryption for tenant-scoped provider credentials. PostgreSQL stores ciphertext; the platform encryption key remains outside the database.
 - `@oao/sandbox-daytona`: committed Flue Daytona blueprint plus thread-workspace lifecycle, project connection resolution, capability-filtered file/shell/browser tools, durable safe tool audit, target diagnostics, and egress-policy manager.
 - `@oao/artifact-s3`: tenant-keyed S3 artifact adapter plus encrypted project storage resolution and latest-thread workspace backup records.
+- `@oao/mcp-remote`: pinned MCP client adapter plus TLS-only, DNS/IP-pinned,
+  exact-origin credential egress and bounded schema/result handling.
 
 ### Product surfaces
 
@@ -103,6 +111,8 @@ OTel SDK -> optional Collector -> configured OTLP backend
 - Agents list/detail, immutable versions, prompts, models, exact Skill and delegate bindings, tools, and sandbox policy
 - Project-scoped OpenRouter/OpenAI provider connections, write-only encrypted API keys, and approval of model presets from the matching provider catalog
 - Project-scoped S3-compatible storage connections, automatic latest-thread workspace backup, and safe restore diagnostics
+- Project-scoped remote MCP servers, write-only credentials, exact-origin
+  policies, discovery snapshots, restricted toolsets, and agent bindings
 - Sessions list with status, agent, usage, cost, creation and last activity
 - Session detail with Transcript and Debug tabs plus persistent child-session links
 - Pending tool calls and approvals

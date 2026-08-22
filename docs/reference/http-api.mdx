@@ -191,6 +191,49 @@ See [Send files to an agent](/integrations/files) and [Workspace
 backups](/storage/workspace-backups) for object keys, checksum verification,
 replacement-sandbox restore, and failure contracts.
 
+## MCP servers, credentials, and toolsets
+
+Remote MCP resources are project scoped and immutable/versioned. All writes
+require `Idempotency-Key`. Secret values are accepted only on credential create
+or rotation and never appear in a response.
+
+| Method   | Path                                                | Purpose                                     |
+| -------- | --------------------------------------------------- | ------------------------------------------- |
+| `GET`    | `/projects/{projectId}/mcp-servers`                 | List servers and discovered tool snapshots. |
+| `POST`   | `/projects/{projectId}/mcp-servers`                 | Create a server and immutable version 1.    |
+| `POST`   | `/projects/{projectId}/mcp-servers/{id}/discover`   | Discover and snapshot remote tools.         |
+| `GET`    | `/projects/{projectId}/mcp-credentials`             | List redacted credential metadata.          |
+| `POST`   | `/projects/{projectId}/mcp-credentials`             | Store an encrypted write-only credential.   |
+| `POST`   | `/projects/{projectId}/mcp-credentials/{id}/rotate` | Rotate the active encrypted version.        |
+| `DELETE` | `/projects/{projectId}/mcp-credentials/{id}`        | Revoke the active credential.               |
+| `GET`    | `/projects/{projectId}/mcp-credential-policies`     | List exact-origin policy versions.          |
+| `POST`   | `/projects/{projectId}/mcp-credential-policies`     | Publish a credential policy version.        |
+| `GET`    | `/projects/{projectId}/mcp-toolsets`                | List restricted toolsets.                   |
+| `POST`   | `/projects/{projectId}/mcp-toolsets`                | Publish selected discovered tools.          |
+
+Create a server with `{ key, displayName, endpointUrl, transport }`, where the
+endpoint is HTTPS and transport is `streamable_http` or `legacy_sse`. Discover
+with optional `{ credentialPolicyVersionId }`; authenticated discovery requires
+an active policy whose exact origin and path prefix contain the endpoint.
+Repeated discovery returns the current immutable version while metadata is
+unchanged. Tool metadata drift publishes and returns the next server version;
+existing toolsets remain pinned to their original server version.
+
+Create a credential with `{ key, displayName, kind, headerName, secret }`.
+`static_bearer` requires `headerName: null`; `api_key_header` requires a safe
+header name. Responses contain only the fingerprint, version, lifecycle, and
+`credentialConfigured: true`. Rotate with `{ secret }`.
+
+Create a policy with `{ key, displayName, credentialId, exactOrigin,
+pathPrefix, timeoutMs, maximumResponseBytes }`. Create a toolset with `{ key,
+displayName, serverVersionId, tools: [{ remoteToolName, approval }] }`.
+Discovery is capped at 256 tools; a toolset may select 1–64 tools.
+
+Agent publication adds `mcpBindings`, each containing exact
+`toolsetVersionId`, `credentialPolicyVersionId`, and a unique lowercase
+`namespace`. Publication requires `mcp:bind`. See [Remote MCP
+servers](/integrations/mcp) for runtime and egress behavior.
+
 ## Skills
 
 Skills are PostgreSQL-authoritative, immutable procedural packages. Reads use

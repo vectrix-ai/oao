@@ -42,6 +42,7 @@ import {
   TOOL_RETRY_POLICY,
   ToolResultFailureCodeSchema,
   type ManagedAgentSnapshot,
+  type ManagedMcpToolSnapshot,
   type ManagedSkillBindingSnapshot,
   type ManagedAgentInstanceData,
   type ManagedRunDelivery,
@@ -52,6 +53,11 @@ import {
 import type { PgPool, Queryable, TenantContext } from "@oao/db-postgres";
 import { withTenantTransaction } from "@oao/db-postgres";
 import type { ProviderCredentialCipher } from "@oao/provider-credentials";
+import type {
+  McpCredentialMaterial,
+  McpRemotePort,
+  McpToolResult,
+} from "@oao/mcp-remote";
 import type {
   OrganizationId,
   ProjectArtifactStoreResolverPort,
@@ -157,6 +163,19 @@ export interface AgentDelegationPort {
   }): Promise<AgentDelegationResult>;
 }
 
+export interface McpToolExecutionPort {
+  execute(
+    tenant: TenantContext & {
+      readonly sessionId: string;
+      readonly runId: RunId;
+      readonly flueToolCallId: string;
+    },
+    tool: ManagedMcpToolSnapshot,
+    arguments_: Readonly<Record<string, PublicValue>>,
+    signal?: AbortSignal,
+  ): Promise<Readonly<Record<string, PublicValue>>>;
+}
+
 /**
  * Registers a provider with the Flue runtime. Keeping the call behind this
  * package preserves the single Flue seam: the worker never imports Flue.
@@ -172,6 +191,7 @@ interface ManagedAgentRuntimeConfig {
   readonly platformTools: ReadonlyMap<string, PlatformToolHandler>;
   readonly skills?: SkillDefinitionResolverPort;
   readonly delegations?: AgentDelegationPort;
+  readonly mcp?: McpToolExecutionPort;
   readonly runFileStorage?: ProjectArtifactStoreResolverPort;
   readonly sandboxFactory?: (
     initial: ManagedAgentInstanceData,
@@ -559,14 +579,30 @@ function inputBody(
 }
 
 function managedSystemPrompt(snapshot: ManagedAgentSnapshot): string {
-  const retryInstructions = snapshot.tools.length
-    ? `\n\nTool retry policy: When a tool returns a retryable failure, call that tool again automatically. You may retry at most ${TOOL_RETRY_POLICY.maximumRetries} times after the initial failure (${TOOL_RETRY_POLICY.maximumAttempts} total attempts). Correct invalid arguments when guidance is available. Do not retry approval_denied, approval_expired, run_cancelled, or tool_retry_exhausted. After exhaustion, explain the failure instead of calling the tool again.`
-    : "";
+  const retryInstructions =
+    snapshot.tools.length + (snapshot.mcpTools?.length ?? 0)
+      ? `\n\nTool retry policy: When a tool returns a retryable failure, call that tool again automatically. You may retry at most ${TOOL_RETRY_POLICY.maximumRetries} times after the initial failure (${TOOL_RETRY_POLICY.maximumAttempts} total attempts). Correct invalid arguments when guidance is available. Do not retry approval_denied, approval_expired, run_cancelled, or tool_retry_exhausted. After exhaustion, explain the failure instead of calling the tool again.`
+      : "";
   const delegationInstructions =
     snapshot.delegates.length === 0
       ? ""
       : "\n\nYou may delegate work with delegate_agent. Keep the returned delegationId and use message_agent for later questions to that same isolated child thread.";
   return `${snapshot.systemPrompt}${retryInstructions}${delegationInstructions}`;
+}
+
+function mcpToolName(namespace: string, remoteToolName: string): string {
+  const safeRemote = remoteToolName
+    .replace(/[^a-zA-Z0-9_:-]+/gu, "_")
+    .replace(/_+/gu, "_")
+    .replace(/^_|_$/gu, "");
+  if (!safeRemote) throw new Error("MCP tool name cannot be namespaced safely");
+  const prefix = `mcp__${namespace}__`;
+  if (prefix.length + safeRemote.length <= 200) return `${prefix}${safeRemote}`;
+  const suffix = createHash("sha256")
+    .update(remoteToolName)
+    .digest("hex")
+    .slice(0, 12);
+  return `${prefix}${safeRemote.slice(0, 200 - prefix.length - suffix.length - 1)}_${suffix}`;
 }
 
 const MANAGED_RUN_FILE_DIRECTORY = ".oao/attachments";
@@ -861,6 +897,68 @@ export function ManagedAgent(): string {
       },
     });
   }
+
+  if (initial.snapshot.mcpTools.length > 0 && !config.mcp)
+    throw new Error("ManagedAgent MCP executor is not configured");
+  const mcpOutput = v.variant("status", [
+    v.strictObject({
+      version: v.literal(1),
+      status: v.literal("success"),
+      value: v.strictObject({
+        content: v.string(),
+        isError: v.boolean(),
+      }),
+    }),
+    v.strictObject({
+      version: v.literal(1),
+      status: v.literal("failure"),
+      error: v.strictObject({
+        code: ToolResultFailureCodeSchema,
+        message: v.string(),
+      }),
+    }),
+  ]);
+  for (const tool of initial.snapshot.mcpTools)
+    useTool({
+      name: tool.name,
+      description: tool.description,
+      input: compileToolInputSchema(tool.inputSchema),
+      output: mcpOutput,
+      durable: true,
+      async run({ data, signal, step, toolCallId }) {
+        const obligation: ToolObligationInput = {
+          organizationId: initial.organizationId as OrganizationId,
+          projectId: initial.projectId as ProjectId,
+          runId: delivery.runId as RunId,
+          flueToolCallId: toolCallId,
+          toolName: tool.name,
+          safeArguments: safeArguments(data),
+          approval: tool.approval,
+        };
+        const retryBlocked = await config.broker.retryAdmission(obligation);
+        if (retryBlocked) return { output: retryBlocked };
+        const outcome = await step.do("execute-mcp-obligation", () =>
+          config.broker.executePlatform(
+            obligation,
+            () =>
+              config.mcp!.execute(
+                {
+                  organizationId: initial.organizationId as OrganizationId,
+                  projectId: initial.projectId as ProjectId,
+                  sessionId: initial.sessionId,
+                  runId: delivery.runId as RunId,
+                  flueToolCallId: toolCallId,
+                },
+                tool,
+                obligation.safeArguments,
+                signal,
+              ),
+            signal,
+          ),
+        );
+        return { output: outcome };
+      },
+    });
 
   for (const tool of initial.snapshot.tools) {
     const outputValueSchema = compileObjectSchema(tool.outputSchema);
@@ -1302,6 +1400,22 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
            SELECT organization_id,project_id,$3,agent_version_id,
                   skill_version_id,skill_name
              FROM oao.agent_version_skill_bindings
+            WHERE organization_id=$1 AND project_id=$2 AND agent_version_id=$4`,
+          [
+            input.organizationId,
+            input.projectId,
+            childSessionId,
+            parent.child_agent_version_id,
+          ],
+        );
+        await transaction.query(
+          `INSERT INTO oao.session_mcp_bindings (
+             organization_id,project_id,session_id,agent_version_id,
+             toolset_version_id,credential_policy_version_id,namespace
+           )
+           SELECT organization_id,project_id,$3,agent_version_id,
+                  toolset_version_id,credential_policy_version_id,namespace
+             FROM oao.agent_version_mcp_bindings
             WHERE organization_id=$1 AND project_id=$2 AND agent_version_id=$4`,
           [
             input.organizationId,
@@ -2439,11 +2553,138 @@ export class ManagedRuntimeOrchestrator {
             contentHash: Buffer.from(binding.content_hash).toString("hex"),
           }) satisfies ManagedSkillBindingSnapshot,
       );
+      const mcpResult = await transaction.query<{
+        toolset_version_id: string;
+        credential_policy_version_id: string;
+        namespace: string;
+        server_version_id: string;
+        remote_tool_name: string;
+        description: string;
+        input_schema: ManagedMcpToolSnapshot["inputSchema"];
+        output_schema: ManagedMcpToolSnapshot["outputSchema"];
+        approval: "never" | "always";
+        timeout_ms: number;
+        maximum_response_bytes: number;
+        toolset_status: "active" | "deprecated" | "revoked";
+        server_status: "active" | "deprecated" | "revoked";
+        policy_status: "active" | "deprecated" | "revoked";
+        credential_status: "active" | "deprecated" | "revoked";
+      }>(
+        `SELECT binding.toolset_version_id,binding.credential_policy_version_id,
+                binding.namespace,toolset.server_version_id,
+                selection.remote_tool_name,tool.description,tool.input_schema,
+                tool.output_schema,
+                selection.approval,policy.timeout_ms,policy.maximum_response_bytes,
+                toolset_lifecycle.status AS toolset_status,
+                server_lifecycle.status AS server_status,
+                policy_lifecycle.status AS policy_status,
+                credential_lifecycle.status AS credential_status
+           FROM oao.session_mcp_bindings binding
+           JOIN oao.mcp_toolset_versions toolset
+             ON toolset.organization_id=binding.organization_id
+            AND toolset.project_id=binding.project_id
+            AND toolset.id=binding.toolset_version_id
+           JOIN oao.mcp_toolset_version_lifecycle toolset_lifecycle
+             ON toolset_lifecycle.organization_id=toolset.organization_id
+            AND toolset_lifecycle.project_id=toolset.project_id
+            AND toolset_lifecycle.toolset_version_id=toolset.id
+           JOIN oao.mcp_toolset_version_tools selection
+             ON selection.organization_id=toolset.organization_id
+            AND selection.project_id=toolset.project_id
+            AND selection.toolset_version_id=toolset.id
+           JOIN oao.mcp_server_version_tools tool
+             ON tool.organization_id=selection.organization_id
+            AND tool.project_id=selection.project_id
+            AND tool.server_version_id=selection.server_version_id
+            AND tool.remote_tool_name=selection.remote_tool_name
+           JOIN oao.mcp_server_version_lifecycle server_lifecycle
+             ON server_lifecycle.organization_id=tool.organization_id
+            AND server_lifecycle.project_id=tool.project_id
+            AND server_lifecycle.server_version_id=tool.server_version_id
+           JOIN oao.mcp_credential_policy_versions policy
+             ON policy.organization_id=binding.organization_id
+            AND policy.project_id=binding.project_id
+            AND policy.id=binding.credential_policy_version_id
+           JOIN oao.mcp_credential_policy_version_lifecycle policy_lifecycle
+             ON policy_lifecycle.organization_id=policy.organization_id
+            AND policy_lifecycle.project_id=policy.project_id
+            AND policy_lifecycle.policy_version_id=policy.id
+           JOIN oao.mcp_credentials credential
+             ON credential.organization_id=policy.organization_id
+            AND credential.project_id=policy.project_id
+            AND credential.id=policy.credential_id
+           JOIN oao.mcp_credential_version_lifecycle credential_lifecycle
+             ON credential_lifecycle.organization_id=credential.organization_id
+            AND credential_lifecycle.project_id=credential.project_id
+            AND credential_lifecycle.credential_version_id=credential.active_version_id
+          WHERE binding.organization_id=$1 AND binding.project_id=$2
+            AND binding.session_id=$3
+          ORDER BY binding.namespace,selection.remote_tool_name`,
+        [tenant.organizationId, tenant.projectId, row.session_id],
+      );
+      const expectedMcpBindings = publication.mcpBindings
+        .map(
+          (binding) =>
+            `${binding.namespace}:${binding.toolsetVersionId}:${binding.credentialPolicyVersionId}`,
+        )
+        .sort();
+      const boundMcpBindings = [
+        ...new Set(
+          mcpResult.rows.map(
+            (binding) =>
+              `${binding.namespace}:${binding.toolset_version_id}:${binding.credential_policy_version_id}`,
+          ),
+        ),
+      ].sort();
+      if (
+        expectedMcpBindings.length !== boundMcpBindings.length ||
+        expectedMcpBindings.some(
+          (binding, index) => binding !== boundMcpBindings[index],
+        )
+      )
+        throw new Error("Session MCP bindings do not match the agent version");
+      if (
+        mcpResult.rows.some(
+          (binding) =>
+            binding.toolset_status !== "active" ||
+            binding.server_status !== "active" ||
+            binding.policy_status !== "active" ||
+            binding.credential_status !== "active",
+        )
+      )
+        throw new Error("A bound MCP resource is no longer active");
+      const mcpTools = mcpResult.rows.map(
+        (binding) =>
+          ({
+            serverVersionId: binding.server_version_id,
+            toolsetVersionId: binding.toolset_version_id,
+            credentialPolicyVersionId: binding.credential_policy_version_id,
+            namespace: binding.namespace,
+            remoteToolName: binding.remote_tool_name,
+            name: mcpToolName(binding.namespace, binding.remote_tool_name),
+            description: binding.description,
+            approval: binding.approval,
+            inputSchema: binding.input_schema,
+            outputSchema: binding.output_schema,
+            timeoutMs: binding.timeout_ms,
+            maximumResponseBytes: binding.maximum_response_bytes,
+          }) satisfies ManagedMcpToolSnapshot,
+      );
+      const visibleToolNames = [
+        ...publication.tools.map((tool) => tool.name),
+        ...mcpTools.map((tool) => tool.name),
+        ...(publication.delegates.length
+          ? ["delegate_agent", "message_agent"]
+          : []),
+      ];
+      if (new Set(visibleToolNames).size !== visibleToolNames.length)
+        throw new Error("MCP tool namespace collides with another agent tool");
       const runInput = v.parse(ManagedRunInputV1Schema, row.input_public);
       const runtimeConfig = {
         systemPrompt: publication.systemPrompt,
         modelPreset: publication.modelPreset,
         tools: publication.tools,
+        mcpTools,
         delegates: publication.delegates,
         sandbox: publication.sandbox,
         limits: publication.limits,
@@ -3117,6 +3358,337 @@ export async function configureVendorNeutralTelemetry(
   };
 }
 
+interface McpExecutionRow {
+  endpoint_url: string;
+  exact_origin: string;
+  path_prefix: string;
+  transport: "streamable_http" | "legacy_sse";
+  timeout_ms: number;
+  maximum_response_bytes: number;
+  credential_id: string;
+  credential_version_id: string;
+  credential_kind: "static_bearer" | "api_key_header";
+  header_name: string | null;
+  encrypted_secret: Buffer;
+  encryption_nonce: Buffer;
+  encryption_tag: Buffer;
+  encryption_key_version: number;
+}
+
+export function createPostgresMcpToolExecutor(input: {
+  readonly pool: PgPool;
+  readonly credentialCipher: ProviderCredentialCipher;
+  readonly remote: McpRemotePort;
+}): McpToolExecutionPort {
+  return {
+    async execute(tenant, tool, arguments_, signal) {
+      const toolCallId = eventUuid(
+        `tool:${tenant.runId}:${tenant.flueToolCallId}`,
+      );
+      const requestHash = Buffer.from(
+        digestJson({
+          runId: tenant.runId,
+          toolCallId: tenant.flueToolCallId,
+          serverVersionId: tool.serverVersionId,
+          toolsetVersionId: tool.toolsetVersionId,
+          credentialPolicyVersionId: tool.credentialPolicyVersionId,
+          remoteToolName: tool.remoteToolName,
+          arguments: arguments_,
+        }),
+      );
+      const row = await withTenantTransaction<
+        McpExecutionRow | { readonly blocked_state: string }
+      >(input.pool, tenant, async (transaction) => {
+        const prior = await transaction.query<{ state: string }>(
+          `SELECT state FROM oao.mcp_call_attempts
+              WHERE organization_id=$1 AND project_id=$2
+                AND tool_call_id=$3 AND attempt=1 FOR UPDATE`,
+          [tenant.organizationId, tenant.projectId, toolCallId],
+        );
+        if (prior.rows[0]) {
+          if (prior.rows[0].state === "started")
+            await transaction.query(
+              `UPDATE oao.mcp_call_attempts
+                    SET state='unknown',safe_error_code='outcome_unknown',
+                        completed_at=clock_timestamp()
+                  WHERE organization_id=$1 AND project_id=$2
+                    AND tool_call_id=$3 AND attempt=1`,
+              [tenant.organizationId, tenant.projectId, toolCallId],
+            );
+          await appendEventOnce(transaction, {
+            organizationId: tenant.organizationId as OrganizationId,
+            projectId: tenant.projectId as ProjectId,
+            id: eventUuid(`event:mcp:${toolCallId}:recovery-blocked`),
+            aggregateType: "tool_call",
+            aggregateId: toolCallId,
+            kind: "mcp.call_failed",
+            payload: {
+              runId: tenant.runId,
+              serverVersionId: tool.serverVersionId,
+              remoteToolName: tool.remoteToolName,
+              errorCode:
+                prior.rows[0].state === "started"
+                  ? "outcome_unknown"
+                  : "attempt_already_executed",
+            },
+          });
+          return { blocked_state: prior.rows[0].state };
+        }
+        const result = await transaction.query<McpExecutionRow>(
+          `SELECT server.endpoint_url,server.transport,policy.exact_origin,
+                    policy.path_prefix,policy.timeout_ms,
+                    policy.maximum_response_bytes,credential.id AS credential_id,
+                    version.id AS credential_version_id,
+                    credential.credential_kind,credential.header_name,
+                    version.encrypted_secret,version.encryption_nonce,
+                    version.encryption_tag,version.encryption_key_version
+               FROM oao.session_mcp_bindings binding
+               JOIN oao.mcp_toolset_versions toolset
+                 ON toolset.organization_id=binding.organization_id
+                AND toolset.project_id=binding.project_id
+                AND toolset.id=binding.toolset_version_id
+               JOIN oao.mcp_toolset_version_lifecycle toolset_lifecycle
+                 ON toolset_lifecycle.organization_id=toolset.organization_id
+                AND toolset_lifecycle.project_id=toolset.project_id
+                AND toolset_lifecycle.toolset_version_id=toolset.id
+                AND toolset_lifecycle.status='active'
+               JOIN oao.mcp_toolset_version_tools selection
+                 ON selection.organization_id=toolset.organization_id
+                AND selection.project_id=toolset.project_id
+                AND selection.toolset_version_id=toolset.id
+                AND selection.remote_tool_name=$8
+               JOIN oao.mcp_server_versions server
+                 ON server.organization_id=toolset.organization_id
+                AND server.project_id=toolset.project_id
+                AND server.id=toolset.server_version_id
+                AND server.id=$6
+               JOIN oao.mcp_server_version_lifecycle server_lifecycle
+                 ON server_lifecycle.organization_id=server.organization_id
+                AND server_lifecycle.project_id=server.project_id
+                AND server_lifecycle.server_version_id=server.id
+                AND server_lifecycle.status='active'
+               JOIN oao.mcp_credential_policy_versions policy
+                 ON policy.organization_id=binding.organization_id
+                AND policy.project_id=binding.project_id
+                AND policy.id=binding.credential_policy_version_id
+                AND policy.id=$7
+                AND oao.mcp_endpoint_matches_policy(
+                  server.endpoint_url,policy.exact_origin,policy.path_prefix
+                )
+               JOIN oao.mcp_credential_policy_version_lifecycle policy_lifecycle
+                 ON policy_lifecycle.organization_id=policy.organization_id
+                AND policy_lifecycle.project_id=policy.project_id
+                AND policy_lifecycle.policy_version_id=policy.id
+                AND policy_lifecycle.status='active'
+               JOIN oao.mcp_credentials credential
+                 ON credential.organization_id=policy.organization_id
+                AND credential.project_id=policy.project_id
+                AND credential.id=policy.credential_id
+               JOIN oao.mcp_credential_versions version
+                 ON version.organization_id=credential.organization_id
+                AND version.project_id=credential.project_id
+                AND version.id=credential.active_version_id
+               JOIN oao.mcp_credential_version_lifecycle credential_lifecycle
+                 ON credential_lifecycle.organization_id=version.organization_id
+                AND credential_lifecycle.project_id=version.project_id
+                AND credential_lifecycle.credential_version_id=version.id
+                AND credential_lifecycle.status='active'
+               JOIN oao.runs run
+                 ON run.organization_id=binding.organization_id
+                AND run.project_id=binding.project_id
+                AND run.id=$4 AND run.session_id=binding.session_id
+               JOIN oao.principals principal
+                 ON principal.organization_id=run.organization_id
+                AND principal.project_id=run.project_id
+                AND principal.id=run.created_by_principal_id
+               LEFT JOIN oao.project_members member
+                 ON member.organization_id=principal.organization_id
+                AND member.project_id=principal.project_id
+                AND member.principal_id=principal.id
+               LEFT JOIN oao.api_keys api_key
+                 ON api_key.organization_id=principal.organization_id
+                AND api_key.project_id=principal.project_id
+                AND api_key.principal_id=principal.id
+                AND api_key.revoked_at IS NULL
+                AND (api_key.expires_at IS NULL OR api_key.expires_at>clock_timestamp())
+              WHERE binding.organization_id=$1 AND binding.project_id=$2
+                AND binding.session_id=$3 AND binding.agent_version_id=run.agent_version_id
+                AND binding.toolset_version_id=$5
+                AND (principal.kind<>'human' OR member.principal_id IS NOT NULL)
+                AND (principal.kind<>'api_key' OR api_key.id IS NOT NULL)
+                AND ('*'=ANY(principal.scopes) OR 'mcp:execute'=ANY(principal.scopes))`,
+          [
+            tenant.organizationId,
+            tenant.projectId,
+            tenant.sessionId,
+            tenant.runId,
+            tool.toolsetVersionId,
+            tool.serverVersionId,
+            tool.credentialPolicyVersionId,
+            tool.remoteToolName,
+          ],
+        );
+        const execution = result.rows[0];
+        if (!execution)
+          throw new Error(
+            "MCP binding, authorization, or credential is no longer active",
+          );
+        await transaction.query(
+          `INSERT INTO oao.mcp_call_attempts (
+               organization_id,project_id,tool_call_id,run_id,attempt,
+               server_version_id,toolset_version_id,
+               credential_policy_version_id,credential_version_id,
+               remote_tool_name,request_hash,state
+             ) VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10,'started')`,
+          [
+            tenant.organizationId,
+            tenant.projectId,
+            toolCallId,
+            tenant.runId,
+            tool.serverVersionId,
+            tool.toolsetVersionId,
+            tool.credentialPolicyVersionId,
+            execution.credential_version_id,
+            tool.remoteToolName,
+            requestHash,
+          ],
+        );
+        await appendEventOnce(transaction, {
+          organizationId: tenant.organizationId as OrganizationId,
+          projectId: tenant.projectId as ProjectId,
+          id: eventUuid(`event:mcp:${toolCallId}:started`),
+          aggregateType: "tool_call",
+          aggregateId: toolCallId,
+          kind: "mcp.call_started",
+          payload: {
+            runId: tenant.runId,
+            serverVersionId: tool.serverVersionId,
+            toolsetVersionId: tool.toolsetVersionId,
+            remoteToolName: tool.remoteToolName,
+          },
+        });
+        return execution;
+      });
+      if ("blocked_state" in row)
+        throw new Error(
+          row.blocked_state === "started"
+            ? "MCP call outcome is unknown after recovery"
+            : "MCP call attempt has already been executed",
+        );
+      const secret = input.credentialCipher.decrypt(
+        {
+          ciphertext: row.encrypted_secret,
+          nonce: row.encryption_nonce,
+          tag: row.encryption_tag,
+          keyVersion: row.encryption_key_version,
+        },
+        {
+          organizationId: tenant.organizationId,
+          projectId: tenant.projectId,
+          providerId: row.credential_id,
+          providerType: "mcp",
+        },
+      );
+      const credential: McpCredentialMaterial =
+        row.credential_kind === "static_bearer"
+          ? { kind: "static_bearer", secret }
+          : {
+              kind: "api_key_header",
+              headerName: row.header_name!,
+              secret,
+            };
+      let result: McpToolResult;
+      try {
+        result = await input.remote.call(
+          {
+            endpointUrl: row.endpoint_url,
+            exactOrigin: row.exact_origin,
+            pathPrefix: row.path_prefix,
+            transport: row.transport,
+            timeoutMs: row.timeout_ms,
+            maximumResponseBytes: row.maximum_response_bytes,
+            credential,
+          },
+          {
+            tool: {
+              name: tool.remoteToolName,
+              description: tool.description,
+              inputSchema: tool.inputSchema,
+              ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
+            },
+            arguments: arguments_,
+          },
+          signal,
+        );
+      } catch (error) {
+        const cancelled = signal?.aborted === true;
+        await withTenantTransaction(input.pool, tenant, async (transaction) => {
+          await transaction.query(
+            `UPDATE oao.mcp_call_attempts
+                SET state=$4,safe_error_code=$5,completed_at=clock_timestamp()
+              WHERE organization_id=$1 AND project_id=$2
+                AND tool_call_id=$3 AND attempt=1 AND state='started'`,
+            [
+              tenant.organizationId,
+              tenant.projectId,
+              toolCallId,
+              cancelled ? "cancelled" : "failed",
+              cancelled ? "request_cancelled" : "remote_call_failed",
+            ],
+          );
+          await appendEventOnce(transaction, {
+            organizationId: tenant.organizationId as OrganizationId,
+            projectId: tenant.projectId as ProjectId,
+            id: eventUuid(
+              `event:mcp:${toolCallId}:${cancelled ? "cancelled" : "failed"}`,
+            ),
+            aggregateType: "tool_call",
+            aggregateId: toolCallId,
+            kind: cancelled ? "mcp.call_cancelled" : "mcp.call_failed",
+            payload: {
+              runId: tenant.runId,
+              serverVersionId: tool.serverVersionId,
+              remoteToolName: tool.remoteToolName,
+              errorCode: cancelled ? "request_cancelled" : "remote_call_failed",
+            },
+          });
+        });
+        throw error;
+      }
+      await withTenantTransaction(input.pool, tenant, async (transaction) => {
+        await transaction.query(
+          `UPDATE oao.mcp_call_attempts
+              SET state='completed',response_bytes=$4,completed_at=clock_timestamp()
+            WHERE organization_id=$1 AND project_id=$2
+              AND tool_call_id=$3 AND attempt=1 AND state='started'`,
+          [
+            tenant.organizationId,
+            tenant.projectId,
+            toolCallId,
+            result.responseBytes,
+          ],
+        );
+        await appendEventOnce(transaction, {
+          organizationId: tenant.organizationId as OrganizationId,
+          projectId: tenant.projectId as ProjectId,
+          id: eventUuid(`event:mcp:${toolCallId}:completed`),
+          aggregateType: "tool_call",
+          aggregateId: toolCallId,
+          kind: "mcp.call_completed",
+          payload: {
+            runId: tenant.runId,
+            serverVersionId: tool.serverVersionId,
+            remoteToolName: tool.remoteToolName,
+            responseBytes: result.responseBytes,
+            remoteError: result.isError,
+          },
+        });
+      });
+      return { content: result.content, isError: result.isError };
+    },
+  };
+}
+
 interface ProjectModelPresetRow {
   preset_key: string;
   model: string;
@@ -3416,6 +3988,7 @@ export async function startManagedFlueRuntime(input: {
   readonly broker: PostgresToolBroker;
   readonly skills?: SkillDefinitionResolverPort;
   readonly delegations?: AgentDelegationPort;
+  readonly mcp?: McpToolExecutionPort;
   readonly runFileStorage?: ProjectArtifactStoreResolverPort;
   readonly platformTools?: ReadonlyMap<string, PlatformToolHandler>;
   readonly sandboxFactory?: (
@@ -3430,6 +4003,7 @@ export async function startManagedFlueRuntime(input: {
     platformTools: input.platformTools ?? new Map(),
     ...(input.skills ? { skills: input.skills } : {}),
     ...(input.delegations ? { delegations: input.delegations } : {}),
+    ...(input.mcp ? { mcp: input.mcp } : {}),
     ...(input.runFileStorage ? { runFileStorage: input.runFileStorage } : {}),
     ...(input.sandboxFactory ? { sandboxFactory: input.sandboxFactory } : {}),
   });
@@ -3449,5 +4023,6 @@ export const runtimeTesting = {
   compileObjectSchema,
   compileToolInputSchema,
   managedSystemPrompt,
+  mcpToolName,
   loadManagedRunFiles,
 };

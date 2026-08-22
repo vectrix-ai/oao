@@ -22,6 +22,7 @@ import {
   withPlatformTurnLimit,
   type FauxResponseStep,
 } from "@oao/models-openrouter";
+import { McpRemoteClient, type McpRemotePort } from "@oao/mcp-remote";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { PostgresWakeQueue, WakeWorker } from "@oao/queue-postgres";
 import {
@@ -31,6 +32,7 @@ import {
   RuntimeProjection,
   configureVendorNeutralTelemetry,
   createProjectModelPresetActivator,
+  createPostgresMcpToolExecutor,
   registerRuntimeModelProvider,
   resetManagedAgentRuntime,
   startManagedFlueRuntime,
@@ -66,6 +68,7 @@ export async function startRuntimeWorker(input: {
   readonly daytonaProvider?: FlueSandboxProviderPort;
   readonly fakeResponses?: readonly FauxResponseStep[];
   readonly platformTools?: ReadonlyMap<string, PlatformToolHandler>;
+  readonly mcpRemote?: McpRemotePort;
 }): Promise<RuntimeWorkerHandle> {
   const env = input.env ?? process.env;
   const pool = createPool(input.databaseUrl);
@@ -117,6 +120,13 @@ export async function startRuntimeWorker(input: {
   });
   const skills = new PostgresSkillRegistry(pool);
   const delegations = new PostgresAgentDelegationCoordinator(pool, queue);
+  const mcp = credentialCipher
+    ? createPostgresMcpToolExecutor({
+        pool,
+        credentialCipher,
+        remote: input.mcpRemote ?? new McpRemoteClient(),
+      })
+    : undefined;
   const flue = await startManagedFlueRuntime({
     pool,
     providers,
@@ -124,6 +134,7 @@ export async function startRuntimeWorker(input: {
     broker,
     skills,
     delegations,
+    ...(mcp ? { mcp } : {}),
     ...(runFileStorage ? { runFileStorage } : {}),
     ...(input.platformTools ? { platformTools: input.platformTools } : {}),
     sandboxFactory: (initial, delivery) => {

@@ -91,6 +91,19 @@ resource path, outcome, and duration. They never contain instructions,
 resource contents, decoded bytes, model text, credentials, or authorization
 headers. Audit records follow the same boundary.
 
+## MCP events
+
+MCP configuration emits `mcp.server_created`,
+`mcp.server_version_published`, `mcp.discovery_completed`,
+`mcp.discovery_failed`, `mcp.toolset_published`,
+`mcp.credential_created`, `mcp.credential_rotated`, and
+`mcp.credential_revoked`. Runtime calls emit `mcp.call_started`,
+`mcp.call_completed`, `mcp.call_failed`, or `mcp.call_cancelled`.
+
+Payloads contain only tenant resource IDs, remote tool name, safe outcome/error
+code, response byte count, and timing/state metadata. They exclude credentials,
+headers, tool arguments, tool results, model content, and sandbox state.
+
 ## TypeScript SDK
 
 The workspace SDK reconnects automatically unless disabled:

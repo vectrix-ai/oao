@@ -14,7 +14,7 @@ export interface ProviderCredentialContext {
   readonly organizationId: string;
   readonly projectId: string;
   readonly providerId: string;
-  readonly providerType: "openrouter" | "openai" | "daytona" | "s3";
+  readonly providerType: "openrouter" | "openai" | "daytona" | "s3" | "mcp";
   readonly keyVersion: number;
 }
 

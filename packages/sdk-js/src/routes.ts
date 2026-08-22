@@ -95,6 +95,18 @@ export function createRoutes(apiPrefix = "/v1") {
       versionId: string,
     ) =>
       `${project(projectId)}/skills/${segment(skillId)}/versions/${segment(versionId)}/lifecycle`,
+    mcpServers: (projectId: string) => `${project(projectId)}/mcp-servers`,
+    mcpServerDiscovery: (projectId: string, serverId: string) =>
+      `${project(projectId)}/mcp-servers/${segment(serverId)}/discover`,
+    mcpCredentials: (projectId: string) =>
+      `${project(projectId)}/mcp-credentials`,
+    mcpCredential: (projectId: string, credentialId: string) =>
+      `${project(projectId)}/mcp-credentials/${segment(credentialId)}`,
+    rotateMcpCredential: (projectId: string, credentialId: string) =>
+      `${project(projectId)}/mcp-credentials/${segment(credentialId)}/rotate`,
+    mcpCredentialPolicies: (projectId: string) =>
+      `${project(projectId)}/mcp-credential-policies`,
+    mcpToolsets: (projectId: string) => `${project(projectId)}/mcp-toolsets`,
     agents: (projectId: string) => `${project(projectId)}/agents`,
     agent: (projectId: string, agentId: string) =>
       `${project(projectId)}/agents/${segment(agentId)}`,
