@@ -1,0 +1,197 @@
+---
+title: "Add tools to an agent"
+description: "Give a managed agent caller, platform, sandbox, and MCP tools through the console or the REST API."
+---
+
+Tools are immutable agent-version data. Adding, changing, or removing a tool
+always publishes a new version; existing versions and the sessions pinned to
+them are never rewritten. This guide shows both paths: the console's
+agent-version editor and the publication API.
+
+## Where an agent's tools come from
+
+| Source           | Configured in                           | Executed by                                                             |
+| ---------------- | --------------------------------------- | ----------------------------------------------------------------------- |
+| Caller tools     | `config.tools` with `owner: "caller"`   | Your application, through durable claim/result work items               |
+| Platform tools   | `config.tools` with `owner: "platform"` | A handler registered in the runtime worker                              |
+| Sandbox tools    | `config.sandbox.capabilities`           | The Daytona sandbox (`read`, `write`, `bash`, browser tools, and so on) |
+| MCP tools        | `config.mcpBindings`                    | A remote HTTPS MCP server through an immutable restricted toolset       |
+| Delegation tools | `config.delegates`                      | The platform; `delegate_agent` and `message_agent` are added for you    |
+
+`delegate_agent` and `message_agent` are reserved platform tool names: they are
+published automatically when a version has delegates and are rejected inside
+`config.tools`. A version may declare at most 64 tools with unique names and at
+most 16 MCP bindings.
+
+## Add tools in the console
+
+<Steps>
+  <Step title="Open the latest version">
+    Open **Agents**, select the agent, and stay on its latest version. Older
+    versions are read-only; every panel below edits a draft of the next
+    version.
+  </Step>
+
+  <Step title="Author caller and platform tools">
+    Expand the **Tools** panel. It lists each tool as a collapsible row with a
+    syntax-highlighted preview of its input and output schema.
+
+    - **Add tool** opens a modal editor for one tool definition as JSON.
+    - **Edit definition** on a row opens the same modal for that tool.
+    - **Edit JSON** opens the complete tool list for authoring or pasting in
+      bulk.
+
+    Both editors validate the JSON against the publication contract before it
+    can be applied to the draft, including the
+    [supported schema subset](/agents/create-agent#tool-contract).
+
+  </Step>
+
+<Step title="Select sandbox tools">
+  Sandbox tools are not part of the **Tools** panel. Under **Sandbox policy**,
+  enable the sandbox and select exact capabilities: `filesystem_read` adds
+  `read`; `filesystem_write` adds `write` and `edit`; `shell` adds `bash`,
+  `grep`, and `glob`; `browser` adds `browser_navigate`, `browser_snapshot`, and
+  `browser_interact`. See [Daytona sandboxes](/sandboxes/daytona).
+</Step>
+
+<Step title="Bind MCP toolsets">
+  Under **MCP toolsets**, check a published toolset and choose an exact-origin
+  credential policy for it. The binding pins the toolset version, the policy
+  version, and a namespace (the toolset key by default). Toolsets and policies
+  are managed under **MCP connections**; see [Remote MCP
+  servers](/integrations/mcp).
+</Step>
+
+  <Step title="Publish">
+    Select **Publish new version**. Publication appends an immutable version;
+    sessions created earlier keep the version and tools they started with, so
+    create a new session to exercise the new tools.
+  </Step>
+</Steps>
+
+## Add tools through the API
+
+Publication sends the complete next configuration to
+`POST /projects/{projectId}/agents/{agentId}/versions` — it does not patch the
+previous version. Read the current config first, then republish it with the
+changed `tools`, `sandbox`, or `mcpBindings` fields. The write requires
+`agent:write` and an `Idempotency-Key`.
+
+```bash
+curl --fail-with-body \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/agents/$OAO_AGENT_ID" \
+  --header "Authorization: Bearer $OAO_API_KEY"
+```
+
+Copy `versions[0].config`, add the tool, and publish:
+
+```bash
+curl --fail-with-body \
+  --request POST \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: publish-support-agent-tools-1' \
+  --data '{
+    "config": {
+      "systemPrompt": "Answer support questions concisely. Use lookup_customer when account context is required.",
+      "modelPreset": "project-model-v1",
+      "tools": [
+        {
+          "name": "lookup_customer",
+          "description": "Look up safe customer support context.",
+          "owner": "caller",
+          "approval": "always",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "customerRef": { "type": "string", "minLength": 1 }
+            },
+            "required": ["customerRef"],
+            "additionalProperties": false
+          },
+          "outputSchema": {
+            "type": "object",
+            "properties": { "found": { "type": "boolean" } },
+            "required": ["found"],
+            "additionalProperties": false
+          }
+        }
+      ],
+      "sandbox": {
+        "enabled": false,
+        "provider": "daytona-primary",
+        "network": "none",
+        "capabilities": ["filesystem_read", "filesystem_write", "shell"]
+      },
+      "limits": { "maxTurns": 32, "timeoutMs": 60000 }
+    }
+  }' \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/agents/$OAO_AGENT_ID/versions"
+```
+
+The full field-by-field contract — schema subset, size limits, and rejection
+behavior — is documented in
+[Create an agent](/agents/create-agent#tool-contract). Publishing an identical
+configuration conflicts because version content hashes are unique per agent.
+
+The same publication carries sandbox and MCP tools:
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "provider": "daytona-primary",
+    "snapshotId": "77777777-7777-4777-8777-777777777777",
+    "network": "restricted",
+    "capabilities": ["filesystem_read", "shell"]
+  },
+  "mcpBindings": [
+    {
+      "toolsetVersionId": "66666666-6666-4666-8666-666666666666",
+      "credentialPolicyVersionId": "55555555-5555-4555-8555-555555555555",
+      "namespace": "langsmith"
+    }
+  ]
+}
+```
+
+Each MCP binding pins one immutable toolset version and one credential policy
+version under a unique namespace; the agent sees the allowed remote tools as
+`mcp__<namespace>__<remote-name>`. See [Remote MCP servers](/integrations/mcp)
+for publishing toolsets and policies.
+
+## Choose owner and approval
+
+- `owner: "caller"` creates durable work your application resolves: claim the
+  tool call, keep the fence, and submit a result envelope that matches the
+  published `outputSchema`. See
+  [Resolve caller tools correctly](/agents/create-agent#resolve-caller-tools-correctly).
+- `owner: "platform"` requires a matching handler registered in the runtime
+  worker. Without one, the invocation fails with the safe
+  `platform_tool_failed` outcome.
+- `approval: "always"` inserts a durable approval gate before either owner can
+  execute; resolve it in **Pending Work** or through
+  `POST /approvals/{approvalId}/decision`.
+
+<Warning>
+  Tool names, descriptions, and schemas are public configuration and are sent to
+  the selected model provider. Never place credentials, authorization headers,
+  or secret-bearing examples in them.
+</Warning>
+
+## Verify the tools
+
+Create a **new** session against the agent — existing sessions keep their
+pinned version. In the session detail:
+
+- **Transcript** shows tool invocations inline with their model-facing
+  arguments and results.
+- **Pending Work** lists unresolved caller tool calls and approval gates.
+- **Debug** shows the chronological waterfall including sandbox commands and
+  MCP calls.
+
+Through the API, `GET /projects/{projectId}/tool-calls?runId={runId}` and
+`GET /projects/{projectId}/pending-work` return the durable tool ledger, and
+retryable tool failures are surfaced to the model automatically (three total
+attempts per tool per run).

@@ -22,6 +22,7 @@
         "group": "Build agents",
         "pages": [
           "agents/create-agent",
+          "agents/add-tools",
           "concepts/multi-agent-orchestration",
           "concepts/skills",
           "models/adding-models",
@@ -31,7 +32,11 @@
       },
       {
         "group": "Connect your app",
-        "pages": ["integrations/files", "integrations/codebase"]
+        "pages": [
+          "integrations/files",
+          "integrations/codebase",
+          "integrations/mcp"
+        ]
       },
       {
         "group": "Reference",

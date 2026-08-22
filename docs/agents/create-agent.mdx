@@ -121,6 +121,7 @@ cookies.
       "skillVersionIds": [
         "44444444-4444-4444-8444-444444444445"
       ],
+      "mcpBindings": [],
       "delegates": [],
       "sandbox": {
         "enabled": false,
@@ -154,7 +155,9 @@ cookies.
     with a link to **Manage models**. Select **Publish new version** to append an immutable
     version.
 
-    Linking a different model or Skill version is always a publication.
+    Linking a different model, Skill version, or MCP toolset/policy version is
+    always a publication. Configure remote tools under **MCP connections**, then
+    select the immutable toolset and exact-origin policy on the agent editor.
     Publishing a newer Skill does not update an existing agent version.
     Existing sessions stay attached to the agent and Skill versions they were
     created with. See [Versioned Skills](/concepts/skills).
@@ -502,7 +505,9 @@ preview of the input and output schema. **Add tool** and **Edit definition**
 open a modal editor for one tool definition as JSON, and **Edit JSON** opens
 the complete tool list for authoring or pasting in bulk; both validate the JSON
 before it can be applied to the draft. Publishing still creates a new immutable
-version; existing versions are never rewritten.
+version; existing versions are never rewritten. See
+[Add tools to an agent](/agents/add-tools) for the complete console and API
+workflow across caller, platform, sandbox, and MCP tools.
 
 <Warning>
   Tool schemas are public agent configuration and are sent to the selected model
@@ -914,7 +919,8 @@ proof that active model or tool work has already stopped.
   published twice for one agent.
 - The console can edit instructions, model preset, sandbox provider, sandbox
   capabilities, network policy, and timeout while creating an agent and on its
-  latest version. It cannot author caller/platform tools.
+  latest version. Caller/platform tools are authored as JSON in the **Tools**
+  panel; there is no form-based schema builder.
 - Model presets can be added and linked, but not deprecated or deleted. Preset
   rows are append-only by design.
 - Sessions never float to a newer version, and only one unsettled run is

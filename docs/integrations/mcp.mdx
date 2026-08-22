@@ -1,0 +1,96 @@
+---
+title: "Remote MCP servers"
+description: "Connect HTTPS MCP servers through immutable toolsets and exact-origin credential policies."
+---
+
+OAO can expose a restricted set of tools from a remote Model Context Protocol
+(MCP) server to a managed agent. The integration is provider-neutral: server,
+credential, policy, and toolset records do not contain LangSmith-specific
+behavior.
+
+## Architecture
+
+```text
+Agent version                  OAO control plane
+┌──────────────────┐          ┌────────────────────────────────────┐
+│ MCP binding      │─────────▶│ immutable toolset + server version │
+│ namespace        │          │ exact credential-policy version    │
+└────────┬─────────┘          └────────────────┬───────────────────┘
+         │ session copies exact bindings       │ PostgreSQL + RLS
+         ▼                                     ▼
+┌──────────────────┐          ┌────────────────────────────────────┐
+│ Flue durable run │─approval▶│ OAO MCP executor + egress broker   │
+│ namespaced tool  │◀─result──│ live auth, fencing, audit, limits  │
+└──────────────────┘          └────────────────┬───────────────────┘
+                                              │ TLS; DNS/IP checked
+                                              │ secret injected here
+                                              ▼
+                              ┌────────────────────────────────────┐
+                              │ approved remote MCP HTTPS endpoint │
+                              └────────────────────────────────────┘
+```
+
+Flue sees MCP tools as normal durable OAO tools. OAO owns MCP discovery,
+authorization, credentials, approvals, transport policy, and recovery. The
+decrypted credential is never added to the prompt, tool arguments, model-visible
+results, sandbox environment, product events, audit details, or list responses.
+
+## Configure a connection
+
+Open **MCP connections** in the console and complete the four numbered steps:
+
+1. Add a write-only static bearer token or API-key-header credential.
+2. Bind it to an exact HTTPS origin and an absolute path prefix. Set the request
+   timeout and maximum response size.
+3. Register a Streamable HTTP or legacy SSE server and discover its tools with
+   the policy. Discovery snapshots the names, descriptions, and supported JSON
+   schemas into the immutable server version.
+4. Publish a toolset containing only the tools the agent may call. Approval
+   defaults to `always`.
+
+On the agent's latest version, bind the toolset and credential policy. OAO
+prefixes each tool as `mcp__<namespace>__<remote-name>` to prevent collisions.
+A session copies these exact versions; later toolset or policy versions do not
+silently change an existing session.
+
+## Egress and credential boundary
+
+The broker requires TLS, resolves the hostname before each request, denies
+private and special-purpose addresses, and pins the request to the validated IP
+while retaining TLS server-name verification. This limits SSRF and DNS
+rebinding. It strips caller-supplied authorization, cookie, and proxy
+authorization headers before injecting the configured secret.
+
+Credential-bearing requests must retain the exact scheme, host, and port and
+remain under the policy path prefix. Redirects are not followed. Requests and
+responses are size-limited, and calls honor cancellation and the policy timeout.
+At execution time OAO rechecks the session binding, run creator's current
+authorization, project membership, and every resource lifecycle before it
+decrypts a credential.
+
+Tool metadata and results are untrusted input. Discovery rejects duplicate tool
+names, repeated pagination cursors, excessive tool counts, and unsupported JSON
+schemas. Descriptions are bounded and control characters are removed. Tool
+arguments are validated against the pinned schema. Remote result text may still
+contain prompt injection, so the agent's instructions and approval policy must
+treat it as data rather than authority.
+
+## Recovery behavior
+
+Every call has a deterministic tool-call identity and one PostgreSQL call-attempt
+record. A process crash after dispatch can leave the remote outcome unknowable;
+OAO marks that attempt `unknown` and refuses to replay it automatically. This
+fail-closed behavior avoids repeating a non-idempotent remote action. Product
+events contain resource IDs, safe error codes, duration/size metadata, and state,
+never request arguments, results, credentials, or authorization headers.
+
+## Current authentication support
+
+The MVP supports static bearer credentials and arbitrary safe API-key headers.
+OAuth, token refresh, dynamic client registration, stdio servers, per-user
+delegated credentials, configurable retries/reconnects, and secret substitution
+for sandbox commands are not implemented. OAO uses the MCP client pinned in
+`@oao/mcp-remote`; compatibility tests lock behavior to that exact version.
+
+See [HTTP API](/reference/http-api), [Authentication](/reference/authentication),
+and [MVP limitations](/reference/mvp-limitations).
