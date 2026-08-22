@@ -39,7 +39,10 @@
       },
       {
         "group": "Get started",
-        "pages": ["getting-started/local-development"]
+        "pages": [
+          "getting-started/local-development",
+          "getting-started/railway"
+        ]
       },
       {
         "group": "Build agents",

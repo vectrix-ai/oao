@@ -105,6 +105,15 @@ See [apps/api/README.md](apps/api/README.md) for the runnable API commands,
 development/Vite proxy setup, exact authentication environment contract, WorkOS
 callback/webhook URLs, and operator identity provisioning.
 
+## Railway deployment
+
+The minimal hosted topology is one public service that serves the compiled
+console and API from the same origin, one private runtime worker, and Railway
+PostgreSQL. The web service opts into static console hosting with
+`OAO_SERVE_CONSOLE=true`. See the
+[Railway deployment guide](docs/getting-started/railway.mdx) for commands,
+variables, first-identity provisioning, and verification.
+
 ## Documentation
 
 The Mintlify source lives in [`docs`](docs). From that directory, run

@@ -15,6 +15,7 @@ import { listDaytonaSnapshots } from "@oao/sandbox-daytona";
 import { createApiApp } from "./app.js";
 import { composeAuthentication } from "./composition.js";
 import { loadServerConfiguration } from "./config.js";
+import { mountConsoleStatic } from "./console-static.js";
 import { HttpApiError } from "./errors.js";
 import { PostgresApiStore } from "./store.js";
 import { PostgresRuntimeCommandPort } from "./runtime-commands.js";
@@ -95,6 +96,10 @@ const app = createApiApp({
     );
   },
 });
+
+if (process.env.OAO_SERVE_CONSOLE === "true") {
+  mountConsoleStatic(app);
+}
 
 const server = serve({ fetch: app.fetch, port: configuration.port });
 process.stdout.write(

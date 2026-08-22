@@ -1,0 +1,84 @@
+---
+title: "Deploy to Railway"
+description: "Run the OAO console, API, runtime worker, and PostgreSQL in a small Railway production topology."
+---
+
+OAO's smallest hosted topology uses three Railway resources in one project:
+
+- a public `web` service that serves both the compiled React console and Hono API
+- a private `runtime-worker` service
+- Railway PostgreSQL
+
+Serving the console and API from the same HTTPS origin preserves the browser
+cookie and relative `/v1` request model. The runtime worker does not need a
+public domain. Both application services must use the same PostgreSQL database
+and credential-encryption key.
+
+## Configure the web service
+
+Deploy the repository root with Node.js 22.19 or newer and pnpm. Use:
+
+```text
+Build command: pnpm build
+Start command: pnpm --filter @oao/api start
+Healthcheck path: /readyz
+```
+
+Set these public configuration values:
+
+```dotenv
+NODE_ENV=production
+AUTH_PROVIDER=workos
+VITE_OAO_API_MODE=http
+OAO_SERVE_CONSOLE=true
+APP_ORIGIN=https://your-web-domain.example
+WORKOS_CALLBACK_URL=https://your-web-domain.example/v1/auth/callback
+```
+
+Set `DATABASE_URL` to a Railway reference to the PostgreSQL service. Also set
+`API_KEY_PEPPER`, `OAO_CREDENTIAL_ENCRYPTION_KEY`, `WORKOS_API_KEY`,
+`WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD`, and `WORKOS_WEBHOOK_SECRET` as
+secrets. Register the exact callback URL and web origin as the callback and
+sign-out URLs in the WorkOS application.
+
+`OAO_SERVE_CONSOLE=true` is required for this topology. Without it, the API
+serves only JSON routes and health checks.
+
+## Configure the runtime worker
+
+Deploy the same repository root with:
+
+```text
+Build command: pnpm build
+Start command: pnpm --filter @oao/runtime-worker start
+Healthcheck path: /readyz
+```
+
+Set the same `DATABASE_URL` and `OAO_CREDENTIAL_ENCRYPTION_KEY` values used by
+the web service. Do not generate a public domain for the worker.
+
+## Provision the first identity
+
+Migrations run idempotently when the API and runtime start, but migrations do
+not invent a tenant or browser identity. Before the first WorkOS login, create
+an OAO organization, project, principal, and membership, then run the API's
+`provision:workos` command with the corresponding WorkOS user and organization
+IDs. The exact variables and command are documented in the API README.
+
+For an initial disposable evaluation environment, the existing development
+seed can create the first OAO tenant before `provision:workos` links the real
+WorkOS identity. WorkOS remains the only enabled login provider when
+`AUTH_PROVIDER=workos`; the development identity is not browser-accessible.
+
+## Verify the deployment
+
+Wait for both deployments to reach Railway's `SUCCESS` state. Then verify:
+
+1. `GET /readyz` returns `200` from the public web domain.
+2. `GET /` loads the console rather than a JSON 404 response.
+3. Login redirects through WorkOS and returns to `/v1/auth/callback`.
+4. The runtime worker passes its private `/readyz` deployment health check.
+
+Keep the first deployment to one web replica and one worker replica. Scale only
+after validating queue behavior, provider limits, and database capacity for the
+intended workload.
