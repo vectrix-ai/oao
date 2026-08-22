@@ -17,6 +17,11 @@ const databaseUrl =
   `postgresql://postgres:postgres@127.0.0.1:${postgresPort}/oao`;
 const appOrigin = process.env.APP_ORIGIN ?? `http://127.0.0.1:${consolePort}`;
 const apiOrigin = process.env.API_ORIGIN ?? `http://127.0.0.1:${apiPort}`;
+const authProvider = process.env.AUTH_PROVIDER ?? "development";
+const nodeEnvironment = process.env.NODE_ENV ?? "development";
+
+if (authProvider !== "development" && authProvider !== "workos")
+  throw new Error("AUTH_PROVIDER must be development or workos");
 
 const children = new Set();
 let databaseStartedHere = false;
@@ -195,20 +200,22 @@ async function main() {
   run("pnpm", ["db:migrate"], {
     env: { ...process.env, DATABASE_URL: databaseUrl },
   });
-  run("pnpm", ["--filter", "@oao/api", "seed:dev"], {
-    env: {
-      ...process.env,
-      DATABASE_URL: databaseUrl,
-      AUTH_PROVIDER: "development",
-      NODE_ENV: "development",
-      APP_ORIGIN: appOrigin,
-    },
-  });
+  if (authProvider === "development") {
+    run("pnpm", ["--filter", "@oao/api", "seed:dev"], {
+      env: {
+        ...process.env,
+        DATABASE_URL: databaseUrl,
+        AUTH_PROVIDER: authProvider,
+        NODE_ENV: nodeEnvironment,
+        APP_ORIGIN: appOrigin,
+      },
+    });
+  }
 
   startChild("API", ["--filter", "@oao/api", "dev"], {
     DATABASE_URL: databaseUrl,
-    AUTH_PROVIDER: "development",
-    NODE_ENV: "development",
+    AUTH_PROVIDER: authProvider,
+    NODE_ENV: nodeEnvironment,
     APP_ORIGIN: appOrigin,
     PORT: apiPort,
   });

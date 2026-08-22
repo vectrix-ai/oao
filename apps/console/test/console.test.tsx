@@ -31,6 +31,95 @@ function renderConsole(
 }
 
 describe("management console", () => {
+  it("shows WorkOS display metadata and provides logout", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    vi.spyOn(api, "getContext").mockResolvedValue({
+      organization: { id: "org-1", name: "OAO" },
+      project: { id: "project-1", name: "Managed agents" },
+      currentPrincipal: {
+        id: "principal-1",
+        kind: "human",
+        subject: "development-user",
+        displayName: "Ben Selleslagh",
+        role: "Platform owner",
+        scopes: ["*"],
+      },
+      organizations: [{ id: "org-1", name: "OAO" }],
+      projects: [{ id: "project-1", name: "Managed agents" }],
+      authProvider: "workos",
+    });
+    const logout = vi.spyOn(api, "logout").mockResolvedValue();
+
+    renderConsole("/agents", api);
+    expect(await screen.findByText("Ben Selleslagh")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Log out" }));
+    expect(logout).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders real organization and current-project metadata without placeholder actions", async () => {
+    const { unmount } = renderConsole("/organization");
+    expect(
+      await screen.findByRole("heading", { name: "Organization" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Example operations")).toHaveLength(2);
+    expect(
+      screen.getByText("11111111-1111-4111-8111-111111111111"),
+    ).toBeInTheDocument();
+    unmount();
+
+    renderConsole("/projects");
+    expect(
+      await screen.findByRole("heading", { name: "Projects" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("managed-agents")).toBeInTheDocument();
+    expect(screen.getByText("current")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "New project" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("adds, changes, and removes project members", async () => {
+    const user = userEvent.setup();
+    renderConsole("/members");
+    expect(await screen.findByText("Demo Operator")).toBeInTheDocument();
+    expect(screen.getByLabelText("Role for Demo Operator")).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "Add member" }));
+    const add = within(
+      screen.getByRole("dialog", { name: "Add project member" }),
+    );
+    await user.type(
+      add.getByLabelText("Principal subject"),
+      "new.reviewer@example.test",
+    );
+    await user.selectOptions(add.getByLabelText("Project role"), "viewer");
+    await user.click(add.getByRole("button", { name: "Add member" }));
+
+    const memberName = await screen.findByText("new reviewer");
+    const row = memberName.closest("tr");
+    expect(row).not.toBeNull();
+    if (!row) throw new Error("New member row was not rendered");
+    await user.selectOptions(
+      within(row).getByRole("combobox", { name: "Role for new reviewer" }),
+      "member",
+    );
+    await waitFor(() =>
+      expect(
+        within(row).getByRole("combobox", { name: "Role for new reviewer" }),
+      ).toHaveValue("member"),
+    );
+
+    await user.click(within(row).getByRole("button", { name: "Remove" }));
+    const remove = within(
+      screen.getByRole("dialog", { name: "Remove new reviewer" }),
+    );
+    await user.click(remove.getByRole("button", { name: "Remove member" }));
+    await waitFor(() =>
+      expect(screen.queryByText("new reviewer")).not.toBeInTheDocument(),
+    );
+  });
+
   it("uses a light-first appearance and persists the theme toggle", async () => {
     const user = userEvent.setup();
     renderConsole("/agents");

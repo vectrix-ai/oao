@@ -57,6 +57,126 @@ describe("HTTP console adapter", () => {
     );
   });
 
+  it("prefers authenticated display metadata over the internal principal subject", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        ...CONTEXT,
+        principal: {
+          ...CONTEXT.principal,
+          displayName: "Ben Selleslagh",
+        },
+        authProvider: "workos",
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new HttpConsoleApi().getContext()).resolves.toMatchObject({
+      currentPrincipal: {
+        subject: "development-user",
+        displayName: "Ben Selleslagh",
+      },
+      authProvider: "workos",
+    });
+  });
+
+  it("loads organization, project, and WorkOS-backed member settings", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: CONTEXT.organization.id,
+          name: "Development organization",
+          slug: "development",
+          createdAt: "2026-08-20T00:00:00.000Z",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: [
+            {
+              id: PROJECT_ID,
+              name: "Default project",
+              slug: "default",
+              createdAt: "2026-08-20T00:00:00.000Z",
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: [
+            {
+              id: CONTEXT.principal.id,
+              principalId: CONTEXT.principal.id,
+              subject: "development-user",
+              displayName: "Ben Selleslagh",
+              email: "developer@example.test",
+              role: "owner",
+              scopes: ["*"],
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ data: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new HttpConsoleApi().getSettings()).resolves.toMatchObject({
+      organization: {
+        id: CONTEXT.organization.id,
+        slug: "development",
+      },
+      projects: [{ id: PROJECT_ID, slug: "default", current: true }],
+      members: [
+        {
+          name: "Ben Selleslagh",
+          subject: "development-user",
+          email: "developer@example.test",
+          current: true,
+        },
+      ],
+    });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/context",
+      `/v1/organizations/${CONTEXT.organization.id}`,
+      "/v1/projects?limit=100",
+      `/v1/projects/${PROJECT_ID}/members?limit=100`,
+      `/v1/projects/${PROJECT_ID}/api-keys?limit=100`,
+    ]);
+  });
+
+  it("creates, updates, and removes project members", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValue(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+
+    await api.addMember({
+      subject: "reviewer@example.test",
+      role: "viewer",
+      scopes: ["agent:read"],
+    });
+    await api.updateMemberRole("member/one", "member");
+    await api.removeMember("member/one");
+
+    expect(fetchMock.mock.calls.slice(1).map(([url]) => url)).toEqual([
+      `/v1/projects/${PROJECT_ID}/members`,
+      `/v1/projects/${PROJECT_ID}/members/member%2Fone`,
+      `/v1/projects/${PROJECT_ID}/members/member%2Fone`,
+    ]);
+    expect(
+      (fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.method,
+    ).toBe("POST");
+    expect(
+      (fetchMock.mock.calls[2]?.[1] as RequestInit | undefined)?.method,
+    ).toBe("PATCH");
+    expect(
+      (fetchMock.mock.calls[3]?.[1] as RequestInit | undefined)?.method,
+    ).toBe("DELETE");
+  });
+
   it("bootstraps a development session once after an unauthenticated context", async () => {
     const fetchMock = vi
       .fn()
@@ -122,17 +242,20 @@ describe("HTTP console adapter", () => {
   });
 
   it("starts WorkOS hosted sign-in when development login is unavailable", async () => {
-    const authorizationUrl =
+    const redirectUrl =
       "https://api.workos.com/user_management/authorize?client_id=client_123";
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({}, 401))
       .mockResolvedValueOnce(jsonResponse({}, 404))
-      .mockResolvedValueOnce(jsonResponse({ authorizationUrl }));
+      .mockResolvedValueOnce(jsonResponse({ redirectUrl }));
     const navigateTo = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
     const api = new HttpConsoleApi({ navigateTo });
+    await expect(api.getContext()).rejects.toThrow(
+      "Redirecting to WorkOS sign in.",
+    );
     await expect(api.getContext()).rejects.toThrow(
       "Redirecting to WorkOS sign in.",
     );
@@ -141,7 +264,30 @@ describe("HTTP console adapter", () => {
       "/v1/auth/development/login",
       "/v1/auth/login",
     ]);
-    expect(navigateTo).toHaveBeenCalledWith(authorizationUrl);
+    expect(navigateTo).toHaveBeenCalledWith(redirectUrl);
+    expect(navigateTo).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the local session and follows the WorkOS logout redirect", async () => {
+    const redirectUrl = "https://authkit.example.test/logout";
+    const fetchMock = vi.fn(async () => jsonResponse({ redirectUrl }));
+    const navigateTo = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new HttpConsoleApi({ navigateTo });
+    await api.logout();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/v1/auth/logout",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        headers: expect.objectContaining({
+          "idempotency-key": expect.any(String),
+        }),
+      }),
+    );
+    expect(navigateTo).toHaveBeenCalledWith(redirectUrl);
   });
 
   it("scopes project requests and adds a unique idempotency key to mutations", async () => {

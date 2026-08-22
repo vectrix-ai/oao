@@ -7,11 +7,13 @@ pnpm dev:local
 ```
 
 This single command starts PostgreSQL when needed, builds the workspace,
-migrates and seeds the database, and launches the API, runtime worker, and Vite
-console. It traps Ctrl-C and termination, stops every child, and calls `db:down`
-only when it started PostgreSQL. Docker Desktop, Colima, or another
-Docker-compatible daemon must already be running; OAO never starts or stops that
-daemon.
+migrates the database, seeds the deterministic tenant only when
+`AUTH_PROVIDER=development`, and launches the API, runtime worker, and Vite
+console. Set `AUTH_PROVIDER=workos` with the required WorkOS values to disable
+development login. The launcher traps Ctrl-C and termination, stops every
+child, and calls `db:down` only when it started PostgreSQL. Docker Desktop,
+Colima, or another Docker-compatible daemon must already be running; OAO never
+starts or stops that daemon.
 
 The persistent database can also be managed separately:
 

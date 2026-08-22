@@ -62,6 +62,7 @@ interface ContextResponse {
     readonly id: string;
     readonly kind: "human" | "api_key" | "service";
     readonly subject: string;
+    readonly displayName?: string;
     readonly scopes: readonly string[];
   };
   readonly organization: { readonly id: string; readonly name: string };
@@ -82,6 +83,13 @@ class HttpConsoleError extends Error {
   ) {
     super(message);
     this.name = "HttpConsoleError";
+  }
+}
+
+class AuthenticationRedirectError extends Error {
+  constructor(cause: unknown) {
+    super("Redirecting to WorkOS sign in.", { cause });
+    this.name = "AuthenticationRedirectError";
   }
 }
 
@@ -121,15 +129,16 @@ function idempotencyKey(): string {
 
 function contextView(response: ContextResponse): ProjectContext {
   const subject = response.principal.subject;
-  const displayName = subject.includes("@")
+  const fallbackDisplayName = subject.includes("@")
     ? subject.slice(0, subject.indexOf("@")).replaceAll(/[._-]+/gu, " ")
     : subject.replaceAll(/[._-]+/gu, " ");
+  const displayName = response.principal.displayName?.trim();
   return {
     organization: response.organization,
     project: response.project,
     currentPrincipal: {
       ...response.principal,
-      displayName: displayName || "Authenticated user",
+      displayName: displayName || fallbackDisplayName || "Authenticated user",
       role: response.principal.scopes.includes("*")
         ? "Platform owner"
         : response.principal.kind.replaceAll("_", " "),
@@ -814,20 +823,18 @@ export class HttpConsoleApi implements ConsoleApi {
         )
           throw loginError;
         const login = await this.#request<{
-          readonly authorizationUrl?: unknown;
+          readonly redirectUrl?: unknown;
         }>("/auth/login", { method: "POST", body: "{}" });
         if (
-          typeof login.authorizationUrl !== "string" ||
-          !login.authorizationUrl.startsWith("https://")
+          typeof login.redirectUrl !== "string" ||
+          !login.redirectUrl.startsWith("https://")
         )
           throw new Error(
             "The authentication provider returned an invalid URL.",
             { cause: loginError },
           );
-        this.#navigateTo(login.authorizationUrl);
-        throw new Error("Redirecting to WorkOS sign in.", {
-          cause: loginError,
-        });
+        this.#navigateTo(login.redirectUrl);
+        throw new AuthenticationRedirectError(loginError);
       }
       return contextView(await this.#request<ContextResponse>("/context"));
     }
@@ -836,12 +843,35 @@ export class HttpConsoleApi implements ConsoleApi {
   getContext = (): Promise<ProjectContext> => {
     if (!this.#contextPromise) {
       this.#contextPromise = this.#loadContext().catch((error: unknown) => {
-        this.#contextPromise = undefined;
+        // Keep the rejected promise while the browser is leaving for AuthKit.
+        // Other mounted queries also request context; allowing them to start a
+        // second login would replace the one-time state cookie before the first
+        // callback returns.
+        if (!(error instanceof AuthenticationRedirectError))
+          this.#contextPromise = undefined;
         throw error;
       });
     }
     return this.#contextPromise;
   };
+
+  async logout(): Promise<void> {
+    const result = await this.#request<{ readonly redirectUrl?: unknown }>(
+      "/auth/logout",
+      { method: "POST", body: "{}" },
+    );
+    this.#contextPromise = undefined;
+    if (result.redirectUrl === undefined) {
+      this.#navigateTo("/");
+      return;
+    }
+    if (
+      typeof result.redirectUrl !== "string" ||
+      !result.redirectUrl.startsWith("https://")
+    )
+      throw new Error("The authentication provider returned an invalid URL.");
+    this.#navigateTo(result.redirectUrl);
+  }
 
   async #projectPath(path: string): Promise<string> {
     const context = await this.getContext();
@@ -1482,10 +1512,11 @@ export class HttpConsoleApi implements ConsoleApi {
 
   getSettings = async (): Promise<SettingsData> => {
     const context = await this.getContext();
-    const [organization, members, apiKeys] = await Promise.all([
+    const [organization, projects, members, apiKeys] = await Promise.all([
       this.#request<Record<string, unknown>>(
         `/organizations/${encodeURIComponent(context.organization.id)}`,
       ),
+      this.#request<CursorPage<Record<string, unknown>>>("/projects?limit=100"),
       this.#projectRequest<CursorPage<Record<string, unknown>>>(
         "/members?limit=100",
       ),
@@ -1495,16 +1526,28 @@ export class HttpConsoleApi implements ConsoleApi {
     ]);
     return {
       organization: {
+        id: String(organization.id ?? context.organization.id),
         name: String(organization.name ?? context.organization.name),
         slug: String(organization.slug ?? ""),
         createdAt: String(organization.createdAt ?? ""),
       },
-      projects: context.projects.map((project) => ({ ...project, slug: "" })),
+      projects: projects.data.map((project) => ({
+        id: String(project.id),
+        name: String(project.name),
+        slug: String(project.slug),
+        createdAt: String(project.createdAt),
+        current: String(project.id) === context.project.id,
+      })),
       members: members.data.map((member) => ({
         id: String(member.id ?? member.principalId),
-        name: String(member.name ?? member.subject ?? "Project member"),
-        email: String(member.email ?? member.subject ?? ""),
+        name: String(member.displayName ?? member.subject ?? "Project member"),
+        subject: String(member.subject ?? ""),
+        ...(member.email ? { email: String(member.email) } : {}),
         role: String(member.role) as SettingsData["members"][number]["role"],
+        scopes: Array.isArray(member.scopes) ? member.scopes.map(String) : [],
+        current:
+          String(member.id ?? member.principalId) ===
+          context.currentPrincipal?.id,
       })),
       apiKeys: apiKeys.data.map((key) => ({
         id: String(key.id),
@@ -1515,6 +1558,31 @@ export class HttpConsoleApi implements ConsoleApi {
       })),
       hosting: [],
     };
+  };
+
+  addMember = async (
+    input: Parameters<ConsoleApi["addMember"]>[0],
+  ): Promise<void> => {
+    await this.#projectRequest("/members", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  };
+
+  updateMemberRole = async (
+    memberId: string,
+    role: SettingsData["members"][number]["role"],
+  ): Promise<void> => {
+    await this.#projectRequest(`/members/${encodeURIComponent(memberId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    });
+  };
+
+  removeMember = async (memberId: string): Promise<void> => {
+    await this.#projectRequest(`/members/${encodeURIComponent(memberId)}`, {
+      method: "DELETE",
+    });
   };
 
   connectEvents(

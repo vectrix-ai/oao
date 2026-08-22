@@ -75,7 +75,8 @@ On every start, the launcher:
 1. Starts PostgreSQL 17 if it is not already running.
 2. Builds the workspace packages required by the source watchers.
 3. Applies all PostgreSQL migrations.
-4. Idempotently seeds the development organization, project, and principal.
+4. When `AUTH_PROVIDER=development`, idempotently seeds the development
+   organization, project, and principal.
 5. Starts the API, runtime worker, and Vite console.
 6. Waits up to 30 seconds for the API, worker, and console to become ready.
 
@@ -102,6 +103,32 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173) in a browser.
   principal with full local permissions. Use this profile only in a trusted
   development environment; it is not a production authentication mode.
 </Warning>
+
+### Disable the development identity
+
+Authentication is selected at process startup. To disable deterministic
+development login and use WorkOS AuthKit locally, set these values in `.env`:
+
+```dotenv
+AUTH_PROVIDER=workos
+NODE_ENV=development
+APP_ORIGIN=http://127.0.0.1:5173
+API_KEY_PEPPER=generate-a-random-secret
+WORKOS_API_KEY=sk_test_...
+WORKOS_CLIENT_ID=client_...
+WORKOS_COOKIE_PASSWORD=at-least-32-random-characters
+WORKOS_WEBHOOK_SECRET=whsec_...
+WORKOS_CALLBACK_URL=http://127.0.0.1:5173/v1/auth/callback
+```
+
+Register the exact callback and `http://127.0.0.1:5173` sign-out URI in the
+WorkOS Staging application. Restart `pnpm dev:local` after changing the provider;
+the launcher does not switch authentication in a running API process.
+
+WorkOS login does not create OAO authorization. Before switching a fresh local
+database, create the local tenant in development mode, then use the
+`provision:workos` command documented in `apps/api/README.md` to link the WorkOS
+user and organization to that existing OAO principal and membership.
 
 ## Normal start and stop
 
@@ -131,7 +158,11 @@ Use `pnpm dev:local`, rather than the generic `pnpm dev`, when you need the comp
 
 ## Verify the stack
 
-The browser should load the console without a WorkOS sign-in. The console uses the HTTP API through the Vite `/v1` proxy and the deterministic development identity.
+With `AUTH_PROVIDER=development`, the browser loads the console without a
+WorkOS sign-in and shows the deterministic development identity. With
+`AUTH_PROVIDER=workos`, an unauthenticated browser is redirected to AuthKit and
+the development identity is unavailable. In both modes, the console uses the
+HTTP API through the Vite `/v1` proxy.
 
 The console starts in its light appearance. Use **Use dark appearance** in the
 top bar to switch themes; the choice is stored only in the browser and does not
@@ -294,11 +325,10 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
 Leave it empty when no collector is running.
 
 <Note>
-  `pnpm dev:local` always starts the API with `AUTH_PROVIDER=development` and
-  `NODE_ENV=development`, even if `.env` contains WorkOS values. WorkOS is a
-  separate production-oriented API mode that requires HTTPS-compatible origin,
-  callback, cookie, webhook, pepper, and operator-provisioning configuration. It
-  is not a credential switch for the local launcher.
+  `pnpm dev:local` reads `AUTH_PROVIDER` and `NODE_ENV` from `.env`. Development
+  remains the credential-free default. Local WorkOS testing requires
+  `NODE_ENV=development`; hosted WorkOS deployments should use production mode
+  with HTTPS origins, callbacks, and cookies.
 </Note>
 
 ## Troubleshooting

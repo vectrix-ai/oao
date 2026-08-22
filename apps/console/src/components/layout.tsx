@@ -10,6 +10,7 @@ import {
   Database,
   KeyRound,
   Layers3,
+  LogOut,
   Menu,
   Moon,
   Settings,
@@ -19,13 +20,14 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { NavLink, Outlet } from "react-router";
 import { useState } from "react";
 import { useApi, useProjectEvents } from "../api/context";
 import { applyConsoleTheme, readConsoleTheme } from "../theme";
 import { Button, IconButton } from "./button";
 import { BadgeCount, Chip } from "./chip";
+import { useToast } from "./feedback";
 import { initials } from "./format";
 
 interface NavItem {
@@ -81,6 +83,7 @@ const navGroups: readonly {
 
 export function AppLayout() {
   const api = useApi();
+  const notify = useToast();
   const context = useQuery({
     queryKey: ["context"],
     queryFn: () => api.getContext(),
@@ -93,6 +96,10 @@ export function AppLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [theme, setTheme] = useState(readConsoleTheme);
   const principal = context.data?.currentPrincipal;
+  const logout = useMutation({
+    mutationFn: () => api.logout(),
+    onError: () => notify("Logout failed. Please try again.", "danger"),
+  });
   const nextTheme = theme === "light" ? "dark" : "light";
   const themeLabel = `Use ${nextTheme} appearance`;
   const queueCounts = { "pending-work": pendingWork.data?.length ?? 0 };
@@ -176,6 +183,18 @@ export function AppLayout() {
                 <span>{principal.role}</span>
               </span>
             </div>
+          ) : null}
+          {principal && context.data?.authProvider === "workos" ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label="Log out"
+              loading={logout.isPending}
+              icon={<LogOut size={14} />}
+              onClick={() => logout.mutate()}
+            >
+              <span className="hide-sm">Log out</span>
+            </Button>
           ) : null}
         </div>
       </header>

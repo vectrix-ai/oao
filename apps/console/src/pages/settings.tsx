@@ -7,6 +7,8 @@ import {
   Plus,
   RefreshCw,
   Settings2,
+  Trash2,
+  UserPlus,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
@@ -108,10 +110,12 @@ const copy: Record<
 };
 
 const createLabel: Partial<Record<SettingsRoute, string>> = {
-  projects: "New project",
-  members: "Invite member",
+  members: "Add member",
   "api-keys": "Create API key",
 };
+
+type SettingsMember = SettingsData["members"][number];
+type MemberRole = SettingsMember["role"];
 
 export function SettingsPage() {
   const api = useApi();
@@ -120,6 +124,10 @@ export function SettingsPage() {
   const location = useLocation();
   const [creatingApiKey, setCreatingApiKey] = useState(false);
   const [createdApiKey, setCreatedApiKey] = useState<CreatedApiKey | null>(
+    null,
+  );
+  const [addingMember, setAddingMember] = useState(false);
+  const [removingMember, setRemovingMember] = useState<SettingsMember | null>(
     null,
   );
   const route = (
@@ -138,6 +146,34 @@ export function SettingsPage() {
       setCreatedApiKey(key);
       void queryClient.invalidateQueries({ queryKey: ["settings"] });
       notify("API key created.");
+    },
+  });
+  const addMember = useMutation({
+    mutationFn: (input: Parameters<typeof api.addMember>[0]) =>
+      api.addMember(input),
+    onSuccess: () => {
+      setAddingMember(false);
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      notify("Project member added.");
+    },
+  });
+  const updateMemberRole = useMutation({
+    mutationFn: (input: {
+      readonly memberId: string;
+      readonly role: MemberRole;
+    }) => api.updateMemberRole(input.memberId, input.role),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      notify("Member role updated.");
+    },
+    onError: () => notify("Member role could not be updated.", "danger"),
+  });
+  const removeMember = useMutation({
+    mutationFn: (memberId: string) => api.removeMember(memberId),
+    onSuccess: () => {
+      setRemovingMember(null);
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      notify("Project member removed.");
     },
   });
   const heading = copy[route] ?? copy.settings;
@@ -170,14 +206,25 @@ export function SettingsPage() {
           action ? (
             <Button
               variant="primary"
-              icon={<Plus size={15} />}
+              icon={
+                route === "members" ? (
+                  <UserPlus size={15} />
+                ) : (
+                  <Plus size={15} />
+                )
+              }
               onClick={
                 route === "api-keys"
                   ? () => {
                       createApiKey.reset();
                       setCreatingApiKey(true);
                     }
-                  : undefined
+                  : route === "members"
+                    ? () => {
+                        addMember.reset();
+                        setAddingMember(true);
+                      }
+                    : undefined
               }
             >
               {action}
@@ -185,7 +232,40 @@ export function SettingsPage() {
           ) : undefined
         }
       />
-      <SettingsBody route={route} data={query.data} />
+      <SettingsBody
+        route={route}
+        data={query.data}
+        {...(updateMemberRole.variables?.memberId
+          ? { updatingMemberId: updateMemberRole.variables.memberId }
+          : {})}
+        onUpdateMemberRole={(memberId, role) =>
+          updateMemberRole.mutate({ memberId, role })
+        }
+        onRemoveMember={setRemovingMember}
+      />
+      {addingMember ? (
+        <AddMemberDialog
+          pending={addMember.isPending}
+          error={addMember.error}
+          onClose={() => {
+            addMember.reset();
+            setAddingMember(false);
+          }}
+          onSubmit={(input) => addMember.mutate(input)}
+        />
+      ) : null}
+      {removingMember ? (
+        <RemoveMemberDialog
+          member={removingMember}
+          pending={removeMember.isPending}
+          error={removeMember.error}
+          onClose={() => {
+            removeMember.reset();
+            setRemovingMember(null);
+          }}
+          onConfirm={() => removeMember.mutate(removingMember.id)}
+        />
+      ) : null}
       {creatingApiKey ? (
         <CreateApiKeyDialog
           pending={createApiKey.isPending}
@@ -213,9 +293,15 @@ export function SettingsPage() {
 function SettingsBody({
   route,
   data,
+  updatingMemberId,
+  onUpdateMemberRole,
+  onRemoveMember,
 }: {
   readonly route: SettingsRoute;
   readonly data: SettingsData;
+  readonly updatingMemberId?: string;
+  readonly onUpdateMemberRole: (memberId: string, role: MemberRole) => void;
+  readonly onRemoveMember: (member: SettingsMember) => void;
 }) {
   if (route === "organization")
     return (
@@ -225,8 +311,9 @@ function SettingsBody({
         actions={<Boxes size={18} aria-hidden="true" />}
       >
         <MetaGrid
-          columns={3}
+          columns={2}
           items={[
+            { label: "ID", value: <code>{data.organization.id}</code> },
             { label: "Name", value: data.organization.name },
             {
               label: "Slug",
@@ -242,7 +329,13 @@ function SettingsBody({
     );
 
   if (route === "projects")
-    return (
+    return data.projects.length === 0 ? (
+      <EmptyState
+        icon="◇"
+        title="No accessible projects"
+        description="Projects appear here after an administrator provisions access to an OAO principal."
+      />
+    ) : (
       <section className="cards-grid">
         {data.projects.map((project) => (
           <article className="resource-card" key={project.id}>
@@ -250,13 +343,21 @@ function SettingsBody({
               <Layers3 size={16} />
             </span>
             <div>
-              <h2>{project.name}</h2>
+              <h2>
+                {project.name}{" "}
+                {project.current ? <StatusChip value="current" /> : null}
+              </h2>
               <code>{project.slug}</code>
+              <p className="muted">Created {formatDate(project.createdAt)}</p>
             </div>
             <div>
-              <Link className="btn btn--sm" to="/agents">
-                Open project
-              </Link>
+              {project.current ? (
+                <Link className="btn btn--sm" to="/agents">
+                  Open project
+                </Link>
+              ) : (
+                <span className="muted">Provision access to open</span>
+              )}
             </div>
           </article>
         ))}
@@ -264,13 +365,23 @@ function SettingsBody({
     );
 
   if (route === "members")
-    return (
-      <TableCard label="Members table" caption="Members of this organization">
+    return data.members.length === 0 ? (
+      <EmptyState
+        icon="◎"
+        title="No project members"
+        description="Add a principal with the least project access it needs."
+      />
+    ) : (
+      <TableCard label="Members table" caption="Members of the current project">
         <thead>
           <tr>
             <th>Member</th>
             <th>Email</th>
+            <th>Scopes</th>
             <th>Role</th>
+            <th>
+              <span className="sr-only">Actions</span>
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -281,12 +392,51 @@ function SettingsBody({
                   <span className="avatar" aria-hidden="true">
                     {initials(member.name)}
                   </span>
-                  <strong>{member.name}</strong>
+                  <span>
+                    <strong>{member.name}</strong>
+                    <code>{member.subject}</code>
+                  </span>
                 </span>
               </td>
-              <td>{member.email}</td>
+              <td>{member.email ?? "—"}</td>
               <td>
-                <StatusChip value={member.role} />
+                {member.scopes.includes("*") ? (
+                  <span className="scope">all project scopes</span>
+                ) : (
+                  `${member.scopes.length} scope${member.scopes.length === 1 ? "" : "s"}`
+                )}
+              </td>
+              <td>
+                <Select
+                  aria-label={`Role for ${member.name}`}
+                  value={member.role}
+                  disabled={member.current || updatingMemberId === member.id}
+                  onChange={(event) =>
+                    onUpdateMemberRole(
+                      member.id,
+                      event.target.value as MemberRole,
+                    )
+                  }
+                >
+                  <option value="owner">Owner</option>
+                  <option value="admin">Admin</option>
+                  <option value="member">Member</option>
+                  <option value="viewer">Viewer</option>
+                </Select>
+              </td>
+              <td className="cell-actions">
+                {member.current ? (
+                  <StatusChip value="you" />
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={<Trash2 size={14} />}
+                    onClick={() => onRemoveMember(member)}
+                  >
+                    Remove
+                  </Button>
+                )}
               </td>
             </tr>
           ))}
@@ -1263,6 +1413,158 @@ const DEFAULT_API_KEY_SCOPES = new Set([
   "run:create",
   "run:read",
 ]);
+
+const DEFAULT_MEMBER_SCOPES = new Set([
+  "agent:read",
+  "session:read",
+  "run:read",
+]);
+
+function AddMemberDialog({
+  pending,
+  error,
+  onClose,
+  onSubmit,
+}: {
+  readonly pending: boolean;
+  readonly error: Error | null;
+  readonly onClose: () => void;
+  readonly onSubmit: (input: {
+    readonly subject: string;
+    readonly role: MemberRole;
+    readonly scopes: readonly string[];
+  }) => void;
+}) {
+  const [subject, setSubject] = useState("");
+  const [role, setRole] = useState<MemberRole>("member");
+  const [scopes, setScopes] = useState(
+    () => new Set<string>(DEFAULT_MEMBER_SCOPES),
+  );
+  const subjectError =
+    subject.trim().length === 0
+      ? "Principal subject is required."
+      : subject.trim().length > 500
+        ? "Principal subject must contain at most 500 characters."
+        : undefined;
+  const scopesError =
+    scopes.size === 0 ? "Select at least one project scope." : undefined;
+  return (
+    <Dialog
+      title="Add project member"
+      description="Create or update an OAO principal in the current project. WorkOS users must also be provisioned to this project before they can sign in."
+      wide
+      onClose={onClose}
+      onSubmit={(event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        if (!subjectError && !scopesError)
+          onSubmit({ subject: subject.trim(), role, scopes: [...scopes] });
+      }}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            type="submit"
+            loading={pending}
+            disabled={Boolean(subjectError || scopesError)}
+          >
+            {pending ? "Adding…" : "Add member"}
+          </Button>
+        </>
+      }
+    >
+      <Field
+        label="Principal subject"
+        hint="Use a stable internal subject or email. This value is not a WorkOS invitation."
+        {...(subject.length > 0 && subjectError ? { error: subjectError } : {})}
+      >
+        <Input
+          autoFocus
+          value={subject}
+          maxLength={500}
+          placeholder="operator@example.com"
+          onChange={(event) => setSubject(event.target.value)}
+        />
+      </Field>
+      <Field label="Project role">
+        <Select
+          value={role}
+          onChange={(event) => setRole(event.target.value as MemberRole)}
+        >
+          <option value="owner">Owner</option>
+          <option value="admin">Admin</option>
+          <option value="member">Member</option>
+          <option value="viewer">Viewer</option>
+        </Select>
+      </Field>
+      <fieldset className="scope-picker">
+        <legend>Project scopes</legend>
+        <span className="hint">
+          Select only the API capabilities this principal needs.
+        </span>
+        <div className="scope-picker-grid">
+          {API_KEY_SCOPES.map(([scope, description]) => (
+            <CheckboxRow
+              key={scope}
+              label={scope}
+              description={description}
+              checked={scopes.has(scope)}
+              onChange={(event) => {
+                setScopes((current) => {
+                  const next = new Set(current);
+                  if (event.target.checked) next.add(scope);
+                  else next.delete(scope);
+                  return next;
+                });
+              }}
+            />
+          ))}
+        </div>
+        {scopesError ? <FormError>{scopesError}</FormError> : null}
+      </fieldset>
+      {error ? <FormError>{error.message}</FormError> : null}
+    </Dialog>
+  );
+}
+
+function RemoveMemberDialog({
+  member,
+  pending,
+  error,
+  onClose,
+  onConfirm,
+}: {
+  readonly member: SettingsMember;
+  readonly pending: boolean;
+  readonly error: Error | null;
+  readonly onClose: () => void;
+  readonly onConfirm: () => void;
+}) {
+  return (
+    <Dialog
+      title={`Remove ${member.name}`}
+      description="This removes the principal's membership from the current project. It does not delete the WorkOS user."
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button variant="danger" loading={pending} onClick={onConfirm}>
+            {pending ? "Removing…" : "Remove member"}
+          </Button>
+        </>
+      }
+    >
+      <Alert tone="warning" title="Project access will be revoked">
+        {member.subject} will no longer resolve as a member of this project.
+      </Alert>
+      {error ? <FormError>{error.message}</FormError> : null}
+    </Dialog>
+  );
+}
 
 function CreateApiKeyDialog({
   pending,

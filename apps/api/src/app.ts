@@ -1718,9 +1718,20 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           "p.id",
         );
         const result = await tx.query(
-          `SELECT p.id,pm.organization_id,pm.project_id,pm.principal_id,p.kind,p.subject,p.scopes,pm.role,pm.created_at
+          `SELECT p.id,pm.organization_id,pm.project_id,pm.principal_id,
+                  p.kind,p.subject,p.scopes,identity.display_name,identity.email,
+                  pm.role,pm.created_at
          FROM oao.project_members pm JOIN oao.principals p
            ON p.organization_id=pm.organization_id AND p.project_id=pm.project_id AND p.id=pm.principal_id
+         LEFT JOIN LATERAL (
+           SELECT ai.display_name,ai.email
+           FROM oao.auth_identities ai
+           WHERE ai.organization_id=pm.organization_id
+             AND ai.project_id=pm.project_id
+             AND ai.principal_id=pm.principal_id
+           ORDER BY (ai.provider='workos') DESC,ai.updated_at DESC
+           LIMIT 1
+         ) identity ON true
          WHERE pm.organization_id=$1 AND pm.project_id=$2${condition.sql}
          ORDER BY pm.created_at DESC,pm.principal_id DESC LIMIT $${3 + condition.values.length}`,
           [
@@ -1754,17 +1765,33 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           execute: async () => {
             const id = randomUUID();
             const result = await tx.query(
-              `WITH created AS (
+              `WITH principal AS (
                INSERT INTO oao.principals (organization_id,project_id,id,kind,subject,scopes)
                VALUES ($1,$2,$3,'human',$4,$5)
                ON CONFLICT (organization_id,project_id,kind,subject)
                DO UPDATE SET scopes=EXCLUDED.scopes RETURNING id,kind,subject,scopes
+             ), membership AS (
+               INSERT INTO oao.project_members (
+                 organization_id,project_id,principal_id,role,created_by_principal_id
+               )
+               SELECT $1,$2,id,$6,$7 FROM principal
+               ON CONFLICT (organization_id,project_id,principal_id)
+               DO UPDATE SET role=EXCLUDED.role,updated_at=clock_timestamp()
+               RETURNING organization_id,project_id,principal_id,role,created_at
              )
-             INSERT INTO oao.project_members (organization_id,project_id,principal_id,role)
-             SELECT $1,$2,id,$6 FROM created
-             ON CONFLICT (organization_id,project_id,principal_id)
-             DO UPDATE SET role=EXCLUDED.role
-             RETURNING principal_id AS id,organization_id,project_id,principal_id,role,created_at`,
+             SELECT p.id,pm.organization_id,pm.project_id,pm.principal_id,
+                    p.kind,p.subject,p.scopes,identity.display_name,identity.email,
+                    pm.role,pm.created_at
+             FROM membership pm JOIN principal p ON p.id=pm.principal_id
+             LEFT JOIN LATERAL (
+               SELECT ai.display_name,ai.email
+               FROM oao.auth_identities ai
+               WHERE ai.organization_id=pm.organization_id
+                 AND ai.project_id=pm.project_id
+                 AND ai.principal_id=pm.principal_id
+               ORDER BY (ai.provider='workos') DESC,ai.updated_at DESC
+               LIMIT 1
+             ) identity ON true`,
               [
                 actor.organizationId,
                 actor.projectId,
@@ -1772,6 +1799,7 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
                 subject,
                 scopes,
                 role,
+                actor.id,
               ],
             );
             const member = publicValue(result.rows[0]) as Readonly<
@@ -1809,9 +1837,27 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           status: 200,
           execute: async () => {
             const result = await tx.query(
-              `UPDATE oao.project_members SET role=$4,updated_at=clock_timestamp()
-             WHERE organization_id=$1 AND project_id=$2 AND principal_id=$3
-             RETURNING principal_id AS id,organization_id,project_id,principal_id,role,created_at`,
+              `WITH membership AS (
+               UPDATE oao.project_members SET role=$4,updated_at=clock_timestamp()
+               WHERE organization_id=$1 AND project_id=$2 AND principal_id=$3
+               RETURNING organization_id,project_id,principal_id,role,created_at
+             )
+             SELECT p.id,pm.organization_id,pm.project_id,pm.principal_id,
+                    p.kind,p.subject,p.scopes,identity.display_name,identity.email,
+                    pm.role,pm.created_at
+             FROM membership pm JOIN oao.principals p
+               ON p.organization_id=pm.organization_id
+              AND p.project_id=pm.project_id
+              AND p.id=pm.principal_id
+             LEFT JOIN LATERAL (
+               SELECT ai.display_name,ai.email
+               FROM oao.auth_identities ai
+               WHERE ai.organization_id=pm.organization_id
+                 AND ai.project_id=pm.project_id
+                 AND ai.principal_id=pm.principal_id
+               ORDER BY (ai.provider='workos') DESC,ai.updated_at DESC
+               LIMIT 1
+             ) identity ON true`,
               [
                 actor.organizationId,
                 actor.projectId,
@@ -2065,6 +2111,7 @@ function publicPrincipal(value: Principal) {
     projectId: value.projectId,
     kind: value.kind,
     subject: value.subject,
+    ...(value.displayName ? { displayName: value.displayName } : {}),
     scopes: [...value.scopes],
   };
 }

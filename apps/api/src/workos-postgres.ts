@@ -41,12 +41,14 @@ export class PostgresWorkOsTenantResolver implements WorkOsTenantResolver {
     );
     const row = result.rows[0];
     if (!row) return undefined;
+    const displayName = identity.displayName?.trim() || identity.email?.trim();
     return {
       id: brandedId<PrincipalId>(row.principal_id),
       organizationId: row.organization_id as Principal["organizationId"],
       projectId: row.project_id as Principal["projectId"],
       kind: "human",
       subject: row.subject,
+      ...(displayName ? { displayName } : {}),
       scopes: new Set(row.scopes as AuthorizationScope[]),
     };
   }

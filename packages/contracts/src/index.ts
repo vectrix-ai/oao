@@ -4,6 +4,20 @@ const IdSchema = v.pipe(v.string(), v.uuid());
 const TimestampSchema = v.pipe(v.string(), v.isoTimestamp());
 const JsonObjectSchema = v.record(v.string(), v.unknown());
 
+export const PublicPrincipalSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  kind: v.picklist(["human", "api_key", "service"]),
+  subject: v.pipe(v.string(), v.minLength(1), v.maxLength(500)),
+  displayName: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(200))),
+  scopes: v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(120))),
+});
+
+export const AuthLogoutResultSchema = v.object({
+  redirectUrl: v.optional(v.pipe(v.string(), v.url())),
+});
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
@@ -748,6 +762,37 @@ export const ProjectSchema = v.object({
   createdAt: TimestampSchema,
 });
 
+export const ProjectMemberRoleSchema = v.picklist([
+  "owner",
+  "admin",
+  "member",
+  "viewer",
+]);
+
+export const ProjectMemberSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  principalId: IdSchema,
+  kind: v.picklist(["human", "api_key", "service"]),
+  subject: v.pipe(v.string(), v.minLength(1), v.maxLength(500)),
+  displayName: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(200))),
+  email: v.optional(v.pipe(v.string(), v.email(), v.maxLength(320))),
+  scopes: v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(120))),
+  role: ProjectMemberRoleSchema,
+  createdAt: TimestampSchema,
+});
+
+export const CreateProjectMemberInputSchema = v.strictObject({
+  subject: v.pipe(v.string(), v.minLength(1), v.maxLength(500)),
+  role: ProjectMemberRoleSchema,
+  scopes: v.pipe(v.array(v.string()), v.minLength(1)),
+});
+
+export const UpdateProjectMemberInputSchema = v.strictObject({
+  role: ProjectMemberRoleSchema,
+});
+
 export const AgentDefinitionSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
@@ -1453,6 +1498,14 @@ export const ApiErrorSchema = v.object({
 
 export type Organization = v.InferOutput<typeof OrganizationSchema>;
 export type Project = v.InferOutput<typeof ProjectSchema>;
+export type ProjectMemberRole = v.InferOutput<typeof ProjectMemberRoleSchema>;
+export type ProjectMember = v.InferOutput<typeof ProjectMemberSchema>;
+export type CreateProjectMemberInput = v.InferOutput<
+  typeof CreateProjectMemberInputSchema
+>;
+export type UpdateProjectMemberInput = v.InferOutput<
+  typeof UpdateProjectMemberInputSchema
+>;
 export type AgentDefinition = v.InferOutput<typeof AgentDefinitionSchema>;
 export type AgentVersion = v.InferOutput<typeof AgentVersionSchema>;
 export type Skill = v.InferOutput<typeof SkillSchema>;
@@ -2122,6 +2175,8 @@ export function parseModelRoutingPolicy(input: unknown): ModelRoutingPolicy {
 }
 
 export type ModelRoutingPolicy = v.InferOutput<typeof ModelRoutingPolicySchema>;
+export type PublicPrincipal = v.InferOutput<typeof PublicPrincipalSchema>;
+export type AuthLogoutResult = v.InferOutput<typeof AuthLogoutResultSchema>;
 export type ModelPresetOrigin = v.InferOutput<typeof ModelPresetOriginSchema>;
 export type ModelProviderType = v.InferOutput<typeof ModelProviderTypeSchema>;
 export type McpTransport = v.InferOutput<typeof McpTransportSchema>;

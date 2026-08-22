@@ -20,8 +20,10 @@ import type {
   AgentToolInput,
   AuditEntry,
   AuditExport,
+  AuthLogoutResult,
   AuthSession,
   CreateAgentInput,
+  CreateProjectMemberInput,
   CreatedSession,
   DelegationMessageResult,
   CreateSessionInput,
@@ -67,6 +69,7 @@ import type {
   ToolClaim,
   ToolResultEnvelope,
   ToolResultSubmission,
+  UpdateProjectMemberInput,
   UpdateProjectSandboxProviderConfigurationInput,
   WriteOptions,
   McpServer,
@@ -177,7 +180,7 @@ export class OaoClient {
     });
   }
 
-  logout(options?: RequestOptions): Promise<void> {
+  logout(options?: RequestOptions): Promise<AuthLogoutResult> {
     return this.#request(this.routes.auth.logout, {
       ...options,
       method: "POST",
@@ -225,11 +228,7 @@ export class OaoClient {
 
   addMember(
     projectId: string,
-    input: {
-      readonly subject: string;
-      readonly role: Member["role"];
-      readonly scopes: readonly string[];
-    },
+    input: CreateProjectMemberInput,
     options: WriteOptions,
   ): Promise<Member> {
     return this.#write(this.routes.members(projectId), "POST", input, options);
@@ -238,7 +237,7 @@ export class OaoClient {
   updateMember(
     projectId: string,
     memberId: string,
-    input: { readonly role: Member["role"] },
+    input: UpdateProjectMemberInput,
     options: WriteOptions,
   ): Promise<Member> {
     return this.#write(

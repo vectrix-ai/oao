@@ -292,3 +292,35 @@ test("official AuthKit transport builds the configured server callback URL", asy
   assert.equal(url.searchParams.get("state"), "server-state");
   assert.equal(url.searchParams.get("organization_id"), "org_01");
 });
+
+test("official AuthKit transport falls back to first and last name metadata", async () => {
+  const workos = {
+    userManagement: {
+      authenticateWithCode: async () => ({
+        accessToken: "not-a-jwt",
+        sealedSession: "sealed-session",
+        organizationId: "org_01",
+        user: {
+          id: "user_01",
+          email: "developer@example.test",
+          name: null,
+          firstName: "Ben",
+          lastName: "Selleslagh",
+        },
+      }),
+    },
+  } as unknown as WorkOS;
+  const transport = new WorkOsNodeAuthTransport({
+    apiKey: "sk_test_not-a-real-credential",
+    clientId: "client_test",
+    cookiePassword: "test-cookie-password-at-least-32-characters",
+    workos,
+  });
+
+  const session = await transport.exchangeCode({
+    code: "code_01",
+    redirectUri: "https://app.example.test/v1/auth/callback",
+  });
+
+  assert.equal(session.identity.displayName, "Ben Selleslagh");
+});

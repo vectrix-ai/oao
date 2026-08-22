@@ -34,6 +34,8 @@ export interface Principal extends TenantIdentity {
   readonly id: PrincipalId;
   readonly kind: "human" | "api_key" | "service";
   readonly subject: string;
+  /** Optional presentation metadata supplied by the active auth provider. */
+  readonly displayName?: string;
   readonly scopes: ReadonlySet<AuthorizationScope>;
 }
 

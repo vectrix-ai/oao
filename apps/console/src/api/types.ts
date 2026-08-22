@@ -501,6 +501,7 @@ export type CreatedApiKey = ApiKeySummary &
 
 export interface SettingsData {
   readonly organization: {
+    readonly id: string;
     readonly name: string;
     readonly slug: string;
     readonly createdAt: string;
@@ -509,12 +510,17 @@ export interface SettingsData {
     readonly id: string;
     readonly name: string;
     readonly slug: string;
+    readonly createdAt: string;
+    readonly current: boolean;
   }[];
   readonly members: readonly {
     readonly id: string;
     readonly name: string;
-    readonly email: string;
-    readonly role: "owner" | "admin" | "member" | "operator" | "viewer";
+    readonly subject: string;
+    readonly email?: string;
+    readonly role: "owner" | "admin" | "member" | "viewer";
+    readonly scopes: readonly string[];
+    readonly current: boolean;
   }[];
   readonly apiKeys: readonly ApiKeySummary[];
   readonly hosting: readonly {
@@ -538,6 +544,7 @@ export interface RunFileUpload {
 
 export interface ConsoleApi {
   getContext(): Promise<ProjectContext>;
+  logout(): Promise<void>;
   listAgents(filters: ListFilters): Promise<PageResult<AgentSummary>>;
   getAgent(id: string): Promise<AgentDetail>;
   createAgent(input: {
@@ -688,6 +695,16 @@ export interface ConsoleApi {
   ): Promise<ModelCatalogList>;
   createModelPreset(input: CreateModelPresetInput): Promise<ModelPreset>;
   getSettings(): Promise<SettingsData>;
+  addMember(input: {
+    readonly subject: string;
+    readonly role: SettingsData["members"][number]["role"];
+    readonly scopes: readonly string[];
+  }): Promise<void>;
+  updateMemberRole(
+    memberId: string,
+    role: SettingsData["members"][number]["role"],
+  ): Promise<void>;
+  removeMember(memberId: string): Promise<void>;
   createApiKey(input: CreateApiKeyInput): Promise<CreatedApiKey>;
   connectEvents(input: {
     readonly after?: string;

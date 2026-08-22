@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  DEVELOPMENT_PRINCIPAL,
   DevelopmentAuthAdapter,
   type AuthCallbackInput,
   type AuthLoginInput,
@@ -134,6 +135,24 @@ test("development auth lifecycle keeps tokens in HttpOnly cookies", async () => 
   assert.match(setCookie, /HttpOnly/u);
   assert.doesNotMatch(setCookie, /; Secure/u);
   assert.doesNotMatch(await login.text(), /oao-development-session/u);
+});
+
+test("authentication responses expose optional provider display metadata", async () => {
+  const app = createApiApp({
+    store: new PostgresApiStore(unusedPool, "unit-test-api-key-pepper"),
+    auth: new DevelopmentAuthAdapter({
+      principal: {
+        ...DEVELOPMENT_PRINCIPAL,
+        displayName: "Ben Selleslagh",
+      },
+    }),
+    runtimeCommands: unusedRuntimeCommands,
+  });
+  const response = await app.request("/v1/auth/development/login", {
+    method: "POST",
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).principal.displayName, "Ben Selleslagh");
 });
 
 test("cookie-authenticated writes enforce APP_ORIGIN", async () => {

@@ -426,10 +426,16 @@ function identityFromUser(
   user: AuthenticationResponse["user"],
   organizationId?: string,
 ): WorkOsIdentity {
+  const displayName =
+    user.name?.trim() ||
+    [user.firstName, user.lastName]
+      .filter((part): part is string => Boolean(part?.trim()))
+      .map((part) => part.trim())
+      .join(" ");
   return {
     subject: user.id,
     email: user.email,
-    ...(user.name === null ? {} : { displayName: user.name }),
+    ...(displayName ? { displayName } : {}),
     ...(organizationId === undefined
       ? {}
       : { externalOrganizationId: organizationId }),

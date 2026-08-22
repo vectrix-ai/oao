@@ -3,9 +3,14 @@ import test from "node:test";
 import * as v from "valibot";
 import {
   ApiErrorSchema,
+  AuthLogoutResultSchema,
   MODEL_PRESET_KEY_PATTERN,
   PLATFORM_MAX_TURNS,
   ProductEventSchema,
+  ProjectMemberSchema,
+  CreateProjectMemberInputSchema,
+  UpdateProjectMemberInputSchema,
+  PublicPrincipalSchema,
   RunSchema,
   ToolCallSchema,
   parseCreateModelPresetInput,
@@ -22,6 +27,55 @@ import {
 
 const id = "00000000-0000-4000-8000-000000000001";
 const timestamp = "2026-08-20T10:00:00.000Z";
+
+test("authentication contracts expose optional presentation metadata and logout redirects", () => {
+  const principal = v.parse(PublicPrincipalSchema, {
+    id,
+    organizationId: id,
+    projectId: id,
+    kind: "human",
+    subject: "development-user",
+    displayName: "Ben Selleslagh",
+    scopes: ["*"],
+  });
+  assert.equal(principal.displayName, "Ben Selleslagh");
+  assert.deepEqual(v.parse(AuthLogoutResultSchema, {}), {});
+  assert.equal(
+    v.parse(AuthLogoutResultSchema, {
+      redirectUrl: "https://authkit.example.test/logout",
+    }).redirectUrl,
+    "https://authkit.example.test/logout",
+  );
+});
+
+test("project member contracts preserve safe identity metadata and roles", () => {
+  const member = v.parse(ProjectMemberSchema, {
+    id,
+    organizationId: id,
+    projectId: id,
+    principalId: id,
+    kind: "human",
+    subject: "development-user",
+    displayName: "Ben Selleslagh",
+    email: "developer@example.test",
+    scopes: ["*"],
+    role: "owner",
+    createdAt: timestamp,
+  });
+  assert.equal(member.displayName, "Ben Selleslagh");
+  assert.deepEqual(
+    v.parse(CreateProjectMemberInputSchema, {
+      subject: "reviewer@example.test",
+      role: "viewer",
+      scopes: ["agent:read"],
+    }).scopes,
+    ["agent:read"],
+  );
+  assert.equal(
+    v.parse(UpdateProjectMemberInputSchema, { role: "admin" }).role,
+    "admin",
+  );
+});
 
 test("run and event public contracts accept safe wire representations", () => {
   assert.equal(

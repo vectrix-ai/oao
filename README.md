@@ -20,7 +20,8 @@ The implemented local profile runs:
 - Hono REST/SSE API
 - Flue runtime worker
 - PostgreSQL canonical/control/read-model storage and wake queue
-- Development identity plus real project-scoped model and Daytona adapters
+- Configurable development or WorkOS identity plus real project-scoped model
+  and Daytona adapters
 
 See [docs/architecture.md](docs/architecture.md) for boundaries and implementation order.
 
@@ -38,9 +39,48 @@ pnpm dev:local
 `dev:local` requires a running Docker-compatible daemon. It does not start
 Docker Desktop or Colima. The command starts PostgreSQL if necessary, builds the
 workspace packages needed by the source watchers, applies migrations, seeds the
-development tenant, and launches the API on port 3000, runtime worker on 8788,
-and console on 5173. Open <http://127.0.0.1:5173>. Ctrl-C stops every child and
+development tenant when `AUTH_PROVIDER=development`, and launches the API on
+port 3000, runtime worker on 8788, and console on 5173. Set
+`AUTH_PROVIDER=workos` with the required WorkOS values to disable deterministic
+development login. Open <http://127.0.0.1:5173>. Ctrl-C stops every child and
 stops the PostgreSQL container only when this invocation started it.
+
+### Local authentication
+
+The local launcher selects one authentication provider at process startup.
+Change `.env`, stop the current `pnpm dev:local` process, and start it again
+after switching modes.
+
+To enable WorkOS AuthKit and disable the deterministic development user:
+
+```dotenv
+AUTH_PROVIDER=workos
+NODE_ENV=development
+APP_ORIGIN=http://127.0.0.1:5173
+API_KEY_PEPPER=generate-a-random-secret
+WORKOS_API_KEY=sk_test_...
+WORKOS_CLIENT_ID=client_...
+WORKOS_COOKIE_PASSWORD=at-least-32-random-characters
+WORKOS_WEBHOOK_SECRET=whsec_...
+WORKOS_CALLBACK_URL=http://127.0.0.1:5173/v1/auth/callback
+```
+
+Register the exact callback and `http://127.0.0.1:5173` sign-out URI in the
+WorkOS Staging application. A WorkOS identity must also be explicitly linked to
+an existing OAO organization, project, principal, and membership using the
+`provision:workos` command documented in
+[`apps/api/README.md`](apps/api/README.md).
+
+To disable WorkOS and restore credential-free development authentication:
+
+```dotenv
+AUTH_PROVIDER=development
+NODE_ENV=development
+```
+
+WorkOS variables may remain in the ignored local `.env`; the API does not read
+them while the development provider is selected. Never commit `.env` or real
+provider credentials.
 
 There is no runnable fake model or sandbox profile. `.env.example` documents
 the platform encryption key used for project-scoped model and Daytona

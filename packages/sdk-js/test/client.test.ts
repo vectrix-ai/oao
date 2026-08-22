@@ -32,6 +32,74 @@ test("route builders scope resources to a project and allow a custom prefix", ()
   );
 });
 
+test("client returns the provider logout redirect and includes browser credentials", async () => {
+  const requests: Request[] = [];
+  const redirectUrl = "https://authkit.example.test/logout";
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    credentials: "include",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({ redirectUrl });
+    },
+  });
+
+  assert.deepEqual(await client.logout(), { redirectUrl });
+  assert.equal(requests[0]?.url, "https://api.example.test/v1/auth/logout");
+  assert.equal(requests[0]?.method, "POST");
+  assert.equal(requests[0]?.credentials, "include");
+});
+
+test("client manages project membership with exact project-scoped writes", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({
+        id: "member-1",
+        role: "member",
+        data: [],
+        pageInfo: { hasMore: false, nextCursor: null },
+      });
+    },
+  });
+
+  await client.addMember(
+    "project-1",
+    {
+      subject: "reviewer@example.test",
+      role: "viewer",
+      scopes: ["agent:read"],
+    },
+    { idempotencyKey: "member-create-1" },
+  );
+  await client.updateMember(
+    "project-1",
+    "member-1",
+    { role: "member" },
+    { idempotencyKey: "member-update-1" },
+  );
+  await client.removeMember("project-1", "member-1", {
+    idempotencyKey: "member-remove-1",
+  });
+
+  assert.equal(
+    requests[0]?.url,
+    "https://api.example.test/v1/projects/project-1/members",
+  );
+  assert.equal(requests[0]?.method, "POST");
+  assert.deepEqual(await requests[0]?.json(), {
+    subject: "reviewer@example.test",
+    role: "viewer",
+    scopes: ["agent:read"],
+  });
+  assert.equal(requests[1]?.method, "PATCH");
+  assert.deepEqual(await requests[1]?.json(), { role: "member" });
+  assert.equal(requests[2]?.method, "DELETE");
+  assert.equal(requests[2]?.headers.get("idempotency-key"), "member-remove-1");
+});
+
 test("client manages redacted MCP resources", async () => {
   const requests: Request[] = [];
   const client = new OaoClient({

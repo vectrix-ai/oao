@@ -13,6 +13,10 @@ import type {
   Page,
   ProductEvent,
   Project,
+  ProjectMember,
+  ProjectMemberRole,
+  CreateProjectMemberInput,
+  UpdateProjectMemberInput,
   ProjectSandboxProvider,
   ProjectStorageProvider,
   RunFile,
@@ -32,6 +36,8 @@ import type {
   RotateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
   CreateMcpToolsetInput,
+  PublicPrincipal,
+  AuthLogoutResult,
 } from "@oao/contracts";
 
 export type {
@@ -49,6 +55,10 @@ export type {
   Page,
   ProductEvent,
   Project,
+  ProjectMember,
+  ProjectMemberRole,
+  CreateProjectMemberInput,
+  UpdateProjectMemberInput,
   ProjectSandboxProvider,
   ProjectStorageProvider,
   RunFile,
@@ -68,6 +78,8 @@ export type {
   RotateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
   CreateMcpToolsetInput,
+  PublicPrincipal,
+  AuthLogoutResult,
 };
 
 export interface McpServerList {
@@ -101,28 +113,11 @@ export interface ReadinessStatus {
 
 export interface AuthSession {
   readonly expiresAt: string;
-  readonly principal: {
-    readonly id: string;
-    readonly organizationId: string;
-    readonly projectId: string;
-    readonly kind: "human" | "api_key" | "service";
-    readonly subject: string;
-    readonly scopes: readonly string[];
-  };
+  readonly principal: PublicPrincipal;
 }
 
-export interface Member {
-  readonly id: string;
-  readonly organizationId: string;
-  readonly projectId: string;
-  readonly principalId: string;
-  readonly subject?: string;
-  readonly kind?: "human" | "api_key" | "service";
-  readonly scopes?: readonly string[];
-  readonly email?: string;
-  readonly role: "owner" | "admin" | "member" | "viewer";
-  readonly createdAt: string;
-}
+/** @deprecated Use ProjectMember. */
+export type Member = ProjectMember;
 
 export interface PlatformApiKey {
   readonly id: string;

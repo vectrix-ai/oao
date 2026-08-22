@@ -18,6 +18,7 @@ import type {
   ModelPreset,
   PageResult,
   PendingWork,
+  ProjectContext,
   ProjectModelProvider,
   ProjectSandboxProvider,
   ProjectStorageProvider,
@@ -625,30 +626,45 @@ const pendingSeed: PendingWork[] = [
 
 const settingsSeed: SettingsData = {
   organization: {
+    id: ORG_ID,
     name: "Example operations",
     slug: "example-operations",
     createdAt: "2026-07-14T09:00:00.000Z",
   },
   projects: [
-    { id: PROJECT_ID, name: "Managed agents", slug: "managed-agents" },
+    {
+      id: PROJECT_ID,
+      name: "Managed agents",
+      slug: "managed-agents",
+      createdAt: "2026-07-14T09:00:00.000Z",
+      current: true,
+    },
     {
       id: "23232323-2323-4232-8232-232323232323",
       name: "Evaluation lab",
       slug: "evaluation-lab",
+      createdAt: "2026-08-01T09:00:00.000Z",
+      current: false,
     },
   ],
   members: [
     {
       id: principalId,
       name: "Demo Operator",
+      subject: "demo.operator@example.test",
       email: "demo.operator@example.test",
       role: "owner",
+      scopes: ["*"],
+      current: true,
     },
     {
       id: "34343434-3434-4343-8343-343434343434",
       name: "Review Operator",
+      subject: "review.operator@example.test",
       email: "review.operator@example.test",
-      role: "operator",
+      role: "member",
+      scopes: ["agent:read", "session:read", "run:read"],
+      current: false,
     },
   ],
   apiKeys: [
@@ -813,6 +829,9 @@ export class DemoConsoleApi implements ConsoleApi {
   #skillDrafts: SkillDraft[] = [];
   #skillFiles = new Map<string, readonly SkillFileInput[]>();
   #apiKeys = structuredClone(settingsSeed.apiKeys) as ApiKeySummary[];
+  #members = structuredClone(
+    settingsSeed.members,
+  ) as SettingsData["members"][number][];
   #modelPresets = structuredClone(modelPresetsSeed) as ModelPreset[];
   #modelProviders = structuredClone(
     modelProvidersSeed,
@@ -859,7 +878,7 @@ export class DemoConsoleApi implements ConsoleApi {
     );
   }
 
-  async getContext() {
+  async getContext(): Promise<ProjectContext> {
     return {
       organization: { id: ORG_ID, name: "Example operations" },
       project: { id: PROJECT_ID, name: "Managed agents" },
@@ -878,6 +897,8 @@ export class DemoConsoleApi implements ConsoleApi {
       ],
     };
   }
+
+  async logout(): Promise<void> {}
 
   async listAgents(filters: ListFilters) {
     this.#guard();
@@ -2185,7 +2206,66 @@ export class DemoConsoleApi implements ConsoleApi {
 
   async getSettings() {
     this.#guard();
-    return structuredClone({ ...settingsSeed, apiKeys: this.#apiKeys });
+    return structuredClone({
+      ...settingsSeed,
+      members: this.#members,
+      apiKeys: this.#apiKeys,
+    });
+  }
+
+  async addMember(
+    input: Parameters<ConsoleApi["addMember"]>[0],
+  ): Promise<void> {
+    this.#guard();
+    const existing = this.#members.find(
+      (member) => member.subject === input.subject,
+    );
+    if (existing) {
+      this.#members = this.#members.map((member) =>
+        member.id === existing.id
+          ? { ...member, role: input.role, scopes: [...input.scopes] }
+          : member,
+      );
+      return;
+    }
+    const name = input.subject.includes("@")
+      ? input.subject
+          .slice(0, input.subject.indexOf("@"))
+          .replaceAll(/[._-]+/gu, " ")
+      : input.subject.replaceAll(/[._-]+/gu, " ");
+    this.#members = [
+      {
+        id: crypto.randomUUID(),
+        name: name || "Project member",
+        subject: input.subject,
+        ...(input.subject.includes("@") ? { email: input.subject } : {}),
+        role: input.role,
+        scopes: [...input.scopes],
+        current: false,
+      },
+      ...this.#members,
+    ];
+  }
+
+  async updateMemberRole(
+    memberId: string,
+    role: SettingsData["members"][number]["role"],
+  ): Promise<void> {
+    this.#guard();
+    if (!this.#members.some((member) => member.id === memberId))
+      throw new Error("Project member not found");
+    this.#members = this.#members.map((member) =>
+      member.id === memberId ? { ...member, role } : member,
+    );
+  }
+
+  async removeMember(memberId: string): Promise<void> {
+    this.#guard();
+    const member = this.#members.find((entry) => entry.id === memberId);
+    if (!member) throw new Error("Project member not found");
+    if (member.current)
+      throw new Error("The active principal cannot remove itself");
+    this.#members = this.#members.filter((entry) => entry.id !== memberId);
   }
 
   async createApiKey(input: CreateApiKeyInput): Promise<CreatedApiKey> {

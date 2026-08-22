@@ -185,6 +185,7 @@ test(
           workosUserId: "user_api_integration",
           workosOrganizationId: "org_api_integration",
           email: "integration@example.test",
+          displayName: "API Integration User",
         };
         await provisionWorkOsIdentity(pool, input);
         await provisionWorkOsIdentity(pool, input);
@@ -321,6 +322,79 @@ test(
         403,
       );
     });
+
+    await t.test(
+      "organization and project member views expose identity metadata and lifecycle actions",
+      async () => {
+        const organization = await app.request(
+          `/v1/organizations/${integrationPrincipal.organizationId}`,
+        );
+        assert.equal(organization.status, 200);
+        assert.equal((await organization.json()).slug, "api-integration");
+
+        const projects = await app.request("/v1/projects?limit=100");
+        assert.equal(projects.status, 200);
+        assert.equal((await projects.json()).data[0]?.slug, "api-integration");
+
+        const initialMembers = await app.request(`${projectPath}/members`);
+        assert.equal(initialMembers.status, 200);
+        const initialMember = (await initialMembers.json()).data.find(
+          (member: { readonly id: string }) =>
+            member.id === integrationPrincipal.id,
+        );
+        assert.equal(initialMember?.displayName, "API Integration User");
+        assert.equal(initialMember?.email, "integration@example.test");
+
+        const createdResponse = await app.request(
+          `${projectPath}/members`,
+          jsonRequest(
+            {
+              subject: "reviewer@example.test",
+              role: "viewer",
+              scopes: ["agent:read"],
+            },
+            "member-create-1",
+          ),
+        );
+        assert.equal(createdResponse.status, 201);
+        const created = (await createdResponse.json()) as {
+          readonly id: string;
+          readonly subject: string;
+          readonly role: string;
+          readonly scopes: readonly string[];
+        };
+        assert.equal(created.subject, "reviewer@example.test");
+        assert.equal(created.role, "viewer");
+        assert.deepEqual(created.scopes, ["agent:read"]);
+
+        const updatedResponse = await app.request(
+          `${projectPath}/members/${created.id}`,
+          {
+            method: "PATCH",
+            headers: {
+              "content-type": "application/json",
+              "idempotency-key": "member-update-1",
+            },
+            body: JSON.stringify({ role: "member" }),
+          },
+        );
+        assert.equal(updatedResponse.status, 200);
+        assert.equal((await updatedResponse.json()).role, "member");
+
+        const removedResponse = await app.request(
+          `${projectPath}/members/${created.id}`,
+          {
+            method: "DELETE",
+            headers: { "idempotency-key": "member-remove-1" },
+          },
+        );
+        assert.equal(removedResponse.status, 200);
+        assert.deepEqual(await removedResponse.json(), {
+          id: created.id,
+          removed: true,
+        });
+      },
+    );
 
     let agentId = "";
     let disabledAgentVersionId = "";

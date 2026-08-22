@@ -19,6 +19,58 @@ Idempotency-Key: unique-key-for-this-logical-write
 
 `Idempotency-Key` is required for operations that change application state.
 
+## Browser authentication
+
+| Method | Path             | Purpose                                                    |
+| ------ | ---------------- | ---------------------------------------------------------- |
+| `POST` | `/auth/login`    | Start hosted authentication and return an HTTPS redirect.  |
+| `GET`  | `/auth/callback` | Validate one-time state and set HTTP-only session cookies. |
+| `POST` | `/auth/refresh`  | Refresh a cookie-authenticated browser session.            |
+| `POST` | `/auth/logout`   | Clear OAO cookies and end the provider session.            |
+| `GET`  | `/context`       | Return the active tenant, project, and public principal.   |
+
+`GET /context` returns `principal` with `id`, `organizationId`, `projectId`,
+`kind`, internal `subject`, `scopes`, and optional `displayName`, plus the
+current organization, project, available tenant choices, model presets, and
+`authProvider`. `displayName` is presentation metadata from the active identity
+provider; authorization continues to use the PostgreSQL principal and scopes.
+
+`POST /auth/logout` requires the current cookie session, clears both session and
+refresh cookies, and returns `{}` or `{ "redirectUrl": "https://..." }`. The
+console follows the provider redirect when present so the hosted WorkOS session
+is ended as well. Cookie-authenticated writes require an allowed `Origin` and an
+`Idempotency-Key`.
+
+## Organizations, projects, and members
+
+Organization and project reads expose the active PostgreSQL-authoritative
+tenant. The current API does not create projects or switch the authenticated
+project: project bootstrap and WorkOS provisioning remain operator-controlled
+so RLS, principals, memberships, and provider mappings are created together.
+
+| Method   | Path                                       | Purpose                                              |
+| -------- | ------------------------------------------ | ---------------------------------------------------- |
+| `GET`    | `/organizations`                           | List the active principal's organization.            |
+| `GET`    | `/organizations/{organizationId}`          | Read organization identity and creation time.        |
+| `GET`    | `/projects`                                | List projects accessible in the active context.      |
+| `GET`    | `/projects/{projectId}`                    | Read the active project and organization metadata.   |
+| `GET`    | `/projects/{projectId}/members`            | List project principals, roles, and scopes.          |
+| `POST`   | `/projects/{projectId}/members`            | Create or update a project principal and membership. |
+| `PATCH`  | `/projects/{projectId}/members/{memberId}` | Change a project member's role.                      |
+| `DELETE` | `/projects/{projectId}/members/{memberId}` | Remove project membership.                           |
+
+All routes require `project:admin`. Member writes also require an
+`Idempotency-Key`. Create input is `{ subject, role, scopes }`; roles are
+`owner`, `admin`, `member`, or `viewer`. A member response includes the stable
+principal `subject`, safe scopes, role, and optional identity-provider
+`displayName` and `email`. Provider metadata is presentational and does not
+grant access.
+
+Adding a member does not send a WorkOS invitation or create a provider mapping.
+To let that person sign in through WorkOS, provision the existing OAO principal
+with the operator workflow described in [Authentication](/reference/authentication).
+The active principal cannot remove itself.
+
 ## Model providers, presets, and catalog
 
 A published agent version names an immutable model preset. A hosted preset

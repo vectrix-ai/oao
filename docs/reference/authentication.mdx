@@ -112,5 +112,43 @@ cookie-authenticated requests are origin-checked. API-key clients do not need
 the browser cookie or a custom tenant header: the key resolves its organization,
 project, principal, and scopes before tenant queries run.
 
+The context response keeps the PostgreSQL principal `subject` as the stable
+authorization identity and may add provider-supplied `displayName` for the UI.
+For example, a provisioned WorkOS user can display as `Ben Selleslagh` while
+still authorizing as the existing `development-user` principal. The display
+name does not grant scopes or change tenant membership.
+
+When the console has no session, it first tries the development-login endpoint.
+If that endpoint is unavailable in WorkOS mode, it calls `POST /v1/auth/login`
+and navigates to the HTTPS `redirectUrl` returned by the API. The callback then
+sets the HTTP-only session cookies and redirects back to the configured app
+origin. While that navigation is in progress, concurrent console requests reuse
+the same login attempt so they cannot replace its one-time state cookie.
+
+In WorkOS mode, the console shows **Log out** beside the signed-in user. It
+posts to `POST /v1/auth/logout`, which clears OAO's HTTP-only session and
+refresh cookies. When WorkOS returns a hosted logout URL, the console follows
+that HTTPS redirect to end the provider session too. Development auth omits the
+button because local requests intentionally resolve to the deterministic
+development principal without an external session.
+
+## Manage project members
+
+The console's **Organization** and **Projects** pages read the active tenant and
+project directly from the API. Project creation and project switching are not
+exposed in the console yet because those operations must provision the project,
+principal, membership, RLS context, and WorkOS mapping together.
+
+The **Members** page lists project principals with their roles, scopes, and safe
+WorkOS display metadata. A project administrator can add an OAO principal,
+change another member's role, or remove another member. The active principal's
+role and removal actions are disabled in the console to prevent accidental
+self-lockout.
+
+Adding an OAO member is not a WorkOS invitation. For hosted sign-in, first add
+the project principal, then run the explicit WorkOS provisioning flow with that
+principal's ID, the existing organization and project IDs, and the verified
+WorkOS user and organization IDs.
+
 See `apps/api/README.md` in the repository for the exact WorkOS callback,
 webhook, cookie, and local proxy environment variables.
