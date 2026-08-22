@@ -3,10 +3,33 @@
   "theme": "mint",
   "name": "OAO",
   "description": "Build, run, and inspect durable managed agents with OAO.",
+  "logo": {
+    "light": "/logo/oao-wordmark-black.png",
+    "dark": "/logo/oao-wordmark-white.png",
+    "href": "/"
+  },
+  "favicon": "/favicon.svg",
   "colors": {
-    "primary": "#4338CA",
-    "light": "#A5A5F5",
-    "dark": "#7777E9"
+    "primary": "#2a513e",
+    "light": "#82c8a1",
+    "dark": "#4e9d74"
+  },
+  "background": {
+    "color": {
+      "light": "#f8faf9",
+      "dark": "#0b100d"
+    }
+  },
+  "fonts": {
+    "heading": {
+      "family": "Manrope"
+    },
+    "body": {
+      "family": "Inter"
+    }
+  },
+  "appearance": {
+    "default": "system"
   },
   "navigation": {
     "groups": [
