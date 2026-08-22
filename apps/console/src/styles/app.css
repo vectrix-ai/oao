@@ -304,61 +304,74 @@
 }
 
 /* ---------- Agent detail ---------- */
-.detail-grid {
-  display: grid;
-  grid-template-columns: 236px minmax(0, 1fr);
-  gap: var(--sp-5);
-  align-items: start;
-}
-.version-rail {
-  position: sticky;
-  top: calc(var(--topbar-h) + var(--sp-4));
-  display: grid;
-  gap: var(--sp-2);
-}
-.version-list {
-  display: grid;
-  gap: 1px;
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
-  background: var(--border);
-  overflow: hidden;
-}
-.version-item {
-  display: grid;
-  gap: 2px;
-  padding: var(--sp-3);
-  border: 0;
-  border-left: 2px solid transparent;
-  background: var(--surface);
-  text-align: left;
-}
-.version-item:hover {
-  background: var(--surface-2);
-}
-.version-item--active {
-  background: var(--accent-weak);
-  border-left-color: var(--accent);
-}
-.version-item--active:hover {
-  background: var(--accent-weak);
-}
-.version-item .title {
+/* Immutable versions read as one compact strip, so the editor keeps the
+   full page width instead of losing a mostly-empty sidebar column. */
+.version-strip {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2);
-  font-size: 13px;
-  font-weight: 500;
+  gap: var(--sp-3);
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius-2);
+  background: var(--surface);
 }
-.version-item time,
-.version-item code {
+.version-strip > .eyebrow {
+  flex: none;
+}
+.version-strip .muted {
+  margin: 0;
+  font-size: 12px;
+}
+.version-strip-list {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  overflow-x: auto;
+}
+.version-pill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 3px 10px;
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease);
+}
+.version-pill:hover {
+  background: var(--surface-2);
+}
+.version-pill--active {
+  border-color: var(--accent-weak-border);
+  background: var(--accent-weak);
+  color: var(--accent-on-weak);
+  font-weight: 600;
+}
+.version-strip-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+  min-width: 0;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-3);
+  white-space: nowrap;
+}
+.version-strip-meta code {
+  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .editor-stack {
   display: grid;
@@ -397,6 +410,110 @@
 }
 .tool-card details[open] > summary {
   margin-bottom: var(--sp-2);
+}
+
+/* Collapsible tool definition rows in the agent editor. */
+.tool-item {
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius-2);
+  background: var(--surface);
+  overflow: hidden;
+}
+.tool-item-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+.tool-item-row:hover {
+  background: var(--surface-2);
+}
+.tool-item-row .caret {
+  flex: none;
+  color: var(--text-3);
+  transition: transform var(--dur-1) var(--ease);
+}
+.tool-item-row[aria-expanded="true"] .caret {
+  transform: rotate(90deg);
+}
+.tool-item-row > svg:not(.caret) {
+  flex: none;
+  color: var(--warning-fg);
+}
+.tool-item-row code {
+  flex: none;
+  font-family: var(--font-mono);
+}
+.tool-item-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: 12px;
+}
+.tool-item-meta {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+.tool-item-body {
+  display: grid;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border-top: var(--bw) solid var(--border);
+  background: var(--surface-2);
+}
+.tool-item-body > p {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.tool-item-schemas {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.tool-item-schemas > div {
+  min-width: 0;
+}
+.tool-item-schemas h4 {
+  margin: 0 0 var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.tool-item-actions {
+  display: flex;
+  gap: var(--sp-2);
+}
+.tool-preview {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.tool-preview code {
+  font-family: var(--font-mono);
+  color: var(--text);
 }
 
 .skill-explainer {
@@ -1534,6 +1651,9 @@
   gap: var(--sp-3);
 }
 .composer-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
   font-size: 12px;
   color: var(--text-3);
 }
@@ -1722,14 +1842,14 @@
 .storage-row--highlight td {
   background: var(--surface-3);
 }
-.skill-usage-list {
+.usage-list {
   display: grid;
   gap: var(--sp-2);
   margin: 0;
   padding: 0;
   list-style: none;
 }
-.skill-usage-list li {
+.usage-list li {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
@@ -1740,41 +1860,41 @@
   border-radius: var(--radius-1);
   background: var(--surface-2);
 }
-.skill-usage-list li > svg {
+.usage-list li > svg {
   color: var(--text-3);
 }
-.skill-usage-list li.skill-usage--used {
+.usage-list li.usage--used {
   border-color: var(--accent-weak-border);
   background: var(--accent-weak);
 }
-.skill-usage-list li.skill-usage--used > svg {
+.usage-list li.usage--used > svg {
   color: var(--accent-on-weak);
 }
-.skill-usage-name {
+.usage-name {
   display: grid;
   min-width: 0;
 }
-.skill-usage-name strong {
+.usage-name strong {
   overflow: hidden;
   font-size: 12px;
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.skill-usage-name strong a {
+.usage-name strong a {
   color: var(--text);
 }
-.skill-usage-name strong a:hover {
+.usage-name strong a:hover {
   color: var(--accent);
 }
-.skill-usage-name > span {
+.usage-name > span {
   overflow: hidden;
   color: var(--text-3);
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.skill-usage-state {
+.usage-state {
   padding: 1px 6px;
   border-radius: var(--radius-pill);
   color: var(--text-2);
@@ -1782,7 +1902,7 @@
   font-size: 10px;
   white-space: nowrap;
 }
-.skill-usage-state--used {
+.usage-state--used {
   color: var(--success-fg);
   background: var(--success-bg);
 }

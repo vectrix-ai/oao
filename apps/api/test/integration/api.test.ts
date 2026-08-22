@@ -658,6 +658,193 @@ test(
     });
 
     await t.test(
+      "caller results are validated before persistence and normalized for agent retry",
+      async () => {
+        const createdAgent = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "tool-result-validation-agent",
+              name: "Tool result validation agent",
+              config: {
+                systemPrompt: "Retry safe shipment lookups after failures.",
+                modelPreset: baseModelPresetKey,
+                tools: [
+                  {
+                    schemaVersion: 1,
+                    name: "lookup_shipment",
+                    description: "Look up one shipment.",
+                    owner: "caller",
+                    approval: "never",
+                    inputSchema: {
+                      type: "object",
+                      properties: {
+                        reference: { type: "string", minLength: 2 },
+                      },
+                      required: ["reference"],
+                      additionalProperties: false,
+                    },
+                    outputSchema: {
+                      type: "object",
+                      properties: {
+                        status: {
+                          type: "string",
+                          enum: ["in_transit", "delivered", "exception"],
+                        },
+                        eta: { type: ["string", "null"], format: "date-time" },
+                        checkpoints: {
+                          type: "array",
+                          items: { type: "string" },
+                          minItems: 1,
+                        },
+                      },
+                      required: ["status", "eta", "checkpoints"],
+                      additionalProperties: false,
+                    },
+                  },
+                ],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "tool-result-validation-agent-create",
+          ),
+        );
+        assert.equal(
+          createdAgent.status,
+          201,
+          await createdAgent.clone().text(),
+        );
+        const validationAgent = (await createdAgent.json()) as {
+          id: string;
+          latestVersionId: string;
+        };
+        const validationThreadId = randomUUID();
+        const validationSessionId = randomUUID();
+        const validationRunId = randomUUID();
+        await pool.query(
+          `INSERT INTO oao.threads (organization_id,project_id,id,title)
+           VALUES ($1,$2,$3,'Tool result validation')`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            validationThreadId,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.sessions
+             (organization_id,project_id,id,thread_id,agent_version_id)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            validationSessionId,
+            validationThreadId,
+            validationAgent.latestVersionId,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.runs
+             (organization_id,project_id,id,thread_id,session_id,agent_version_id,
+              created_by_principal_id,idempotency_key)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'tool-result-validation-run')`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            validationRunId,
+            validationThreadId,
+            validationSessionId,
+            validationAgent.latestVersionId,
+            integrationPrincipal.id,
+          ],
+        );
+        const toolCallId = randomUUID();
+        const toolRequestKey = `api-validation:${toolCallId}`;
+        await pool.query(
+          "SELECT oao.publish_runtime_tool_call($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            toolCallId,
+            validationRunId,
+            `flue:${toolCallId}`,
+            toolRequestKey,
+            createHash("sha256").update(toolRequestKey).digest(),
+            "lookup_shipment",
+            "caller",
+            { reference: "VX-2048" },
+          ],
+        );
+        const claimed = await app.request(
+          `${projectPath}/tool-calls/${toolCallId}/claim`,
+          jsonRequest({ leaseMs: 60_000 }, "tool-result-validation-claim"),
+        );
+        assert.equal(claimed.status, 200, await claimed.clone().text());
+        const fence = ((await claimed.json()) as { fence: string }).fence;
+        const submitted = await app.request(
+          `${projectPath}/tool-calls/${toolCallId}/result`,
+          jsonRequest(
+            {
+              fence,
+              safeResult: {
+                version: 1,
+                status: "success",
+                value: {
+                  status: "moving",
+                  eta: "not-a-date",
+                  checkpoints: [],
+                },
+              },
+            },
+            "tool-result-validation-submit",
+          ),
+        );
+        assert.equal(submitted.status, 202, await submitted.clone().text());
+        assert.deepEqual(await submitted.json(), {
+          outcome: "submitted",
+          normalizedFailure: {
+            code: "invalid_tool_result",
+            path: "safeResult.value.status",
+          },
+        });
+        const persisted = await pool.query<{
+          stage: string;
+          safe_result: {
+            status: string;
+            error: { code: string; message: string };
+          };
+        }>(
+          `SELECT call.stage,result.safe_result
+           FROM oao.tool_calls call
+           JOIN oao.tool_call_results result
+             ON result.organization_id=call.organization_id
+            AND result.project_id=call.project_id
+            AND result.tool_call_id=call.id
+           WHERE call.organization_id=$1 AND call.project_id=$2 AND call.id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            toolCallId,
+          ],
+        );
+        assert.equal(persisted.rows[0]?.stage, "result_submitted");
+        assert.equal(persisted.rows[0]?.safe_result.status, "failure");
+        assert.equal(
+          persisted.rows[0]?.safe_result.error.code,
+          "invalid_tool_result",
+        );
+        assert.match(
+          persisted.rows[0]?.safe_result.error.message ?? "",
+          /safeResult\.value\.status/u,
+        );
+        assert.doesNotMatch(
+          JSON.stringify(persisted.rows[0]?.safe_result),
+          /not-a-date|moving/u,
+        );
+      },
+    );
+
+    await t.test(
       "agent publication explains incompatible delegate sandboxes",
       async () => {
         const child = await app.request(
@@ -726,6 +913,47 @@ test(
           sandbox: disabledSandbox,
           limits: { maxTurns: 32, timeoutMs: 60_000 },
         };
+        const unsupportedTool = {
+          schemaVersion: 1,
+          name: "invalid",
+          description: "Unsupported schema keyword",
+          owner: "caller",
+          approval: "never",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: {
+                type: "string",
+                $ref: "https://example.com/unsafe.json",
+              },
+            },
+            required: ["query"],
+            additionalProperties: false,
+          },
+          outputSchema: {
+            type: "object",
+            properties: {},
+            required: [],
+            additionalProperties: false,
+          },
+        };
+        const apiRejection = await app.request(
+          `${projectPath}/agents/${agentId}/versions`,
+          jsonRequest(
+            { config: { ...valid, tools: [unsupportedTool] } },
+            "invalid-rich-schema-path",
+          ),
+        );
+        assert.equal(apiRejection.status, 400);
+        const apiError = (await apiRejection.json()) as {
+          readonly error: {
+            readonly details?: { readonly path?: string };
+          };
+        };
+        assert.equal(
+          apiError.error.details?.path,
+          "tools[0].inputSchema.properties.query",
+        );
         const invalid = [
           { ...valid, limits: { timeoutMs: 60_000 } },
           { ...valid, limits: { maxTurns: 32 } },
@@ -733,27 +961,7 @@ test(
           { ...valid, sandbox: { enabled: false } },
           {
             ...valid,
-            tools: [
-              {
-                schemaVersion: 1,
-                name: "invalid",
-                description: "Unsupported schema keyword",
-                owner: "caller",
-                approval: "never",
-                inputSchema: {
-                  type: "object",
-                  properties: { query: { type: "string", minLength: 1 } },
-                  required: ["query"],
-                  additionalProperties: false,
-                },
-                outputSchema: {
-                  type: "object",
-                  properties: {},
-                  required: [],
-                  additionalProperties: false,
-                },
-              },
-            ],
+            tools: [unsupportedTool],
           },
         ];
         for (const config of invalid) {
@@ -805,7 +1013,19 @@ test(
                     approval: "always",
                     inputSchema: {
                       type: "object",
-                      properties: { query: { type: "string" } },
+                      description: "Lookup arguments.",
+                      properties: {
+                        query: {
+                          type: "string",
+                          description: "The customer search query.",
+                          minLength: 2,
+                          maxLength: 200,
+                        },
+                        options: {
+                          type: ["object", "null"],
+                          description: "Optional dynamic lookup options.",
+                        },
+                      },
                       required: ["query"],
                       additionalProperties: false,
                     },
@@ -1217,6 +1437,12 @@ test(
             name: string;
             description: string;
             contentHash: string;
+          }[];
+          tools: readonly {
+            name: string;
+            description: string;
+            owner: string;
+            approval: string;
           }[];
           transcript: readonly {
             runId: string;

@@ -109,6 +109,16 @@ const supportConfig: AgentVersionConfig = {
   limits: { maxTurns: 32, timeoutMs: 300_000 },
 };
 
+/** A session lists the pinned agent version's tools, without their schemas. */
+function sessionTools(config: AgentVersionConfig): SessionDetail["tools"] {
+  return config.tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    owner: tool.owner,
+    approval: tool.approval,
+  }));
+}
+
 const agentsSeed: AgentDetail[] = [
   {
     id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -298,6 +308,7 @@ const sessionsSeed: SessionDetail[] = [
     completedAt: null,
     attempt: 1,
     workspaceFiles: [],
+    tools: sessionTools(supportConfig),
     skills: [
       {
         skillId: skillsSeed[0]!.id,
@@ -483,6 +494,7 @@ const sessionsSeed: SessionDetail[] = [
     completedAt: "2026-08-19T14:24:38.000Z",
     attempt: 1,
     workspaceFiles: [],
+    tools: [],
     skills: [],
     delegations: [],
     capabilities: { canCancel: false, canResume: false, canBranchReplay: true },
@@ -548,6 +560,7 @@ const sessionsSeed: SessionDetail[] = [
     completedAt: "2026-08-18T11:08:15.000Z",
     attempt: 3,
     workspaceFiles: [],
+    tools: sessionTools(supportConfig),
     skills: [],
     delegations: [],
     capabilities: { canCancel: false, canResume: true, canBranchReplay: true },
@@ -1427,6 +1440,7 @@ export class DemoConsoleApi implements ConsoleApi {
       completedAt: null,
       attempt: 1,
       workspaceFiles: [],
+      tools: agent.versions[0] ? sessionTools(agent.versions[0].config) : [],
       delegations: [],
       events: [
         {

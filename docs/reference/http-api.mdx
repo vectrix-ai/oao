@@ -347,12 +347,21 @@ The session detail response includes `debug.sandboxCommands`. Each item returns
 the recorded `safeCommand` and `safeResult`, including model-facing arguments,
 file/edit text, shell input, browser values, and tool output. The transcript
 renders each call as a collapsed activity row; expanding it shows arguments
-and results directly, without a second payload inspector. Credential-bearing
-fields and obvious authorization values remain masked.
+and results directly as formatted, highlighted JSON, without a second payload
+inspector. Caller tool calls from `debug.toolCalls` expand the same way and
+show their recorded `safeArguments`; tool events that carry only other safe
+metadata (for example Skill activations) expand to that metadata instead.
+Credential-bearing fields and obvious authorization values remain masked.
 
 The same response includes top-level `skills` metadata with `skillId`, exact
 `skillVersionId`, version number, name, description, content hash, and current
 lifecycle status. It never includes Skill instructions or resource bytes.
+
+It also includes top-level `tools`: the tool list of the pinned agent version
+as `name`, `description`, `owner`, and `approval` per tool, in authored order
+and without the input or output schemas. The console session sidebar lists
+these next to the bound Skills and marks how many times each tool was called
+during the session.
 
 `debug.modelInvocations` includes each invocation's actual start/completion
 window and any provider thinking text returned with the response. The
@@ -400,6 +409,16 @@ events, audit detail, or tool-call safe arguments. See
 
 The claim response includes a fence encoded as a positive integer string. The
 same fence must accompany renew, release, and result operations.
+
+Successful tool results use
+`{ "version": 1, "status": "success", "value": { ... } }`. OAO validates
+`value` against the immutable agent version's output schema before persistence.
+If validation fails, the API stores a normalized `invalid_tool_result` failure,
+returns `202` with `normalizedFailure.code` and `normalizedFailure.path`, and
+resumes the agent. The raw invalid value is neither persisted nor sent to the
+model. Retryable failures permit two automatic agent retries after the initial
+attempt; further calls receive `tool_retry_exhausted`. Approval and cancellation
+failures are never retried.
 
 ## Pagination
 

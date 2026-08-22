@@ -575,7 +575,10 @@ function sessionDetail(
         summary.createdAt;
       const command = record(detail.safeCommand);
       const result = record(detail.safeResult);
-      const arguments_ = command.arguments ?? command;
+      const arguments_ =
+        collection === "toolCalls"
+          ? record(detail.safeArguments)
+          : (command.arguments ?? command);
       const toolPayload = {
         arguments: arguments_,
         ...(result.output !== undefined
@@ -586,6 +589,11 @@ function sessionDetail(
         ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
       };
       const argumentsRecord = record(arguments_);
+      const toolCallPayload = {
+        arguments: arguments_,
+        ...(detail.owner !== undefined ? { owner: text(detail.owner) } : {}),
+        ...(detail.stage !== undefined ? { stage: text(detail.stage) } : {}),
+      };
       debugEvents.push({
         id: `debug:${collection}:${text(detail.id, String(index))}`,
         kind: timelineKind(`${collection} ${type}`),
@@ -634,7 +642,9 @@ function sessionDetail(
         payload:
           collection === "sandboxCommands"
             ? visiblePayload(toolPayload)
-            : safePayload(detail),
+            : collection === "toolCalls"
+              ? visiblePayload(toolCallPayload)
+              : safePayload(detail),
       });
     });
   }
@@ -669,6 +679,19 @@ function sessionDetail(
       canResume: false,
       canBranchReplay: false,
     },
+    tools: (Array.isArray(value.tools) ? value.tools : []).map((entry) => {
+      const tool = record(entry);
+      return {
+        name: text(tool.name),
+        description: text(tool.description),
+        owner: text(
+          tool.owner,
+          "caller",
+        ) as SessionDetail["tools"][number]["owner"],
+        approval:
+          text(tool.approval, "always") === "never" ? "never" : "always",
+      } as const;
+    }),
     skills: (Array.isArray(value.skills) ? value.skills : []).map((entry) => {
       const skill = record(entry);
       return {

@@ -198,10 +198,8 @@ cookies.
 </Steps>
 
 <Warning>
-  The **Add tool** control is not wired up in the current console. Existing
-  tools are displayed, but publish tool definitions through the API. The current
-  API-key, archive, rename, resume, and branch-replay controls are also not
-  implemented in the console.
+  The current API-key, archive, rename, resume, and branch-replay controls are
+  not implemented in the console.
 </Warning>
 
 ## Create through the API
@@ -334,7 +332,14 @@ curl --fail-with-body \
             "type": "object",
             "properties": {
               "customerRef": {
-                "type": "string"
+                "type": "string",
+                "description": "Customer id, account number, or exact customer name.",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "options": {
+                "type": ["object", "null"],
+                "description": "Optional provider-specific lookup options. Unknown keys are preserved."
               }
             },
             "required": ["customerRef"],
@@ -446,27 +451,80 @@ Each published tool has these fields:
 | `description`   | Non-empty string, at most 2,000 characters |
 | `owner`         | `caller` or `platform`                     |
 | `approval`      | `never` or `always`                        |
-| `inputSchema`   | Closed supported object schema             |
-| `outputSchema`  | Closed supported object schema             |
+| `inputSchema`   | Supported object schema                    |
+| `outputSchema`  | Supported object schema                    |
 
-Both root schemas must be objects with `properties`, `required`, and
-`additionalProperties: false`. Nested schemas support only:
+Both root schemas must have `type: "object"`. `properties`, `required`, and
+`additionalProperties` are optional; their defaults are `{}`, `[]`, and `true`.
+The same canonical schema is compiled to Flue for model guidance and local
+validation. The model receives the tool description plus property titles,
+descriptions, examples, types, required fields, nesting, enums, and supported
+constraints. OAO remains authoritative and validates arguments before a tool
+can create an approval or execute.
 
-- Primitive `{ "type": "string" | "number" | "integer" | "boolean" | "null" }`.
-- Arrays with exactly `type` and `items`.
-- Closed objects with exactly `type`, `properties`, `required`, and
-  `additionalProperties`.
-- Non-empty primitive `enum` arrays represented by an object containing only
-  `enum`.
+Schema version 1 supports:
 
-Keywords such as `description`, `minLength`, `maximum`, `pattern`, `format`,
-`oneOf`, `$ref`, and open-ended properties are rejected rather than silently
-ignored. Every name in `required` must be unique and present in `properties`.
+- String, number, integer, boolean, null, array, and object types.
+- Nullable forms containing one type and null, such as
+  `"type": ["string", "null"]`.
+- Nested objects and homogeneous arrays with `items`.
+- Primitive `enum` values and primitive `const`.
+- `title`, `description`, and up to eight JSON `examples` on every schema node.
+- `minLength`, `maxLength`, and the `date`, `date-time`, `email`, `time`, `uri`,
+  and `uuid` string formats.
+- `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, and
+  `multipleOf` numeric constraints.
+- `minItems` and `maxItems` array bounds.
+- Open objects, closed objects with `additionalProperties: false`, and typed
+  maps whose `additionalProperties` is another supported schema.
+
+The early contract intentionally rejects `pattern`, defaults, coercion,
+`oneOf`, `anyOf`, `allOf`, discriminated unions, `$defs`, `$ref`, external or
+recursive references, tuple schemas, and every unknown keyword. Rejection is
+fail-closed and includes the exact schema path. Every name in `required` must
+be unique and present in `properties`; `__proto__`, `constructor`, and
+`prototype` property names are prohibited. A schema is limited to 64 KiB, 12
+levels, 512 nodes, and 256 properties.
+`enum` and `const` nodes may include a type and annotations, but not additional
+constraints; this prevents a compiled provider schema from losing redundant or
+conflicting guidance.
+
+OAO does not silently downgrade a published schema for a model provider. The
+MVP subset is chosen to work through the pinned Flue conversion and configured
+OpenAI/OpenRouter adapters; if a downstream provider rejects that schema, the
+model invocation fails visibly and no tool executes. Local argument and result
+validation remains authoritative even when a provider uses the schema only as
+generation guidance.
+
+The console's agent-version editor lists tools as collapsible rows inside a
+**Tools** panel that starts collapsed. Each row opens to a syntax-highlighted
+preview of the input and output schema. **Add tool** and **Edit definition**
+open a modal editor for one tool definition as JSON, and **Edit JSON** opens
+the complete tool list for authoring or pasting in bulk; both validate the JSON
+before it can be applied to the draft. Publishing still creates a new immutable
+version; existing versions are never rewritten.
+
+<Warning>
+  Tool schemas are public agent configuration and are sent to the selected model
+  provider. Never place credentials, authorization headers, personal secrets, or
+  secret-bearing examples in names, descriptions, titles, enums, constants, or
+  examples.
+</Warning>
 
 `caller` tools create durable work for an external operator or integration.
 `platform` tools require a matching handler registered in the runtime worker.
 `approval: "always"` creates a durable approval before either owner can
 execute.
+
+Retryable tool failures are returned to the model automatically. The model may
+retry twice after the initial failure, for three total attempts per tool within
+one run. OAO appends retry instructions to the managed system prompt and
+enforces the attempt ceiling before another external call is published.
+`tool_expired`, `tool_failed`, `platform_tool_failed`,
+`invalid_tool_arguments`, and `invalid_tool_result` are retryable. Approval
+denial or expiry, cancellation, and `tool_retry_exhausted` are not. Every retry
+is a new fenced tool call with its own ID; successful completion resets the
+consecutive-failure count.
 
 <Warning>
   The default runtime does not register application-specific platform tool
@@ -791,11 +849,27 @@ Claims and results are fenced so a stale worker cannot submit after losing its
 lease. Approval decisions use `{ "status": "approved" }` or
 `{ "status": "denied" }`, with an optional `note` of at most 2,000 characters.
 
-<Warning>
-  The current console's caller-result form sends the entered object directly as
-  `safeResult`; it does not add the required `version`/`status`/`value`
-  envelope. Use the API for caller results until that UI is completed.
-</Warning>
+OAO validates successful `value` objects against the immutable agent version's
+published `outputSchema` in the same transaction, before PostgreSQL persists
+the result. A malformed success is replaced with a safe
+`invalid_tool_result` failure; the raw malformed value is not persisted or sent
+to the model. The `202` response includes a `normalizedFailure` object with the
+first failing path, and Flue resumes the agent so it can make a new attempt:
+
+```json
+{
+  "outcome": "submitted",
+  "normalizedFailure": {
+    "code": "invalid_tool_result",
+    "path": "safeResult.value.status"
+  }
+}
+```
+
+The Console **Pending Work** form accepts only the successful result value and
+adds the versioned envelope automatically. Failure envelopes remain available
+through the API and SDK for integrations that need to report an explicit tool
+failure.
 
 ### Errors and cancellation
 

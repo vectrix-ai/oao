@@ -17,6 +17,7 @@ export {
   FieldRow,
   FormActions,
   FormError,
+  InfoHint,
   Input,
   SearchField,
   Select,
@@ -25,6 +26,8 @@ export {
 } from "./field";
 export { Alert, ToastProvider, useToast } from "./feedback";
 export type { Tone } from "./feedback";
+export { FileDropInput } from "./file-input";
+export { JsonBlock, formatJson } from "./json";
 export { MarkdownContent } from "./markdown";
 export {
   Breadcrumbs,
@@ -48,6 +51,7 @@ export {
   formatCost,
   formatDate,
   formatDuration,
+  formatFileSize,
   formatNumber,
   formatTime,
   formatTimestamp,

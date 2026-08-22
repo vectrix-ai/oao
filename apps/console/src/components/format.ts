@@ -68,6 +68,13 @@ export function formatCompactDuration(value: number | null): string {
   return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
 }
 
+/** Binary file sizes for attachment rows: `812 B`, `3.4 KiB`, `1.2 MiB`. */
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
 /** Compact token counts for meta strips: `507k`, `7.1k`, `24`. */
 export function formatCompactNumber(value: number): string {
   if (value < 1000) return String(Math.round(value));

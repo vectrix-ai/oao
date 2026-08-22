@@ -58,7 +58,11 @@ export function PendingWorkPage() {
       );
       if (!work || work.kind !== "tool")
         throw new Error("Claimed tool work was not found.");
-      return api.submitToolResult(id, work.claimFence, result);
+      return api.submitToolResult(id, work.claimFence, {
+        version: 1,
+        status: "success",
+        value: result,
+      });
     },
     onSuccess: async () => {
       setResultFor(null);
@@ -204,8 +208,8 @@ export function PendingWorkPage() {
                       onSubmit={(event) => submitResult(event, work.id)}
                     >
                       <Field
-                        label="Result JSON"
-                        hint="Stored immutably against the claim fence above."
+                        label="Successful result value"
+                        hint="Validated against the published output schema before it is stored against the claim fence."
                       >
                         <Textarea
                           name="result"

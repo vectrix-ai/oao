@@ -352,6 +352,13 @@ export interface SessionDetail extends SessionSummary {
     readonly contentHash: string;
     readonly status: "active" | "deprecated" | "revoked";
   }[];
+  /** Tools the pinned agent version makes available to the model. */
+  readonly tools: readonly {
+    readonly name: string;
+    readonly description: string;
+    readonly owner: ToolOwner;
+    readonly approval: "never" | "always";
+  }[];
   readonly delegations: readonly {
     readonly id: string;
     readonly delegateKey: string;

@@ -15,7 +15,10 @@ import {
   parseRotateProjectSandboxProviderCredentialInput,
   parseRotateProjectStorageProviderCredentialInput,
   parseUpdateProjectSandboxProviderConfigurationInput,
+  parseToolResultEnvelope,
   RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION,
+  validateToolJsonValue,
+  validateToolJsonSchema,
   type CreateProjectSandboxProviderInput,
   type CreateProjectStorageProviderInput,
   type CreateModelPresetInput,
@@ -24,6 +27,7 @@ import {
   type ModelCatalogEntry,
   type ModelProviderType,
   type SandboxSnapshotEntry,
+  type ToolResultEnvelope,
   type UpdateProjectSandboxProviderConfigurationInput,
 } from "@oao/contracts";
 import type {
@@ -1094,6 +1098,29 @@ function parseFence(value: unknown): bigint {
 }
 
 function parseAgentConfig(value: unknown): ManagedAgentPublicationConfig {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const tools = (value as Record<string, unknown>).tools;
+    if (Array.isArray(tools)) {
+      for (const [index, tool] of tools.entries()) {
+        if (!tool || typeof tool !== "object" || Array.isArray(tool)) continue;
+        for (const field of ["inputSchema", "outputSchema"] as const) {
+          const validation = validateToolJsonSchema(
+            (tool as Record<string, unknown>)[field],
+            { requireObjectRoot: true },
+          );
+          const first = validation.issues[0];
+          if (first)
+            throw new HttpApiError(
+              "bad_request",
+              `tools[${index}].${field}${first.path === "$" ? "" : first.path.slice(1)}: ${first.message}`,
+              {
+                path: `tools[${index}].${field}${first.path === "$" ? "" : first.path.slice(1)}`,
+              },
+            );
+        }
+      }
+    }
+  }
   let config: ManagedAgentPublicationConfig;
   try {
     config = parseManagedAgentSnapshotForPublication(value);
@@ -4842,7 +4869,18 @@ function registerRunRoutes(
       const result = await tx.query(
         `SELECT s.id,s.organization_id,s.project_id,s.thread_id,s.agent_version_id,t.title,
                 d.id AS agent_id,d.name AS agent_name,v.version AS agent_version,
-                v.config->>'modelPreset' AS model,lr.id AS latest_run_id,
+                v.config->>'modelPreset' AS model,
+                COALESCE((
+                  SELECT jsonb_agg(jsonb_build_object(
+                    'name',tool.value->>'name',
+                    'description',tool.value->>'description',
+                    'owner',tool.value->>'owner',
+                    'approval',tool.value->>'approval'
+                  ) ORDER BY tool.ordinality)
+                  FROM jsonb_array_elements(COALESCE(v.config->'tools','[]'::jsonb))
+                    WITH ORDINALITY AS tool(value,ordinality)
+                ),'[]'::jsonb) AS tools,
+                lr.id AS latest_run_id,
                 COALESCE(lr.state::text,'queued') AS status,
                 lr.created_at AS started_at,lr.settled_at AS completed_at,
                 COALESCE(ss.input_tokens,0)::float8 AS input_tokens,
@@ -5840,10 +5878,68 @@ function registerRunRoutes(
       )
         throw new HttpApiError("bad_request", "safeResult must be an object");
       assertPublicPayload(safeResult as Readonly<Record<string, PublicValue>>);
+      let submittedResult: ToolResultEnvelope;
+      try {
+        submittedResult = parseToolResultEnvelope(safeResult);
+      } catch {
+        throw new HttpApiError(
+          "bad_request",
+          "safeResult must match the version 1 success or failure envelope",
+          { path: "safeResult" },
+        );
+      }
       return dependencies.store.transaction(
         actor,
         "tool_call:submit",
         async (tx) => {
+          const contract = await tx.query<{ output_schema: unknown }>(
+            `SELECT published_tool.value->'outputSchema' AS output_schema
+             FROM oao.tool_calls call
+             JOIN oao.runs run
+               ON run.organization_id=call.organization_id
+              AND run.project_id=call.project_id AND run.id=call.run_id
+             JOIN oao.agent_versions version
+               ON version.organization_id=run.organization_id
+              AND version.project_id=run.project_id
+              AND version.id=run.agent_version_id
+             CROSS JOIN LATERAL jsonb_array_elements(version.config->'tools') published_tool(value)
+             WHERE call.organization_id=$1 AND call.project_id=$2 AND call.id=$3
+               AND published_tool.value->>'name'=call.tool_name`,
+            [actor.organizationId, actor.projectId, c.req.param("toolCallId")],
+          );
+          const outputSchema = contract.rows[0]?.output_schema;
+          if (!outputSchema)
+            throw new HttpApiError(
+              "conflict",
+              "Published tool output schema was not found",
+            );
+          let persistedResult = submittedResult;
+          let normalizedFailure:
+            | { readonly code: "invalid_tool_result"; readonly path: string }
+            | undefined;
+          if (submittedResult.status === "success") {
+            const validation = validateToolJsonValue(
+              outputSchema,
+              submittedResult.value,
+            );
+            const first = validation.issues[0];
+            if (first) {
+              const path = `safeResult.value${first.path.slice(1)}`;
+              persistedResult = {
+                version: 1,
+                status: "failure",
+                error: {
+                  code: "invalid_tool_result",
+                  message:
+                    `Tool output validation failed at ${path}: ${first.message}`.slice(
+                      0,
+                      500,
+                    ),
+                },
+              };
+              normalizedFailure = { code: "invalid_tool_result", path };
+            }
+          }
           const result = await tx.query<{ outcome: string }>(
             "SELECT oao.submit_tool_result($1,$2,$3,$4,$5,$6,$7,$8) AS outcome",
             [
@@ -5854,7 +5950,7 @@ function registerRunRoutes(
               fence.toString(),
               idem,
               requestHash(safeResult),
-              safeResult,
+              persistedResult,
             ],
           );
           const outcome = result.rows[0]?.outcome ?? "submitted";
@@ -5863,16 +5959,32 @@ function registerRunRoutes(
               aggregateType: "tool_call",
               aggregateId: c.req.param("toolCallId"),
               kind: "tool_call.result_submitted",
-              payload: { outcome, fence: fence.toString() },
+              payload: {
+                outcome,
+                fence: fence.toString(),
+                normalizedFailure: Boolean(normalizedFailure),
+                ...(normalizedFailure ? { path: normalizedFailure.path } : {}),
+              },
             });
             await dependencies.store.appendAudit(tx, actor, {
               action: "tool_call.result_submitted",
               resourceType: "tool_call",
               resourceId: c.req.param("toolCallId"),
-              detail: { outcome, fence: fence.toString() },
+              detail: {
+                outcome,
+                fence: fence.toString(),
+                normalizedFailure: Boolean(normalizedFailure),
+                ...(normalizedFailure ? { path: normalizedFailure.path } : {}),
+              },
             });
           }
-          return c.json({ outcome }, 202);
+          return c.json(
+            {
+              outcome,
+              ...(normalizedFailure ? { normalizedFailure } : {}),
+            },
+            202,
+          );
         },
       );
     },

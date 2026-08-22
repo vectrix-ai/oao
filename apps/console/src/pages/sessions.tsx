@@ -56,10 +56,13 @@ import {
   EmptyState,
   ErrorState,
   Field,
+  FileDropInput,
   FilterBar,
   FormError,
   IconButton,
+  InfoHint,
   Input,
+  JsonBlock,
   LoadingState,
   MarkdownContent,
   Page,
@@ -76,6 +79,7 @@ import {
   formatCost,
   formatDate,
   formatDuration,
+  formatFileSize,
   formatNumber,
   formatTime,
   formatTimestamp,
@@ -173,14 +177,10 @@ function fileBase64(file: File): Promise<string> {
   });
 }
 
-async function runFiles(form: HTMLFormElement): Promise<RunFileUpload[]> {
-  const files = [
-    ...form.querySelectorAll<HTMLInputElement>(
-      'input[type="file"][name="files"]',
-    ),
-  ].flatMap((input) =>
-    [...(input.files ?? [])].filter((file) => file.size > 0),
-  );
+async function encodeRunFiles(
+  attached: readonly File[],
+): Promise<RunFileUpload[]> {
+  const files = attached.filter((file) => file.size > 0);
   if (files.length > 8) throw new Error("Attach at most 8 files per message.");
   if (files.some((file) => file.size > 10 * 1024 * 1024))
     throw new Error("Each attached file must be no larger than 10 MiB.");
@@ -521,6 +521,7 @@ function CreateSessionDialog({
   const published = agents.filter((agent) => agent.status === "published");
   const [encoding, setEncoding] = useState(false);
   const [fileError, setFileError] = useState("");
+  const [attached, setAttached] = useState<readonly File[]>([]);
   return (
     <Dialog
       title="Create session"
@@ -533,7 +534,7 @@ function CreateSessionDialog({
         const initialMessage = String(data.get("initialMessage") ?? "").trim();
         setEncoding(true);
         setFileError("");
-        void runFiles(form)
+        void encodeRunFiles(attached)
           .then((files) => {
             if (!initialMessage && files.length === 0)
               throw new Error("Enter a message or attach at least one file.");
@@ -598,8 +599,13 @@ function CreateSessionDialog({
       <Field
         label="Files"
         hint="Stored in the project's default object storage and copied unmodified into the agent sandbox. Requires sandbox read tools; binary formats require shell tooling. Up to 8 files, 10 MiB each and 20 MiB combined."
+        hintIcon
       >
-        <Input name="files" type="file" multiple accept={RUN_FILE_ACCEPT} />
+        <FileDropInput
+          files={attached}
+          onChange={setAttached}
+          accept={RUN_FILE_ACCEPT}
+        />
       </Field>
       {fileError ? <FormError>{fileError}</FormError> : null}
       {error ? <FormError>{error.message}</FormError> : null}
@@ -1180,6 +1186,31 @@ function skillWasUsed(
 }
 
 /**
+ * How many times the run called each tool the agent version makes available.
+ *
+ * The read model titles a tool event with the tool name, and `timelineKind`
+ * renders underscores as spaces, so both sides are compared on a normalized
+ * key. A failed call still counts as a call: the point is what the agent
+ * reached for, and the row already carries its own error state.
+ */
+function toolCallCounts(session: SessionDetail): ReadonlyMap<string, number> {
+  const normalize = (value: string) =>
+    value.toLowerCase().replaceAll(/[\s_]+/gu, "_");
+  const counts = new Map<string, number>();
+  for (const event of session.events) {
+    if (event.kind !== "tool") continue;
+    const key = normalize(event.title);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return new Map(
+    session.tools.map((tool) => [
+      tool.name,
+      counts.get(normalize(tool.name)) ?? 0,
+    ]),
+  );
+}
+
+/**
  * Right-hand session panel, in the spirit of hosted agent consoles: identity,
  * cumulative cost, and usage beside the conversation rather than above it.
  */
@@ -1193,6 +1224,10 @@ function SessionSidebar({
   const points = costSeries(session);
   const isUsed = skillWasUsed(session);
   const usedCount = session.skills.filter(isUsed).length;
+  const toolCalls = toolCallCounts(session);
+  const usedToolCount = session.tools.filter(
+    (tool) => (toolCalls.get(tool.name) ?? 0) > 0,
+  ).length;
   const start = Date.parse(session.startedAt ?? session.createdAt);
   const end = Math.max(
     Date.parse(session.lastActivityAt ?? session.createdAt),
@@ -1238,24 +1273,64 @@ function SessionSidebar({
           </div>
         ) : null}
       </dl>
+      {session.tools.length > 0 ? (
+        <section aria-label="Tools">
+          <header className="panel-row">
+            <h3>Tools</h3>
+            <span className="panel-sub">
+              {usedToolCount} of {session.tools.length} used
+            </span>
+          </header>
+          <ul className="usage-list">
+            {session.tools.map((tool) => {
+              const calls = toolCalls.get(tool.name) ?? 0;
+              return (
+                <li
+                  key={tool.name}
+                  className={calls > 0 ? "usage--used" : undefined}
+                >
+                  <Wrench size={15} aria-hidden="true" />
+                  <span className="usage-name">
+                    <strong title={tool.description}>{tool.name}</strong>
+                    <span>
+                      {humanize(tool.owner)}
+                      {tool.approval === "always" ? " · approval" : ""}
+                    </span>
+                  </span>
+                  <span
+                    className={`usage-state${calls > 0 ? " usage-state--used" : ""}`}
+                    title={
+                      calls > 0
+                        ? `The agent called this tool ${calls} ${calls === 1 ? "time" : "times"} during the session.`
+                        : "Available to the agent, but it was not called in this session."
+                    }
+                  >
+                    {calls > 0 ? `${calls}×` : "Not used"}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
       {session.skills.length > 0 ? (
-        <section>
+        <section aria-label="Skills">
           <header className="panel-row">
             <h3>Skills</h3>
             <span className="panel-sub">
               {usedCount} of {session.skills.length} used
             </span>
           </header>
-          <ul className="skill-usage-list">
+          <ul className="usage-list">
             {session.skills.map((skill) => {
               const used = isUsed(skill);
               return (
                 <li
                   key={skill.skillVersionId}
-                  className={used ? "skill-usage--used" : undefined}
+                  className={used ? "usage--used" : undefined}
                 >
                   <BookOpen size={15} aria-hidden="true" />
-                  <span className="skill-usage-name">
+                  <span className="usage-name">
                     <strong>
                       <Link
                         to={`/skills/${skill.skillId}`}
@@ -1270,7 +1345,7 @@ function SessionSidebar({
                     </span>
                   </span>
                   <span
-                    className={`skill-usage-state${used ? " skill-usage-state--used" : ""}`}
+                    className={`usage-state${used ? " usage-state--used" : ""}`}
                     title={
                       used
                         ? "The agent activated this Skill during the session."
@@ -1868,12 +1943,6 @@ function UserMessage({
   );
 }
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
 function AssistantMessage({
   event,
   agentName,
@@ -2076,13 +2145,16 @@ function ReasoningActivity({
   );
 }
 
-function transcriptPayloadValue(value: unknown): string {
-  if (value === null || value === undefined) return "—";
-  if (typeof value === "string") return value;
-  return JSON.stringify(value);
-}
+/** Payload keys already rendered as dedicated blocks in the tool detail. */
+const TOOL_DETAIL_KEYS = new Set(["arguments", "result", "exitCode"]);
 
-/** Tool use shows its input and outcome directly, without inspector tabs. */
+/**
+ * Tool use shows its input and outcome directly, without inspector tabs.
+ *
+ * Any tool event with a safe payload can be opened: caller tool calls show
+ * their arguments and result as formatted JSON, and events that only carry
+ * other metadata (Skill activations, sandbox reads) list that instead.
+ */
 function ToolActivity({
   event,
   flashed,
@@ -2095,10 +2167,13 @@ function ToolActivity({
   readonly onToggle: () => void;
 }) {
   const rendered = event.payload?.rendered;
-  const hasTranscriptPayload = Boolean(
-    rendered &&
-    ("arguments" in rendered || "result" in rendered || "exitCode" in rendered),
+  const facts = Object.entries(rendered ?? {}).filter(
+    ([key]) => !TOOL_DETAIL_KEYS.has(key),
   );
+  const hasTranscriptPayload =
+    Boolean(rendered) &&
+    (facts.length > 0 ||
+      Object.keys(rendered ?? {}).some((key) => TOOL_DETAIL_KEYS.has(key)));
   return (
     <article
       id={`event-${event.id}`}
@@ -2158,18 +2233,48 @@ function ToolActivity({
         >
           {open ? (
             <>
-              <div>
-                <dt>Arguments</dt>
-                <dd>
-                  <code>{transcriptPayloadValue(rendered.arguments)}</code>
-                </dd>
-              </div>
-              <div>
-                <dt>Result</dt>
-                <dd>
-                  <code>{transcriptPayloadValue(rendered.result)}</code>
-                </dd>
-              </div>
+              {"arguments" in rendered ? (
+                <div>
+                  <dt>Arguments</dt>
+                  <dd>
+                    <JsonBlock
+                      value={rendered.arguments}
+                      label={`Arguments for ${event.title}`}
+                    />
+                  </dd>
+                </div>
+              ) : null}
+              {"result" in rendered ? (
+                <div>
+                  <dt>Result</dt>
+                  <dd>
+                    <JsonBlock
+                      value={rendered.result}
+                      label={`Result of ${event.title}`}
+                    />
+                  </dd>
+                </div>
+              ) : null}
+              {"exitCode" in rendered ? (
+                <div>
+                  <dt>Exit code</dt>
+                  <dd>
+                    <code>{payloadValue(rendered.exitCode)}</code>
+                  </dd>
+                </div>
+              ) : null}
+              {facts.map(([key, value]) => (
+                <div key={key}>
+                  <dt>{payloadLabel(key)}</dt>
+                  <dd>
+                    {value !== null && typeof value === "object" ? (
+                      <JsonBlock value={value} />
+                    ) : (
+                      <code>{payloadValue(value)}</code>
+                    )}
+                  </dd>
+                </div>
+              ))}
             </>
           ) : null}
         </dl>
@@ -2261,13 +2366,17 @@ function EventDetail({ event }: { readonly event: TimelineEvent }) {
                 <div key={key}>
                   <dt>{payloadLabel(key)}</dt>
                   <dd>
-                    <code>{payloadValue(value)}</code>
+                    {value !== null && typeof value === "object" ? (
+                      <JsonBlock value={value} />
+                    ) : (
+                      <code>{payloadValue(value)}</code>
+                    )}
                   </dd>
                 </div>
               ))}
             </dl>
           ) : event.payload.raw ? (
-            <pre className="code-block">{event.payload.raw}</pre>
+            <JsonBlock value={event.payload.raw} label="Raw payload" />
           ) : (
             <div className="redacted-panel">
               <SearchCode size={18} aria-hidden="true" />
@@ -2313,6 +2422,7 @@ function Composer({
 }) {
   const [encoding, setEncoding] = useState(false);
   const [fileError, setFileError] = useState("");
+  const [attached, setAttached] = useState<readonly File[]>([]);
   if (!settled)
     return (
       <div className="composer composer--waiting">
@@ -2332,12 +2442,13 @@ function Composer({
         const message = String(new FormData(form).get("message") ?? "").trim();
         setEncoding(true);
         setFileError("");
-        void runFiles(form)
+        void encodeRunFiles(attached)
           .then((files) => {
             if (!message && files.length === 0)
               throw new Error("Enter a message or attach at least one file.");
             onSubmit({ message, ...(files.length ? { files } : {}) });
             form.reset();
+            setAttached([]);
           })
           .catch((caught: unknown) =>
             setFileError(
@@ -2371,15 +2482,20 @@ function Composer({
       <Field
         label="Attach files"
         hint="Stored in the project's default object storage and copied unmodified into the session sandbox. The agent must inspect them with read or shell tools."
+        hintIcon
       >
-        <Input name="files" type="file" multiple accept={RUN_FILE_ACCEPT} />
+        <FileDropInput
+          files={attached}
+          onChange={setAttached}
+          accept={RUN_FILE_ACCEPT}
+        />
       </Field>
       {fileError ? <FormError>{fileError}</FormError> : null}
       {error ? <FormError>{error.message}</FormError> : null}
       <div className="composer-actions">
         <span className="composer-hint">
-          A new message starts another durable run on this same thread. Press
-          ⌘+Enter to send.
+          <InfoHint text="A new message starts another durable run on this same thread." />
+          Press ⌘+Enter to send.
         </span>
         <Button
           variant="primary"

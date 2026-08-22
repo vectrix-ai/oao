@@ -158,6 +158,155 @@ test(
         value: { found: true },
       });
 
+      const retryOutcomes = [];
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const retryObligation = {
+          ...obligation,
+          flueToolCallId: `caller-retry-${attempt}`,
+          toolName: "caller.retry",
+        };
+        const retryToolCallId = await broker.publishCaller(retryObligation);
+        const retryWaiting = broker.waitForCaller(retryObligation);
+        const retryFence = await withTenantTransaction(
+          pool,
+          tenant,
+          (transaction) =>
+            foundation.claimToolCall(transaction, {
+              ...tenant,
+              toolCallId: retryToolCallId as ToolCallId,
+              principalId: principal,
+              leaseMilliseconds: 60_000,
+            }),
+        );
+        const idempotencyKey = `caller-retry-result-${attempt}`;
+        await withTenantTransaction(pool, tenant, (transaction) =>
+          foundation.submitResult(transaction, {
+            ...tenant,
+            toolCallId: retryToolCallId as ToolCallId,
+            principalId: principal,
+            fence: retryFence,
+            idempotencyKey,
+            requestHash: createHash("sha256").update(idempotencyKey).digest(),
+            safeResult: {
+              version: 1,
+              status: "failure",
+              error: { code: "tool_failed", message: "private detail" },
+            },
+          }),
+        );
+        retryOutcomes.push(await retryWaiting);
+      }
+      assert.deepEqual(retryOutcomes, [
+        {
+          version: 1,
+          status: "failure",
+          error: {
+            code: "tool_failed",
+            message:
+              "Tool execution failed. Retry the tool automatically; 2 retries remain",
+          },
+        },
+        {
+          version: 1,
+          status: "failure",
+          error: {
+            code: "tool_failed",
+            message:
+              "Tool execution failed. Retry the tool automatically; 1 retry remains",
+          },
+        },
+        {
+          version: 1,
+          status: "failure",
+          error: {
+            code: "tool_retry_exhausted",
+            message: "Automatic retry limit reached after 3 attempts",
+          },
+        },
+      ]);
+      assert.deepEqual(
+        await broker.retryAdmission({
+          ...obligation,
+          flueToolCallId: "caller-retry-4",
+          toolName: "caller.retry",
+        }),
+        {
+          version: 1,
+          status: "failure",
+          error: {
+            code: "tool_retry_exhausted",
+            message: "Automatic retry limit reached after 3 attempts",
+          },
+        },
+      );
+
+      const invalidObligation = {
+        ...obligation,
+        flueToolCallId: "caller-invalid-result-1",
+        toolName: "caller.validated",
+      };
+      const invalidToolCallId = await broker.publishCaller(invalidObligation);
+      const invalidWaiting = broker.waitForCaller(
+        invalidObligation,
+        undefined,
+        () => ({ valid: false, message: "Invalid result value" }),
+      );
+      const invalidFence = await withTenantTransaction(
+        pool,
+        tenant,
+        (transaction) =>
+          foundation.claimToolCall(transaction, {
+            ...tenant,
+            toolCallId: invalidToolCallId as ToolCallId,
+            principalId: principal,
+            leaseMilliseconds: 60_000,
+          }),
+      );
+      await withTenantTransaction(pool, tenant, (transaction) =>
+        foundation.submitResult(transaction, {
+          ...tenant,
+          toolCallId: invalidToolCallId as ToolCallId,
+          principalId: principal,
+          fence: invalidFence,
+          idempotencyKey: "caller-invalid-result-1",
+          requestHash: createHash("sha256")
+            .update("caller-invalid-result-1")
+            .digest(),
+          safeResult: {
+            version: 1,
+            status: "success",
+            value: { invalid: true },
+          },
+        }),
+      );
+      assert.deepEqual(await invalidWaiting, {
+        version: 1,
+        status: "failure",
+        error: {
+          code: "invalid_tool_result",
+          message:
+            "Invalid result value. Retry the tool automatically; 2 retries remain",
+        },
+      });
+      const invalidPersistence = await withTenantTransaction(
+        pool,
+        tenant,
+        (transaction) =>
+          transaction.query<{ stage: string; committed_at: Date | null }>(
+            `SELECT call.stage,result.committed_at
+             FROM oao.tool_calls call
+             JOIN oao.tool_call_results result
+               ON result.organization_id=call.organization_id
+              AND result.project_id=call.project_id
+              AND result.tool_call_id=call.id
+             WHERE call.organization_id=$1 AND call.project_id=$2 AND call.id=$3`,
+            [tenant.organizationId, tenant.projectId, invalidToolCallId],
+          ),
+      );
+      assert.deepEqual(invalidPersistence.rows, [
+        { stage: "result_submitted", committed_at: null },
+      ]);
+
       let executions = 0;
       const platform = {
         ...obligation,

@@ -1,5 +1,11 @@
 import { QueryClient } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
@@ -420,9 +426,25 @@ describe("management console", () => {
     expect(screen.queryByText(/customer_ref/u)).not.toBeInTheDocument();
     await user.click(tool);
     expect(tool).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText(/customer_ref/u)).toBeInTheDocument();
-    expect(screen.getByText(/"matches":2/u)).toBeInTheDocument();
+    // Arguments and result render as highlighted JSON tokens.
+    expect(screen.getByText('"customer_ref"')).toHaveClass("jt-key");
+    expect(screen.getByText('"matches"')).toHaveClass("jt-key");
+    expect(
+      within(screen.getByLabelText("Result of lookup_customer")).getByText("2"),
+    ).toHaveClass("jt-num");
     expect(screen.queryByRole("tab", { name: "Raw" })).not.toBeInTheDocument();
+    // Tool events without arguments still open to their safe metadata.
+    const skillTool = screen.getByRole("button", {
+      name: /^skill\.activated/u,
+    });
+    expect(skillTool).toHaveAttribute("aria-expanded", "false");
+    await user.click(skillTool);
+    const skillDetail = skillTool.closest("article");
+    expect(skillDetail).not.toBeNull();
+    expect(
+      within(skillDetail!).getByText("shipment-intake"),
+    ).toBeInTheDocument();
+    expect(within(skillDetail!).getByText("true")).toBeInTheDocument();
   });
 
   it("shows reasoning and sandbox contents directly in the transcript", async () => {
@@ -622,7 +644,11 @@ describe("management console", () => {
   it("keeps platform telemetry out of the transcript but in the debug tab", async () => {
     const user = userEvent.setup();
     renderConsole("/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V");
-    expect(await screen.findByText("lookup_customer")).toBeInTheDocument();
+    // The tool call reads as transcript activity; the sidebar also names the
+    // tool, so this asserts on the conversation row specifically.
+    expect(
+      await screen.findByRole("button", { name: /^lookup_customer/u }),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /dispatch admitted/u }),
     ).not.toBeInTheDocument();
@@ -719,20 +745,38 @@ describe("management console", () => {
       "shipment-intake v1, carrier-codes v1",
     );
     // Bound Skills are listed with the activated ones highlighted.
-    expect(within(panel).getByText("1 of 2 used")).toBeInTheDocument();
-    const usedRow = within(panel)
+    const skillsSection = within(panel).getByRole("region", { name: "Skills" });
+    expect(within(skillsSection).getByText("1 of 2 used")).toBeInTheDocument();
+    const usedRow = within(skillsSection)
       .getByRole("link", { name: "shipment-intake" })
       .closest("li");
-    expect(usedRow?.className).toContain("skill-usage--used");
+    expect(usedRow?.className).toContain("usage--used");
     expect(
       within(usedRow as HTMLElement).getByText("Used"),
     ).toBeInTheDocument();
-    const unusedRow = within(panel)
+    const unusedRow = within(skillsSection)
       .getByRole("link", { name: "carrier-codes" })
       .closest("li");
-    expect(unusedRow?.className).not.toContain("skill-usage--used");
+    expect(unusedRow?.className).not.toContain("usage--used");
     expect(
       within(unusedRow as HTMLElement).getByText("Not used"),
+    ).toBeInTheDocument();
+    // The agent version's tools are listed the same way, with call counts.
+    const toolsSection = within(panel).getByRole("region", { name: "Tools" });
+    expect(within(toolsSection).getByText("1 of 2 used")).toBeInTheDocument();
+    const calledTool = within(toolsSection)
+      .getByText("lookup_customer")
+      .closest("li");
+    expect(calledTool?.className).toContain("usage--used");
+    expect(
+      within(calledTool as HTMLElement).getByText("1×"),
+    ).toBeInTheDocument();
+    const uncalledTool = within(toolsSection)
+      .getByText("issue_refund")
+      .closest("li");
+    expect(uncalledTool?.className).not.toContain("usage--used");
+    expect(
+      within(uncalledTool as HTMLElement).getByText("Not used"),
     ).toBeInTheDocument();
     expect(
       within(panel).getByRole("img", {
@@ -929,6 +973,11 @@ describe("management console", () => {
         type: "application/json",
       }),
     );
+    // The attachment is listed with a size and can be removed before sending.
+    expect(
+      screen.getByRole("button", { name: "Remove renewal.json" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("19 B")).toBeInTheDocument();
     await user.click(message);
     await user.keyboard("{Enter}");
     expect(message).toHaveValue("Now summarize only the renewal exceptions.\n");
@@ -937,6 +986,10 @@ describe("management console", () => {
       await screen.findByText("Now summarize only the renewal exceptions."),
     ).toBeInTheDocument();
     expect(await screen.findByText("renewal.json")).toBeInTheDocument();
+    // The composer's own attachment list is cleared once the message sends.
+    expect(
+      screen.queryByRole("button", { name: "Remove renewal.json" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
   });
 
@@ -952,6 +1005,19 @@ describe("management console", () => {
     expect(
       await screen.findByRole("button", { name: "Submit result" }),
     ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Submit result" }));
+    const resultValue = screen.getByLabelText("Successful result value");
+    await user.clear(resultValue);
+    await user.click(resultValue);
+    await user.paste('{"found":true}');
+    await user.click(
+      screen.getByRole("button", { name: "Submit immutable result" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Submit immutable result" }),
+      ).not.toBeInTheDocument(),
+    );
     await user.click(screen.getByRole("button", { name: "Approve" }));
     await waitFor(() =>
       expect(
@@ -1193,6 +1259,135 @@ describe("management console", () => {
       snapshotId: "78787878-7878-4787-8787-787878787878",
       capabilities: ["filesystem_read", "filesystem_write", "browser"],
     });
+  });
+
+  it("authors rich tool schemas in the immutable version editor", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", api);
+    await screen.findByRole("option", { name: /daytona-small/u });
+    await user.selectOptions(
+      await screen.findByLabelText("Daytona snapshot"),
+      "78787878-7878-4787-8787-787878787878",
+    );
+    const tools = [
+      {
+        schemaVersion: 1,
+        name: "lookup_customer",
+        description: "Look up one customer.",
+        owner: "caller",
+        approval: "always",
+        inputSchema: {
+          type: "object",
+          properties: {
+            customer: {
+              type: "string",
+              description: "Customer id or exact name.",
+              minLength: 1,
+            },
+          },
+          required: ["customer"],
+          additionalProperties: false,
+        },
+        outputSchema: {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: true,
+        },
+      },
+    ];
+    // Tool authoring lives behind modals; the bulk JSON editor takes a paste.
+    await user.click(screen.getByRole("button", { name: "Edit JSON" }));
+    fireEvent.change(await screen.findByLabelText("Tool definitions (JSON)"), {
+      target: { value: JSON.stringify(tools, null, 2) },
+    });
+    await user.click(screen.getByRole("button", { name: "Apply tools" }));
+    // The Tools panel is collapsed by default; the applied tool shows once
+    // it is expanded, with highlighted schema JSON.
+    expect(
+      screen.queryByRole("button", { name: /^lookup_customer/u }),
+    ).not.toBeInTheDocument();
+    const toolsToggle = screen.getByRole("button", { name: "Tools" });
+    expect(toolsToggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(toolsToggle);
+    const toolRow = screen.getByRole("button", { name: /^lookup_customer/u });
+    await user.click(toolRow);
+    const schemaTokens = within(
+      screen.getByLabelText("Input schema for lookup_customer"),
+    ).getAllByText('"customer"');
+    expect(
+      schemaTokens.some((token) => token.classList.contains("jt-key")),
+    ).toBe(true);
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 4")).toBeInTheDocument();
+    const updated = await api.getAgent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    const inputSchema = updated.versions[0]?.config.tools[0]?.inputSchema as {
+      readonly properties?: unknown;
+    };
+    expect(inputSchema.properties).toMatchObject({
+      customer: {
+        description: "Customer id or exact name.",
+        minLength: 1,
+      },
+    });
+  });
+
+  it("adds, edits, and removes one tool through the modal editor", async () => {
+    const user = userEvent.setup();
+    renderConsole(
+      "/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      new DemoConsoleApi({ eventDelayMs: 60_000 }),
+    );
+    await user.click(await screen.findByRole("button", { name: "Add tool" }));
+    let dialog = within(screen.getByRole("dialog"));
+    const editor = dialog.getByLabelText("Tool definition (JSON)");
+    fireEvent.change(editor, {
+      target: {
+        value: JSON.stringify(
+          {
+            name: "notify_ops",
+            description: "Page the on-call operator.",
+            owner: "caller",
+            approval: "always",
+            inputSchema: { type: "object", properties: {} },
+            outputSchema: { type: "object", properties: {} },
+          },
+          null,
+          2,
+        ),
+      },
+    });
+    await user.click(dialog.getByRole("button", { name: "Add tool" }));
+    // The new tool lands in the collapsed panel as a collapsible row.
+    await user.click(screen.getByRole("button", { name: "Tools" }));
+    const row = screen.getByRole("button", { name: /^notify_ops/u });
+    await user.click(row);
+    await user.click(screen.getByRole("button", { name: "Edit definition" }));
+    dialog = within(screen.getByRole("dialog"));
+    fireEvent.change(dialog.getByLabelText("Tool definition (JSON)"), {
+      target: { value: "not json" },
+    });
+    expect(await dialog.findByRole("alert")).toHaveTextContent(
+      "Invalid tool JSON",
+    );
+    expect(dialog.getByRole("button", { name: "Save tool" })).toBeDisabled();
+    fireEvent.change(dialog.getByLabelText("Tool definition (JSON)"), {
+      target: {
+        value: JSON.stringify({ name: "notify_ops_v2" }, null, 2),
+      },
+    });
+    await user.click(dialog.getByRole("button", { name: "Save tool" }));
+    expect(
+      screen.getByRole("button", { name: /^notify_ops_v2/u }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^notify_ops_v2/u }));
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+    expect(
+      screen.queryByRole("button", { name: /^notify_ops_v2/u }),
+    ).not.toBeInTheDocument();
   });
 
   it("can remove delegates made incompatible by a snapshot change and publish", async () => {

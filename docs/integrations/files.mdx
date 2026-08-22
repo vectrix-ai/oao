@@ -171,8 +171,11 @@ normal visible `read` or `bash` tool call.
 
 In **Sessions**, select **Create session** and choose files under **Files** before
 submitting. On an existing settled session, use **Attach files** under the
-message composer. Selected files are read in the browser and sent through the
-authenticated API request; the browser never receives an S3 credential.
+message composer. Both surfaces share the same attachment control: pick files
+with **Choose files** or drag and drop them onto it, review the listed names
+and sizes, and remove any file before sending. Selected files are read in the
+browser and sent through the authenticated API request; the browser never
+receives an S3 credential.
 
 The transcript shows the filename, normalized content type, and size next to
 the user message. It never returns the stored base64 or raw bytes. If the

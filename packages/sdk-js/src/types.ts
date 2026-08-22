@@ -107,6 +107,41 @@ export type CreatedPlatformApiKey = PlatformApiKey &
     | { readonly shown: false; readonly secret?: never }
   );
 
+export type ToolSchemaType =
+  "string" | "number" | "integer" | "boolean" | "null" | "array" | "object";
+
+export type ToolSchemaPrimitive = string | number | boolean | null;
+
+export interface ToolJsonSchema {
+  readonly type?:
+    | ToolSchemaType
+    | readonly [Exclude<ToolSchemaType, "null">, "null"]
+    | readonly ["null", Exclude<ToolSchemaType, "null">];
+  readonly title?: string;
+  readonly description?: string;
+  readonly examples?: readonly unknown[];
+  readonly enum?: readonly ToolSchemaPrimitive[];
+  readonly const?: ToolSchemaPrimitive;
+  readonly properties?: Readonly<Record<string, ToolJsonSchema>>;
+  readonly required?: readonly string[];
+  readonly additionalProperties?: boolean | ToolJsonSchema;
+  readonly items?: ToolJsonSchema;
+  readonly minLength?: number;
+  readonly maxLength?: number;
+  readonly format?: "date" | "date-time" | "email" | "time" | "uri" | "uuid";
+  readonly minimum?: number;
+  readonly maximum?: number;
+  readonly exclusiveMinimum?: number;
+  readonly exclusiveMaximum?: number;
+  readonly multipleOf?: number;
+  readonly minItems?: number;
+  readonly maxItems?: number;
+}
+
+export interface ToolJsonObjectSchema extends ToolJsonSchema {
+  readonly type: "object";
+}
+
 export interface AgentToolInput {
   readonly schemaVersion?: 1;
   readonly name: string;
@@ -469,6 +504,10 @@ export interface ToolClaim {
 
 export interface ToolResultSubmission {
   readonly outcome: "submitted" | "replayed";
+  readonly normalizedFailure?: {
+    readonly code: "invalid_tool_result";
+    readonly path: string;
+  };
 }
 
 export interface ProjectEventFrame {

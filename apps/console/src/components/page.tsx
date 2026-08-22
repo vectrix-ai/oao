@@ -1,6 +1,6 @@
-import { ChevronLeft } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Link } from "react-router";
-import type { ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 
 /** Page container. `wide` is for dense two-pane surfaces such as a session. */
 export function Page({
@@ -86,7 +86,12 @@ export function PageHeader({
   );
 }
 
-/** Bordered content panel with an optional header row and actions. */
+/**
+ * Bordered content panel with an optional header row and actions.
+ *
+ * `collapsible` turns the title into a disclosure so long editors can fold
+ * dense sections away; header actions stay reachable while collapsed.
+ */
 export function Panel({
   title,
   description,
@@ -94,6 +99,8 @@ export function Panel({
   children,
   flush = false,
   labelledBy,
+  collapsible = false,
+  defaultCollapsed = false,
 }: {
   readonly title?: string;
   readonly description?: string;
@@ -101,7 +108,11 @@ export function Panel({
   readonly children: ReactNode;
   readonly flush?: boolean;
   readonly labelledBy?: string;
+  readonly collapsible?: boolean;
+  readonly defaultCollapsed?: boolean;
 }) {
+  const [collapsed, setCollapsed] = useState(collapsible && defaultCollapsed);
+  const bodyId = useId();
   return (
     <section
       className="panel"
@@ -110,13 +121,36 @@ export function Panel({
       {title ? (
         <div className="panel-head">
           <div>
-            <h2 {...(labelledBy ? { id: labelledBy } : {})}>{title}</h2>
+            <h2 {...(labelledBy ? { id: labelledBy } : {})}>
+              {collapsible ? (
+                <button
+                  type="button"
+                  className="panel-toggle"
+                  aria-expanded={!collapsed}
+                  aria-controls={bodyId}
+                  onClick={() => setCollapsed(!collapsed)}
+                >
+                  <ChevronRight
+                    className="caret"
+                    size={14}
+                    aria-hidden="true"
+                  />
+                  {title}
+                </button>
+              ) : (
+                title
+              )}
+            </h2>
             {description ? <p>{description}</p> : null}
           </div>
           {actions ? <div className="panel-head-actions">{actions}</div> : null}
         </div>
       ) : null}
-      <div className={`panel-body${flush ? " panel-body--flush" : ""}`}>
+      <div
+        id={bodyId}
+        hidden={collapsible && collapsed}
+        className={`panel-body${flush ? " panel-body--flush" : ""}`}
+      >
         {children}
       </div>
     </section>

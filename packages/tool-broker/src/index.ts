@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import {
+  RETRYABLE_TOOL_FAILURE_CODES,
+  TOOL_RETRY_POLICY,
   ToolResultEnvelopeSchema,
   type ToolResultEnvelope,
 } from "@oao/contracts";
@@ -17,9 +19,19 @@ export type ToolFailureCode =
   | "tool_failed"
   | "platform_tool_failed"
   | "invalid_tool_arguments"
-  | "invalid_tool_result";
+  | "invalid_tool_result"
+  | "tool_retry_exhausted";
 
 export type ToolOutcome = ToolResultEnvelope;
+
+export interface ToolResultValueValidation {
+  readonly valid: boolean;
+  readonly message?: string;
+}
+
+export type ToolResultValueValidator = (
+  value: Readonly<Record<string, unknown>>,
+) => ToolResultValueValidation;
 
 export interface ToolObligationInput extends TenantContext {
   readonly runId: RunId;
@@ -102,6 +114,7 @@ function decodeResult(
     "platform_tool_failed",
     "invalid_tool_arguments",
     "invalid_tool_result",
+    "tool_retry_exhausted",
   ]);
   const code = visible.has(parsed.output.error.code)
     ? parsed.output.error.code
@@ -115,8 +128,18 @@ function decodeResult(
     platform_tool_failed: "Platform tool execution failed",
     invalid_tool_arguments: "Tool arguments were invalid",
     invalid_tool_result: "Tool returned an invalid result",
+    tool_retry_exhausted: "Automatic tool retry limit reached",
   };
   return failure(code, messages[code]);
+}
+
+const retryableFailureCodes = new Set<ToolFailureCode>(
+  RETRYABLE_TOOL_FAILURE_CODES,
+);
+
+interface ToolRetryState {
+  readonly consecutiveFailures: number;
+  readonly blockedBy?: ToolFailureCode;
 }
 
 async function appendEventOnce(
@@ -192,6 +215,12 @@ export class PostgresToolBroker {
     return this.publish(input, "caller");
   }
 
+  async retryAdmission(
+    input: ToolObligationInput,
+  ): Promise<ToolOutcome | undefined> {
+    return this.retryAdmissionFailure(input);
+  }
+
   async publishPlatform(input: ToolObligationInput): Promise<string> {
     return this.publish(input, "platform");
   }
@@ -201,6 +230,7 @@ export class PostgresToolBroker {
     owner: "caller" | "platform",
   ): Promise<string> {
     assertPublicPayload(input.safeArguments);
+    const retryState = await this.retryState(input);
     const requestKey = `tool:${input.runId}:${input.flueToolCallId}`;
     const toolCallId = stableUuid(requestKey);
     const approvalId = stableUuid(`approval:${requestKey}`);
@@ -227,7 +257,13 @@ export class PostgresToolBroker {
         aggregateType: "run",
         aggregateId: input.runId,
         kind: "tool_call.requested",
-        payload: { toolCallId, toolName: input.toolName, owner },
+        payload: {
+          toolCallId,
+          toolName: input.toolName,
+          owner,
+          attempt: retryState.consecutiveFailures + 1,
+          maximumAttempts: TOOL_RETRY_POLICY.maximumAttempts,
+        },
       });
       if (input.approval === "always") {
         await transaction.query(
@@ -269,9 +305,18 @@ export class PostgresToolBroker {
   async waitForCaller(
     input: ToolObligationInput,
     signal?: AbortSignal,
+    validateResult?: ToolResultValueValidator,
   ): Promise<ToolOutcome> {
+    const blocked = await this.retryAdmissionFailure(input);
+    if (blocked) return blocked;
     const toolCallId = await this.publishCaller(input);
-    return this.waitForResult(input, toolCallId, signal);
+    const outcome = await this.waitForResult(
+      input,
+      toolCallId,
+      signal,
+      validateResult,
+    );
+    return this.withRetryGuidance(input, outcome);
   }
 
   async executePlatform(
@@ -280,11 +325,17 @@ export class PostgresToolBroker {
     signal?: AbortSignal,
   ): Promise<ToolOutcome> {
     try {
-      return await this.executePlatformSafely(input, execute, signal);
+      const blocked = await this.retryAdmissionFailure(input);
+      if (blocked) return blocked;
+      return await this.withRetryGuidance(
+        input,
+        await this.executePlatformSafely(input, execute, signal),
+      );
     } catch {
-      return signal?.aborted
+      const outcome = signal?.aborted
         ? failure("run_cancelled", "Run was cancelled")
         : failure("platform_tool_failed", "Platform tool execution failed");
+      return this.withRetryGuidance(input, outcome);
     }
   }
 
@@ -452,6 +503,7 @@ export class PostgresToolBroker {
     input: ToolObligationInput,
     toolCallId: string,
     signal?: AbortSignal,
+    validateResult?: ToolResultValueValidator,
   ): Promise<ToolOutcome> {
     for (;;) {
       const row = await this.read(input, toolCallId);
@@ -466,6 +518,17 @@ export class PostgresToolBroker {
         row.safe_result &&
         row.idempotency_key
       ) {
+        const outcome = decodeResult(row.safe_result);
+        if (outcome.status === "success" && validateResult) {
+          const validation = validateResult(outcome.value);
+          if (!validation.valid) {
+            await this.resumeRun(input, row);
+            return failure(
+              "invalid_tool_result",
+              validation.message ?? "Tool returned an invalid result",
+            );
+          }
+        }
         if (row.stage === "result_submitted") {
           await withTenantTransaction(this.pool, input, async (transaction) => {
             await transaction.query(
@@ -491,10 +554,127 @@ export class PostgresToolBroker {
           });
         }
         await this.resumeRun(input, row);
-        return decodeResult(row.safe_result);
+        return outcome;
       }
       await this.pause(signal);
     }
+  }
+
+  private async retryState(
+    input: ToolObligationInput,
+  ): Promise<ToolRetryState> {
+    return withTenantTransaction(this.pool, input, async (transaction) => {
+      const result = await transaction.query<{
+        flue_tool_call_ref: string;
+        stage: ToolRow["stage"];
+        safe_result: Readonly<Record<string, PublicValue>> | null;
+        committed_at: Date | null;
+        approval_status: ToolRow["approval_status"];
+      }>(
+        `SELECT call.flue_tool_call_ref,call.stage,result.safe_result,result.committed_at,
+                approval.status AS approval_status
+         FROM oao.tool_calls call
+         LEFT JOIN oao.tool_call_results result
+           ON result.organization_id=call.organization_id
+          AND result.project_id=call.project_id AND result.tool_call_id=call.id
+         LEFT JOIN oao.approvals approval
+           ON approval.organization_id=call.organization_id
+          AND approval.project_id=call.project_id AND approval.tool_call_id=call.id
+         WHERE call.organization_id=$1 AND call.project_id=$2
+           AND call.run_id=$3 AND call.tool_name=$4
+         ORDER BY call.created_at DESC,call.id DESC
+         LIMIT $5`,
+        [
+          input.organizationId,
+          input.projectId,
+          input.runId,
+          input.toolName,
+          TOOL_RETRY_POLICY.maximumAttempts,
+        ],
+      );
+      let consecutiveFailures = 0;
+      for (const row of result.rows) {
+        if (
+          row.flue_tool_call_ref === input.flueToolCallId &&
+          !row.safe_result &&
+          [
+            "caller_pending",
+            "caller_claimed",
+            "platform_ready",
+            "platform_executing",
+          ].includes(row.stage)
+        )
+          continue;
+        if (row.approval_status === "denied")
+          return { consecutiveFailures, blockedBy: "approval_denied" };
+        if (row.approval_status === "expired")
+          return { consecutiveFailures, blockedBy: "approval_expired" };
+        if (row.stage === "cancelled")
+          return { consecutiveFailures, blockedBy: "run_cancelled" };
+        if (row.safe_result) {
+          const outcome = decodeResult(row.safe_result);
+          if (outcome.status === "success" && row.committed_at) break;
+          const code =
+            outcome.status === "failure"
+              ? (outcome.error.code as ToolFailureCode)
+              : "invalid_tool_result";
+          if (!retryableFailureCodes.has(code))
+            return { consecutiveFailures, blockedBy: code };
+          consecutiveFailures += 1;
+          continue;
+        }
+        if (row.stage === "expired" || row.stage === "failed") {
+          consecutiveFailures += 1;
+          continue;
+        }
+        break;
+      }
+      return { consecutiveFailures };
+    });
+  }
+
+  private async retryAdmissionFailure(
+    input: ToolObligationInput,
+  ): Promise<ToolOutcome | undefined> {
+    const state = await this.retryState(input);
+    if (state.blockedBy)
+      return failure(
+        "tool_retry_exhausted",
+        `Previous ${state.blockedBy} failure is not retryable`,
+      );
+    if (state.consecutiveFailures >= TOOL_RETRY_POLICY.maximumAttempts)
+      return failure(
+        "tool_retry_exhausted",
+        `Automatic retry limit reached after ${TOOL_RETRY_POLICY.maximumAttempts} attempts`,
+      );
+    return undefined;
+  }
+
+  private async withRetryGuidance(
+    input: ToolObligationInput,
+    outcome: ToolOutcome,
+  ): Promise<ToolOutcome> {
+    if (
+      outcome.status === "success" ||
+      !retryableFailureCodes.has(outcome.error.code as ToolFailureCode)
+    )
+      return outcome;
+    const state = await this.retryState(input);
+    const retriesRemaining = Math.max(
+      0,
+      TOOL_RETRY_POLICY.maximumAttempts - state.consecutiveFailures,
+    );
+    if (retriesRemaining === 0)
+      return failure(
+        "tool_retry_exhausted",
+        `Automatic retry limit reached after ${TOOL_RETRY_POLICY.maximumAttempts} attempts`,
+      );
+    return failure(
+      outcome.error.code as ToolFailureCode,
+      `${outcome.error.message}. Retry the tool automatically; ${retriesRemaining} ${
+        retriesRemaining === 1 ? "retry remains" : "retries remain"
+      }`,
+    );
   }
 
   private stageFailure(row: ToolRow): ToolOutcome | undefined {

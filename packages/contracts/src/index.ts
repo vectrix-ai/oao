@@ -5,7 +5,9 @@ const TimestampSchema = v.pipe(v.string(), v.isoTimestamp());
 const JsonObjectSchema = v.record(v.string(), v.unknown());
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function hasOnlyKeys(
@@ -15,57 +17,690 @@ function hasOnlyKeys(
   return Object.keys(value).every((key) => allowed.includes(key));
 }
 
-export function isSupportedToolJsonSchema(value: unknown): boolean {
-  if (!isPlainRecord(value)) return false;
-  if ("enum" in value) {
-    return (
-      hasOnlyKeys(value, ["enum"]) &&
-      Array.isArray(value.enum) &&
-      value.enum.length > 0 &&
-      value.enum.every(
-        (entry) =>
-          entry === null ||
-          typeof entry === "string" ||
-          typeof entry === "number" ||
-          typeof entry === "boolean",
-      )
-    );
+export const TOOL_SCHEMA_LIMITS = Object.freeze({
+  maximumBytes: 65_536,
+  maximumDepth: 12,
+  maximumNodes: 512,
+  maximumProperties: 256,
+  maximumDescriptionLength: 2_000,
+  maximumTitleLength: 200,
+  maximumExamples: 8,
+} as const);
+
+export const TOOL_RETRY_POLICY = Object.freeze({
+  maximumRetries: 2,
+  maximumAttempts: 3,
+} as const);
+
+export const RETRYABLE_TOOL_FAILURE_CODES = Object.freeze([
+  "tool_expired",
+  "tool_failed",
+  "platform_tool_failed",
+  "invalid_tool_arguments",
+  "invalid_tool_result",
+] as const);
+
+const TOOL_SCHEMA_TYPES = new Set([
+  "string",
+  "number",
+  "integer",
+  "boolean",
+  "null",
+  "array",
+  "object",
+]);
+const TOOL_SCHEMA_FORMATS = new Set([
+  "date",
+  "date-time",
+  "email",
+  "time",
+  "uri",
+  "uuid",
+]);
+const PROHIBITED_PROPERTY_NAMES = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+const ANNOTATION_KEYS = ["title", "description", "examples"] as const;
+const ENUM_KEYS = ["enum", "const"] as const;
+
+export interface ToolSchemaIssue {
+  readonly path: string;
+  readonly message: string;
+}
+
+export interface ToolSchemaValidationResult {
+  readonly valid: boolean;
+  readonly issues: readonly ToolSchemaIssue[];
+}
+
+function toolSchemaType(value: Record<string, unknown>): string | undefined {
+  if (typeof value.type === "string") return value.type;
+  if (
+    Array.isArray(value.type) &&
+    value.type.length === 2 &&
+    value.type.includes("null")
+  ) {
+    const nonNull = value.type.find((entry) => entry !== "null");
+    return typeof nonNull === "string" ? nonNull : undefined;
   }
-  switch (value.type) {
+  return undefined;
+}
+
+function isJsonPrimitive(
+  value: unknown,
+): value is string | number | boolean | null {
+  return (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
+function isJsonValue(value: unknown, depth = 0): boolean {
+  if (depth > TOOL_SCHEMA_LIMITS.maximumDepth) return false;
+  if (isJsonPrimitive(value)) return true;
+  if (Array.isArray(value))
+    return value.every((entry) => isJsonValue(entry, depth + 1));
+  return (
+    isPlainRecord(value) &&
+    Object.entries(value).every(
+      ([key, nested]) =>
+        !PROHIBITED_PROPERTY_NAMES.has(key) && isJsonValue(nested, depth + 1),
+    )
+  );
+}
+
+function primitiveMatchesType(value: unknown, type: string): boolean {
+  switch (type) {
     case "string":
+      return typeof value === "string";
     case "number":
+      return typeof value === "number" && Number.isFinite(value);
     case "integer":
+      return typeof value === "number" && Number.isSafeInteger(value);
     case "boolean":
+      return typeof value === "boolean";
     case "null":
-      return hasOnlyKeys(value, ["type"]);
-    case "array":
-      return (
-        hasOnlyKeys(value, ["type", "items"]) &&
-        isSupportedToolJsonSchema(value.items)
-      );
-    case "object": {
-      const properties = value.properties;
-      const required = value.required;
-      if (
-        !hasOnlyKeys(value, [
-          "type",
-          "properties",
-          "required",
-          "additionalProperties",
-        ]) ||
-        value.additionalProperties !== false ||
-        !isPlainRecord(properties) ||
-        !Array.isArray(required) ||
-        required.some((key) => typeof key !== "string") ||
-        new Set(required).size !== required.length ||
-        required.some((key) => typeof key !== "string" || !(key in properties))
-      )
-        return false;
-      return Object.values(properties).every(isSupportedToolJsonSchema);
-    }
+      return value === null;
     default:
       return false;
   }
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+export function validateToolJsonSchema(
+  input: unknown,
+  options: { readonly requireObjectRoot?: boolean } = {},
+): ToolSchemaValidationResult {
+  const issues: ToolSchemaIssue[] = [];
+  let nodes = 0;
+  let properties = 0;
+  const issue = (path: string, message: string): void => {
+    if (issues.length < 32) issues.push({ path, message });
+  };
+
+  let bytes = Number.POSITIVE_INFINITY;
+  try {
+    bytes = new TextEncoder().encode(JSON.stringify(input)).byteLength;
+  } catch {
+    // The structural validation below reports the actionable error.
+  }
+  if (bytes > TOOL_SCHEMA_LIMITS.maximumBytes)
+    issue("$", `schema exceeds ${TOOL_SCHEMA_LIMITS.maximumBytes} UTF-8 bytes`);
+
+  const visit = (schema: unknown, path: string, depth: number): void => {
+    nodes += 1;
+    if (nodes > TOOL_SCHEMA_LIMITS.maximumNodes) {
+      issue("$", `schema exceeds ${TOOL_SCHEMA_LIMITS.maximumNodes} nodes`);
+      return;
+    }
+    if (depth > TOOL_SCHEMA_LIMITS.maximumDepth) {
+      issue(path, `schema exceeds depth ${TOOL_SCHEMA_LIMITS.maximumDepth}`);
+      return;
+    }
+    if (!isPlainRecord(schema)) {
+      issue(path, "schema must be a JSON object");
+      return;
+    }
+
+    const typeValue = schema.type;
+    const nullable = Array.isArray(typeValue);
+    const type = toolSchemaType(schema);
+    if (nullable) {
+      if (
+        typeValue.length !== 2 ||
+        new Set(typeValue).size !== 2 ||
+        !typeValue.includes("null") ||
+        !type ||
+        type === "null" ||
+        !TOOL_SCHEMA_TYPES.has(type)
+      )
+        issue(
+          `${path}.type`,
+          'nullable type must contain exactly one supported type and "null"',
+        );
+    } else if (
+      schema.type !== undefined &&
+      (typeof schema.type !== "string" || !TOOL_SCHEMA_TYPES.has(schema.type))
+    ) {
+      issue(`${path}.type`, "type is not supported");
+    }
+    if (!type && schema.enum === undefined && schema.const === undefined)
+      issue(path, "schema requires type, enum, or const");
+
+    if (
+      schema.title !== undefined &&
+      (typeof schema.title !== "string" ||
+        schema.title.length === 0 ||
+        schema.title.length > TOOL_SCHEMA_LIMITS.maximumTitleLength)
+    )
+      issue(
+        `${path}.title`,
+        `title must contain 1-${TOOL_SCHEMA_LIMITS.maximumTitleLength} characters`,
+      );
+    if (
+      schema.description !== undefined &&
+      (typeof schema.description !== "string" ||
+        schema.description.length === 0 ||
+        schema.description.length > TOOL_SCHEMA_LIMITS.maximumDescriptionLength)
+    )
+      issue(
+        `${path}.description`,
+        `description must contain 1-${TOOL_SCHEMA_LIMITS.maximumDescriptionLength} characters`,
+      );
+    if (
+      schema.examples !== undefined &&
+      (!Array.isArray(schema.examples) ||
+        schema.examples.length > TOOL_SCHEMA_LIMITS.maximumExamples ||
+        !schema.examples.every((example) => isJsonValue(example)))
+    )
+      issue(
+        `${path}.examples`,
+        `examples must be an array of at most ${TOOL_SCHEMA_LIMITS.maximumExamples} JSON values`,
+      );
+
+    if (schema.enum !== undefined) {
+      if (
+        !Array.isArray(schema.enum) ||
+        schema.enum.length === 0 ||
+        schema.enum.length > 100 ||
+        !schema.enum.every(isJsonPrimitive)
+      ) {
+        issue(
+          `${path}.enum`,
+          "enum must contain 1-100 finite primitive JSON values",
+        );
+      } else {
+        if (
+          new Set(schema.enum.map((entry) => JSON.stringify(entry))).size !==
+          schema.enum.length
+        )
+          issue(`${path}.enum`, "enum values must be unique");
+        if (
+          type &&
+          schema.enum.some(
+            (entry) =>
+              !(nullable && entry === null) &&
+              !primitiveMatchesType(entry, type),
+          )
+        )
+          issue(`${path}.enum`, "enum values must match the declared type");
+      }
+    }
+    if (schema.const !== undefined) {
+      if (!isJsonPrimitive(schema.const))
+        issue(`${path}.const`, "const must be a finite primitive JSON value");
+      else if (
+        type &&
+        !(nullable && schema.const === null) &&
+        !primitiveMatchesType(schema.const, type)
+      )
+        issue(`${path}.const`, "const must match the declared type");
+    }
+    if (schema.enum !== undefined && schema.const !== undefined)
+      issue(path, "enum and const cannot be combined");
+
+    const common = ["type", ...ANNOTATION_KEYS, ...ENUM_KEYS];
+    if (
+      (schema.enum !== undefined || schema.const !== undefined) &&
+      Object.keys(schema).some((key) => !common.includes(key))
+    )
+      issue(path, "enum and const cannot be combined with other constraints");
+    let allowed = common;
+    switch (type) {
+      case "string": {
+        allowed = [...common, "minLength", "maxLength", "format"];
+        if (
+          schema.minLength !== undefined &&
+          !isNonNegativeInteger(schema.minLength)
+        )
+          issue(
+            `${path}.minLength`,
+            "minLength must be a non-negative integer",
+          );
+        if (
+          schema.maxLength !== undefined &&
+          !isNonNegativeInteger(schema.maxLength)
+        )
+          issue(
+            `${path}.maxLength`,
+            "maxLength must be a non-negative integer",
+          );
+        if (
+          typeof schema.minLength === "number" &&
+          typeof schema.maxLength === "number" &&
+          schema.minLength > schema.maxLength
+        )
+          issue(path, "minLength cannot exceed maxLength");
+        if (
+          schema.format !== undefined &&
+          (typeof schema.format !== "string" ||
+            !TOOL_SCHEMA_FORMATS.has(schema.format))
+        )
+          issue(`${path}.format`, "format is not supported");
+        break;
+      }
+      case "number":
+      case "integer": {
+        allowed = [
+          ...common,
+          "minimum",
+          "maximum",
+          "exclusiveMinimum",
+          "exclusiveMaximum",
+          "multipleOf",
+        ];
+        for (const key of [
+          "minimum",
+          "maximum",
+          "exclusiveMinimum",
+          "exclusiveMaximum",
+          "multipleOf",
+        ] as const) {
+          if (
+            schema[key] !== undefined &&
+            (typeof schema[key] !== "number" || !Number.isFinite(schema[key]))
+          )
+            issue(`${path}.${key}`, `${key} must be a finite number`);
+        }
+        if (typeof schema.multipleOf === "number" && schema.multipleOf <= 0)
+          issue(`${path}.multipleOf`, "multipleOf must be greater than zero");
+        if (
+          schema.minimum !== undefined &&
+          schema.exclusiveMinimum !== undefined
+        )
+          issue(path, "minimum and exclusiveMinimum cannot be combined");
+        if (
+          schema.maximum !== undefined &&
+          schema.exclusiveMaximum !== undefined
+        )
+          issue(path, "maximum and exclusiveMaximum cannot be combined");
+        const lower =
+          typeof schema.minimum === "number"
+            ? schema.minimum
+            : schema.exclusiveMinimum;
+        const upper =
+          typeof schema.maximum === "number"
+            ? schema.maximum
+            : schema.exclusiveMaximum;
+        if (
+          typeof lower === "number" &&
+          typeof upper === "number" &&
+          lower > upper
+        )
+          issue(path, "numeric lower bound cannot exceed upper bound");
+        break;
+      }
+      case "array":
+        allowed = [...common, "items", "minItems", "maxItems"];
+        if (schema.items === undefined)
+          issue(`${path}.items`, "array schemas require items");
+        else visit(schema.items, `${path}.items`, depth + 1);
+        if (
+          schema.minItems !== undefined &&
+          !isNonNegativeInteger(schema.minItems)
+        )
+          issue(`${path}.minItems`, "minItems must be a non-negative integer");
+        if (
+          schema.maxItems !== undefined &&
+          !isNonNegativeInteger(schema.maxItems)
+        )
+          issue(`${path}.maxItems`, "maxItems must be a non-negative integer");
+        if (
+          typeof schema.minItems === "number" &&
+          typeof schema.maxItems === "number" &&
+          schema.minItems > schema.maxItems
+        )
+          issue(path, "minItems cannot exceed maxItems");
+        break;
+      case "object": {
+        allowed = [...common, "properties", "required", "additionalProperties"];
+        const entries = schema.properties ?? {};
+        if (!isPlainRecord(entries))
+          issue(`${path}.properties`, "properties must be an object");
+        else {
+          properties += Object.keys(entries).length;
+          if (properties > TOOL_SCHEMA_LIMITS.maximumProperties)
+            issue(
+              "$",
+              `schema exceeds ${TOOL_SCHEMA_LIMITS.maximumProperties} properties`,
+            );
+          for (const [key, nested] of Object.entries(entries)) {
+            if (PROHIBITED_PROPERTY_NAMES.has(key))
+              issue(`${path}.properties.${key}`, "property name is prohibited");
+            else if (key.length === 0 || key.length > 200)
+              issue(
+                `${path}.properties.${key}`,
+                "property name must contain 1-200 characters",
+              );
+            visit(nested, `${path}.properties.${key}`, depth + 1);
+          }
+        }
+        const required = schema.required ?? [];
+        if (
+          !Array.isArray(required) ||
+          required.some((key) => typeof key !== "string")
+        )
+          issue(
+            `${path}.required`,
+            "required must be an array of property names",
+          );
+        else {
+          if (new Set(required).size !== required.length)
+            issue(`${path}.required`, "required property names must be unique");
+          if (
+            isPlainRecord(entries) &&
+            required.some((key) => !(key in entries))
+          )
+            issue(
+              `${path}.required`,
+              "required names must exist in properties",
+            );
+        }
+        const additional = schema.additionalProperties ?? true;
+        if (typeof additional !== "boolean" && !isPlainRecord(additional))
+          issue(
+            `${path}.additionalProperties`,
+            "additionalProperties must be boolean or a supported schema",
+          );
+        else if (isPlainRecord(additional))
+          visit(additional, `${path}.additionalProperties`, depth + 1);
+        break;
+      }
+      default:
+        break;
+    }
+    if (!hasOnlyKeys(schema, allowed)) {
+      const unknown = Object.keys(schema).filter(
+        (key) => !allowed.includes(key),
+      );
+      issue(
+        path,
+        `unsupported keyword${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`,
+      );
+    }
+  };
+
+  visit(input, "$", 0);
+  if (
+    options.requireObjectRoot &&
+    (!isPlainRecord(input) || toolSchemaType(input) !== "object")
+  )
+    issue("$.type", "tool root schema must have type object");
+  return { valid: issues.length === 0, issues };
+}
+
+export function isSupportedToolJsonSchema(value: unknown): boolean {
+  return validateToolJsonSchema(value).valid;
+}
+
+function appendValuePath(path: string, key: string | number): string {
+  if (typeof key === "number") return `${path}[${key}]`;
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(key)
+    ? `${path}.${key}`
+    : `${path}[${JSON.stringify(key)}]`;
+}
+
+function jsonPrimitiveEqual(left: unknown, right: unknown): boolean {
+  return left === right || (left === 0 && right === 0);
+}
+
+function matchesStringFormat(value: string, format: unknown): boolean {
+  switch (format) {
+    case "date":
+      return v.safeParse(v.pipe(v.string(), v.isoDate()), value).success;
+    case "date-time":
+      return v.safeParse(v.pipe(v.string(), v.isoTimestamp()), value).success;
+    case "email":
+      return v.safeParse(v.pipe(v.string(), v.email()), value).success;
+    case "time":
+      return v.safeParse(v.pipe(v.string(), v.isoTime()), value).success;
+    case "uri":
+      return v.safeParse(v.pipe(v.string(), v.url()), value).success;
+    case "uuid":
+      return v.safeParse(v.pipe(v.string(), v.uuid()), value).success;
+    default:
+      return true;
+  }
+}
+
+function isMultipleOf(value: number, divisor: number): boolean {
+  const quotient = value / divisor;
+  const tolerance = Number.EPSILON * Math.max(1, Math.abs(quotient)) * 4;
+  return Math.abs(quotient - Math.round(quotient)) <= tolerance;
+}
+
+/**
+ * Validates one JSON value against OAO's published provider-neutral tool-schema
+ * subset. This is deliberately validation-only: values are never coerced and
+ * defaults are never applied.
+ */
+export function validateToolJsonValue(
+  schemaInput: unknown,
+  value: unknown,
+): ToolSchemaValidationResult {
+  const schemaValidation = validateToolJsonSchema(schemaInput);
+  if (!schemaValidation.valid)
+    return {
+      valid: false,
+      issues: [
+        {
+          path: "$",
+          message: "published tool schema is invalid",
+        },
+      ],
+    };
+
+  const issues: ToolSchemaIssue[] = [];
+  const issue = (path: string, message: string): void => {
+    if (issues.length < 32) issues.push({ path, message });
+  };
+  if (!isJsonValue(value)) {
+    issue("$", "value must be finite JSON without prohibited object keys");
+    return { valid: false, issues };
+  }
+
+  const visit = (
+    schema: Record<string, unknown>,
+    nested: unknown,
+    path: string,
+  ): void => {
+    const type = toolSchemaType(schema);
+    const nullable = Array.isArray(schema.type) && schema.type.includes("null");
+
+    if (
+      Array.isArray(schema.enum) &&
+      !schema.enum.some((entry) => jsonPrimitiveEqual(entry, nested))
+    ) {
+      issue(
+        path,
+        `value must be one of: ${schema.enum.map(String).join(", ")}`,
+      );
+      return;
+    }
+    if (
+      schema.const !== undefined &&
+      !jsonPrimitiveEqual(schema.const, nested)
+    ) {
+      issue(path, `value must equal ${JSON.stringify(schema.const)}`);
+      return;
+    }
+    if (nested === null && nullable) return;
+    if (!type) return;
+
+    if (type === "string") {
+      if (typeof nested !== "string") {
+        issue(path, "value must be a string");
+        return;
+      }
+      if (
+        typeof schema.minLength === "number" &&
+        nested.length < schema.minLength
+      )
+        issue(
+          path,
+          `string must contain at least ${schema.minLength} characters`,
+        );
+      if (
+        typeof schema.maxLength === "number" &&
+        nested.length > schema.maxLength
+      )
+        issue(
+          path,
+          `string must contain at most ${schema.maxLength} characters`,
+        );
+      if (!matchesStringFormat(nested, schema.format))
+        issue(path, `string must match format ${String(schema.format)}`);
+      return;
+    }
+
+    if (type === "number" || type === "integer") {
+      if (
+        typeof nested !== "number" ||
+        !Number.isFinite(nested) ||
+        (type === "integer" && !Number.isSafeInteger(nested))
+      ) {
+        issue(path, `value must be a finite ${type}`);
+        return;
+      }
+      if (typeof schema.minimum === "number" && nested < schema.minimum)
+        issue(path, `number must be at least ${schema.minimum}`);
+      if (typeof schema.maximum === "number" && nested > schema.maximum)
+        issue(path, `number must be at most ${schema.maximum}`);
+      if (
+        typeof schema.exclusiveMinimum === "number" &&
+        nested <= schema.exclusiveMinimum
+      )
+        issue(path, `number must be greater than ${schema.exclusiveMinimum}`);
+      if (
+        typeof schema.exclusiveMaximum === "number" &&
+        nested >= schema.exclusiveMaximum
+      )
+        issue(path, `number must be less than ${schema.exclusiveMaximum}`);
+      if (
+        typeof schema.multipleOf === "number" &&
+        !isMultipleOf(nested, schema.multipleOf)
+      )
+        issue(path, `number must be a multiple of ${schema.multipleOf}`);
+      return;
+    }
+
+    if (type === "boolean") {
+      if (typeof nested !== "boolean") issue(path, "value must be a boolean");
+      return;
+    }
+    if (type === "null") {
+      if (nested !== null) issue(path, "value must be null");
+      return;
+    }
+    if (type === "array") {
+      if (!Array.isArray(nested)) {
+        issue(path, "value must be an array");
+        return;
+      }
+      if (
+        typeof schema.minItems === "number" &&
+        nested.length < schema.minItems
+      )
+        issue(path, `array must contain at least ${schema.minItems} items`);
+      if (
+        typeof schema.maxItems === "number" &&
+        nested.length > schema.maxItems
+      )
+        issue(path, `array must contain at most ${schema.maxItems} items`);
+      if (isPlainRecord(schema.items))
+        nested.forEach((entry, index) =>
+          visit(
+            schema.items as Record<string, unknown>,
+            entry,
+            appendValuePath(path, index),
+          ),
+        );
+      return;
+    }
+
+    if (!isPlainRecord(nested)) {
+      issue(path, "value must be an object");
+      return;
+    }
+    const properties = isPlainRecord(schema.properties)
+      ? schema.properties
+      : {};
+    const required = Array.isArray(schema.required) ? schema.required : [];
+    for (const key of required) {
+      if (typeof key === "string" && !Object.hasOwn(nested, key))
+        issue(appendValuePath(path, key), "required property is missing");
+    }
+    for (const [key, propertyValue] of Object.entries(nested)) {
+      const propertySchema = properties[key];
+      if (isPlainRecord(propertySchema)) {
+        visit(propertySchema, propertyValue, appendValuePath(path, key));
+        continue;
+      }
+      const additional = schema.additionalProperties ?? true;
+      if (additional === false)
+        issue(appendValuePath(path, key), "additional property is not allowed");
+      else if (isPlainRecord(additional))
+        visit(additional, propertyValue, appendValuePath(path, key));
+    }
+  };
+
+  visit(schemaInput as Record<string, unknown>, value, "$");
+  return { valid: issues.length === 0, issues };
+}
+
+function canonicalizeToolSchema(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const canonical: Record<string, unknown> = {};
+  for (const key of Object.keys(schema).sort()) {
+    const value = schema[key];
+    if (key === "required" && Array.isArray(value)) {
+      canonical[key] = [...value].sort();
+    } else if (key === "properties" && isPlainRecord(value)) {
+      canonical[key] = Object.fromEntries(
+        Object.entries(value)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([name, nested]) => [
+            name,
+            canonicalizeToolSchema(nested as Record<string, unknown>),
+          ]),
+      );
+    } else if (key === "items" && isPlainRecord(value)) {
+      canonical[key] = canonicalizeToolSchema(value);
+    } else if (key === "additionalProperties" && isPlainRecord(value)) {
+      canonical[key] = canonicalizeToolSchema(value);
+    } else {
+      canonical[key] = value;
+    }
+  }
+  return canonical;
 }
 
 const PublishedPropertySchema = v.pipe(
@@ -79,19 +714,23 @@ const PublishedPropertySchema = v.pipe(
 const PublishedObjectSchema = v.pipe(
   v.strictObject({
     type: v.literal("object"),
-    properties: v.record(v.string(), PublishedPropertySchema),
+    title: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(200))),
+    description: v.optional(
+      v.pipe(v.string(), v.minLength(1), v.maxLength(2_000)),
+    ),
+    examples: v.optional(v.pipe(v.array(v.unknown()), v.maxLength(8))),
+    properties: v.optional(v.record(v.string(), PublishedPropertySchema), {}),
     required: v.optional(v.array(v.string()), []),
-    additionalProperties: v.literal(false),
+    additionalProperties: v.optional(
+      v.union([v.boolean(), PublishedPropertySchema]),
+      true,
+    ),
   }),
   v.check(
-    (value: {
-      type: "object";
-      properties: Record<string, Record<string, unknown>>;
-      required: string[];
-      additionalProperties: false;
-    }) => isSupportedToolJsonSchema(value),
-    "Tool JSON schema must be a closed supported object schema",
+    (value) => validateToolJsonSchema(value, { requireObjectRoot: true }).valid,
+    "Tool JSON schema must be a supported object schema",
   ),
+  v.transform((value) => canonicalizeToolSchema(value) as typeof value),
 );
 
 export const OrganizationSchema = v.object({
@@ -534,13 +1173,15 @@ export const ManagedAgentPublicationConfigSchema = v.pipe(
     modelPreset: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
     tools: v.pipe(
       v.array(RuntimeToolSnapshotSchema),
+      v.maxLength(64),
       v.check(
         (tools) =>
+          new Set(tools.map((tool) => tool.name)).size === tools.length &&
           tools.every(
             (tool) =>
               tool.name !== "delegate_agent" && tool.name !== "message_agent",
           ),
-        "delegate_agent and message_agent are reserved platform tools",
+        "tool names must be unique; delegate_agent and message_agent are reserved platform tools",
       ),
     ),
     skillVersionIds: v.optional(v.array(IdSchema), []),
@@ -666,6 +1307,7 @@ export const ToolResultFailureCodeSchema = v.picklist([
   "platform_tool_failed",
   "invalid_tool_arguments",
   "invalid_tool_result",
+  "tool_retry_exhausted",
 ]);
 
 export const ToolResultEnvelopeSchema = v.variant("status", [
@@ -683,6 +1325,10 @@ export const ToolResultEnvelopeSchema = v.variant("status", [
     }),
   }),
 ]);
+
+export function parseToolResultEnvelope(input: unknown): ToolResultEnvelope {
+  return v.parse(ToolResultEnvelopeSchema, input);
+}
 export const ProductEventSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,

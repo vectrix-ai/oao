@@ -4,6 +4,8 @@ import test from "node:test";
 import type { PgPool } from "@oao/db-postgres";
 import type { OrganizationId, ProjectId, RunId } from "@oao/domain";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
+import { toJsonSchema } from "@valibot/to-json-schema";
+import * as v from "valibot";
 import {
   FLUE_PACKAGE_VERSIONS,
   PostgresSkillRegistry,
@@ -35,6 +37,92 @@ test("runtime projections use deterministic ids and redact unsafe arguments", ()
     }),
     { authorization: "[REDACTED]", orderId: "safe" },
   );
+});
+
+test("rich tool schemas guide the model and fail closed at execution", () => {
+  const compiled = runtimeTesting.compileToolInputSchema({
+    type: "object",
+    description: "Search input.",
+    properties: {
+      query: {
+        type: "string",
+        description: "At least two characters.",
+        minLength: 2,
+      },
+      options: {
+        type: ["object", "null"],
+        description: "Provider-specific options.",
+      },
+      scopes: {
+        type: "array",
+        items: { type: "string", enum: ["customer", "shipment"] },
+        maxItems: 2,
+      },
+    },
+    required: ["query"],
+    additionalProperties: false,
+  } as never);
+
+  const valid = v.safeParse(compiled, {
+    query: "acme",
+    options: { region: "eu" },
+    scopes: ["customer"],
+  });
+  assert.equal(valid.success, true);
+  if (valid.success)
+    assert.equal(
+      (
+        valid.output as {
+          readonly options: Readonly<Record<string, unknown>>;
+        }
+      ).options.region,
+      "eu",
+    );
+  assert.equal(v.safeParse(compiled, { query: "x" }).success, false);
+  assert.equal(
+    v.safeParse(compiled, { query: "acme", unexpected: true }).success,
+    false,
+  );
+  const pollutionAttempt = v.safeParse(
+    compiled,
+    JSON.parse('{"query":"acme","options":{"__proto__":{"polluted":true}}}'),
+  );
+  assert.equal(pollutionAttempt.success, true);
+  if (pollutionAttempt.success) {
+    const options = (
+      pollutionAttempt.output as { readonly options: Record<string, unknown> }
+    ).options;
+    assert.equal(Object.hasOwn(options, "__proto__"), false);
+    assert.equal(Object.getPrototypeOf(options), Object.prototype);
+  }
+  const serialized = JSON.stringify(compiled);
+  assert.match(serialized, /Search input\./u);
+  assert.match(serialized, /At least two characters\./u);
+  assert.match(serialized, /customer/u);
+  const providerSchema = toJsonSchema(compiled, { errorMode: "ignore" });
+  assert.equal(providerSchema.description, "Search input.");
+  assert.equal(
+    (providerSchema.properties?.query as { description?: string }).description,
+    "At least two characters.",
+  );
+  assert.equal(
+    (providerSchema.properties?.query as { minLength?: number }).minLength,
+    2,
+  );
+  assert.deepEqual(
+    (providerSchema.properties?.scopes as { items?: { enum?: unknown } }).items
+      ?.enum,
+    ["customer", "shipment"],
+  );
+  const retryPrompt = runtimeTesting.managedSystemPrompt({
+    systemPrompt: "Base instructions.",
+    tools: [{ name: "lookup" }],
+    delegates: [],
+  } as never);
+  assert.match(retryPrompt, /call that tool again automatically/u);
+  assert.match(retryPrompt, /2 times after the initial failure/u);
+  assert.match(retryPrompt, /3 total attempts/u);
+  assert.match(retryPrompt, /tool_retry_exhausted/u);
 });
 
 test("runtime projections retain full model timing and thinking text", () => {
@@ -206,6 +294,14 @@ test("runtime reloads run attachments only from the bound object store", async (
           },
           async head() {
             return undefined;
+          },
+          async list() {
+            return {
+              prefix: "",
+              folders: [],
+              objects: [],
+              truncated: false,
+            };
           },
           async delete() {},
         },

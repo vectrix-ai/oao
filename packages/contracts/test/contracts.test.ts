@@ -13,6 +13,8 @@ import {
   parseCreateProjectStorageProviderInput,
   parseManagedAgentSnapshotForPublication,
   parseModelRoutingPolicy,
+  validateToolJsonSchema,
+  validateToolJsonValue,
 } from "../src/index.js";
 
 const id = "00000000-0000-4000-8000-000000000001";
@@ -187,7 +189,7 @@ test("tool claim fences remain precise above Number.MAX_SAFE_INTEGER", () => {
   );
 });
 
-test("agent publication rejects JSON schema keywords the runtime cannot enforce", () => {
+test("agent publication accepts canonical rich tool schemas and rejects ignored features", () => {
   const snapshot = {
     systemPrompt: "Be deterministic",
     modelPreset: "project-model-v1",
@@ -200,7 +202,27 @@ test("agent publication rejects JSON schema keywords the runtime cannot enforce"
         approval: "never",
         inputSchema: {
           type: "object",
-          properties: { query: { type: "string" } },
+          description: "Lookup arguments.",
+          properties: {
+            query: {
+              type: "string",
+              description: "Free-text lookup query.",
+              minLength: 2,
+              maxLength: 200,
+            },
+            filters: {
+              type: ["object", "null"],
+              description: "Optional dynamic filter values.",
+            },
+            scopes: {
+              type: "array",
+              items: {
+                type: "string",
+                enum: ["customer", "shipment"],
+              },
+              maxItems: 2,
+            },
+          },
           required: ["query"],
           additionalProperties: false,
         },
@@ -219,25 +241,52 @@ test("agent publication rejects JSON schema keywords the runtime cannot enforce"
     },
     limits: { maxTurns: PLATFORM_MAX_TURNS, timeoutMs: 60_000 },
   };
+  const parsed = parseManagedAgentSnapshotForPublication(snapshot);
+  assert.equal(parsed.tools[0]?.name, "lookup");
   assert.equal(
-    parseManagedAgentSnapshotForPublication(snapshot).tools[0]?.name,
-    "lookup",
+    parsed.tools[0]?.inputSchema.properties.query?.description,
+    "Free-text lookup query.",
   );
-  assert.throws(() =>
-    parseManagedAgentSnapshotForPublication({
-      ...snapshot,
-      tools: [
-        {
-          ...snapshot.tools[0],
-          inputSchema: {
-            ...snapshot.tools[0]?.inputSchema,
-            properties: {
-              query: { type: "string", minLength: 1 },
-            },
-          },
-        },
-      ],
-    }),
+  assert.deepEqual(parsed.tools[0]?.inputSchema.required, ["query"]);
+  assert.equal(
+    validateToolJsonValue(parsed.tools[0]!.inputSchema, {
+      query: "shipment",
+      filters: null,
+      scopes: ["customer"],
+    }).valid,
+    true,
+  );
+  const invalidValue = validateToolJsonValue(parsed.tools[0]!.inputSchema, {
+    query: "x",
+    scopes: ["unknown"],
+    unexpected: true,
+  });
+  assert.equal(invalidValue.valid, false);
+  assert.deepEqual(
+    invalidValue.issues.map((issue) => issue.path),
+    ["$.query", "$.scopes[0]", "$.unexpected"],
+  );
+
+  for (const unsupported of [
+    { type: "string", pattern: "(a+)+$" },
+    { oneOf: [{ type: "string" }, { type: "number" }] },
+    { $ref: "https://example.com/schema.json" },
+    { type: "string", default: "surprising" },
+    { type: "string", enum: ["a"], minLength: 1 },
+  ]) {
+    const validation = validateToolJsonSchema(unsupported);
+    assert.equal(validation.valid, false);
+    assert.match(
+      validation.issues[0]?.message ?? "",
+      /unsupported|requires|cannot be combined/u,
+    );
+  }
+  assert.equal(
+    validateToolJsonSchema({
+      type: "object",
+      properties: JSON.parse('{"__proto__":{"type":"string"}}'),
+    }).valid,
+    false,
   );
 });
 

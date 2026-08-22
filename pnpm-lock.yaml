@@ -321,6 +321,10 @@ importers:
       valibot:
         specifier: 1.4.2
         version: 1.4.2(typescript@5.9.3)
+    devDependencies:
+      '@valibot/to-json-schema':
+        specifier: 1.7.1
+        version: 1.7.1(valibot@1.4.2(typescript@5.9.3))
 
   packages/sandbox-daytona:
     dependencies:

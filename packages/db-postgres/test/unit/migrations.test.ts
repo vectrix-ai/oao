@@ -268,6 +268,22 @@ test("sandbox-enabled agent versions require an explicit snapshot", async () => 
   assert.doesNotMatch(sql, /DROP|DELETE|UPDATE/u);
 });
 
+test("rich tool schemas expand schema version 1 without rewriting history", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0021_rich_tool_schemas.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    sql,
+    /CREATE OR REPLACE FUNCTION oao\.is_valid_published_json_schema/u,
+  );
+  assert.match(sql, /description/u);
+  assert.match(sql, /additionalProperties/u);
+  assert.match(sql, /exclusiveMinimum/u);
+  assert.match(sql, /maximum_depth <= 12/u);
+  assert.doesNotMatch(sql, /ALTER TABLE|DROP|DELETE|UPDATE/u);
+});
+
 test("workspace storage migration keeps backups tenant-correlated and credentials encrypted", async () => {
   const sql = await readFile(
     new URL("../../migrations/0015_workspace_storage.sql", import.meta.url),

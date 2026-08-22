@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import {
   ProjectWorkspaceBackupResolver,
+  type S3ListObjectsInput,
   type S3ObjectBody,
   type S3ObjectClient,
   type S3ObjectMetadata,
@@ -160,6 +161,25 @@ class MemoryS3Client implements S3ObjectClient {
     readonly key: string;
   }): Promise<void> {
     this.objects.delete(`${input.bucket}/${input.key}`);
+  }
+
+  async listObjects(input: S3ListObjectsInput) {
+    const bucketPrefix = `${input.bucket}/`;
+    const prefix = input.prefix;
+    const maxKeys = input.maxKeys ?? 1_000;
+    const objects = [...this.objects.entries()].flatMap(
+      ([storedKey, value]) => {
+        if (!storedKey.startsWith(bucketPrefix)) return [];
+        const key = storedKey.slice(bucketPrefix.length);
+        if (!key.startsWith(prefix)) return [];
+        return [{ key, sizeBytes: value.body.byteLength }];
+      },
+    );
+    return {
+      objects: objects.slice(0, maxKeys),
+      commonPrefixes: [],
+      truncated: objects.length > maxKeys,
+    };
   }
 }
 

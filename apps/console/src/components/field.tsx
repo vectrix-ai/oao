@@ -1,4 +1,4 @@
-import { Search } from "lucide-react";
+import { Info, Search } from "lucide-react";
 import {
   createContext,
   useContext,
@@ -8,6 +8,29 @@ import {
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
 } from "react";
+
+/**
+ * Small info icon that reveals its explanation on hover or keyboard focus.
+ *
+ * For guidance that matters once, not every render — long storage or policy
+ * notes that would otherwise push the actual controls apart.
+ */
+export function InfoHint({
+  text,
+  id,
+}: {
+  readonly text: string;
+  readonly id?: string;
+}) {
+  return (
+    <span className="info-hint" tabIndex={0} aria-label="Field information">
+      <Info size={13} aria-hidden="true" />
+      <span className="info-hint-bubble" role="tooltip" {...(id ? { id } : {})}>
+        {text}
+      </span>
+    </span>
+  );
+}
 
 interface FieldControl {
   readonly id: string;
@@ -28,6 +51,7 @@ export function Field({
   label,
   labelHidden = false,
   hint,
+  hintIcon = false,
   error,
   className,
   children,
@@ -36,6 +60,8 @@ export function Field({
   /** Hides the label visually where a placeholder already carries it. */
   readonly labelHidden?: boolean;
   readonly hint?: string;
+  /** Tucks a long hint behind an info icon next to the label. */
+  readonly hintIcon?: boolean;
   readonly error?: string;
   readonly className?: string;
   readonly children: ReactNode;
@@ -54,11 +80,20 @@ export function Field({
       }}
     >
       <div className={`field${className ? ` ${className}` : ""}`}>
-        <label htmlFor={id} className={labelHidden ? "sr-only" : undefined}>
-          {label}
-        </label>
+        {hint && hintIcon ? (
+          <span className="field-label">
+            <label htmlFor={id} className={labelHidden ? "sr-only" : undefined}>
+              {label}
+            </label>
+            <InfoHint text={hint} {...(hintId ? { id: hintId } : {})} />
+          </span>
+        ) : (
+          <label htmlFor={id} className={labelHidden ? "sr-only" : undefined}>
+            {label}
+          </label>
+        )}
         {children}
-        {hint ? (
+        {hint && !hintIcon ? (
           <span className="hint" id={hintId}>
             {hint}
           </span>

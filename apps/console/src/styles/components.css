@@ -140,9 +140,51 @@
   font-weight: 500;
   color: var(--text);
 }
+.field > .field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
 .field .hint {
   font-size: 12px;
   color: var(--text-2);
+}
+
+/* Info icon that reveals a long explanation on hover or keyboard focus. */
+.info-hint {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-3);
+  cursor: help;
+}
+.info-hint:hover,
+.info-hint:focus-visible {
+  color: var(--text-2);
+}
+.info-hint-bubble {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  display: none;
+  width: 280px;
+  max-width: 70vw;
+  padding: var(--sp-2) var(--sp-3);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius-2);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  white-space: normal;
+}
+.info-hint:hover .info-hint-bubble,
+.info-hint:focus .info-hint-bubble,
+.info-hint:focus-visible .info-hint-bubble {
+  display: block;
 }
 .field .error-msg {
   font-size: 12px;
@@ -204,6 +246,12 @@
 .input--mono {
   font-family: var(--font-mono);
   font-size: 12px;
+}
+.textarea--code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre;
 }
 
 .select {
@@ -1161,6 +1209,32 @@ details.policy-details .policy-body {
 .panel > .panel-body--flush {
   padding: 0;
 }
+.panel > .panel-body[hidden] {
+  display: none;
+}
+.panel > .panel-head:has(+ .panel-body[hidden]) {
+  border-bottom: none;
+}
+/* Disclosure title for collapsible panels; inherits the h2 typography. */
+.panel-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.panel-toggle .caret {
+  color: var(--text-3);
+  transition: transform var(--dur-1) var(--ease);
+}
+.panel-toggle[aria-expanded="true"] .caret {
+  transform: rotate(90deg);
+}
 
 /* Bordered key/value grid used for run and resource metadata. */
 .meta-grid {
@@ -1222,6 +1296,92 @@ details.policy-details .policy-body {
   font-size: 12px;
   line-height: 1.7;
   overflow: auto;
+}
+
+/* JSON token colours reuse the signal palette so both themes stay coherent. */
+.code-block--json .jt-key {
+  color: var(--info-fg);
+}
+.code-block--json .jt-str {
+  color: var(--success-fg);
+}
+.code-block--json .jt-num {
+  color: var(--warning-fg);
+}
+.code-block--json .jt-bool {
+  color: var(--danger-fg);
+}
+.code-block--json .jt-null {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+/* ---------- File attachment control ---------- */
+.file-drop {
+  display: grid;
+  gap: var(--sp-2);
+}
+.file-drop-target {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  border: var(--bw) dashed var(--border-strong);
+  border-radius: var(--radius-2);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-1) var(--ease),
+    background var(--dur-1) var(--ease);
+}
+.file-drop-target strong {
+  color: var(--accent);
+}
+.file-drop-target:hover:not(:disabled),
+.file-drop--dropping .file-drop-target {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+  color: var(--accent-on-weak);
+}
+.file-drop-target:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.file-drop-list {
+  display: grid;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.file-drop-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border: var(--bw) solid var(--border);
+  border-radius: var(--radius-1);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+}
+.file-drop-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.file-drop-list small {
+  flex: none;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
 .avatar {

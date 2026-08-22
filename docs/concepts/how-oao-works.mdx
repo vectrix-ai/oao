@@ -86,6 +86,14 @@ An authorized integration claims the request for a lease, receives a monotonical
 increasing fence, performs the work, and submits one immutable safe result. A
 stale worker cannot commit with an older fence.
 
+Before a successful caller result is persisted, OAO validates its value against
+the output schema pinned in the run's immutable agent version. Invalid values
+are converted into a redacted `invalid_tool_result` failure and handed back to
+the model. The model retries retryable failures up to twice after the first
+attempt; OAO enforces three total attempts and publishes every retry as a new
+fenced tool call. Approval, cancellation, and exhausted-retry failures do not
+loop.
+
 Attach a small, deliberate set of supported files directly to a run. For a full
 or changing codebase, caller-owned tools remain the recommended pattern: keep
 the repository in your environment, expose narrow read/search tools, validate

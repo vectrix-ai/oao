@@ -39,6 +39,7 @@ import {
   ManagedRunDeliverySchema,
   ManagedRunInputV1Schema,
   ModelRoutingPolicySchema,
+  TOOL_RETRY_POLICY,
   ToolResultFailureCodeSchema,
   type ManagedAgentSnapshot,
   type ManagedSkillBindingSnapshot,
@@ -204,44 +205,248 @@ function runtimeConfig(): ManagedAgentRuntimeConfig {
 type PublishedObjectSchema =
   ManagedAgentSnapshot["tools"][number]["inputSchema"];
 
+function schemaType(schema: Record<string, unknown>): string | undefined {
+  if (typeof schema.type === "string") return schema.type;
+  if (Array.isArray(schema.type))
+    return schema.type.find((entry) => entry !== "null") as string | undefined;
+  return undefined;
+}
+
+const PROTOTYPE_POLLUTION_KEYS = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
+function hasSafeObjectKeys(
+  value: unknown,
+  seen = new WeakSet<object>(),
+  depth = 0,
+): boolean {
+  if (!value || typeof value !== "object") return true;
+  if (depth > 64 || seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) return false;
+    return value.every((entry) => hasSafeObjectKeys(entry, seen, depth + 1));
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  return Object.entries(value).every(
+    ([key, nested]) =>
+      !PROTOTYPE_POLLUTION_KEYS.has(key) &&
+      hasSafeObjectKeys(nested, seen, depth + 1),
+  );
+}
+
+function literalSchema(value: unknown): v.GenericSchema {
+  if (value === null) return v.null();
+  if (
+    typeof value !== "string" &&
+    typeof value !== "number" &&
+    typeof value !== "boolean"
+  )
+    throw new TypeError("Tool schema literals must be primitive JSON values");
+  return v.literal(value);
+}
+
+function compileEnumSchema(values: readonly unknown[]): v.GenericSchema {
+  if (values.length === 0)
+    throw new TypeError("Published enum schemas require values");
+  if (
+    values.every(
+      (value): value is string | number =>
+        typeof value === "string" || typeof value === "number",
+    )
+  )
+    return v.picklist(values as [string | number, ...(string | number)[]]);
+  const options = values.map(literalSchema);
+  return options.length === 1
+    ? options[0]!
+    : v.union(
+        options as [v.GenericSchema, v.GenericSchema, ...v.GenericSchema[]],
+      );
+}
+
+function compilePipe(
+  schema: v.GenericSchema,
+  ...actions: readonly unknown[]
+): v.GenericSchema {
+  const pipe = v.pipe as unknown as (
+    input: v.GenericSchema,
+    ...items: readonly unknown[]
+  ) => v.GenericSchema;
+  return pipe(schema, ...actions);
+}
+
+function withSchemaMetadata(
+  compiled: v.GenericSchema,
+  schema: Record<string, unknown>,
+): v.GenericSchema {
+  const metadata = {
+    ...(typeof schema.title === "string" ? { title: schema.title } : {}),
+    ...(typeof schema.description === "string"
+      ? { description: schema.description }
+      : {}),
+    ...(Array.isArray(schema.examples) ? { examples: schema.examples } : {}),
+  };
+  return Object.keys(metadata).length > 0
+    ? compilePipe(compiled, v.metadata(metadata))
+    : compiled;
+}
+
 function compilePropertySchema(
   schema: Record<string, unknown>,
 ): v.GenericSchema {
   if (Array.isArray(schema.enum) && schema.enum.length > 0) {
-    const values = schema.enum;
-    return v.custom((value) => values.some((entry) => Object.is(entry, value)));
+    return withSchemaMetadata(compileEnumSchema(schema.enum), schema);
   }
-  switch (schema.type) {
-    case "string":
-      return v.string();
-    case "number":
-      return v.number();
+  if ("const" in schema)
+    return withSchemaMetadata(literalSchema(schema.const), schema);
+
+  let compiled: v.GenericSchema;
+  switch (schemaType(schema)) {
+    case "string": {
+      let stringSchema: v.GenericSchema = v.string();
+      if (typeof schema.minLength === "number")
+        stringSchema = compilePipe(
+          stringSchema,
+          v.minLength(schema.minLength),
+        ) as v.GenericSchema;
+      if (typeof schema.maxLength === "number")
+        stringSchema = compilePipe(
+          stringSchema,
+          v.maxLength(schema.maxLength),
+        ) as v.GenericSchema;
+      switch (schema.format) {
+        case "date":
+          stringSchema = compilePipe(stringSchema, v.isoDate());
+          break;
+        case "date-time":
+          stringSchema = compilePipe(
+            stringSchema,
+            v.isoTimestamp(),
+          ) as v.GenericSchema;
+          break;
+        case "email":
+          stringSchema = compilePipe(stringSchema, v.email());
+          break;
+        case "time":
+          stringSchema = compilePipe(stringSchema, v.isoTime());
+          break;
+        case "uri":
+          stringSchema = compilePipe(stringSchema, v.url());
+          break;
+        case "uuid":
+          stringSchema = compilePipe(stringSchema, v.uuid());
+          break;
+        default:
+          break;
+      }
+      compiled = stringSchema;
+      break;
+    }
+    case "number": {
+      let numberSchema: v.GenericSchema = v.pipe(v.number(), v.finite());
+      if (typeof schema.minimum === "number")
+        numberSchema = compilePipe(
+          numberSchema,
+          v.minValue(schema.minimum),
+        ) as v.GenericSchema;
+      if (typeof schema.maximum === "number")
+        numberSchema = compilePipe(
+          numberSchema,
+          v.maxValue(schema.maximum),
+        ) as v.GenericSchema;
+      if (typeof schema.exclusiveMinimum === "number")
+        numberSchema = compilePipe(
+          numberSchema,
+          v.gtValue(schema.exclusiveMinimum),
+        ) as v.GenericSchema;
+      if (typeof schema.exclusiveMaximum === "number")
+        numberSchema = compilePipe(
+          numberSchema,
+          v.ltValue(schema.exclusiveMaximum),
+        ) as v.GenericSchema;
+      if (typeof schema.multipleOf === "number")
+        numberSchema = compilePipe(
+          numberSchema,
+          v.multipleOf(schema.multipleOf),
+        ) as v.GenericSchema;
+      compiled = numberSchema;
+      break;
+    }
     case "integer":
-      return v.pipe(v.number(), v.integer());
+      compiled = v.pipe(v.number(), v.safeInteger(), v.finite());
+      if (typeof schema.minimum === "number")
+        compiled = compilePipe(
+          compiled,
+          v.minValue(schema.minimum),
+        ) as v.GenericSchema;
+      if (typeof schema.maximum === "number")
+        compiled = compilePipe(
+          compiled,
+          v.maxValue(schema.maximum),
+        ) as v.GenericSchema;
+      if (typeof schema.exclusiveMinimum === "number")
+        compiled = compilePipe(
+          compiled,
+          v.gtValue(schema.exclusiveMinimum),
+        ) as v.GenericSchema;
+      if (typeof schema.exclusiveMaximum === "number")
+        compiled = compilePipe(
+          compiled,
+          v.ltValue(schema.exclusiveMaximum),
+        ) as v.GenericSchema;
+      if (typeof schema.multipleOf === "number")
+        compiled = compilePipe(
+          compiled,
+          v.multipleOf(schema.multipleOf),
+        ) as v.GenericSchema;
+      break;
     case "boolean":
-      return v.boolean();
+      compiled = v.boolean();
+      break;
     case "null":
-      return v.null();
+      compiled = v.null();
+      break;
     case "array": {
       if (!schema.items || typeof schema.items !== "object")
         throw new TypeError("Published array schemas require items");
-      return v.array(
+      compiled = v.array(
         compilePropertySchema(schema.items as Record<string, unknown>),
       );
+      if (typeof schema.minItems === "number")
+        compiled = compilePipe(
+          compiled,
+          v.minLength(schema.minItems),
+        ) as v.GenericSchema;
+      if (typeof schema.maxItems === "number")
+        compiled = compilePipe(
+          compiled,
+          v.maxLength(schema.maxItems),
+        ) as v.GenericSchema;
+      break;
     }
     case "object":
-      return compileObjectSchema(schema as PublishedObjectSchema);
+      compiled = compileObjectSchema(schema as PublishedObjectSchema);
+      break;
     default:
       throw new TypeError("Unsupported published JSON schema type");
   }
+  if (Array.isArray(schema.type) && schema.type.includes("null"))
+    compiled = v.nullable(compiled);
+  return withSchemaMetadata(compiled, schema);
 }
 
 function compileObjectSchema(schema: PublishedObjectSchema): ToolInputSchema {
-  if (schema.type !== "object" || schema.additionalProperties !== false)
-    throw new TypeError("Tool schemas must be closed objects");
-  const required = new Set(schema.required);
-  const entries: Record<string, v.GenericSchema> = {};
-  for (const [key, property] of Object.entries(schema.properties)) {
+  if (schemaType(schema as Record<string, unknown>) !== "object")
+    throw new TypeError("Tool schemas must be objects");
+  const required = new Set(schema.required ?? []);
+  const entries: Record<string, v.GenericSchema> = Object.create(
+    null,
+  ) as Record<string, v.GenericSchema>;
+  for (const [key, property] of Object.entries(schema.properties ?? {})) {
     const compiled = compilePropertySchema(property);
     entries[key] = required.has(key) ? compiled : v.optional(compiled);
   }
@@ -249,7 +454,34 @@ function compileObjectSchema(schema: PublishedObjectSchema): ToolInputSchema {
     if (!(key in entries))
       throw new TypeError(`Required tool schema property is missing: ${key}`);
   }
-  return v.strictObject(entries);
+  let compiled: ToolInputSchema;
+  const additionalProperties = schema.additionalProperties ?? true;
+  if (additionalProperties === false) {
+    compiled = v.strictObject(entries);
+  } else if (additionalProperties && typeof additionalProperties === "object") {
+    compiled = v.objectWithRest(
+      entries,
+      compilePropertySchema(additionalProperties as Record<string, unknown>),
+    );
+  } else {
+    compiled = v.looseObject(entries);
+  }
+  return compilePipe(
+    compiled,
+    v.check(
+      hasSafeObjectKeys,
+      "Object contains a prohibited prototype-pollution key",
+    ),
+  ) as ToolInputSchema;
+}
+
+function compileToolInputSchema(
+  schema: PublishedObjectSchema,
+): ToolInputSchema {
+  return withSchemaMetadata(
+    compileObjectSchema(schema),
+    schema as Record<string, unknown>,
+  ) as ToolInputSchema;
 }
 
 function compileToolOutputSchema(
@@ -324,6 +556,17 @@ function inputBody(
     "The following original files were copied into the sandbox without preprocessing. Inspect the files with sandbox tools before answering; their contents are not included in this message.",
     ...entries,
   ].join("\n");
+}
+
+function managedSystemPrompt(snapshot: ManagedAgentSnapshot): string {
+  const retryInstructions = snapshot.tools.length
+    ? `\n\nTool retry policy: When a tool returns a retryable failure, call that tool again automatically. You may retry at most ${TOOL_RETRY_POLICY.maximumRetries} times after the initial failure (${TOOL_RETRY_POLICY.maximumAttempts} total attempts). Correct invalid arguments when guidance is available. Do not retry approval_denied, approval_expired, run_cancelled, or tool_retry_exhausted. After exhaustion, explain the failure instead of calling the tool again.`
+    : "";
+  const delegationInstructions =
+    snapshot.delegates.length === 0
+      ? ""
+      : "\n\nYou may delegate work with delegate_agent. Keep the returned delegationId and use message_agent for later questions to that same isolated child thread.";
+  return `${snapshot.systemPrompt}${retryInstructions}${delegationInstructions}`;
 }
 
 const MANAGED_RUN_FILE_DIRECTORY = ".oao/attachments";
@@ -620,10 +863,11 @@ export function ManagedAgent(): string {
   }
 
   for (const tool of initial.snapshot.tools) {
+    const outputValueSchema = compileObjectSchema(tool.outputSchema);
     useTool({
       name: tool.name,
       description: tool.description,
-      input: compileObjectSchema(tool.inputSchema),
+      input: compileToolInputSchema(tool.inputSchema),
       output: compileToolOutputSchema(tool.outputSchema),
       durable: true,
       async run({ data, signal, step, toolCallId }) {
@@ -636,12 +880,22 @@ export function ManagedAgent(): string {
           safeArguments: safeArguments(data),
           approval: tool.approval,
         };
+        const retryBlocked = await config.broker.retryAdmission(obligation);
+        if (retryBlocked) return { output: retryBlocked };
         if (tool.owner === "caller") {
           await step.do("publish-caller-obligation", () =>
             config.broker.publishCaller(obligation),
           );
           const outcome = await step.do("commit-caller-result", () =>
-            config.broker.waitForCaller(obligation, signal),
+            config.broker.waitForCaller(obligation, signal, (value) => {
+              const validation = v.safeParse(outputValueSchema, value);
+              return {
+                valid: validation.success,
+                ...(validation.success
+                  ? {}
+                  : { message: "Tool returned an invalid result" }),
+              };
+            }),
           );
           return { output: outcome };
         }
@@ -658,10 +912,7 @@ export function ManagedAgent(): string {
                 idempotencyKey: `platform:${obligation.runId}:${toolCallId}`,
                 ...(signal ? { signal } : {}),
               });
-              return v.parse(
-                compileObjectSchema(tool.outputSchema),
-                result,
-              ) as PublicValue;
+              return v.parse(outputValueSchema, result) as PublicValue;
             },
             signal,
           ),
@@ -670,9 +921,7 @@ export function ManagedAgent(): string {
       },
     });
   }
-  if (initial.snapshot.delegates.length === 0)
-    return initial.snapshot.systemPrompt;
-  return `${initial.snapshot.systemPrompt}\n\nYou may delegate work with delegate_agent. Keep the returned delegationId and use message_agent for later questions to that same isolated child thread.`;
+  return managedSystemPrompt(initial.snapshot);
 }
 
 ManagedAgent.agentName = "ManagedAgent";
@@ -3198,5 +3447,7 @@ export const runtimeTesting = {
   turnThinking,
   threadInstanceId,
   compileObjectSchema,
+  compileToolInputSchema,
+  managedSystemPrompt,
   loadManagedRunFiles,
 };
