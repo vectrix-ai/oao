@@ -205,6 +205,87 @@ cookies.
   not implemented in the console.
 </Warning>
 
+## Connect MCP tools to an agent
+
+An agent version does not point directly at an MCP URL or secret. It pins an
+immutable restricted toolset version and an exact-origin credential-policy
+version. First complete [Add an MCP server](/integrations/mcp), then bind those
+versions using either path below.
+
+### Through the console
+
+<Steps>
+  <Step title="Open the latest agent version">
+    Open **Agents**, select the agent, and select its latest version. Older
+    versions are read-only.
+  </Step>
+
+<Step title="Select the MCP toolset">
+  Find **MCP toolsets** and check the restricted toolset you want to expose. If
+  the list is empty, return to **MCP connections**, complete discovery, and
+  publish a toolset first.
+</Step>
+
+<Step title="Choose the credential policy">
+  Under the selected toolset, choose the exact-origin credential policy that
+  authorizes its server endpoint. The editor derives a collision-safe namespace
+  from the toolset key; the model will see names such as
+  `mcp__example_read_tools__list_items`.
+</Step>
+
+  <Step title="Publish and test">
+    Select **Publish new version**, then create a new session for the agent.
+    Existing sessions remain pinned to the earlier agent version and will not
+    acquire the MCP tools.
+  </Step>
+</Steps>
+
+You can also attach the agent on the last screen of the **Add MCP server**
+wizard. That path performs the same immutable agent-version publication and
+lets you confirm the namespace before finishing.
+
+### Through the API
+
+Read the latest complete agent config, append one `mcpBindings` entry, and
+publish the complete next config. This example expects the
+`toolset_version_id` and `policy_version_id` produced by the API setup in
+[Remote MCP servers](/integrations/mcp#add-an-mcp-server-through-the-api).
+
+```bash
+current_config="$(
+  curl --fail-with-body --silent \
+    --header "Authorization: Bearer $OAO_API_KEY" \
+    "$OAO_API_URL/projects/$OAO_PROJECT_ID/agents/$OAO_AGENT_ID" \
+  | jq '.versions[0].config'
+)"
+
+next_config="$(
+  jq \
+    --arg toolsetVersionId "$toolset_version_id" \
+    --arg credentialPolicyVersionId "$policy_version_id" \
+    '.mcpBindings = ((.mcpBindings // []) + [{
+      toolsetVersionId: $toolsetVersionId,
+      credentialPolicyVersionId: $credentialPolicyVersionId,
+      namespace: "example_read_tools"
+    }])' \
+    <<<"$current_config"
+)"
+
+curl --fail-with-body \
+  --request POST \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: bind-example-mcp-tools-1' \
+  --data "$(jq -n --argjson config "$next_config" '{config: $config}')" \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/agents/$OAO_AGENT_ID/versions"
+```
+
+The namespace must be unique within the agent version and contain 1–64
+characters. It must start with a lowercase letter and use lowercase alphanumeric
+segments separated by single underscores, so consecutive or trailing underscores
+are invalid. Publication requires `agent:write` and `mcp:bind`; reading the agent
+and MCP resources requires `agent:read` and `mcp:read`.
+
 ## Create through the API
 
 Every mutation requires:

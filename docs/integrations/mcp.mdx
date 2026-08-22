@@ -35,24 +35,51 @@ authorization, credentials, approvals, transport policy, and recovery. The
 decrypted credential is never added to the prompt, tool arguments, model-visible
 results, sandbox environment, product events, audit details, or list responses.
 
-## Configure a connection
+## Add an MCP server in the console
 
-Open **MCP connections**, select **Add MCP server**, and follow the guided setup:
+Open **MCP connections** and select **Add MCP server**. Complete every wizard
+screen in order:
 
-1. **Server:** enter a display name, stable key, HTTPS endpoint, and transport.
-2. **Authentication:** add a write-only bearer token or API-key-header secret.
-   OAO derives the exact origin and path policy from the endpoint. You can review
-   the request timeout, response limit, and destination under **Security policy
-   and limits**.
-3. **Connect:** review the destination, save the encrypted resources, test the
-   connection, and discover tools. Discovery snapshots the names, descriptions,
-   and supported JSON schemas into the immutable server version.
-4. **Tools:** choose the smallest tool allowlist the agent needs and select the
-   approval rule for each tool. OAO publishes this selection as an immutable
-   toolset.
-5. **Agent:** optionally attach the connection to an agent under a unique
-   namespace. This publishes a new immutable agent version; it does not modify an
-   existing version.
+<Steps>
+  <Step title="Enter the server">
+    Enter a display name, stable lowercase key, HTTPS MCP endpoint, and
+    transport. Choose **Streamable HTTP** for current MCP servers or **Legacy
+    SSE** only when the remote server requires it. Select **Next**.
+  </Step>
+
+<Step title="Add authentication and review the policy">
+  Choose **Bearer token** or **API-key header** and enter the write-only secret.
+  For an API-key header, also enter its safe header name. Expand **Security
+  policy and limits** and confirm the exact HTTPS origin, allowed path prefix,
+  request timeout, and response-size limit. OAO never returns the secret after
+  saving it. Select **Next**.
+</Step>
+
+<Step title="Connect and discover">
+  Select **Test and discover**. OAO saves the encrypted credential and immutable
+  server version, connects to the approved destination, and loads its tool
+  schemas.
+</Step>
+
+<Step title="Choose the tools">
+  Select only the tools the agent needs. For each selected tool, choose **Always
+  require approval** or **Run without approval**. Use approval-free execution
+  only for a narrowly allowlisted read-only tool. Select **Next**.
+</Step>
+
+<Step title="Attach it to an agent">
+  To finish the connection without an agent, leave **Attach to agent** empty.
+  Otherwise choose an agent and confirm its unique tool namespace. The wizard
+  will publish a new immutable agent version containing the binding. Select
+  **Finish setup**.
+</Step>
+
+  <Step title="Verify it">
+    Confirm the connection card reports **ready**, a discovered-tool count, and
+    at least one restricted toolset. If you attached an agent, create a new
+    session for that agent; existing sessions retain their previous version.
+  </Step>
+</Steps>
 
 The **Connections** view summarizes configured endpoints, discovery status, and
 restricted toolsets. The individual credential, policy, server, and toolset
@@ -62,12 +89,117 @@ toolset, choose whether all selected tools always require approval or may run
 without approval; use approval-free execution only for narrowly allowlisted,
 read-only tools.
 
-The wizard creates durable resources in dependency order. If testing fails after
-one of them is saved, retrying in the same open wizard continues from the first
-incomplete resource instead of duplicating it. Closing the wizard never rolls
-back already-saved resources; inspect them under **Advanced resources** before
-starting again with the same key. Secret input is cleared as soon as the
-credential is encrypted and is never returned to the console.
+The wizard creates the server and server version, encrypted credential,
+exact-origin credential-policy version, and restricted toolset in dependency
+order. If testing fails after one of them is saved, retrying in the same open
+wizard continues from the first incomplete resource instead of duplicating it.
+Closing the wizard never rolls back already-saved resources; inspect them under
+**Advanced resources** before starting again with the same key. Secret input is
+cleared as soon as the credential is encrypted and is never returned to the
+console.
+
+## Add an MCP server through the API
+
+The API follows the same dependency order as the wizard. The example below uses
+a static bearer credential and requires `curl` plus `jq`. Set
+`OAO_API_URL`, `OAO_PROJECT_ID`, and `OAO_API_KEY` first.
+
+```bash
+read -r -s -p "MCP bearer token: " OAO_MCP_SECRET
+echo
+
+credential_id="$(
+  curl --fail-with-body --silent \
+    --request POST \
+    --header "Authorization: Bearer $OAO_API_KEY" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: create-example-mcp-credential-1' \
+    --data "$(jq -n --arg secret "$OAO_MCP_SECRET" '{
+      key: "example-mcp-credential",
+      displayName: "Example MCP credential",
+      kind: "static_bearer",
+      headerName: null,
+      secret: $secret
+    }')" \
+    "$OAO_API_URL/projects/$OAO_PROJECT_ID/mcp-credentials" \
+  | jq -r '.id'
+)"
+unset OAO_MCP_SECRET
+
+policy_version_id="$(
+  curl --fail-with-body --silent \
+    --request POST \
+    --header "Authorization: Bearer $OAO_API_KEY" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: create-example-mcp-policy-1' \
+    --data "$(jq -n --arg credentialId "$credential_id" '{
+      key: "example-mcp-policy",
+      displayName: "Example MCP egress policy",
+      credentialId: $credentialId,
+      exactOrigin: "https://mcp.example.com",
+      pathPrefix: "/mcp",
+      timeoutMs: 30000,
+      maximumResponseBytes: 1048576
+    }')" \
+    "$OAO_API_URL/projects/$OAO_PROJECT_ID/mcp-credential-policies" \
+  | jq -r '.latestVersionId'
+)"
+
+server_id="$(
+  curl --fail-with-body --silent \
+    --request POST \
+    --header "Authorization: Bearer $OAO_API_KEY" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: create-example-mcp-server-1' \
+    --data '{
+      "key": "example-mcp",
+      "displayName": "Example MCP",
+      "endpointUrl": "https://mcp.example.com/mcp",
+      "transport": "streamable_http"
+    }' \
+    "$OAO_API_URL/projects/$OAO_PROJECT_ID/mcp-servers" \
+  | jq -r '.id'
+)"
+
+server_version_id="$(
+  curl --fail-with-body --silent \
+    --request POST \
+    --header "Authorization: Bearer $OAO_API_KEY" \
+    --header 'Content-Type: application/json' \
+    --data "$(jq -n --arg policy "$policy_version_id" '{
+      credentialPolicyVersionId: $policy
+    }')" \
+    "$OAO_API_URL/projects/$OAO_PROJECT_ID/mcp-servers/$server_id/discover" \
+  | jq -r '.latestVersionId'
+)"
+
+toolset_version_id="$(
+  curl --fail-with-body --silent \
+    --request POST \
+    --header "Authorization: Bearer $OAO_API_KEY" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: create-example-mcp-toolset-1' \
+    --data "$(jq -n --arg serverVersionId "$server_version_id" '{
+      key: "example-read-tools",
+      displayName: "Example read tools",
+      serverVersionId: $serverVersionId,
+      tools: [{remoteToolName: "list_items", approval: "always"}]
+    }')" \
+    "$OAO_API_URL/projects/$OAO_PROJECT_ID/mcp-toolsets" \
+  | jq -r '.latestVersionId'
+)"
+```
+
+Replace `list_items` with a name returned by discovery. Keep
+`toolset_version_id` and `policy_version_id`; the agent-version request needs
+both. Continue with [Connect MCP tools to an
+agent](/agents/create-agent#connect-mcp-tools-to-an-agent).
+
+<Note>
+  MCP administration requires `credential:write`, `mcp:write`, and
+  `mcp:discover`; reading resources requires `mcp:read`. Binding the resulting
+  versions to an agent additionally requires `mcp:bind`.
+</Note>
 
 OAO prefixes bound tools as `mcp__<namespace>__<remote-name>` to prevent
 collisions. A session copies the exact toolset and credential-policy versions;
