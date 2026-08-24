@@ -10,19 +10,19 @@
   },
   "favicon": "/favicon.svg",
   "colors": {
-    "primary": "#2a513e",
-    "light": "#82c8a1",
-    "dark": "#4e9d74"
+    "primary": "#3d5bf5",
+    "light": "#f7ff00",
+    "dark": "#3d5bf5"
   },
   "background": {
     "color": {
-      "light": "#f8faf9",
-      "dark": "#0b100d"
+      "light": "#ffffff",
+      "dark": "#111111"
     }
   },
   "fonts": {
     "heading": {
-      "family": "Manrope"
+      "family": "Space Grotesk"
     },
     "body": {
       "family": "Inter"

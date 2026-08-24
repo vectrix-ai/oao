@@ -3,14 +3,14 @@
  *
  * Mintlify's `fonts` config sets the heading and body families; code spans and
  * blocks keep its default mono face. The console renders every identifier,
- * object key, and transcript detail in IBM Plex Mono, so the docs match it.
+ * object key, and transcript detail in Space Mono, so the docs match it.
  */
 
-@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap");
 
 :root {
   --font-mono-oao:
-    "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    "Space Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 code,

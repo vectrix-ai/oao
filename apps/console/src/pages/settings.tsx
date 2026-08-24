@@ -392,7 +392,7 @@ function SettingsBody({
                   <span className="avatar" aria-hidden="true">
                     {initials(member.name)}
                   </span>
-                  <span>
+                  <span className="entity-text">
                     <strong>{member.name}</strong>
                     <code>{member.subject}</code>
                   </span>

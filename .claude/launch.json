@@ -6,6 +6,19 @@
       "runtimeExecutable": "pnpm",
       "runtimeArgs": ["--filter", "@oao/console", "dev"],
       "port": 5173
+    },
+    {
+      "name": "console-demo",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": [
+        "--filter",
+        "@oao/console",
+        "dev",
+        "--port",
+        "5175",
+        "--strictPort"
+      ],
+      "port": 5175
     }
   ]
 }

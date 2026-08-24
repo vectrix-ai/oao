@@ -120,20 +120,18 @@ describe("management console", () => {
     );
   });
 
-  it("uses a light-first appearance and persists the theme toggle", async () => {
-    const user = userEvent.setup();
+  // The neo-brutalist system is light-only: dark is composed with ink blocks
+  // inside a light page, never as a `data-theme` variant, so the console must
+  // not offer an appearance toggle.
+  it("renders a single light appearance with no theme toggle", async () => {
     renderConsole("/agents");
     expect(
-      await screen.findByRole("button", { name: "Use dark appearance" }),
+      await screen.findByRole("heading", { name: "Agents" }),
     ).toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: "Use dark appearance" }),
-    );
-    expect(document.documentElement.dataset.theme).toBe("dark");
-    expect(localStorage.getItem("oao-console-theme")).toBe("dark");
     expect(
-      screen.getByRole("button", { name: "Use light appearance" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /appearance/i }),
+    ).not.toBeInTheDocument();
+    expect(document.documentElement.dataset.theme).toBeUndefined();
   });
 
   it("lists agents and applies search filters", async () => {

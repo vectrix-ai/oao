@@ -12,10 +12,8 @@ import {
   Layers3,
   LogOut,
   Menu,
-  Moon,
   Settings,
   Server,
-  Sun,
   Users,
   X,
   type LucideIcon,
@@ -24,7 +22,6 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { NavLink, Outlet } from "react-router";
 import { useState } from "react";
 import { useApi, useProjectEvents } from "../api/context";
-import { applyConsoleTheme, readConsoleTheme } from "../theme";
 import { Button, IconButton } from "./button";
 import { BadgeCount, Chip } from "./chip";
 import { useToast } from "./feedback";
@@ -94,14 +91,11 @@ export function AppLayout() {
   });
   const events = useProjectEvents();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [theme, setTheme] = useState(readConsoleTheme);
   const principal = context.data?.currentPrincipal;
   const logout = useMutation({
     mutationFn: () => api.logout(),
     onError: () => notify("Logout failed. Please try again.", "danger"),
   });
-  const nextTheme = theme === "light" ? "dark" : "light";
-  const themeLabel = `Use ${nextTheme} appearance`;
   const queueCounts = { "pending-work": pendingWork.data?.length ?? 0 };
 
   return (
@@ -118,11 +112,7 @@ export function AppLayout() {
           <Menu size={18} />
         </IconButton>
         <NavLink className="topbar-brand" to="/agents">
-          <img
-            className="invert-dark"
-            src="/brand/oao-wordmark-black.png"
-            alt="OAO"
-          />
+          <img src="/brand/oao-wordmark-black.png" alt="OAO" />
           <span className="product">Console</span>
         </NavLink>
         <div className="context-switcher">
@@ -162,17 +152,6 @@ export function AppLayout() {
             connected={events.connected}
             error={events.error !== null}
           />
-          <Button
-            size="sm"
-            aria-label={themeLabel}
-            icon={theme === "light" ? <Moon size={14} /> : <Sun size={14} />}
-            onClick={() => {
-              applyConsoleTheme(nextTheme);
-              setTheme(nextTheme);
-            }}
-          >
-            <span className="hide-sm">{themeLabel}</span>
-          </Button>
           {principal ? (
             <div className="user-chip">
               <span className="avatar" aria-hidden="true">
@@ -204,12 +183,7 @@ export function AppLayout() {
           aria-label="Primary navigation"
         >
           <div className="sidenav-head">
-            <img
-              className="invert-dark"
-              src="/brand/oao-wordmark-black.png"
-              alt="OAO"
-              height={14}
-            />
+            <img src="/brand/oao-wordmark-black.png" alt="OAO" height={14} />
             <IconButton
               className="sidenav-close"
               label="Close navigation"

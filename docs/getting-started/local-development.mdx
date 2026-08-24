@@ -164,10 +164,12 @@ WorkOS sign-in and shows the deterministic development identity. With
 the development identity is unavailable. In both modes, the console uses the
 HTTP API through the Vite `/v1` proxy.
 
-The console starts in its light appearance. Use **Use dark appearance** in the
-top bar to switch themes; the choice is stored only in the browser and does not
-affect project or organization data. Both appearances preserve the same OAO
-green action and status palette.
+The console renders in a single light appearance and has no theme toggle. Its
+neo-brutalist system uses a white ground, ink borders and hard offset shadows,
+and three flat brand hues with fixed jobs: action red for primary buttons and
+destructive confirmation, signal yellow for live and completed states, and
+accent blue for links and focus. Dark surfaces appear compositionally — an ink
+block for a failed run or a crashed worker — never as a separate theme.
 
 Check the services directly:
 

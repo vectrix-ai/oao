@@ -32,7 +32,7 @@ h3,
 h4 {
   margin: 0;
   font-family: var(--font-display);
-  letter-spacing: -0.02em;
+  letter-spacing: -0.03em;
 }
 h1 {
   font-size: 24px;
@@ -60,6 +60,7 @@ p:last-child {
 
 a {
   color: var(--accent);
+  font-weight: 500;
   text-decoration: none;
   text-underline-offset: 3px;
   text-decoration-thickness: 1px;
@@ -102,28 +103,15 @@ dd {
 :focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
-  border-radius: var(--radius-1);
 }
 
 ::selection {
-  background: var(--green-200);
-  color: var(--ink-900);
-}
-:root[data-theme="dark"] ::selection {
-  background: var(--green-800);
-  color: #fff;
+  background: var(--highlight);
+  color: var(--text);
 }
 
 img {
   max-width: 100%;
-}
-
-/* Brand artwork ships as black-on-transparent; invert it on dark canvases. */
-.invert-dark {
-  filter: none;
-}
-:root[data-theme="dark"] .invert-dark {
-  filter: invert(1);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -157,8 +145,8 @@ img {
   z-index: 100;
   padding: var(--sp-2) var(--sp-3);
   background: var(--surface);
-  border: var(--bw) solid var(--border-strong);
-  border-radius: var(--radius-1);
+  border: var(--bw-control) solid var(--line);
+  box-shadow: var(--shadow-2);
   transition: top var(--dur-1) var(--ease);
 }
 .skip-link:focus {
@@ -175,10 +163,10 @@ img {
   margin: 0 0 var(--sp-1);
   font-family: var(--font-mono);
   font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.12em;
+  font-weight: 700;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--accent);
+  color: var(--text-3);
 }
 
 .stack {

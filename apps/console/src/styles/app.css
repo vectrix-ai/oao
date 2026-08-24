@@ -19,10 +19,8 @@
   gap: var(--sp-4);
   height: var(--topbar-h);
   padding: 0 var(--sp-4);
-  border-bottom: var(--bw) solid var(--border);
-  background: var(--glass);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  border-bottom: var(--bw-control) solid var(--line);
+  background: var(--surface);
 }
 .topbar-brand {
   display: flex;
@@ -43,7 +41,8 @@
 .topbar-brand .product {
   font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.12em;
+  font-weight: 700;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text-3);
 }
@@ -73,8 +72,7 @@
   height: 26px;
   max-width: 190px;
   padding: 0 26px 0 var(--sp-2);
-  border: var(--bw) solid transparent;
-  border-radius: var(--radius-1);
+  border: var(--bw-control) solid transparent;
   background-color: transparent;
   background-position: right 6px center;
   color: var(--text);
@@ -85,8 +83,8 @@
   text-overflow: ellipsis;
 }
 .context-select:hover {
-  border-color: var(--border-strong);
-  background-color: var(--surface);
+  border-color: var(--line);
+  background-color: var(--surface-2);
 }
 
 .user-chip {
@@ -94,7 +92,7 @@
   align-items: center;
   gap: var(--sp-2);
   padding-left: var(--sp-2);
-  border-left: var(--bw) solid var(--border);
+  border-left: var(--bw) solid var(--line);
   min-width: 0;
 }
 .user-chip .avatar {
@@ -135,15 +133,16 @@
   flex-direction: column;
   height: calc(100vh - var(--topbar-h));
   padding: var(--sp-3) var(--sp-2);
-  border-right: var(--bw) solid var(--border);
-  background: var(--surface);
+  border-right: var(--bw-control) solid var(--line);
+  background: var(--surface-2);
   overflow: auto;
 }
 .sidenav .nav-group {
   padding: var(--sp-3) var(--sp-2) var(--sp-1);
   font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: 0.12em;
+  font-weight: 700;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text-3);
 }
@@ -153,22 +152,25 @@
   gap: var(--sp-2);
   margin-bottom: 1px;
   padding: 6px var(--sp-2);
-  border-left: 2px solid transparent;
-  border-radius: var(--radius-1);
+  border: var(--bw) solid transparent;
   color: var(--text-2);
+  font-family: var(--font-display);
   font-size: 13px;
+  font-weight: 500;
   text-decoration: none;
 }
 .sidenav a:hover {
-  background: var(--surface-2);
+  background: var(--surface);
+  border-color: var(--line);
   color: var(--text);
   text-decoration: none;
 }
+/* The current page is an active state, and active states wear signal yellow. */
 .sidenav a[aria-current="page"] {
-  background: var(--accent-weak);
-  border-left-color: var(--accent);
-  color: var(--accent-on-weak);
-  font-weight: 500;
+  background: var(--selected);
+  border-color: var(--line);
+  color: var(--text);
+  font-weight: 700;
 }
 .sidenav a svg {
   flex: none;
@@ -179,7 +181,7 @@
 .sidenav-foot {
   margin-top: auto;
   padding-top: var(--sp-3);
-  border-top: var(--bw) solid var(--border);
+  border-top: var(--bw) solid var(--line);
   display: grid;
   gap: var(--sp-1);
 }
@@ -292,8 +294,7 @@
   gap: var(--sp-3);
   flex-wrap: wrap;
   padding: var(--sp-3) var(--sp-4);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface);
 }
 .filter-bar .field {
@@ -312,8 +313,7 @@
   gap: var(--sp-3);
   min-width: 0;
   padding: var(--sp-2) var(--sp-3);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface);
 }
 .version-strip > .eyebrow {
@@ -336,26 +336,23 @@
   align-items: center;
   gap: var(--sp-2);
   padding: 3px 10px;
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-pill);
+  border: var(--bw) solid var(--line);
   background: var(--surface);
   color: var(--text-2);
   font: inherit;
+  font-family: var(--font-mono);
   font-size: 12px;
   white-space: nowrap;
   cursor: pointer;
-  transition:
-    background var(--dur-1) var(--ease),
-    border-color var(--dur-1) var(--ease);
+  transition: background var(--dur-1) var(--ease);
 }
 .version-pill:hover {
   background: var(--surface-2);
 }
 .version-pill--active {
-  border-color: var(--accent-weak-border);
-  background: var(--accent-weak);
-  color: var(--accent-on-weak);
-  font-weight: 600;
+  background: var(--selected);
+  color: var(--text);
+  font-weight: 700;
 }
 .version-strip-meta {
   display: inline-flex;
@@ -387,8 +384,7 @@
   display: grid;
   gap: var(--sp-3);
   padding: var(--sp-4);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface-2);
 }
 .tool-card > header {
@@ -414,8 +410,7 @@
 
 /* Collapsible tool definition rows in the agent editor. */
 .tool-item {
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface);
   overflow: hidden;
 }
@@ -474,7 +469,7 @@
   display: grid;
   gap: var(--sp-3);
   padding: var(--sp-3);
-  border-top: var(--bw) solid var(--border);
+  border-top: var(--bw) solid var(--border-soft);
   background: var(--surface-2);
 }
 .tool-item-body > p {
@@ -526,8 +521,7 @@
   align-content: start;
   gap: var(--sp-2);
   padding: var(--sp-4);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface-2);
 }
 .skill-explainer h3,
@@ -552,8 +546,7 @@
 .skill-content-details {
   min-width: 0;
   padding: var(--sp-3);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-1);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface);
 }
 .skill-content-details > summary {
@@ -566,8 +559,7 @@
 .skill-markdown-panel {
   min-width: 0;
   padding: var(--sp-4);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-1);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface-2);
 }
 .skill-resource-list {
@@ -581,7 +573,7 @@
 }
 .skill-resource + .skill-resource {
   padding-top: var(--sp-3);
-  border-top: var(--bw) solid var(--border);
+  border-top: var(--bw) solid var(--border-soft);
 }
 .skill-resource > header {
   display: flex;
@@ -622,8 +614,7 @@
   gap: var(--sp-2);
   min-width: 0;
   padding: var(--sp-2) var(--sp-3);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-1);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface);
   color: var(--text-2);
   font: inherit;
@@ -633,9 +624,9 @@
 }
 .skill-steps button[aria-current="step"],
 .setup-steps button[aria-current="step"] {
-  border-color: var(--accent-weak-border);
-  background: var(--accent-weak);
-  color: var(--accent-on-weak);
+  background: var(--selected);
+  color: var(--text);
+  font-weight: 700;
 }
 .skill-steps button:disabled,
 .setup-steps button:disabled {
@@ -650,9 +641,9 @@
   height: 18px;
   place-items: center;
   border: var(--bw) solid currentColor;
-  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
   font-size: 10px;
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .mcp-connection-card code {
@@ -720,8 +711,7 @@
   min-height: 340px;
   min-width: 0;
   overflow: hidden;
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface);
 }
 .skill-finder__intro {
@@ -734,7 +724,7 @@
   justify-content: space-between;
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-3);
-  border-bottom: var(--bw) solid var(--border);
+  border-bottom: var(--bw) solid var(--line);
   background: var(--surface-2);
 }
 .skill-crumbs {
@@ -787,8 +777,8 @@
   overflow: auto;
 }
 .skill-finder__list.is-dropping {
-  background: var(--accent-weak);
-  outline: 2px dashed var(--accent);
+  background: var(--selected);
+  outline: 2px dashed var(--line);
   outline-offset: -6px;
 }
 .skill-finder__row {
@@ -926,9 +916,8 @@
   display: grid;
   gap: var(--sp-2);
   padding: var(--sp-4);
-  border: var(--bw) solid var(--border);
-  border-left: 2px solid var(--accent);
-  border-radius: var(--radius-1);
+  border: var(--bw) solid var(--line);
+  border-left: 4px solid var(--highlight);
   background: var(--surface-2);
   font-size: 13px;
 }
@@ -954,9 +943,8 @@
 .compact-list {
   display: grid;
   gap: 1px;
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
-  background: var(--border);
+  border: var(--bw-control) solid var(--line);
+  background: var(--border-soft);
   overflow: hidden;
 }
 .compact-list > a {
@@ -1002,9 +990,10 @@
   align-items: center;
   gap: 6px;
   padding: 3px var(--sp-2);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-pill);
+  border: var(--bw) solid var(--line);
   background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 11px;
   white-space: nowrap;
 }
 .session-facts .fact svg {
@@ -1038,7 +1027,7 @@
   gap: var(--sp-1);
   padding-left: var(--sp-3);
   margin-left: auto;
-  border-left: var(--bw) solid var(--border);
+  border-left: var(--bw) solid var(--line);
 }
 .session-filters .field--inline > label {
   font-size: 12px;
@@ -1060,17 +1049,17 @@
   position: relative;
   height: 20px;
   margin-inline: 4px;
-  border-bottom: var(--bw) solid var(--border-strong);
+  border-bottom: var(--bw) solid var(--line);
   color: var(--text-3);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 9.5px;
 }
 .minimap-axis-tick {
   position: absolute;
   bottom: -1px;
   width: 1px;
   height: 5px;
-  background: var(--border-strong);
+  background: var(--line);
 }
 .minimap-axis-label {
   position: absolute;
@@ -1090,8 +1079,7 @@
   gap: 2px;
   height: 20px;
   padding: 3px;
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-pill);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface-2);
   /* Busy sessions compress their blocks rather than spilling the strip. */
   overflow: hidden;
@@ -1101,7 +1089,6 @@
   min-width: 3px;
   padding: 0;
   border: 0;
-  border-radius: var(--radius-1);
   background: var(--ink-300);
   cursor: pointer;
   transition: filter var(--dur-1) var(--ease);
@@ -1110,23 +1097,25 @@
   filter: brightness(0.85);
 }
 .minimap-seg--user {
-  background: var(--blue-300);
+  background: var(--ink-600);
 }
 .minimap-seg--agent {
-  background: var(--green-500);
+  background: var(--accent);
 }
 .minimap-seg--reasoning {
-  background: #9b8fd3;
+  background: var(--ink-300);
 }
-.minimap-seg--tool,
-.minimap-seg--retry {
-  background: var(--amber-300);
+.minimap-seg--tool {
+  background: var(--surface);
+  outline: 1px solid var(--line);
+  outline-offset: -1px;
 }
+.minimap-seg--retry,
 .minimap-seg--approval {
-  background: var(--amber-300);
+  background: var(--highlight);
 }
 .minimap-seg--error {
-  background: var(--red-300);
+  background: var(--ink-950);
 }
 /* Waiting time: 45° tone-on-tone stripes, per the reference trace bar. */
 .minimap-seg--idle {
@@ -1145,35 +1134,6 @@
   outline: 2px solid var(--focus);
   outline-offset: 0;
 }
-:root[data-theme="dark"] .minimap-seg--user {
-  background: #3c608a;
-}
-:root[data-theme="dark"] .minimap-seg--agent {
-  background: var(--green-600);
-}
-:root[data-theme="dark"] .minimap-seg--reasoning {
-  background: #7568ad;
-}
-:root[data-theme="dark"] .minimap-seg--tool,
-:root[data-theme="dark"] .minimap-seg--retry {
-  background: #8a6a2e;
-}
-:root[data-theme="dark"] .minimap-seg--approval {
-  background: #8a6a2e;
-}
-:root[data-theme="dark"] .minimap-seg--error {
-  background: #8a4444;
-}
-:root[data-theme="dark"] .minimap-seg--idle {
-  background: repeating-linear-gradient(
-    45deg,
-    var(--surface-3) 0 5px,
-    var(--surface) 5px 10px
-  );
-}
-:root[data-theme="dark"] .minimap-seg:hover {
-  filter: brightness(1.25);
-}
 
 /* Floating hover card naming the hovered state, its text, and its duration. */
 .minimap-tip {
@@ -1185,10 +1145,9 @@
   gap: var(--sp-2);
   max-width: 420px;
   padding: 5px 10px;
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface);
-  box-shadow: var(--shadow-2);
+  box-shadow: var(--shadow-3);
   font-size: 12px;
   white-space: nowrap;
   pointer-events: none;
@@ -1206,39 +1165,40 @@
 }
 .minimap-chip {
   flex: none;
-  padding: 1px 8px;
-  border-radius: var(--radius-pill);
-  font-size: 11px;
-  font-weight: 500;
+  padding: 0 6px;
+  border: var(--bw) solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 .minimap-chip--user {
-  color: var(--info-fg);
-  background: var(--info-bg);
+  color: var(--text);
 }
 .minimap-chip--agent {
-  color: var(--accent-on-weak);
-  background: var(--accent-weak);
+  color: var(--accent);
 }
 .minimap-chip--reasoning {
-  color: var(--info-fg);
-  background: var(--info-bg);
+  color: var(--text-2);
 }
-.minimap-chip--tool,
-.minimap-chip--retry {
-  color: var(--warning-fg);
-  background: var(--warning-bg);
+.minimap-chip--tool {
+  color: var(--text);
+}
+.minimap-chip--retry,
+.minimap-chip--approval {
+  background: var(--highlight);
+  color: var(--text);
 }
 .minimap-chip--idle {
-  color: var(--text-2);
+  color: var(--text-3);
   background: var(--surface-2);
 }
-.minimap-chip--approval {
-  color: var(--warning-fg);
-  background: var(--warning-bg);
-}
 .minimap-chip--error {
-  color: var(--danger-fg);
-  background: var(--danger-bg);
+  background: var(--ink-950);
+  color: var(--on-ink);
 }
 
 /* Landing highlight after a minimap jump. */
@@ -1248,10 +1208,12 @@
 @keyframes flash-ring {
   0%,
   55% {
-    box-shadow: 0 0 0 2px var(--focus);
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
   }
   100% {
-    box-shadow: 0 0 0 6px transparent;
+    outline: 2px solid transparent;
+    outline-offset: 2px;
   }
 }
 
@@ -1307,17 +1269,17 @@
   display: grid;
   gap: var(--sp-1);
   padding: var(--sp-2) var(--sp-3);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
+  border: var(--bw) solid var(--line);
   background: var(--surface);
 }
-/* The prompt reads as the person's turn: filled, stronger edge, neutral name. */
+/* The prompt reads as the person's turn: filled ground, no elevation. */
 .msg--user {
-  border-color: var(--border-strong);
   background: var(--surface-2);
 }
+/* The agent's answer is the artefact of the run, so it gets the card. */
 .msg--assistant {
-  border-left: 2px solid var(--accent-weak-border);
+  border-width: var(--bw-control);
+  box-shadow: var(--shadow-2);
 }
 .msg-head {
   display: flex;
@@ -1330,7 +1292,7 @@
   place-items: center;
   width: 18px;
   height: 18px;
-  border-radius: var(--radius-pill);
+  border: var(--bw) solid var(--line);
   flex: none;
 }
 .msg-avatar svg {
@@ -1338,19 +1300,19 @@
   height: 11px;
 }
 .msg-avatar--user {
-  color: var(--info-fg);
-  background: var(--info-bg);
+  color: var(--text);
+  background: var(--surface);
 }
 .msg-avatar--assistant {
-  color: var(--accent-on-weak);
-  background: var(--accent-weak);
+  color: var(--text);
+  background: var(--highlight);
 }
 .msg-author {
   font-weight: 500;
   color: var(--text);
 }
 .msg--assistant .msg-author {
-  color: var(--accent-on-weak);
+  color: var(--text);
 }
 .msg-time {
   margin-left: auto;
@@ -1386,13 +1348,13 @@
   margin-top: 2px;
 }
 .msg-body a {
-  color: var(--accent-on-weak);
+  color: var(--accent);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 .msg-body code {
-  padding: 1px 3px;
-  border-radius: var(--radius-1);
+  padding: 1px 4px;
+  border: var(--bw) solid var(--border-soft);
   background: var(--surface-2);
   font-family: var(--font-mono);
   font-size: 0.92em;
@@ -1401,8 +1363,7 @@
   max-width: 100%;
   overflow-x: auto;
   padding: var(--sp-3);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-1);
+  border: var(--bw) solid var(--line);
   background: var(--surface-2);
 }
 .msg-body pre code {
@@ -1411,7 +1372,7 @@
 }
 .msg-body blockquote {
   padding-left: var(--sp-3);
-  border-left: 2px solid var(--border-strong);
+  border-left: 3px solid var(--line);
   color: var(--text-2);
 }
 .msg-body table {
@@ -1423,7 +1384,7 @@
 .msg-body th,
 .msg-body td {
   padding: var(--sp-1) var(--sp-2);
-  border: var(--bw) solid var(--border);
+  border: var(--bw) solid var(--border-soft);
   text-align: left;
 }
 .msg--user .msg-body {
@@ -1447,8 +1408,7 @@
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-2);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-1);
+  border: var(--bw) solid var(--line);
   background: var(--surface);
   font-size: 12px;
 }
@@ -1463,8 +1423,7 @@
 
 /* ---------- Activity rows ---------- */
 .activity {
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-1);
+  border: var(--bw) solid var(--line);
   background: var(--surface);
   overflow: hidden;
 }
@@ -1533,20 +1492,25 @@
   display: inline-flex;
   align-items: center;
   padding: 0 6px;
-  border-radius: var(--radius-pill);
-  font-size: 11px;
+  border: var(--bw) solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   white-space: nowrap;
 }
+/* A failed step is a dead state: an ink block, matching the FAILED stamp. */
 .activity-flag--error {
-  color: var(--danger-fg);
-  background: var(--danger-bg);
+  color: var(--on-ink);
+  background: var(--ink-950);
 }
 .activity-flag--pending {
-  color: var(--warning-fg);
-  background: var(--warning-bg);
+  color: var(--text);
+  background: var(--surface);
 }
 .activity--tool .activity-icon {
-  color: var(--warning-fg);
+  color: var(--text);
 }
 .activity-row--static {
   cursor: default;
@@ -1555,15 +1519,12 @@
   display: grid;
   gap: var(--sp-3);
   padding: var(--sp-3);
-  border-left: 3px solid #9b8fd3;
+  border-left: 4px solid var(--ink-300);
   background: var(--surface-2);
 }
 .reasoning-detail[hidden],
 .tool-transcript-detail[hidden] {
   display: none;
-}
-:root[data-theme="dark"] .reasoning-detail {
-  border-left-color: #7568ad;
 }
 .reasoning-copy {
   margin: 0;
@@ -1580,12 +1541,9 @@
   gap: var(--sp-3);
   margin: 0;
   padding: var(--sp-3);
-  border-top: var(--bw) solid var(--border);
-  border-left: 3px solid var(--amber-300);
+  border-top: var(--bw) solid var(--border-soft);
+  border-left: 4px solid var(--line);
   background: var(--surface-2);
-}
-:root[data-theme="dark"] .tool-transcript-detail {
-  border-left-color: #8a6a2e;
 }
 .tool-transcript-detail > div {
   min-width: 0;
@@ -1611,13 +1569,13 @@
   white-space: pre-wrap;
 }
 .activity--error {
-  border-color: var(--danger-bd);
+  border-color: var(--primary);
 }
 .activity--error .activity-icon {
   color: var(--danger-fg);
 }
 .activity--pending .activity-icon {
-  color: var(--warning-fg);
+  color: var(--text-2);
 }
 /* Author `display` beats the UA rule for [hidden], so restate it explicitly. */
 .activity-detail[hidden] {
@@ -1627,7 +1585,7 @@
   display: grid;
   gap: var(--sp-3);
   padding: var(--sp-3);
-  border-top: var(--bw) solid var(--border);
+  border-top: var(--bw) solid var(--border-soft);
   background: var(--surface-2);
 }
 .detail-summary {
@@ -1669,19 +1627,14 @@
   display: grid;
   gap: var(--sp-2);
   padding: var(--sp-3);
-  border: var(--bw) solid var(--border-strong);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface);
-  background: color-mix(in srgb, var(--surface) 78%, transparent);
-  -webkit-backdrop-filter: blur(12px) saturate(120%);
-  backdrop-filter: blur(12px) saturate(120%);
   box-shadow: var(--shadow-2);
   z-index: 5;
 }
 .composer .textarea {
   resize: vertical;
   background: var(--surface);
-  background: color-mix(in srgb, var(--surface) 72%, transparent);
 }
 .composer-actions {
   display: flex;
@@ -1701,7 +1654,7 @@
   align-items: center;
   gap: var(--sp-2);
   border-style: dashed;
-  border-color: var(--border);
+  border-color: var(--line);
   box-shadow: none;
   color: var(--text-2);
   font-size: 13px;
@@ -1720,9 +1673,8 @@
   gap: var(--sp-4);
   align-content: start;
   padding: var(--sp-4);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
-  background: var(--surface);
+  border: var(--bw-control) solid var(--line);
+  background: var(--surface-2);
   min-height: 0;
   max-height: 100%;
   overflow: auto;
@@ -1748,7 +1700,7 @@
   gap: var(--sp-3);
   align-items: baseline;
   padding: 6px 0;
-  border-bottom: var(--bw) solid var(--border);
+  border-bottom: var(--bw) solid var(--border-soft);
 }
 .panel-facts dt {
   color: var(--text-3);
@@ -1794,7 +1746,7 @@
   justify-content: space-between;
   gap: var(--sp-3);
   padding: 6px 0;
-  border-bottom: var(--bw) solid var(--border);
+  border-bottom: var(--bw) solid var(--border-soft);
 }
 .usage-rows dt {
   color: var(--text-3);
@@ -1816,9 +1768,8 @@
   gap: var(--sp-2);
   min-width: 0;
   padding: var(--sp-2);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-1);
-  background: var(--surface-2);
+  border: var(--bw) solid var(--line);
+  background: var(--surface);
 }
 .workspace-file-list li > svg {
   color: var(--text-3);
@@ -1843,11 +1794,14 @@
   white-space: nowrap;
 }
 .workspace-file-state {
-  padding: 1px 6px;
-  border-radius: var(--radius-pill);
+  padding: 0 6px;
+  border: var(--bw) solid var(--line);
   color: var(--text-2);
-  background: var(--surface-3);
+  background: var(--surface);
+  font-family: var(--font-mono);
   font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 .workspace-file-state--backed-up {
@@ -1895,19 +1849,17 @@
   gap: var(--sp-2);
   min-width: 0;
   padding: var(--sp-2);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-1);
-  background: var(--surface-2);
+  border: var(--bw) solid var(--line);
+  background: var(--surface);
 }
 .usage-list li > svg {
   color: var(--text-3);
 }
 .usage-list li.usage--used {
-  border-color: var(--accent-weak-border);
-  background: var(--accent-weak);
+  background: var(--selected);
 }
 .usage-list li.usage--used > svg {
-  color: var(--accent-on-weak);
+  color: var(--text);
 }
 .usage-name {
   display: grid;
@@ -1924,7 +1876,8 @@
   color: var(--text);
 }
 .usage-name strong a:hover {
-  color: var(--accent);
+  color: var(--text);
+  text-decoration: underline;
 }
 .usage-name > span {
   overflow: hidden;
@@ -1934,11 +1887,14 @@
   white-space: nowrap;
 }
 .usage-state {
-  padding: 1px 6px;
-  border-radius: var(--radius-pill);
+  padding: 0 6px;
+  border: var(--bw) solid var(--line);
   color: var(--text-2);
-  background: var(--surface-3);
+  background: var(--surface);
+  font-family: var(--font-mono);
   font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 .usage-state--used {
@@ -1953,27 +1909,27 @@
   height: auto;
 }
 .chart-grid {
-  stroke: var(--border);
+  stroke: var(--border-soft);
   stroke-width: 1;
 }
+/* Flat fill, hard edge: the system has no gradients and no fades. */
 .chart-area {
-  fill: var(--accent);
-  opacity: 0.1;
+  fill: var(--highlight);
 }
 .chart-line {
   fill: none;
-  stroke: var(--accent);
+  stroke: var(--line);
   stroke-width: 2;
-  stroke-linejoin: round;
-  stroke-linecap: round;
+  stroke-linejoin: miter;
+  stroke-linecap: butt;
 }
 .chart-dot {
-  fill: var(--accent);
+  fill: var(--line);
   stroke: var(--surface);
   stroke-width: 2;
 }
 .chart-crosshair {
-  stroke: var(--border-strong);
+  stroke: var(--accent);
   stroke-width: 1;
 }
 .chart-tick {
@@ -2015,8 +1971,7 @@
   display: grid;
   gap: var(--sp-3);
   padding: var(--sp-4);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface);
 }
 .debug-legend {
@@ -2024,7 +1979,7 @@
   gap: var(--sp-4);
   flex-wrap: wrap;
   padding-bottom: var(--sp-3);
-  border-bottom: var(--bw) solid var(--border);
+  border-bottom: var(--bw) solid var(--border-soft);
   font-size: 11px;
   color: var(--text-3);
 }
@@ -2037,7 +1992,7 @@
   display: inline-block;
   width: 9px;
   height: 9px;
-  border-radius: var(--radius-1);
+  border: var(--bw) solid var(--line);
 }
 .waterfall {
   display: grid;
@@ -2054,7 +2009,6 @@
   width: 100%;
   padding: 5px var(--sp-2);
   border: 0;
-  border-radius: var(--radius-1);
   background: none;
   color: var(--text-2);
   font-size: 12px;
@@ -2064,7 +2018,8 @@
   background: var(--surface-2);
 }
 .waterfall > li > button.selected {
-  background: var(--accent-weak);
+  background: var(--selected);
+  color: var(--text);
 }
 .wf-name {
   display: flex;
@@ -2082,39 +2037,34 @@
 .wf-track {
   position: relative;
   height: 14px;
-  border-radius: var(--radius-1);
+  border: var(--bw) solid var(--border-soft);
   background: var(--surface-2);
 }
+/*
+ * Selected waterfall rows wear signal yellow, so the bars themselves must not:
+ * a yellow bar on a yellow row is invisible. Duration reads blue (time spent,
+ * as on the timing ruler), waiting reads grey, failure reads action red. Every
+ * bar carries an inset ink edge so it stays legible on any ground.
+ */
 .bar {
   display: block;
   height: 10px;
-  margin: 2px 0;
-  border-radius: var(--radius-1);
+  margin: 1px 0;
+  outline: 1px solid var(--line);
+  outline-offset: -1px;
   background: var(--ink-300);
 }
 .bar--success {
-  background: var(--green-500);
+  background: var(--accent);
 }
 .bar--info {
-  background: var(--blue-300);
+  background: var(--ink-600);
 }
 .bar--pending {
-  background: var(--amber-300);
+  background: var(--ink-300);
 }
 .bar--error {
-  background: var(--red-300);
-}
-:root[data-theme="dark"] .bar--success {
-  background: var(--green-600);
-}
-:root[data-theme="dark"] .bar--info {
-  background: #3c608a;
-}
-:root[data-theme="dark"] .bar--pending {
-  background: #8a6a2e;
-}
-:root[data-theme="dark"] .bar--error {
-  background: #8a4444;
+  background: var(--primary);
 }
 .wf-ms {
   font-family: var(--font-mono);
@@ -2128,8 +2078,7 @@
   gap: var(--sp-4);
   align-content: start;
   padding: var(--sp-4);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface);
   min-height: 0;
   max-height: 100%;
@@ -2183,8 +2132,7 @@
   justify-items: start;
   gap: var(--sp-2);
   padding: var(--sp-4);
-  border: var(--bw) dashed var(--border-strong);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) dashed var(--line);
   background: var(--surface-2);
   font-size: 13px;
   color: var(--text-2);
@@ -2195,8 +2143,7 @@
   align-items: flex-start;
   gap: var(--sp-3);
   padding: var(--sp-3) var(--sp-4);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-1);
+  border: var(--bw) solid var(--line);
   background: var(--surface-2);
   color: var(--text-2);
   font-size: 13px;
@@ -2215,8 +2162,7 @@
   display: grid;
   gap: var(--sp-4);
   padding: var(--sp-4) var(--sp-5);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface);
 }
 .work-card--approval {
@@ -2242,10 +2188,9 @@
   width: 32px;
   height: 32px;
   flex: none;
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-1);
+  border: var(--bw) solid var(--line);
   background: var(--surface-2);
-  color: var(--text-2);
+  color: var(--text);
 }
 .work-icon--tool {
   color: var(--info-fg);
@@ -2278,8 +2223,7 @@
   display: grid;
   gap: var(--sp-3);
   padding: var(--sp-4);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface-2);
 }
 
@@ -2298,8 +2242,7 @@
   display: grid;
   gap: var(--sp-3);
   padding: var(--sp-4);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-2);
+  border: var(--bw-control) solid var(--line);
   background: var(--surface);
 }
 .resource-card h2,
@@ -2317,10 +2260,9 @@
   width: 32px;
   height: 32px;
   flex: none;
-  border: var(--bw) solid var(--accent-weak-border);
-  border-radius: var(--radius-1);
-  background: var(--accent-weak);
-  color: var(--accent-on-weak);
+  border: var(--bw) solid var(--line);
+  background: var(--surface-2);
+  color: var(--text);
 }
 .service-card dl {
   display: grid;
@@ -2345,7 +2287,7 @@
   justify-content: space-between;
   gap: var(--sp-4);
   padding: var(--sp-3) 0;
-  border-bottom: var(--bw) solid var(--border);
+  border-bottom: var(--bw) solid var(--border-soft);
 }
 .setting-row:last-child {
   border-bottom: 0;
@@ -2372,7 +2314,7 @@
   margin-bottom: var(--sp-1);
 }
 .safety-list li::marker {
-  color: var(--accent);
+  color: var(--primary);
 }
 .member-cell {
   display: inline-flex;
@@ -2383,8 +2325,7 @@
   display: inline-block;
   margin: 0 4px 4px 0;
   padding: 1px 6px;
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-1);
+  border: var(--bw) solid var(--line);
   background: var(--surface-2);
   font-family: var(--font-mono);
   font-size: 11px;
@@ -2400,8 +2341,7 @@
 .scope-picker {
   margin: 0;
   padding: var(--sp-4);
-  border: var(--bw) solid var(--border);
-  border-radius: var(--radius-1);
+  border: var(--bw-control) solid var(--line);
 }
 
 .scope-picker legend {
@@ -2498,7 +2438,7 @@
     align-items: center;
     gap: var(--sp-2);
     padding: var(--sp-1) var(--sp-2) var(--sp-2);
-    border-bottom: var(--bw) solid var(--border);
+    border-bottom: var(--bw) solid var(--line);
   }
   .sidenav-scrim {
     display: block;
@@ -2548,8 +2488,8 @@
   .app-body {
     background: linear-gradient(
       to right,
-      var(--surface) 0 calc(var(--sidenav-w) - 1px),
-      var(--border) calc(var(--sidenav-w) - 1px) var(--sidenav-w),
+      var(--surface-2) 0 calc(var(--sidenav-w) - 1.5px),
+      var(--line) calc(var(--sidenav-w) - 1.5px) var(--sidenav-w),
       var(--canvas) var(--sidenav-w)
     );
   }

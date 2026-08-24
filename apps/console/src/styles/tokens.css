@@ -1,97 +1,102 @@
 /*
- * OAO design tokens.
+ * OAO design tokens — neo-brutalist system (August 2026 rebrand).
  *
  * The single source of truth for colour, geometry, type, and motion in the
- * console. Components reference semantic roles (--accent, --surface, --text-2)
- * and never a raw shade, so light and dark stay coherent.
+ * console. Components reference semantic roles (--primary, --surface, --text-2)
+ * and never a raw shade.
  *
- * Ported from design/style-guide.html and design/design.html.
- * Seed green #6ebc91; actions use green 700/800 for contrast.
+ * Ported from design/style-guide.html, whose tokens are kept in sync with the
+ * reference implementation in vectrix-ai/oao-landing-page
+ * (src/styles/global.css).
+ *
+ * The console renders the *product tier* of the system: the same hardware as
+ * the marketing pages, thinned out so the tool stays comfortable all day.
+ * 1px hairlines for rows and internal chrome, 1.5px ink for controls and
+ * cards, shadow-s at most on resting elements, 1px presses. The 2-3px borders
+ * and shadow-m/l belong to the poster tier and to things that genuinely float.
+ *
+ * There is no dark theme. Dark is used compositionally — ink blocks inside a
+ * light page — never as a `data-theme` variant.
  */
 
 :root {
   color-scheme: light;
 
-  /* Primitive scale — green (seed #6ebc91) */
-  --green-50: #f3faf6;
-  --green-100: #e4f4eb;
-  --green-200: #cae8d7;
-  --green-300: #a6d8bc;
-  --green-400: #82c8a1;
-  --green-500: #6ebc91;
-  --green-600: #4e9d74;
-  --green-700: #3d7c5c;
-  --green-800: #326349;
-  --green-900: #2a513e;
-  --green-950: #142d21;
+  /* Primitive scale — ink neutrals (the only greys in the system) */
+  --ink-50: #f8f8f5;
+  --ink-100: #efefeb;
+  --ink-200: #dcdcd7;
+  --ink-300: #b9b9b4;
+  --ink-400: #94948f;
+  --ink-500: #6f6f6a;
+  --ink-600: #4a4a46;
+  --ink-700: #333330;
+  --ink-800: #222220;
+  --ink-900: #191918;
+  --ink-950: #111111;
 
-  /* Primitive scale — ink (green-tinted neutrals) */
-  --ink-50: #f7f9f8;
-  --ink-100: #eef1ef;
-  --ink-200: #dde2de;
-  --ink-300: #c3cbc6;
-  --ink-400: #9aa59e;
-  --ink-500: #748079;
-  --ink-600: #52605a;
-  --ink-700: #34403a;
-  --ink-800: #202824;
-  --ink-900: #141a17;
-  --ink-950: #080c0a;
+  /* Primitive — the three flat brand hues. Never tinted, never blended. */
+  --primary: #fa3d31; /* action red */
+  --primary-hover: #e02d22;
+  --highlight: #f7ff00; /* signal yellow */
+  --accent: #3d5bf5; /* accent blue */
 
-  /* Primitive — signal hues */
-  --amber-100: #fbf3e4;
-  --amber-300: #e3c68e;
-  --amber-600: #956114;
-  --red-100: #fdeeee;
-  --red-300: #eab3b3;
-  --red-600: #b23c3c;
-  --blue-100: #eaf2f9;
-  --blue-300: #a9c9e4;
-  --blue-600: #2f6ea6;
-
-  /* Theme roles — light (default) */
-  --canvas: #f8faf9;
+  /* Ground */
+  --canvas: #ffffff;
   --surface: #ffffff;
-  --surface-2: #f2f5f3;
-  --surface-3: #eaefec;
-  --glass: rgba(255, 255, 255, 0.72);
-  --scrim: rgba(20, 26, 23, 0.42);
-  --text: #141a17;
-  --text-2: #52605a;
-  /* Contrast-checked against --surface, --surface-2 and --surface-3 so small
-     mono labels still clear WCAG AA. */
-  --text-3: #5c6961;
-  --border: #e2e7e3;
-  --border-strong: #c9d1cb;
-  --accent: #3d7c5c;
-  --accent-hover: #326349;
-  --accent-weak: #e4f4eb;
-  --accent-weak-border: #cae8d7;
-  /* Green 700 does not clear AA on the weak green tint, so text and glyphs
-     sitting on --accent-weak step down to green 800. */
-  --accent-on-weak: #326349;
-  --on-accent: #ffffff;
-  --focus: #6ebc91;
-  --live: #6ebc91;
-  --success-fg: #2f6a4c;
-  --success-bg: #e4f4eb;
-  --success-bd: #b7dfc8;
-  --warning-fg: #8a5a12;
-  --warning-bg: #fbf3e4;
-  --warning-bd: #e8cf9f;
-  --danger-fg: #a83636;
-  --danger-bg: #fdeeee;
-  --danger-bd: #efc0c0;
-  --info-fg: #2f6ea6;
-  --info-bg: #eaf2f9;
-  --info-bd: #bcd5ea;
+  --surface-2: #f5f5f2; /* quiet wells: sidebars, message grounds */
+  --surface-3: var(--ink-100); /* pressed/hovered wells */
+  --scrim: rgba(17, 17, 17, 0.55);
 
-  /* Geometry — squared by default */
+  /* Text */
+  --text: #111111;
+  --text-2: #3d3d3a;
+  --text-3: var(--ink-500);
+  --on-accent: #ffffff; /* text on action red */
+  --on-ink: #f5f5f1; /* text on ink grounds */
+
+  /*
+   * Hardware. Ink draws every edge; --border-soft is the only lighter rule,
+   * reserved for dividers *inside* a panel that already has an ink edge.
+   */
+  --line: var(--ink-950);
+  --border: var(--line);
+  --border-strong: var(--line);
+  --border-soft: var(--ink-200);
+
+  /* Border ladder */
+  --bw: 1px; /* rows, tags, internal chrome */
+  --bw-control: 1.5px; /* controls and cards */
+  --bw-feature: 2px; /* overlays, emphasized panels */
+
+  /* Interaction */
+  --focus: var(--accent);
+  --selected: var(--highlight); /* active nav, selected rows and chips */
+  --live: var(--highlight);
+
+  /*
+   * Status. Per the style guide's stamp semantics: yellow = live or
+   * successfully finished, white + ink = at rest, white + grey = waiting,
+   * ink block + white = dead. Red is reserved for errors and destruction.
+   */
+  --success-fg: var(--text);
+  --success-bg: var(--highlight);
+  --success-bd: var(--line);
+  --warning-fg: var(--text);
+  --warning-bg: var(--surface-2);
+  --warning-bd: var(--line);
+  --danger-fg: var(--primary);
+  --danger-bg: var(--surface);
+  --danger-bd: var(--primary);
+  --info-fg: var(--accent);
+  --info-bg: var(--surface);
+  --info-bd: var(--line);
+
+  /* Geometry — zero radius everywhere, and it stays zero. */
   --radius-0: 0;
-  --radius-1: 2px; /* controls: buttons, inputs, chips */
-  --radius-2: 4px; /* panels, cards, menus, dialogs */
-  --radius-pill: 999px; /* compact status chips only */
-  --bw: 1px;
+  --radius-1: 0;
+  --radius-2: 0;
+  --radius-pill: 0;
 
   /* Spacing — 4px base unit */
   --sp-1: 4px;
@@ -104,18 +109,19 @@
   --sp-10: 40px;
   --sp-12: 48px;
 
-  /* Shadows — restrained; borders carry most of the separation */
-  --shadow-1: 0 1px 2px rgba(20, 26, 23, 0.05);
-  --shadow-2: 0 2px 8px rgba(20, 26, 23, 0.07);
-  --shadow-3: 0 12px 32px rgba(20, 26, 23, 0.16);
+  /* Shadows — hard ink offsets, never a blur. */
+  --shadow-xs: 1px 1px 0 var(--line);
+  --shadow-1: var(--shadow-xs);
+  --shadow-2: 2px 2px 0 var(--line); /* resting elevation, product tier */
+  --shadow-3: 4px 4px 0 var(--line); /* things that genuinely float */
 
   /* Type */
   --font-ui:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", sans-serif;
-  --font-display: Manrope, Inter, ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", Inter, ui-sans-serif, system-ui, sans-serif;
   --font-mono:
-    "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    "Space Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   /* Motion */
   --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
@@ -129,42 +135,4 @@
   --content-max-wide: 1480px;
   /* Reading measure for the session transcript and the toolbar above it. */
   --measure-transcript: 880px;
-}
-
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --canvas: #0b100d;
-  --surface: #121814;
-  --surface-2: #181f1b;
-  --surface-3: #1f2822;
-  --glass: rgba(18, 24, 20, 0.72);
-  --scrim: rgba(4, 7, 5, 0.6);
-  --text: #f0f4f1;
-  --text-2: #a8b4ad;
-  --text-3: #8b978f;
-  --border: #252e28;
-  --border-strong: #37423b;
-  --accent: #82c8a1;
-  --accent-hover: #a6d8bc;
-  --accent-weak: #16281f;
-  --accent-weak-border: #2a4a38;
-  --accent-on-weak: #82c8a1;
-  --on-accent: #0b100d;
-  --focus: #6ebc91;
-  --live: #6ebc91;
-  --success-fg: #9bd6b4;
-  --success-bg: #142b1f;
-  --success-bd: #2a4a38;
-  --warning-fg: #e0b46a;
-  --warning-bg: #2a2113;
-  --warning-bd: #4d3d1e;
-  --danger-fg: #e59c9c;
-  --danger-bg: #2c1717;
-  --danger-bd: #523030;
-  --info-fg: #8fbfe6;
-  --info-bg: #142230;
-  --info-bd: #28405a;
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-2: 0 2px 8px rgba(0, 0, 0, 0.35);
-  --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.55);
 }

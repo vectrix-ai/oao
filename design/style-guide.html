@@ -1,73 +1,83 @@
 <!doctype html>
-<html lang="en" data-theme="light">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="OAO brand and product interface style guide"
+      content="OAO brand and product interface style guide — neo-brutalist system"
     />
-    <title>OAO — Brand & product style guide</title>
+    <title>OAO — Brand &amp; product style guide</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Manrope:wght@600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap"
       rel="stylesheet"
     />
     <style>
+      /* ------------------------------------------------------------------
+         OAO design tokens — neo-brutalist system (August 2026 rebrand).
+         Source of truth: the landing page repo (oao-landing-page,
+         src/styles/global.css). Keep the two in sync; the landing page is
+         the reference implementation until the console catches up.
+      ------------------------------------------------------------------ */
       :root {
         color-scheme: light;
-        --green-50: #f3faf6;
-        --green-100: #e4f4eb;
-        --green-200: #cae8d7;
-        --green-300: #a6d8bc;
-        --green-400: #82c8a1;
-        --green-500: #6ebc91;
-        --green-600: #4e9d74;
-        --green-700: #3d7c5c;
-        --green-800: #326349;
-        --green-900: #2a513e;
-        --green-950: #142d21;
-        --ink-50: #f7f9f8;
-        --ink-100: #edf0ee;
-        --ink-200: #d9deda;
-        --ink-300: #bdc5c0;
-        --ink-500: #748079;
-        --ink-600: #52605a;
-        --ink-700: #34403a;
-        --ink-800: #202824;
-        --ink-900: #141a17;
-        --ink-950: #080c0a;
-        --warning: #b7791f;
-        --danger: #c44747;
-        --info: #3b82c4;
-        --canvas: #f7f9f8;
+
+        /* Core palette */
+        --canvas: #ffffff;
         --surface: #ffffff;
-        --surface-2: #f0f4f1;
-        --text: #141a17;
-        --muted: #52605a;
-        --border: #d9deda;
-        --primary: #3d7c5c;
-        --primary-hover: #326349;
-        --focus: #6ebc91;
-        --shadow: 0 18px 60px rgba(20, 45, 33, 0.09);
-        --radius-sm: 8px;
-        --radius-md: 12px;
-        --radius-lg: 20px;
+        --surface-2: #f5f5f2;
+        --text: #111111;
+        --muted: #3d3d3a;
+        --line: #111111;
+        --primary: #fa3d31;
+        --primary-hover: #e02d22;
+        --accent: #3d5bf5;
+        --highlight: #f7ff00;
+        --focus: #3d5bf5;
+
+        /* Ink neutrals (grayscale) */
+        --ink-50: #f8f8f5;
+        --ink-100: #efefeb;
+        --ink-200: #dcdcd7;
+        --ink-300: #b9b9b4;
+        --ink-500: #6f6f6a;
+        --ink-600: #4a4a46;
+        --ink-700: #333330;
+        --ink-800: #222220;
+        --ink-900: #191918;
+        --ink-950: #111111;
+
+        --border: #111111;
+
+        /* Hard offset shadows — no blur, ever.
+           Product tier rests on shadow-s or none; shadow-m/l are for
+           overlays, modals and marketing set-pieces. */
+        --shadow-l: 8px 8px 0 var(--line);
+        --shadow-m: 4px 4px 0 var(--line);
+        --shadow-s: 2px 2px 0 var(--line);
+        --shadow-xs: 1px 1px 0 var(--line);
+        --shadow: var(--shadow-s);
+
+        /* Border ladder. The console (product tier) uses hairline/control;
+           feature is for emphasized panels; band is marketing set-pieces. */
+        --line-soft: var(--ink-200); /* internal hairlines, dividers */
+        --bw-hairline: 1px;
+        --bw-control: 1.5px;
+        --bw-feature: 2px;
+        --bw-band: 3px;
+
+        /* Zero radius everywhere */
+        --radius-sm: 0px;
+        --radius-md: 0px;
+        --radius-lg: 0px;
+
+        --font-display: "Space Grotesk", "Inter", ui-sans-serif, system-ui, sans-serif;
+        --font-body: "Inter", ui-sans-serif, system-ui, sans-serif;
+        --font-mono: "Space Mono", ui-monospace, "SF Mono", monospace;
       }
-      [data-theme="dark"] {
-        color-scheme: dark;
-        --canvas: #080c0a;
-        --surface: #101613;
-        --surface-2: #18211d;
-        --text: #f3f6f4;
-        --muted: #aab5af;
-        --border: #2b3630;
-        --primary: #82c8a1;
-        --primary-hover: #a6d8bc;
-        --focus: #6ebc91;
-        --shadow: 0 20px 70px rgba(0, 0, 0, 0.35);
-      }
+
       * {
         box-sizing: border-box;
       }
@@ -76,1197 +86,764 @@
       }
       body {
         margin: 0;
-        color: var(--text);
         background: var(--canvas);
-        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-        font-size: 15px;
-        line-height: 1.6;
-        transition:
-          background 0.2s,
-          color 0.2s;
+        color: var(--text);
+        font-family: var(--font-body);
+        font-size: 16px;
+        line-height: 1.65;
+        -webkit-font-smoothing: antialiased;
       }
-      button,
-      a {
-        font: inherit;
-      }
-      a {
-        color: var(--primary);
-        text-decoration-thickness: 1px;
-        text-underline-offset: 3px;
-      }
-      :focus-visible {
-        outline: 3px solid var(--focus);
-        outline-offset: 3px;
+      h1,
+      h2,
+      h3 {
+        font-family: var(--font-display);
+        letter-spacing: -0.03em;
+        margin: 0;
       }
       .shell {
-        width: min(1180px, calc(100% - 40px));
-        margin: auto;
+        width: min(1080px, calc(100% - 48px));
+        margin-inline: auto;
       }
-      .topbar {
-        position: sticky;
-        top: 0;
-        z-index: 20;
-        border-bottom: 1px solid var(--border);
-        background: color-mix(in srgb, var(--canvas) 90%, transparent);
-        backdrop-filter: blur(18px);
+      section {
+        padding: 72px 0;
+        border-top: 2px solid var(--line);
       }
-      .topbar-inner {
-        height: 68px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 20px;
+      section:first-of-type {
+        border-top: 0;
       }
-      .brand-mini {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        color: var(--text);
-        text-decoration: none;
+      .eyebrow {
+        display: inline-block;
+        font: 700 11px/1 var(--font-mono);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        background: var(--highlight);
+        color: #111111;
+        border: 2px solid var(--line);
+        padding: 6px 9px;
+        margin-bottom: 18px;
       }
-      .brand-mini img {
-        width: 65px;
-        height: auto;
-        filter: none;
+      section h2 {
+        font-size: clamp(30px, 4vw, 44px);
+        line-height: 1.06;
+        margin-bottom: 14px;
       }
-      [data-theme="dark"] .brand-mini img {
-        filter: invert(1);
-      }
-      .brand-mini span {
+      .lede {
+        max-width: 680px;
         color: var(--muted);
+        font-size: 17px;
+        margin: 0 0 36px;
+      }
+      .accent {
+        font-style: italic;
+        color: var(--accent);
+      }
+      .mono {
+        font-family: var(--font-mono);
+      }
+      .note {
+        border: 2px dashed var(--line);
+        padding: 14px 18px;
+        font-size: 14px;
+        color: var(--muted);
+        max-width: 680px;
+      }
+      .note strong {
+        color: var(--text);
+      }
+
+      /* Guide hero */
+      .hero {
+        padding: 88px 0 64px;
+      }
+      .hero img {
+        height: 40px;
+        margin-bottom: 28px;
+      }
+      .hero h1 {
+        font-size: clamp(40px, 6vw, 72px);
+        line-height: 0.98;
+        margin-bottom: 20px;
+      }
+      .hero .tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 26px;
+      }
+      .hero .tags span {
+        font: 700 11px/1 var(--font-mono);
+        letter-spacing: 0.12em;
+        background: var(--line);
+        color: #ffffff;
+        border: 2px solid var(--line);
+        padding: 6px 10px;
+      }
+      .hero .tags span:last-child {
+        background: var(--highlight);
+        color: #111111;
+      }
+
+      /* Swatches */
+      .swatch-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+        gap: 16px;
+        margin-bottom: 28px;
+      }
+      .swatch {
+        border: 2px solid var(--line);
+        box-shadow: var(--shadow-s);
+      }
+      .swatch .chip {
+        height: 84px;
+        border-bottom: 2px solid var(--line);
+      }
+      .swatch .meta {
+        padding: 10px 12px;
+        font-size: 11px;
+        line-height: 1.5;
+      }
+      .swatch .meta strong {
+        display: block;
+        font-family: var(--font-display);
+        font-size: 13px;
+        letter-spacing: -0.01em;
+      }
+      .swatch .meta code {
+        font-family: var(--font-mono);
+        color: var(--ink-500);
+      }
+      .ink-row {
+        display: flex;
+        border: 2px solid var(--line);
+        margin-bottom: 28px;
+      }
+      .ink-row i {
+        flex: 1;
+        height: 52px;
+      }
+
+      /* Type specimens */
+      .specimen {
+        border: 2px solid var(--line);
+        padding: 22px 26px;
+        margin-bottom: 16px;
+        box-shadow: var(--shadow-s);
+      }
+      .specimen .label {
+        font: 700 10px/1 var(--font-mono);
+        letter-spacing: 0.14em;
+        color: var(--ink-500);
+        display: block;
+        margin-bottom: 12px;
+      }
+      .spec-display {
+        font-family: var(--font-display);
+        font-size: 34px;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        line-height: 1.05;
+      }
+      .spec-body {
+        font-family: var(--font-body);
+        font-size: 16px;
+        max-width: 620px;
+      }
+      .spec-mono {
+        font-family: var(--font-mono);
         font-size: 13px;
       }
-      .top-actions {
+
+      /* Component demos */
+      .demo-row {
         display: flex;
-        gap: 8px;
+        flex-wrap: wrap;
+        gap: 22px;
         align-items: center;
+        border: 2px solid var(--line);
+        padding: 26px;
+        margin-bottom: 16px;
+        box-shadow: var(--shadow-s);
       }
+      /* Product-tier button: 1.5px border, 2px drop, 1px press. */
       .button {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        gap: 8px;
-        min-height: 40px;
-        padding: 0 15px;
-        border: 1px solid var(--border);
-        border-radius: var(--radius-sm);
+        min-height: 38px;
+        padding: 0 18px;
+        border: 1.5px solid var(--line);
         background: var(--surface);
         color: var(--text);
+        font-family: var(--font-display);
+        font-weight: 700;
+        font-size: 14px;
         text-decoration: none;
         cursor: pointer;
+        box-shadow: var(--shadow-s);
+        transition:
+          transform 0.12s ease,
+          box-shadow 0.12s ease;
       }
       .button:hover {
-        background: var(--surface-2);
+        transform: translate(1px, 1px);
+        box-shadow: var(--shadow-xs);
+      }
+      .button:active {
+        transform: translate(2px, 2px);
+        box-shadow: none;
       }
       .button.primary {
         background: var(--primary);
-        color: var(--canvas);
-        border-color: transparent;
-        font-weight: 600;
-      }
-      [data-theme="dark"] .button.primary {
-        color: var(--ink-950);
+        color: #ffffff;
       }
       .button.primary:hover {
         background: var(--primary-hover);
       }
-      .hero {
-        padding: 92px 0 76px;
-        border-bottom: 1px solid var(--border);
-        overflow: hidden;
-      }
-      .hero-grid {
-        display: grid;
-        grid-template-columns: 1.05fr 0.95fr;
-        gap: 72px;
-        align-items: center;
-      }
-      .eyebrow {
-        font:
-          500 12px/1 IBM Plex Mono,
-          monospace;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        color: var(--primary);
-      }
-      h1,
-      h2,
-      h3,
-      .display {
-        font-family: Manrope, Inter, sans-serif;
-        letter-spacing: -0.035em;
-      }
-      h1 {
-        font-size: clamp(44px, 7vw, 82px);
-        line-height: 0.98;
-        margin: 24px 0;
-        max-width: 720px;
-      }
-      h2 {
-        font-size: clamp(30px, 4vw, 48px);
-        line-height: 1.08;
-        margin: 0 0 14px;
-      }
-      h3 {
-        font-size: 20px;
-        margin: 0 0 8px;
-      }
-      .lede {
-        font-size: 18px;
-        color: var(--muted);
-        max-width: 650px;
-      }
-      .hero-card {
-        min-height: 390px;
-        border-radius: 32px;
-        background: var(--ink-950);
-        position: relative;
-        display: grid;
-        place-items: center;
-        box-shadow: var(--shadow);
-        isolation: isolate;
-        overflow: hidden;
-      }
-      .hero-card::before {
-        content: "";
-        position: absolute;
-        inset: -35%;
-        background: radial-gradient(circle, var(--green-500), transparent 57%);
-        opacity: 0.35;
-        filter: blur(30px);
-        z-index: -1;
-      }
-      .hero-card img {
-        width: 75%;
-        height: auto;
-      }
-      .hero-note {
-        position: absolute;
-        inset: auto 24px 20px;
-        display: flex;
-        justify-content: space-between;
-        color: #d5ded9;
-        font:
-          400 11px/1.4 IBM Plex Mono,
-          monospace;
-      }
-      section {
-        padding: 88px 0;
-        border-bottom: 1px solid var(--border);
-      }
-      .section-head {
-        display: grid;
-        grid-template-columns: 0.7fr 1.3fr;
-        gap: 48px;
-        margin-bottom: 42px;
-      }
-      .section-head p {
-        margin: 0;
-        color: var(--muted);
-        font-size: 17px;
-        max-width: 700px;
-      }
-      .grid-2 {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 18px;
-      }
-      .grid-3 {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 18px;
-      }
-      .card {
-        border: 1px solid var(--border);
-        border-radius: var(--radius-lg);
+      .input {
+        min-height: 38px;
+        padding: 0 14px;
+        border: 1.5px solid var(--line);
         background: var(--surface);
-        overflow: hidden;
+        font: inherit;
       }
-      .card-body {
-        padding: 24px;
+      .input:focus {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
       }
-      .logo-stage {
-        min-height: 300px;
-        display: grid;
-        place-items: center;
-        padding: 46px;
-        background: #f7f9f8;
+      .card-demo {
+        border: 1.5px solid var(--line);
+        background: var(--surface);
+        box-shadow: var(--shadow-s);
+        padding: 18px 22px;
+        max-width: 260px;
+        transition:
+          transform 0.15s ease,
+          box-shadow 0.15s ease;
       }
-      .logo-stage.dark {
-        background: #080c0a;
+      .card-demo:hover {
+        transform: translate(-1px, -1px);
+        box-shadow: 3px 3px 0 var(--line);
       }
-      .logo-stage img {
-        width: min(100%, 480px);
+      .card-demo strong {
+        font-family: var(--font-display);
       }
-      .logo-stage.mark img {
-        width: 160px;
-      }
-      .meta-row {
-        border-top: 1px solid var(--border);
-        padding: 16px 20px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-      }
-      .meta-row strong {
-        font-size: 13px;
-      }
-      .meta-row code,
-      .mono {
-        font-family: "IBM Plex Mono", monospace;
-        font-size: 12px;
+      .card-demo p {
+        margin: 4px 0 0;
+        font-size: 13.5px;
         color: var(--muted);
       }
-      .download {
-        font-size: 13px;
-        font-weight: 600;
+
+      .stamp {
+        display: inline-block;
+        border: 1.5px solid var(--line);
+        padding: 4px 10px;
+        font: 700 10.5px/1.4 var(--font-mono);
+        letter-spacing: 0.1em;
+        background: var(--surface);
+      }
+      .stamp.live {
+        background: var(--highlight);
+      }
+      .stamp.dead {
+        background: var(--ink-950);
+        color: #f5f5f1;
+      }
+      .stamp.quiet {
+        color: var(--ink-500);
+      }
+      .tag {
+        display: inline-block;
+        border: 1.5px solid var(--line);
+        padding: 2px 7px;
+        font: 700 10.5px/1.6 var(--font-mono);
+        letter-spacing: 0.1em;
+      }
+      .tag.yellow {
+        background: var(--highlight);
+      }
+      .link {
+        color: var(--accent);
+        font: 700 12.5px/1.4 var(--font-mono);
         text-decoration: none;
       }
-      .rules {
-        margin-top: 18px;
+      .link:hover {
+        text-decoration: underline;
       }
-      .rule {
-        padding: 22px;
-      }
-      .rule .number {
-        display: block;
-        color: var(--primary);
-        font:
-          500 12px/1 IBM Plex Mono,
-          monospace;
-        margin-bottom: 20px;
-      }
-      .rule p {
-        color: var(--muted);
-        margin: 0;
-      }
-      .palette {
-        display: grid;
-        grid-template-columns: repeat(6, minmax(0, 1fr));
-        gap: 10px;
-      }
-      .swatch {
-        min-height: 145px;
-        border-radius: 14px;
-        padding: 14px;
+
+      /* Event rows */
+      .event-stack {
+        max-width: 560px;
         display: flex;
         flex-direction: column;
-        justify-content: flex-end;
-        cursor: pointer;
-        border: 1px solid rgba(0, 0, 0, 0.07);
-        transition: transform 0.15s;
+        gap: 9px;
+        margin-bottom: 16px;
       }
-      .swatch:hover {
-        transform: translateY(-3px);
-      }
-      .swatch strong {
-        font-size: 12px;
-      }
-      .swatch span {
-        font:
-          400 11px/1.4 IBM Plex Mono,
-          monospace;
-        opacity: 0.78;
-      }
-      .dark-ink {
-        color: #080c0a;
-      }
-      .light-ink {
-        color: #fff;
-      }
-      .roles {
-        margin-top: 18px;
-      }
-      .role {
-        padding: 22px;
-        min-height: 160px;
-      }
-      .role-chip {
-        width: 40px;
-        height: 40px;
-        border-radius: 10px;
-        margin-bottom: 24px;
-      }
-      .role p {
-        color: var(--muted);
-        margin: 0;
-        font-size: 13px;
-      }
-      .type-specimen {
-        padding: 30px;
-        min-height: 255px;
+      .event-row {
+        border: 1px solid var(--line);
+        padding: 8px 14px;
+        font-size: 13.5px;
         display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-      }
-      .type-specimen .sample {
-        font-size: 44px;
-        line-height: 1.06;
-        letter-spacing: -0.035em;
-      }
-      .type-specimen .caption {
-        color: var(--muted);
-        font:
-          400 12px/1.6 IBM Plex Mono,
-          monospace;
-      }
-      .manrope {
-        font-family: Manrope, sans-serif;
-        font-weight: 700;
-      }
-      .inter {
-        font-family: Inter, sans-serif;
-        font-weight: 500;
-        letter-spacing: -0.02em !important;
-      }
-      .plex {
-        font-family: "IBM Plex Mono", monospace;
-        font-size: 31px !important;
-        letter-spacing: -0.02em !important;
-      }
-      .scale-table {
-        margin-top: 18px;
-        width: 100%;
-        border-collapse: collapse;
+        gap: 9px;
+        align-items: center;
         background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: var(--radius-lg);
-        overflow: hidden;
-        display: table;
       }
-      .scale-table th,
-      .scale-table td {
-        padding: 17px 20px;
-        text-align: left;
-        border-bottom: 1px solid var(--border);
+      .event-row .dur {
+        margin-left: auto;
+        font: 400 11px/1.6 var(--font-mono);
+        color: var(--ink-500);
       }
-      .scale-table tr:last-child td {
-        border-bottom: 0;
+      .event-row.crash {
+        background: var(--ink-950);
+        color: #f5f5f1;
+        font: 700 12px/1.7 var(--font-mono);
+        letter-spacing: 0.03em;
       }
-      .scale-table th {
-        color: var(--muted);
-        font-size: 12px;
-        font-weight: 500;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
+      .event-row.resume {
+        background: var(--highlight);
+        font: 700 12px/1.7 var(--font-mono);
+        letter-spacing: 0.03em;
       }
-      .scale-table td:last-child {
-        font-family: "IBM Plex Mono", monospace;
-        font-size: 12px;
-        color: var(--muted);
+
+      /* Dark ground demo */
+      .band-demo {
+        background: var(--ink-950);
+        color: #f5f5f1;
+        border: 3px solid var(--line);
+        box-shadow: var(--shadow-l);
+        padding: 40px;
+        margin-bottom: 28px;
       }
-      .console {
-        border: 1px solid #2b3630;
-        border-radius: 24px;
-        background: #0d1210;
-        color: #eef3f0;
-        overflow: hidden;
-        box-shadow: 0 28px 80px rgba(0, 0, 0, 0.25);
-      }
-      .console-head {
-        padding: 18px 20px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        border-bottom: 1px solid #26302b;
-      }
-      .console-brand {
-        display: flex;
-        gap: 10px;
-        align-items: center;
-        font:
-          600 14px Manrope,
-          sans-serif;
-      }
-      .console-brand img {
-        width: 48px;
-      }
-      .status {
-        display: inline-flex;
-        gap: 7px;
-        align-items: center;
-        color: #a6d8bc;
-        font:
-          500 11px IBM Plex Mono,
-          monospace;
-      }
-      .status::before {
-        content: "";
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: #6ebc91;
-        box-shadow: 0 0 0 4px rgba(110, 188, 145, 0.14);
-      }
-      .console-layout {
-        display: grid;
-        grid-template-columns: 210px 1fr;
-        min-height: 465px;
-      }
-      .side {
-        border-right: 1px solid #26302b;
-        padding: 18px 12px;
-      }
-      .nav-item {
-        padding: 10px 12px;
-        border-radius: 8px;
-        color: #98a59e;
-        margin-bottom: 4px;
-        font-size: 13px;
-      }
-      .nav-item.active {
-        background: #1a2922;
-        color: #a6d8bc;
-      }
-      .main {
-        padding: 28px;
-        overflow: hidden;
-      }
-      .main-title {
-        display: flex;
-        align-items: end;
-        justify-content: space-between;
-        gap: 16px;
-        margin-bottom: 22px;
-      }
-      .main h3 {
-        color: #fff;
-        font-size: 25px;
-      }
-      .main p {
-        color: #93a198;
-        margin: 3px 0 0;
-        font-size: 13px;
-      }
-      .agent-list {
-        border: 1px solid #28332d;
-        border-radius: 12px;
-        overflow: hidden;
-      }
-      .agent-row {
-        display: grid;
-        grid-template-columns: 1.2fr 1fr 0.7fr;
-        align-items: center;
-        gap: 15px;
-        padding: 17px 18px;
-        border-bottom: 1px solid #28332d;
-      }
-      .agent-row:last-child {
-        border-bottom: 0;
-      }
-      .agent {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-      }
-      .agent-icon {
-        width: 34px;
-        height: 34px;
-        border-radius: 9px;
-        background: #20392d;
-        display: grid;
-        place-items: center;
-        color: #9dd6b5;
-        font: 600 13px Manrope;
-      }
-      .agent strong {
-        font-size: 13px;
-      }
-      .agent small,
-      .model {
-        color: #8e9b94;
-        font:
-          400 11px IBM Plex Mono,
-          monospace;
-        display: block;
-      }
-      .pill {
-        justify-self: start;
-        padding: 4px 9px;
-        background: #183125;
-        border: 1px solid #2d5b43;
-        border-radius: 999px;
-        color: #91d0aa;
-        font-size: 11px;
-      }
-      .token-panel {
-        margin-top: 18px;
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 18px;
-      }
-      pre {
-        margin: 0;
-        padding: 24px;
-        overflow: auto;
-        background: #0d1210;
-        color: #d9e3dd;
-        border-radius: var(--radius-lg);
-        border: 1px solid #2b3630;
-        font:
-          400 12px/1.75 "IBM Plex Mono",
-          monospace;
-      }
-      .note {
-        padding: 24px;
-        background: var(--green-50);
-        border: 1px solid var(--green-200);
-        border-radius: var(--radius-lg);
-        color: var(--green-950);
-      }
-      [data-theme="dark"] .note {
-        background: #11271d;
-        border-color: #28543e;
-        color: #d9efe3;
-      }
-      .note strong {
-        display: block;
+      .band-demo h3 {
+        font-size: 26px;
         margin-bottom: 8px;
       }
+      .band-demo .accent-dark {
+        font-style: italic;
+        color: var(--highlight);
+      }
+      .band-demo p {
+        color: var(--ink-300);
+        max-width: 520px;
+        margin: 0 0 20px;
+        font-size: 15px;
+      }
+      .band-demo .panel {
+        background: var(--surface);
+        color: var(--text); /* white panels on ink MUST reset to ink text */
+        border: 3px solid var(--highlight);
+        padding: 16px 20px;
+        max-width: 340px;
+        font-size: 14px;
+      }
+      .band-demo .panel strong {
+        font-family: var(--font-display);
+      }
+
+      /* Logo block */
+      .logo-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        margin-bottom: 28px;
+      }
+      .logo-cell {
+        border: 2px solid var(--line);
+        display: grid;
+        place-items: center;
+        padding: 40px 20px;
+        box-shadow: var(--shadow-s);
+      }
+      .logo-cell.dark {
+        background: var(--ink-950);
+      }
+      .logo-cell img {
+        height: 34px;
+      }
+
+      /* Rules list */
+      .rules {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        max-width: 760px;
+      }
+      .rules li {
+        display: grid;
+        grid-template-columns: 60px 1fr;
+        gap: 16px;
+        padding: 14px 0;
+        border-top: 1.5px solid var(--ink-200);
+        font-size: 15px;
+      }
+      .rules li:first-child {
+        border-top: 0;
+      }
+      .rules .verdict {
+        font: 700 11px/1.9 var(--font-mono);
+        letter-spacing: 0.1em;
+      }
+      .rules .verdict.do {
+        color: var(--accent);
+      }
+      .rules .verdict.dont {
+        color: var(--primary);
+      }
+
+      code.inline {
+        font-family: var(--font-mono);
+        font-size: 0.85em;
+        background: var(--surface-2);
+        border: 1px solid var(--ink-200);
+        padding: 1px 5px;
+      }
+
       footer {
-        padding: 42px 0 60px;
-        color: var(--muted);
-        font-size: 13px;
-      }
-      .footer-inner {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 24px;
-      }
-      .toast {
-        position: fixed;
-        z-index: 50;
-        left: 50%;
-        bottom: 24px;
-        transform: translate(-50%, 20px);
-        padding: 10px 14px;
-        color: #fff;
-        background: #141a17;
-        border-radius: 8px;
-        opacity: 0;
-        pointer-events: none;
-        transition: 0.2s;
-        box-shadow: var(--shadow);
-        font-size: 13px;
-      }
-      .toast.show {
-        opacity: 1;
-        transform: translate(-50%, 0);
-      }
-      @media (max-width: 900px) {
-        .hero-grid,
-        .section-head {
-          grid-template-columns: 1fr;
-          gap: 32px;
-        }
-        .grid-3 {
-          grid-template-columns: 1fr;
-        }
-        .palette {
-          grid-template-columns: repeat(3, 1fr);
-        }
-        .console-layout {
-          grid-template-columns: 1fr;
-        }
-        .side {
-          display: none;
-        }
-        .token-panel {
-          grid-template-columns: 1fr;
-        }
-      }
-      @media (max-width: 640px) {
-        .shell {
-          width: min(100% - 24px, 1180px);
-        }
-        .hero,
-        section {
-          padding: 60px 0;
-        }
-        .grid-2 {
-          grid-template-columns: 1fr;
-        }
-        .palette {
-          grid-template-columns: repeat(2, 1fr);
-        }
-        .brand-mini span,
-        .top-actions .download-guide {
-          display: none;
-        }
-        .logo-stage {
-          min-height: 220px;
-          padding: 28px;
-        }
-        .scale-table {
-          display: block;
-          overflow: auto;
-          white-space: nowrap;
-        }
-        .agent-row {
-          grid-template-columns: 1fr auto;
-        }
-        .model {
-          display: none;
-        }
-        .footer-inner {
-          align-items: flex-start;
-          flex-direction: column;
-        }
+        border-top: 2px solid var(--line);
+        padding: 28px 0 48px;
+        font: 400 12px/1.6 var(--font-mono);
+        color: var(--ink-500);
       }
     </style>
   </head>
   <body>
-    <header class="topbar">
-      <div class="shell topbar-inner">
-        <a class="brand-mini" href="#top" aria-label="OAO style guide home">
-          <img src="style-guide-assets/oao-wordmark-black.png" alt="OAO" />
-          <span>Brand & product system · v1.0</span>
-        </a>
-        <div class="top-actions">
-          <a
-            class="button download-guide"
-            href="style-guide-assets/oao-wordmark-black.png"
-            download
-            >Download logo</a
-          >
-          <button
-            class="button"
-            id="themeToggle"
-            type="button"
-            aria-label="Toggle color theme"
-          >
-            ◐ Theme
-          </button>
+    <div class="shell">
+      <!-- ============================================================ -->
+      <header class="hero">
+        <img src="./style-guide-assets/oao-wordmark-black.png" alt="OAO" />
+        <h1>Full volume.<br /><span class="accent">Zero radius.</span></h1>
+        <p class="lede">
+          OAO's identity is neo-brutalist: a white ground, ink hardware, and
+          three loud flat hues that each hold exactly one job. Everything is
+          drawn with ink borders and hard offset shadows — nothing blurs,
+          nothing rounds, nothing fades. It runs at two volumes: full volume
+          on marketing surfaces, and a quieter <strong>product tier</strong>
+          in the console, where the same hardware thins out so the tool stays
+          comfortable all day. The landing page
+          (<code class="inline">vectrix-ai/oao-landing-page</code>) is the
+          reference implementation of the poster tier; this guide defines
+          both.
+        </p>
+        <div class="tags">
+          <span>WHITE GROUND</span>
+          <span>INK HARDWARE</span>
+          <span>THREE FLAT HUES</span>
+          <span>REBRAND — AUGUST 2026</span>
         </div>
-      </div>
-    </header>
+      </header>
 
-    <main id="top">
-      <div class="hero">
-        <div class="shell hero-grid">
-          <div>
-            <span class="eyebrow">Open managed agents</span>
-            <h1>Quietly powerful.<br />Radically clear.</h1>
-            <p class="lede">
-              A practical identity system for OAO: a precise monochrome mark,
-              confident product typography, and an EU-minded green palette
-              anchored on <strong>#6ebc91</strong>.
-            </p>
-            <div class="top-actions" style="margin-top: 28px">
-              <a class="button primary" href="#logo">Explore the system</a>
-              <a class="button" href="#interface">View UI example</a>
-            </div>
-          </div>
-          <div class="hero-card" aria-label="OAO white logo on dark background">
-            <img
-              src="style-guide-assets/oao-wordmark-white.png"
-              alt="OAO wordmark"
-            />
-            <div class="hero-note">
-              <span>MONOCHROME MASTER</span
-              ><span>OPEN · DURABLE · PORTABLE</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
+      <!-- ============================================================ -->
       <section id="logo">
-        <div class="shell">
-          <div class="section-head">
-            <div>
-              <span class="eyebrow">01 · Identity</span>
-              <h2>The logo</h2>
-            </div>
-            <p>
-              The OAO wordmark is a custom-drawn asset, not a typeset word. Its
-              circular rhythm signals continuity while the open center mark
-              creates a distinctive point of entry. Always use the supplied
-              artwork.
-            </p>
+        <span class="eyebrow">The logo</span>
+        <h2>The mark is hardware too.</h2>
+        <p class="lede">
+          The approved exports live in
+          <code class="inline">style-guide-assets/</code> (mirrored in the
+          landing repo's <code class="inline">public/brand/</code>). Use them
+          as-is: never recreate the wordmark with a font, never stretch it,
+          never recolor it. Black on light grounds, white on ink grounds.
+        </p>
+        <div class="logo-grid">
+          <div class="logo-cell">
+            <img src="./style-guide-assets/oao-wordmark-black.png" alt="OAO wordmark, black" />
           </div>
-          <div class="grid-2">
-            <article class="card">
-              <div class="logo-stage">
-                <img
-                  src="style-guide-assets/oao-wordmark-black.png"
-                  alt="Black OAO wordmark"
-                />
-              </div>
-              <div class="meta-row">
-                <div>
-                  <strong>Black wordmark</strong
-                  ><code>4096 × 1536 · transparent PNG</code>
-                </div>
-                <a
-                  class="download"
-                  href="style-guide-assets/oao-wordmark-black.png"
-                  download
-                  >Download ↓</a
-                >
-              </div>
-            </article>
-            <article class="card">
-              <div class="logo-stage dark">
-                <img
-                  src="style-guide-assets/oao-wordmark-white.png"
-                  alt="White OAO wordmark"
-                />
-              </div>
-              <div class="meta-row">
-                <div>
-                  <strong>White wordmark</strong
-                  ><code>4096 × 1536 · transparent PNG</code>
-                </div>
-                <a
-                  class="download"
-                  href="style-guide-assets/oao-wordmark-white.png"
-                  download
-                  >Download ↓</a
-                >
-              </div>
-            </article>
-            <article class="card">
-              <div class="logo-stage mark">
-                <img
-                  src="style-guide-assets/oao-mark-black.png"
-                  alt="Black OAO compact mark"
-                />
-              </div>
-              <div class="meta-row">
-                <div>
-                  <strong>Compact mark</strong
-                  ><code>2048 × 2048 · transparent PNG</code>
-                </div>
-                <a
-                  class="download"
-                  href="style-guide-assets/oao-mark-black.png"
-                  download
-                  >Download ↓</a
-                >
-              </div>
-            </article>
-            <article class="card">
-              <div class="logo-stage dark mark">
-                <img
-                  src="style-guide-assets/oao-mark-white.png"
-                  alt="White OAO compact mark"
-                />
-              </div>
-              <div class="meta-row">
-                <div>
-                  <strong>Reversed compact mark</strong
-                  ><code>2048 × 2048 · transparent PNG</code>
-                </div>
-                <a
-                  class="download"
-                  href="style-guide-assets/oao-mark-white.png"
-                  download
-                  >Download ↓</a
-                >
-              </div>
-            </article>
+          <div class="logo-cell dark">
+            <img src="./style-guide-assets/oao-wordmark-white.png" alt="OAO wordmark, white" />
           </div>
-          <div class="grid-3 rules">
-            <article class="card rule">
-              <span class="number">01 / CLEAR SPACE</span>
-              <h3>Let it breathe</h3>
-              <p>
-                Keep clear space equal to at least half the height of one “o”
-                around every side of the wordmark.
-              </p>
-            </article>
-            <article class="card rule">
-              <span class="number">02 / MINIMUM SIZE</span>
-              <h3>Stay legible</h3>
-              <p>
-                Use the full wordmark at 72 px wide or larger. Below that,
-                switch to the compact center mark at 20 px or larger.
-              </p>
-            </article>
-            <article class="card rule">
-              <span class="number">03 / INTEGRITY</span>
-              <h3>Keep it exact</h3>
-              <p>
-                Do not stretch, outline, recolor individual letters, add
-                effects, or recreate the mark with a font.
-              </p>
-            </article>
+          <div class="logo-cell">
+            <img src="./style-guide-assets/oao-mark-black.png" alt="OAO mark, black" style="height: 40px" />
+          </div>
+          <div class="logo-cell dark">
+            <img src="./style-guide-assets/oao-mark-white.png" alt="OAO mark, white" style="height: 40px" />
           </div>
         </div>
       </section>
 
+      <!-- ============================================================ -->
       <section id="color">
-        <div class="shell">
-          <div class="section-head">
-            <div>
-              <span class="eyebrow">02 · Color</span>
-              <h2>Verdant signal</h2>
+        <span class="eyebrow">Color</span>
+        <h2>Three hues, three jobs.</h2>
+        <p class="lede">
+          The ground is white, the hardware is ink. On top of that, exactly
+          three flat brand hues — and each one has a fixed job. Never blend
+          them, never tint them, never run a gradient through them. If a hue
+          is doing a job that isn't listed here, it's the wrong hue.
+        </p>
+
+        <div class="swatch-grid">
+          <div class="swatch">
+            <div class="chip" style="background: #ffffff"></div>
+            <div class="meta">
+              <strong>Ground</strong>
+              <code>--canvas / --surface #ffffff</code>
+              White page, white cards. <code>--surface-2 #f5f5f2</code> for
+              quiet wells (sidebars, message grounds).
             </div>
-            <p>
-              The primary scale is anchored on the selected
-              <a
-                href="https://uicolors.app/generate/6ebc91"
-                target="_blank"
-                rel="noreferrer"
-                >UI Colors seed #6ebc91</a
-              >. Green signals live, healthy and approved states; near-black
-              neutrals keep complex debugging views calm and readable.
-            </p>
           </div>
-          <div class="palette" aria-label="OAO green color palette">
-            <button
-              class="swatch dark-ink"
-              style="background: #f3faf6"
-              data-copy="#f3faf6"
-            >
-              <strong>50</strong><span>#f3faf6</span>
-            </button>
-            <button
-              class="swatch dark-ink"
-              style="background: #e4f4eb"
-              data-copy="#e4f4eb"
-            >
-              <strong>100</strong><span>#e4f4eb</span>
-            </button>
-            <button
-              class="swatch dark-ink"
-              style="background: #cae8d7"
-              data-copy="#cae8d7"
-            >
-              <strong>200</strong><span>#cae8d7</span>
-            </button>
-            <button
-              class="swatch dark-ink"
-              style="background: #a6d8bc"
-              data-copy="#a6d8bc"
-            >
-              <strong>300</strong><span>#a6d8bc</span>
-            </button>
-            <button
-              class="swatch dark-ink"
-              style="background: #82c8a1"
-              data-copy="#82c8a1"
-            >
-              <strong>400</strong><span>#82c8a1</span>
-            </button>
-            <button
-              class="swatch dark-ink"
-              style="background: #6ebc91"
-              data-copy="#6ebc91"
-            >
-              <strong>500 · seed</strong><span>#6ebc91</span>
-            </button>
-            <button
-              class="swatch light-ink"
-              style="background: #4e9d74"
-              data-copy="#4e9d74"
-            >
-              <strong>600</strong><span>#4e9d74</span>
-            </button>
-            <button
-              class="swatch light-ink"
-              style="background: #3d7c5c"
-              data-copy="#3d7c5c"
-            >
-              <strong>700</strong><span>#3d7c5c</span>
-            </button>
-            <button
-              class="swatch light-ink"
-              style="background: #326349"
-              data-copy="#326349"
-            >
-              <strong>800</strong><span>#326349</span>
-            </button>
-            <button
-              class="swatch light-ink"
-              style="background: #2a513e"
-              data-copy="#2a513e"
-            >
-              <strong>900</strong><span>#2a513e</span>
-            </button>
-            <button
-              class="swatch light-ink"
-              style="background: #142d21"
-              data-copy="#142d21"
-            >
-              <strong>950</strong><span>#142d21</span>
-            </button>
-            <button
-              class="swatch light-ink"
-              style="background: #080c0a"
-              data-copy="#080c0a"
-            >
-              <strong>Ink</strong><span>#080c0a</span>
-            </button>
+          <div class="swatch">
+            <div class="chip" style="background: #111111"></div>
+            <div class="meta">
+              <strong>Ink</strong>
+              <code>--line / --ink-950 #111111</code>
+              All borders, all shadows, all text. Also the ground of dark
+              bands and "dead" states (crashes, terminated).
+            </div>
           </div>
-          <div class="grid-3 roles">
-            <article class="card role">
-              <div class="role-chip" style="background: #3d7c5c"></div>
-              <h3>Action</h3>
-              <p>
-                Use green 700 for primary buttons and important links on light
-                surfaces. Hover at 800.
-              </p>
-            </article>
-            <article class="card role">
-              <div class="role-chip" style="background: #e4f4eb"></div>
-              <h3>Selection</h3>
-              <p>
-                Use green 100 for selected rows, filters and gentle active
-                states with 800 text.
-              </p>
-            </article>
-            <article class="card role">
-              <div class="role-chip" style="background: #6ebc91"></div>
-              <h3>Live signal</h3>
-              <p>
-                Use green 500 for focus rings, live indicators and charts—not
-                small white text.
-              </p>
-            </article>
+          <div class="swatch">
+            <div class="chip" style="background: #fa3d31"></div>
+            <div class="meta">
+              <strong>Action red</strong>
+              <code>--primary #fa3d31</code>
+              Primary buttons only. In the product it may extend to
+              destructive confirmation and error text — nothing else.
+            </div>
+          </div>
+          <div class="swatch">
+            <div class="chip" style="background: #f7ff00"></div>
+            <div class="meta">
+              <strong>Signal yellow</strong>
+              <code>--highlight #f7ff00</code>
+              Eyebrows, highlights, tickers, live/active states, status
+              stamps, selected chips. The accent color on ink grounds.
+            </div>
+          </div>
+          <div class="swatch">
+            <div class="chip" style="background: #3d5bf5"></div>
+            <div class="meta">
+              <strong>Accent blue</strong>
+              <code>--accent #3d5bf5</code>
+              Links, italic headline accents, sequence markers
+              (<span class="mono">01/02/03</span>), focus rings. Light
+              grounds only — it drowns on ink.
+            </div>
           </div>
         </div>
+
+        <div class="ink-row" aria-label="Ink neutral scale, 50 to 950">
+          <i style="background: #f8f8f5"></i>
+          <i style="background: #efefeb"></i>
+          <i style="background: #dcdcd7"></i>
+          <i style="background: #b9b9b4"></i>
+          <i style="background: #6f6f6a"></i>
+          <i style="background: #4a4a46"></i>
+          <i style="background: #333330"></i>
+          <i style="background: #222220"></i>
+          <i style="background: #191918"></i>
+          <i style="background: #111111"></i>
+        </div>
+
+        <p class="note">
+          <strong>No theme toggle.</strong> The old green system had a dark
+          theme; the new system doesn't. There is one light system, and dark
+          is used <em>compositionally</em> — full-bleed ink bands and ink
+          cards inside a light page (see "Dark grounds" below). Do not build
+          a <code class="inline">data-theme="dark"</code> variant of the
+          console.
+        </p>
       </section>
 
+      <!-- ============================================================ -->
       <section id="type">
-        <div class="shell">
-          <div class="section-head">
-            <div>
-              <span class="eyebrow">03 · Typography</span>
-              <h2>Three clear voices</h2>
-            </div>
-            <p>
-              Typography separates brand, interface and machine data. This keeps
-              OAO approachable at a glance and exact when an operator is
-              inspecting a run.
-            </p>
-          </div>
-          <div class="grid-3">
-            <article class="card type-specimen">
-              <div class="sample manrope">Managed<br />intelligence.</div>
-              <div class="caption">
-                MANROPE · 600 / 700<br />Headlines, page titles, product moments
-              </div>
-            </article>
-            <article class="card type-specimen">
-              <div class="sample inter">Every state,<br />made visible.</div>
-              <div class="caption">
-                INTER · 400 / 500 / 600<br />Navigation, controls, tables, body
-                copy
-              </div>
-            </article>
-            <article class="card type-specimen">
-              <div class="sample plex">run_01JQ7<br />42.8k · 2.1s</div>
-              <div class="caption">
-                IBM PLEX MONO · 400 / 500<br />IDs, tokens, timings, JSON, code
-              </div>
-            </article>
-          </div>
-          <table class="scale-table">
-            <thead>
-              <tr>
-                <th>Role</th>
-                <th>Font</th>
-                <th>Size / line</th>
-                <th>Weight</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td class="display" style="font-size: 32px; font-weight: 700">
-                  Page title
-                </td>
-                <td>Manrope</td>
-                <td>40 / 44 px</td>
-                <td>700</td>
-              </tr>
-              <tr>
-                <td style="font-size: 18px; font-weight: 600">
-                  Section heading
-                </td>
-                <td>Manrope</td>
-                <td>24 / 30 px</td>
-                <td>600</td>
-              </tr>
-              <tr>
-                <td>Interface body and labels</td>
-                <td>Inter</td>
-                <td>14 / 21 px</td>
-                <td>400–600</td>
-              </tr>
-              <tr>
-                <td class="mono">model/openrouter · 12.4s</td>
-                <td>IBM Plex Mono</td>
-                <td>12 / 18 px</td>
-                <td>400–500</td>
-              </tr>
-            </tbody>
-          </table>
+        <span class="eyebrow">Typography</span>
+        <h2>Three clear voices.</h2>
+        <p class="lede">
+          Space Grotesk speaks for the interface, Inter for paragraphs, Space
+          Mono for the machine. This replaces the old stack (Manrope / Inter /
+          IBM Plex Mono) everywhere.
+        </p>
+        <div class="specimen">
+          <span class="label">DISPLAY &amp; UI — SPACE GROTESK · 700/500 · -0.03EM</span>
+          <div class="spec-display">Define the agent. <span class="accent">We run the rest.</span></div>
         </div>
+        <div class="specimen">
+          <span class="label">BODY — INTER · 400/500/600</span>
+          <p class="spec-body" style="margin: 0">
+            Inter carries paragraphs, descriptions, and empty states. Body
+            text is 16px/1.65 by default, 13.5–14.5px inside dense product
+            surfaces. Muted copy uses <code class="inline">--muted</code> on
+            light grounds and <code class="inline">--ink-300</code> on ink.
+          </p>
+        </div>
+        <div class="specimen">
+          <span class="label">MACHINE — SPACE MONO · 400/700 · WIDE TRACKING FOR LABELS</span>
+          <div class="spec-mono">
+            f29f9f66-d877-41b2 · preset-global-medium-v1 · fence=42 ·
+            2,204 tok · $0.0041 est.<br />
+            <span style="font-weight: 700; letter-spacing: 0.14em; font-size: 10.5px">SESSIONS / SHP-1042 — LABELS TRACK AT 0.10–0.16EM</span>
+          </div>
+        </div>
+        <p class="note">
+          <strong>Italics:</strong> Space Grotesk has no true italics — the
+          italic accent style renders as synthetic oblique, and that is
+          accepted. Accent italics are blue on light grounds, signal yellow
+          on ink grounds.
+        </p>
       </section>
 
-      <section id="interface">
-        <div class="shell">
-          <div class="section-head">
-            <div>
-              <span class="eyebrow">04 · Product</span>
-              <h2>The console</h2>
-            </div>
-            <p>
-              The interface is information-dense without feeling noisy. Dark
-              debugging surfaces reduce glare; green is reserved for selection,
-              system health and the next safe action.
-            </p>
+      <!-- ============================================================ -->
+      <section id="shape">
+        <span class="eyebrow">Shape &amp; elevation</span>
+        <h2>One hardware, two volumes.</h2>
+        <p class="lede">
+          Zero border radius everywhere — the <code class="inline">--radius-*</code>
+          tokens are 0 and stay 0. The same brutalist hardware runs at two
+          volumes. <strong>Poster tier</strong> (marketing pages, empty
+          states, onboarding set-pieces): 2–3px borders, shadow-m/l, big
+          presses. <strong>Product tier</strong> — the console default: 1px
+          hairlines for rows and internal chrome, 1.5px ink borders for
+          controls and cards, shadow-s (2px) at most on resting elements, and
+          <code class="inline">--line-soft</code> (ink-200) for dividers
+          inside panels. Shadows are still hard offsets — never a blur — but
+          in the product they whisper: shadow-m/l is reserved for things that
+          genuinely float (modals, popovers, toasts).
+        </p>
+        <div class="demo-row">
+          <div style="border: 1px solid var(--ink-200); padding: 10px 16px; font-size: 13px">1px soft — dividers</div>
+          <div style="border: 1px solid var(--line); padding: 10px 16px; font-size: 13px">1px — rows, tags</div>
+          <div style="border: 1.5px solid var(--line); padding: 10px 16px; font-size: 13px; box-shadow: var(--shadow-s)">1.5px + shadow-s — controls</div>
+          <div style="border: 2px solid var(--line); padding: 10px 16px; font-size: 13px; box-shadow: var(--shadow-m)">2px + shadow-m — overlays</div>
+          <div style="border: 3px solid var(--line); padding: 10px 16px; font-size: 13px; box-shadow: var(--shadow-l)">3px + shadow-l — poster</div>
+        </div>
+        <p class="note">
+          <strong>Motion follows the shadow — gently.</strong> In the product
+          tier, buttons press <em>into</em> the page by 1px on hover and 2px
+          on active (shadow shrinks, then disappears); cards lift by 1px.
+          The 2–4px presses belong to the poster tier. Entrances rise ~18px
+          with a fast ease-out. Story animations (status flips, event rows
+          landing) play once, then rest in their final state. Always honor
+          <code class="inline">prefers-reduced-motion</code> by showing the
+          finished state, static.
+        </p>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="components">
+        <span class="eyebrow">Components</span>
+        <h2>The hardware kit.</h2>
+        <p class="lede">
+          The core controls, restyled at <strong>product volume</strong> —
+          1.5px borders, 2px shadows, 1px presses — so the console stays
+          calm and usable over a full workday. These supersede the rounded
+          green components in <code class="inline">design.html</code> until
+          that prototype is rebuilt.
+        </p>
+
+        <div class="demo-row">
+          <button class="button primary">Create session</button>
+          <button class="button">Secondary</button>
+          <input class="input" placeholder="you@company.com" />
+          <a class="link" href="#">docs.oao.sh →</a>
+        </div>
+
+        <div class="demo-row">
+          <span class="stamp live">RUNNING</span>
+          <span class="stamp live">DONE ✓</span>
+          <span class="stamp quiet">QUEUED</span>
+          <span class="stamp">PAUSED</span>
+          <span class="stamp dead">FAILED ✕</span>
+          <span class="tag">tool</span>
+          <span class="tag yellow">caller · 2×</span>
+        </div>
+
+        <div class="demo-row">
+          <div class="card-demo">
+            <strong>Versioned skills</strong>
+            <p>Cards hover up and away from their shadow. 2px border,
+            shadow-m at rest.</p>
           </div>
-          <div
-            class="console"
-            role="img"
-            aria-label="Example OAO managed agents console"
-          >
-            <div class="console-head">
-              <div class="console-brand">
-                <img
-                  src="style-guide-assets/oao-wordmark-white.png"
-                  alt="OAO"
-                /><span>Console</span>
-              </div>
-              <span class="status">SYSTEM HEALTHY</span>
+          <div class="event-stack" style="margin: 0; flex: 1; min-width: 280px">
+            <div class="event-row">
+              <span style="color: var(--ink-500); font-size: 11px">▸</span>
+              lookup_shipment <span class="tag">tool</span>
+              <span class="dur">15.9s</span>
             </div>
-            <div class="console-layout">
-              <nav class="side" aria-label="Example navigation">
-                <div class="nav-item active">Agents</div>
-                <div class="nav-item">Sessions</div>
-                <div class="nav-item">Approvals</div>
-                <div class="nav-item">Projects</div>
-                <div class="nav-item">API keys</div>
-              </nav>
-              <div class="main">
-                <div class="main-title">
-                  <div>
-                    <h3>Managed agents</h3>
-                    <p>Build, version and inspect durable agent runtimes.</p>
-                  </div>
-                  <button class="button primary">+ Create agent</button>
-                </div>
-                <div class="agent-list">
-                  <div class="agent-row">
-                    <div class="agent">
-                      <span class="agent-icon">S</span>
-                      <div>
-                        <strong>Shipment investigator</strong
-                        ><small>agent_01JQ7Y8M</small>
-                      </div>
-                    </div>
-                    <span class="model">openrouter/claude-sonnet</span
-                    ><span class="pill">Active</span>
-                  </div>
-                  <div class="agent-row">
-                    <div class="agent">
-                      <span class="agent-icon">O</span>
-                      <div>
-                        <strong>Order extraction</strong
-                        ><small>agent_01JQ8A2D</small>
-                      </div>
-                    </div>
-                    <span class="model">openrouter/gemini-pro</span
-                    ><span class="pill">Active</span>
-                  </div>
-                  <div class="agent-row">
-                    <div class="agent">
-                      <span class="agent-icon">C</span>
-                      <div>
-                        <strong>Customer assistant</strong
-                        ><small>agent_01JQ8EV4</small>
-                      </div>
-                    </div>
-                    <span class="model">openrouter/gpt-5</span
-                    ><span class="pill">Active</span>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <div class="event-row crash">✕ worker.crashed · lease expired</div>
+            <div class="event-row resume">↻ run.resumed · fence=42 · nothing lost</div>
+          </div>
+        </div>
+
+        <p class="note">
+          <strong>Status stamp semantics:</strong> yellow = live or
+          successfully finished (RUNNING, RESUMED, DONE ✓); white + ink text
+          = at rest (PAUSED); white + gray text = waiting (QUEUED); ink block
+          + white text = dead (FAILED, crashed workers). Stamps are Space
+          Mono 700, ~10.5px, letter-spacing 0.1em, 1.5px border, no shadow.
+        </p>
+      </section>
+
+      <!-- ============================================================ -->
+      <section id="dark">
+        <span class="eyebrow">Dark grounds</span>
+        <h2>Ink is a place, not a theme.</h2>
+        <p class="lede">
+          Dark surfaces are deliberate set-pieces on the light page: a
+          full-bleed <code class="inline">--ink-950</code> band with a 3px
+          border and shadow-l, or an ink card inside a light grid. On ink:
+          text is <code class="inline">#f5f5f1</code>, muted copy is
+          <code class="inline">--ink-300</code>, hairlines are
+          <code class="inline">--ink-700</code>, small offset shadows may use
+          <code class="inline">#f5f5f1</code>, and the accent switches from
+          blue to signal yellow.
+        </p>
+        <div class="band-demo">
+          <h3>Boring where it <span class="accent-dark">matters.</span></h3>
+          <p>
+            Muted copy on ink uses --ink-300. Accent italics go yellow —
+            blue drowns here.
+          </p>
+          <div class="panel">
+            <strong>White panel on ink</strong> — must reset
+            <code class="inline">color</code> to ink text explicitly, or it
+            inherits the band's light text and becomes unreadable. A 3px
+            yellow border lifts it off the band.
           </div>
         </div>
       </section>
 
-      <section id="tokens">
-        <div class="shell">
-          <div class="section-head">
-            <div>
-              <span class="eyebrow">05 · Foundations</span>
-              <h2>Implementation tokens</h2>
-            </div>
-            <p>
-              Use semantic tokens in application code. Components should
-              reference roles such as <span class="mono">--color-action</span>,
-              never a raw shade, so light and dark themes remain coherent.
-            </p>
-          </div>
-          <div class="token-panel">
-            <pre><code>:root {
-  --color-action: #3d7c5c;
-  --color-action-hover: #326349;
-  --color-focus: #6ebc91;
-  --color-canvas: #f7f9f8;
-  --color-surface: #ffffff;
-  --color-text: #141a17;
-  --color-muted: #52605a;
-  --color-border: #d9deda;
-
-  --radius-control: 8px;
-  --radius-panel: 12px;
-  --space-unit: 4px;
-}</code></pre>
-            <div class="note">
-              <strong>Accessibility rule</strong>
-              The seed green <span class="mono">#6ebc91</span> is a signal
-              color. Pair it with near-black text. For text links and primary
-              buttons on light surfaces, use green 700 or 800. Never rely on
-              color alone for status: pair it with a label, icon or shape.
-              <br /><br />
-              <strong>Shape & spacing</strong>
-              Build layouts on a 4 px spacing unit. Use 8 px corners for
-              controls, 12 px for data panels and up to 20 px for editorial
-              brand cards. Prefer borders over heavy shadows in the application
-              console.
-            </div>
-          </div>
-        </div>
+      <!-- ============================================================ -->
+      <section id="console">
+        <span class="eyebrow">The console</span>
+        <h2>The session view is the poster.</h2>
+        <p class="lede">
+          The design target for the console's session view is the
+          <code class="inline">ConsoleSession</code> mock in the landing repo
+          (<code class="inline">src/components/ConsoleSession.astro</code>) —
+          a working specimen of every pattern above. Its anatomy, top to
+          bottom:
+        </p>
+        <ul class="rules">
+          <li><span class="verdict do mono">01</span><span><strong>Chrome bar</strong> — ink strip, Space Mono URL/crumb, small square window dots (one yellow).</span></li>
+          <li><span class="verdict do mono">02</span><span><strong>Header</strong> — mono breadcrumb in --ink-500, Space Grotesk title, mono meta chips (1px borders: agent · version, attempt, duration, tokens, cost), status stamp on the right.</span></li>
+          <li><span class="verdict do mono">03</span><span><strong>Timing ruler</strong> — segmented bar behind a 1.5px border: blue segments for model time, white for tool time, ink for the crash gap, yellow after resume. Tick labels in 9.5px mono.</span></li>
+          <li><span class="verdict do mono">04</span><span><strong>Transcript</strong> — user message on --surface-2; collapsible reasoning/tool rows (1px border, ▸, duration right-aligned); crash rows as ink blocks; resume rows on yellow; the agent's answer in a 1.5px card with shadow-s.</span></li>
+          <li><span class="verdict do mono">05</span><span><strong>Session panel</strong> — --surface-2 sidebar behind a 1.5px divider: ID, status, agent, model preset, tools, usage, cost as label/value pairs with --line-soft hairlines. Hidden under ~940px.</span></li>
+          <li><span class="verdict do mono">06</span><span><strong>Composer</strong> — 1.5px bordered field with shadow-s and a red SEND button.</span></li>
+        </ul>
       </section>
-    </main>
+
+      <!-- ============================================================ -->
+      <section id="rules">
+        <span class="eyebrow">Ground rules</span>
+        <h2>Do / don't.</h2>
+        <ul class="rules">
+          <li><span class="verdict do">DO</span><span>Use semantic tokens (<code class="inline">--primary</code>, <code class="inline">--accent</code>, <code class="inline">--highlight</code>, <code class="inline">--line</code>, <code class="inline">--muted</code>) rather than raw hex values.</span></li>
+          <li><span class="verdict do">DO</span><span>Keep machine data (IDs, presets, fences, tokens, costs) in Space Mono, honestly labeled — "est." when estimated.</span></li>
+          <li><span class="verdict do">DO</span><span>Reset text color to ink on any white panel placed on an ink ground.</span></li>
+          <li><span class="verdict do">DO</span><span>Keep the console at product volume: 1–1.5px borders, shadow-s or none at rest, 1px presses. Save shadow-m/l and 2–3px borders for overlays and set-pieces.</span></li>
+          <li><span class="verdict dont">DON'T</span><span>Round a corner, blur a shadow, or run a gradient. Anywhere.</span></li>
+          <li><span class="verdict dont">DON'T</span><span>Tint the brand hues (no #fdffd8-style washes) or invent new accent colors.</span></li>
+          <li><span class="verdict dont">DON'T</span><span>Use action red for anything but primary buttons, destructive confirmation, and error text.</span></li>
+          <li><span class="verdict dont">DON'T</span><span>Put accent blue on ink grounds — switch to signal yellow.</span></li>
+          <li><span class="verdict dont">DON'T</span><span>Recreate, stretch, or recolor the logo, or set the wordmark in a font.</span></li>
+        </ul>
+      </section>
+    </div>
 
     <footer>
-      <div class="shell footer-inner">
-        <span>OAO brand & product style guide · 20 August 2026</span
-        ><span
-          >Palette anchored on
-          <a href="https://uicolors.app/generate/6ebc91">#6ebc91</a></span
-        >
+      <div class="shell">
+        OAO STYLE GUIDE · NEO-BRUTALIST SYSTEM · AUG 2026 · SOURCE OF TRUTH:
+        oao-landing-page/src/styles/global.css
       </div>
     </footer>
-    <div class="toast" id="toast" role="status" aria-live="polite">Copied</div>
-    <script>
-      const root = document.documentElement;
-      const toggle = document.getElementById("themeToggle");
-      const toast = document.getElementById("toast");
-      toggle.addEventListener("click", () => {
-        root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
-      });
-      document.querySelectorAll("[data-copy]").forEach((swatch) => {
-        swatch.addEventListener("click", async () => {
-          const value = swatch.dataset.copy;
-          try {
-            await navigator.clipboard.writeText(value);
-          } catch {
-            /* Clipboard can be unavailable when opened as a local file. */
-          }
-          toast.textContent = `Copied ${value}`;
-          toast.classList.add("show");
-          window.setTimeout(() => toast.classList.remove("show"), 1300);
-        });
-      });
-    </script>
   </body>
 </html>
