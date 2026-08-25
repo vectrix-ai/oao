@@ -1415,10 +1415,12 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     const cookieAuthenticated =
       readCookie(request, "oao_session") !== undefined ||
       readCookie(request, "oao_refresh") !== undefined;
+    const startsAuthentication = pathname === "/v1/auth/login";
     if (
       UNSAFE_METHODS.has(request.method) &&
       cookieAuthenticated &&
       !(apiKeyBearer && apiKeyProtectedRoute) &&
+      !startsAuthentication &&
       pathname !== "/v1/auth/workos/webhook"
     ) {
       const origin = request.headers.get("origin");
@@ -1452,6 +1454,28 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     return c.json({ status: ready ? "ready" : "not_ready" }, ready ? 200 : 503);
   });
 
+  const startAuthentication = async (
+    c: ApiContext,
+    organizationHint?: string,
+  ) => {
+    const state = randomUUID();
+    const result = await dependencies.auth.login({
+      redirectUri: authConfiguration.callbackUri,
+      state,
+      ...(organizationHint === undefined ? {} : { organizationHint }),
+    });
+    appendCookie(
+      c,
+      "oao_auth_state",
+      state,
+      "/v1/auth/callback",
+      "Lax",
+      600,
+      authConfiguration.cookieSecure,
+    );
+    return result;
+  };
+
   app.post("/v1/auth/login", async (c) => {
     const body = await readJsonObject(c.req.raw);
     if (
@@ -1464,28 +1488,11 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
         "Authentication redirect parameters are server configured",
       );
     }
-    const state = randomUUID();
-    const result = await dependencies.auth.login({
-      redirectUri: authConfiguration.callbackUri,
-      state,
-      ...(body.organizationHint === undefined
-        ? {}
-        : {
-            organizationHint: requiredString(
-              body.organizationHint,
-              "organizationHint",
-              500,
-            ),
-          }),
-    });
-    appendCookie(
+    const result = await startAuthentication(
       c,
-      "oao_auth_state",
-      state,
-      "/v1/auth/callback",
-      "Lax",
-      600,
-      authConfiguration.cookieSecure,
+      body.organizationHint === undefined
+        ? undefined
+        : requiredString(body.organizationHint, "organizationHint", 500),
     );
     return c.json(result);
   });
@@ -1493,6 +1500,29 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   app.get("/v1/auth/callback", async (c) => {
     const expectedState = readCookie(c.req.raw, "oao_auth_state");
     const returnedState = c.req.query("state");
+    if (
+      expectedState === undefined ||
+      returnedState === undefined ||
+      !safeStringEqual(expectedState, returnedState)
+    ) {
+      if (authConfiguration.provider === "workos") {
+        const result = await startAuthentication(c);
+        if (!result.redirectUrl.startsWith("https://"))
+          throw new HttpApiError(
+            "internal_error",
+            "Authentication provider returned an invalid redirect",
+          );
+        return c.redirect(result.redirectUrl, 303);
+      }
+      clearCookie(
+        c,
+        "oao_auth_state",
+        "/v1/auth/callback",
+        "Lax",
+        authConfiguration.cookieSecure,
+      );
+      throw new HttpApiError("bad_request", "Invalid authentication state");
+    }
     clearCookie(
       c,
       "oao_auth_state",
@@ -1500,13 +1530,6 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       "Lax",
       authConfiguration.cookieSecure,
     );
-    if (
-      expectedState === undefined ||
-      returnedState === undefined ||
-      !safeStringEqual(expectedState, returnedState)
-    ) {
-      throw new HttpApiError("bad_request", "Invalid authentication state");
-    }
     const session = await dependencies.auth.callback({
       code: requiredString(c.req.query("code"), "code", 2_000),
       redirectUri: authConfiguration.callbackUri,

@@ -5,10 +5,14 @@ export default defineConfig(({ mode }) => {
   const environment = loadEnv(mode, ".", "");
   const proxyTarget =
     environment.VITE_OAO_API_PROXY_TARGET ?? "http://127.0.0.1:3000";
+  const authProvider = environment.AUTH_PROVIDER ?? "development";
   return {
     plugins: [react()],
+    define: {
+      "import.meta.env.VITE_OAO_AUTH_PROVIDER": JSON.stringify(authProvider),
+    },
     server: {
-      port: 5173,
+      port: 8080,
       proxy: { "/v1": { target: proxyTarget, changeOrigin: false } },
     },
     preview: { port: 4173 },

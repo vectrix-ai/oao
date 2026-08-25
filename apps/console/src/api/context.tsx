@@ -14,6 +14,13 @@ import type { ConsoleApi, SessionDetail, SessionSummary } from "./types";
 
 const ApiContext = createContext<ConsoleApi | null>(null);
 
+function configuredAuthProvider(): "development" | "workos" | undefined {
+  const provider = import.meta.env.VITE_OAO_AUTH_PROVIDER;
+  return provider === "development" || provider === "workos"
+    ? provider
+    : undefined;
+}
+
 export function ConsoleApiProvider({
   children,
   api,
@@ -21,14 +28,13 @@ export function ConsoleApiProvider({
   readonly children: ReactNode;
   readonly api?: ConsoleApi;
 }) {
-  const value = useMemo(
-    () =>
-      api ??
-      (import.meta.env.VITE_OAO_API_MODE === "http"
-        ? new HttpConsoleApi()
-        : createDemoApiFromLocation()),
-    [api],
-  );
+  const value = useMemo(() => {
+    if (api) return api;
+    if (import.meta.env.VITE_OAO_API_MODE !== "http")
+      return createDemoApiFromLocation();
+    const authProvider = configuredAuthProvider();
+    return new HttpConsoleApi(authProvider ? { authProvider } : {});
+  }, [api]);
   return <ApiContext.Provider value={value}>{children}</ApiContext.Provider>;
 }
 

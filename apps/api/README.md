@@ -13,9 +13,14 @@ Development mode applies migrations, idempotently seeds the deterministic local
 organization/project/principal, and permits non-`Secure` HttpOnly cookies only
 because `NODE_ENV=development` and the callback is explicit HTTP. The local Vite
 server proxies `/v1` to `http://127.0.0.1:3000`; browser requests remain
-same-origin at `http://127.0.0.1:5173` and satisfy CSRF checks without CORS or
+same-origin at `http://127.0.0.1:8080` and satisfy CSRF checks without CORS or
 database credentials in the browser. See the root `.env.example` for the exact
 standalone variables when running this service without `dev:local`.
+
+The local launcher also passes `AUTH_PROVIDER` to the console build. That lets
+the HTTP adapter establish a development session before requesting protected
+context, or skip directly to WorkOS sign-in, without using expected `401` and
+`404` responses as provider discovery.
 
 ## WorkOS AuthKit
 
@@ -56,6 +61,14 @@ The login route generates server-owned state in an HttpOnly cookie. The callback
 validates that state, exchanges the code with the official `@workos-inc/node`
 SDK, writes sealed session cookies, and responds `303` to the first
 `APP_ORIGIN`. Caller-provided callback and return URLs are rejected or ignored.
+The login route remains available when stale cookies were issued for a
+different configured origin, allowing the console to recover into a fresh
+server-owned WorkOS login flow. Other unsafe cookie-authenticated routes
+continue to require an exact allowed origin.
+In WorkOS mode, a callback with missing, expired, or mismatched one-time state
+also creates a new state cookie and redirects directly to a fresh hosted login.
+Development callbacks retain the explicit `400 Invalid authentication state`
+response so deterministic test and local flows remain strict.
 Webhook signatures are verified from exact raw bytes by
 `workos.webhooks.constructEvent` before durable deduplication and reconciliation.
 

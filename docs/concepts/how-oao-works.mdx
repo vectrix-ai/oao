@@ -28,24 +28,51 @@ from changing work that is already in progress.
 
 ```mermaid
 sequenceDiagram
+  autonumber
   participant App as Your application
   participant API as OAO API
   participant DB as PostgreSQL
-  participant Runtime as Flue worker
-  participant Provider as Model provider
+  participant Worker as Runtime worker
+  participant Model as Model provider
+  participant Tool as Your tool system
 
-  App->>API: Create session + initial message
-  API->>DB: Commit session, inherited Skill bindings, run, message, event, and wake
-  API-->>App: 201 + session and queued run
-  Runtime->>DB: Claim short wake and fenced admission
-  Runtime->>Provider: Execute the durable model/tool loop
-  Runtime->>DB: Commit redacted state and events
-  DB-->>App: Resumable SSE product events
+  App->>API: POST session + initial message
+  API->>DB: Commit session, run, event, and wake
+  API-->>App: 201 Created + queued run ID
+  Note over App,API: The original HTTP request is now closed
+
+  App->>API: GET project events (separate SSE channel)
+  Worker->>DB: Claim wake and admit the run
+  Worker->>Model: Start the model turn
+  Model-->>Worker: Request a caller-owned tool
+  Worker->>DB: Record tool call and waiting_for_tool state
+  API-->>App: SSE tool_call.requested
+
+  App->>API: Claim the tool call
+  API->>DB: Lease claim with a fence
+  API-->>App: Claim fence
+  App->>Tool: Execute the requested operation
+  Tool-->>App: Tool result
+  App->>API: Submit result + fence
+  API->>DB: Validate and commit the result
+
+  DB-->>Worker: Durable result is available
+  Worker->>Model: Resume with the tool result
+  Model-->>Worker: Final response
+  Worker->>DB: Commit transcript and completed state
+  API-->>App: SSE run.state_changed: completed
+  App->>API: GET run or session
+  API-->>App: Final transcript and run state
 ```
 
 The API does not keep the original request open for the whole run. A successful
-create response means the work is durably queued. The worker admits it to Flue,
-and clients observe progress through reads or SSE.
+create response means the work is durably queued. The caller opens a separate,
+resumable SSE connection to observe progress. When the model requests a
+caller-owned tool, OAO persists the request, changes the run to
+`waiting_for_tool`, and emits `tool_call.requested`. The caller claims the work,
+executes it, and submits the fenced result; the worker then resumes the model.
+Platform-owned tools follow the same durable model/tool loop but execute inside
+the runtime worker, so they do not require the caller to submit a result.
 
 ## PostgreSQL is the MVP authority
 

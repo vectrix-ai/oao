@@ -16,7 +16,7 @@ import { createApiApp } from "./app.js";
 import { composeAuthentication } from "./composition.js";
 import { loadServerConfiguration } from "./config.js";
 import { mountConsoleStatic } from "./console-static.js";
-import { HttpApiError } from "./errors.js";
+import { apiLogLevel, HttpApiError } from "./errors.js";
 import { PostgresApiStore } from "./store.js";
 import { PostgresRuntimeCommandPort } from "./runtime-commands.js";
 
@@ -86,7 +86,7 @@ const app = createApiApp({
   onError: ({ requestId, error }) => {
     process.stderr.write(
       `${JSON.stringify({
-        level: "error",
+        level: apiLogLevel(error),
         requestId,
         errorType: error instanceof Error ? error.name : "UnknownError",
         ...(error instanceof HttpApiError

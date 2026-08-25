@@ -2,10 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "console",
+      "name": "oao-local",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--filter", "@oao/console", "dev"],
-      "port": 5173
+      "runtimeArgs": ["dev:local"],
+      "port": 8080
     },
     {
       "name": "console-demo",

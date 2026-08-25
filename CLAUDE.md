@@ -11,7 +11,7 @@ Node.js 22.19+, pnpm 10.27, Turbo. TypeScript ESM everywhere.
 ```sh
 pnpm install
 pnpm dev:local          # full local stack: starts/reuses Postgres 17 in Docker, migrates, seeds,
-                        # runs API :3000, runtime worker :8788, console :5173
+                        # runs API :3000, runtime worker :8788, console :8080
 pnpm check              # format:check + lint + typecheck + unit tests + build (run before finishing)
 pnpm db:migrate         # apply migrations (needs DATABASE_URL)
 ```

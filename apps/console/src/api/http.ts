@@ -80,6 +80,7 @@ class HttpConsoleError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly code?: string,
   ) {
     super(message);
     this.name = "HttpConsoleError";
@@ -91,6 +92,15 @@ class AuthenticationRedirectError extends Error {
     super("Redirecting to WorkOS sign in.", { cause });
     this.name = "AuthenticationRedirectError";
   }
+}
+
+function requiresFreshWorkOsLogin(error: HttpConsoleError): boolean {
+  return (
+    error.status === 401 ||
+    (error.status === 403 &&
+      error.code === "forbidden" &&
+      error.message === "Request origin is not allowed")
+  );
 }
 
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -756,19 +766,23 @@ export class HttpConsoleApi implements ConsoleApi {
   readonly #baseUrl: string;
   readonly #getAccessToken: () => Promise<string | null>;
   readonly #navigateTo: (url: string) => void;
+  readonly #authProvider: "development" | "workos" | undefined;
   #contextPromise: Promise<ProjectContext> | undefined;
+  #authenticationRedirectPromise: Promise<never> | undefined;
 
   constructor(
     input: {
       readonly baseUrl?: string;
       readonly getAccessToken?: () => Promise<string | null>;
       readonly navigateTo?: (url: string) => void;
+      readonly authProvider?: "development" | "workos";
     } = {},
   ) {
     this.#baseUrl = (input.baseUrl ?? "/v1").replace(/\/$/u, "");
     this.#getAccessToken = input.getAccessToken ?? (async () => null);
     this.#navigateTo =
       input.navigateTo ?? ((url) => globalThis.location.assign(url));
+    this.#authProvider = input.authProvider;
   }
 
   async #request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -790,27 +804,70 @@ export class HttpConsoleApi implements ConsoleApi {
     });
     if (!response.ok) {
       let message = `Request failed (${response.status})`;
+      let code: string | undefined;
       try {
         const body = (await response.json()) as {
-          readonly error?: { readonly message?: string };
+          readonly error?: {
+            readonly code?: string;
+            readonly message?: string;
+          };
           readonly message?: string;
         };
         message = body.error?.message ?? body.message ?? message;
+        code = body.error?.code;
       } catch {
         // The status remains actionable when a proxy returns a non-JSON body.
       }
-      throw new HttpConsoleError(response.status, message);
+      const error = new HttpConsoleError(response.status, message, code);
+      if (
+        this.#authProvider === "workos" &&
+        path !== "/auth/login" &&
+        requiresFreshWorkOsLogin(error)
+      )
+        return this.#startWorkOsLogin(error);
+      throw error;
     }
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
   }
 
+  #startWorkOsLogin(cause: unknown): Promise<never> {
+    this.#authenticationRedirectPromise ??= (async () => {
+      const login = await this.#request<{
+        readonly redirectUrl?: unknown;
+      }>("/auth/login", { method: "POST", body: "{}" });
+      if (
+        typeof login.redirectUrl !== "string" ||
+        !login.redirectUrl.startsWith("https://")
+      )
+        throw new Error(
+          "The authentication provider returned an invalid URL.",
+          { cause },
+        );
+      this.#navigateTo(login.redirectUrl);
+      throw new AuthenticationRedirectError(cause);
+    })().catch((error: unknown) => {
+      if (!(error instanceof AuthenticationRedirectError))
+        this.#authenticationRedirectPromise = undefined;
+      throw error;
+    });
+    return this.#authenticationRedirectPromise;
+  }
+
   async #loadContext(): Promise<ProjectContext> {
+    if (this.#authProvider === "development") {
+      await this.#request("/auth/development/login", {
+        method: "POST",
+        body: "{}",
+      });
+      return contextView(await this.#request<ContextResponse>("/context"));
+    }
     try {
       return contextView(await this.#request<ContextResponse>("/context"));
     } catch (error) {
       if (!(error instanceof HttpConsoleError) || error.status !== 401)
         throw error;
+      if (this.#authProvider === "workos") return this.#startWorkOsLogin(error);
       try {
         await this.#request("/auth/development/login", {
           method: "POST",
@@ -822,19 +879,7 @@ export class HttpConsoleApi implements ConsoleApi {
           loginError.status !== 404
         )
           throw loginError;
-        const login = await this.#request<{
-          readonly redirectUrl?: unknown;
-        }>("/auth/login", { method: "POST", body: "{}" });
-        if (
-          typeof login.redirectUrl !== "string" ||
-          !login.redirectUrl.startsWith("https://")
-        )
-          throw new Error(
-            "The authentication provider returned an invalid URL.",
-            { cause: loginError },
-          );
-        this.#navigateTo(login.redirectUrl);
-        throw new AuthenticationRedirectError(loginError);
+        return this.#startWorkOsLogin(loginError);
       }
       return contextView(await this.#request<ContextResponse>("/context"));
     }

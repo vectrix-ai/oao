@@ -40,9 +40,9 @@ pnpm dev:local
 Docker Desktop or Colima. The command starts PostgreSQL if necessary, builds the
 workspace packages needed by the source watchers, applies migrations, seeds the
 development tenant when `AUTH_PROVIDER=development`, and launches the API on
-port 3000, runtime worker on 8788, and console on 5173. Set
+port 3000, runtime worker on 8788, and console on 8080. Set
 `AUTH_PROVIDER=workos` with the required WorkOS values to disable deterministic
-development login. Open <http://127.0.0.1:5173>. Ctrl-C stops every child and
+development login. Open <http://127.0.0.1:8080>. Ctrl-C stops every child and
 stops the PostgreSQL container only when this invocation started it.
 
 ### Local authentication
@@ -56,16 +56,16 @@ To enable WorkOS AuthKit and disable the deterministic development user:
 ```dotenv
 AUTH_PROVIDER=workos
 NODE_ENV=development
-APP_ORIGIN=http://127.0.0.1:5173
+APP_ORIGIN=http://127.0.0.1:8080
 API_KEY_PEPPER=generate-a-random-secret
 WORKOS_API_KEY=sk_test_...
 WORKOS_CLIENT_ID=client_...
 WORKOS_COOKIE_PASSWORD=at-least-32-random-characters
 WORKOS_WEBHOOK_SECRET=whsec_...
-WORKOS_CALLBACK_URL=http://127.0.0.1:5173/v1/auth/callback
+WORKOS_CALLBACK_URL=http://127.0.0.1:8080/v1/auth/callback
 ```
 
-Register the exact callback and `http://127.0.0.1:5173` sign-out URI in the
+Register the exact callback and `http://127.0.0.1:8080` sign-out URI in the
 WorkOS Staging application. A WorkOS identity must also be explicitly linked to
 an existing OAO organization, project, principal, and membership using the
 `provision:workos` command documented in

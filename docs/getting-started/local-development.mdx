@@ -83,7 +83,7 @@ On every start, the launcher:
 Wait for this message before opening the application:
 
 ```text
-OAO is ready at http://127.0.0.1:5173
+OAO is ready at http://127.0.0.1:8080
 Press Ctrl-C to stop.
 ```
 
@@ -91,12 +91,12 @@ The default services are:
 
 | Service        | Address                 | Purpose                                                     |
 | -------------- | ----------------------- | ----------------------------------------------------------- |
-| Console        | `http://127.0.0.1:5173` | React management and debugging UI                           |
+| Console        | `http://127.0.0.1:8080` | React management and debugging UI                           |
 | API            | `http://127.0.0.1:3000` | REST, authentication, and SSE endpoints                     |
 | Runtime worker | `http://127.0.0.1:8788` | Durable run execution and readiness endpoint                |
 | PostgreSQL     | `127.0.0.1:5432`        | Canonical state, control state, read models, and wake queue |
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173) in a browser.
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080) in a browser.
 
 <Warning>
   Development authentication trusts local requests and seeds a deterministic
@@ -112,16 +112,16 @@ development login and use WorkOS AuthKit locally, set these values in `.env`:
 ```dotenv
 AUTH_PROVIDER=workos
 NODE_ENV=development
-APP_ORIGIN=http://127.0.0.1:5173
+APP_ORIGIN=http://127.0.0.1:8080
 API_KEY_PEPPER=generate-a-random-secret
 WORKOS_API_KEY=sk_test_...
 WORKOS_CLIENT_ID=client_...
 WORKOS_COOKIE_PASSWORD=at-least-32-random-characters
 WORKOS_WEBHOOK_SECRET=whsec_...
-WORKOS_CALLBACK_URL=http://127.0.0.1:5173/v1/auth/callback
+WORKOS_CALLBACK_URL=http://127.0.0.1:8080/v1/auth/callback
 ```
 
-Register the exact callback and `http://127.0.0.1:5173` sign-out URI in the
+Register the exact callback and `http://127.0.0.1:8080` sign-out URI in the
 WorkOS Staging application. Restart `pnpm dev:local` after changing the provider;
 the launcher does not switch authentication in a running API process.
 
@@ -164,6 +164,12 @@ WorkOS sign-in and shows the deterministic development identity. With
 the development identity is unavailable. In both modes, the console uses the
 HTTP API through the Vite `/v1` proxy.
 
+The launcher gives the selected provider to the console at startup. Development
+mode establishes its deterministic local session before loading protected
+context, while WorkOS mode goes directly to hosted sign-in when no session is
+present. It does not probe the disabled development-login route, so normal
+authentication startup is not reported as a missing API route.
+
 The console renders in a single light appearance and has no theme toggle. Its
 neo-brutalist system uses a white ground, ink borders and hard offset shadows,
 and three flat brand hues with fixed jobs: action red for primary buttons and
@@ -178,7 +184,7 @@ curl -fsS http://127.0.0.1:3000/healthz
 curl -fsS http://127.0.0.1:3000/readyz
 curl -fsS http://127.0.0.1:8788/healthz
 curl -fsS http://127.0.0.1:8788/readyz
-curl -fsSI http://127.0.0.1:5173/
+curl -fsSI http://127.0.0.1:8080/
 ```
 
 A healthy default stack returns:
@@ -244,8 +250,8 @@ VITE_OAO_API_PROXY_TARGET=http://127.0.0.1:3100
 
 OAO_RUNTIME_PORT=8790
 
-OAO_CONSOLE_PORT=5174
-APP_ORIGIN=http://127.0.0.1:5174
+OAO_CONSOLE_PORT=8081
+APP_ORIGIN=http://127.0.0.1:8081
 ```
 
 Restart `pnpm dev:local` after editing `.env`. The console uses Vite's strict-port mode, so it exits instead of silently choosing a different port when the configured port is occupied.
@@ -375,10 +381,10 @@ Select only dependencies whose install scripts you have reviewed and intend to t
 
 ### A port is already in use
 
-The default ports are `5432`, `3000`, `8788`, and `5173`. Find the process holding a port:
+The default ports are `5432`, `3000`, `8788`, and `8080`. Find the process holding a port:
 
 ```bash
-lsof -nP -iTCP:5173 -sTCP:LISTEN
+lsof -nP -iTCP:8080 -sTCP:LISTEN
 ```
 
 Stop the conflicting process or change the corresponding values in `.env`. For PostgreSQL, change both `OAO_POSTGRES_PORT` and `DATABASE_URL`. For the API, keep `OAO_API_PORT`, `API_ORIGIN`, and `VITE_OAO_API_PROXY_TARGET` aligned. For the console, keep `OAO_CONSOLE_PORT` and `APP_ORIGIN` aligned.

@@ -27,6 +27,12 @@ export class HttpApiError extends Error {
   }
 }
 
+export function apiLogLevel(error: unknown): "info" | "error" {
+  return error instanceof HttpApiError && error.code === "unauthenticated"
+    ? "info"
+    : "error";
+}
+
 export function errorEnvelope(
   error: unknown,
   requestId: string,

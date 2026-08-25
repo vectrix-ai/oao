@@ -26,7 +26,7 @@ cookie session and read the seeded project ID:
 
 ```bash
 API=http://127.0.0.1:3000
-ORIGIN=http://127.0.0.1:5173
+ORIGIN=http://127.0.0.1:8080
 COOKIE_JAR=/tmp/oao-docs-cookies.txt
 
 curl -sS -c "$COOKIE_JAR" -X POST \
@@ -118,12 +118,15 @@ For example, a provisioned WorkOS user can display as `Ben Selleslagh` while
 still authorizing as the existing `development-user` principal. The display
 name does not grant scopes or change tenant membership.
 
-When the console has no session, it first tries the development-login endpoint.
-If that endpoint is unavailable in WorkOS mode, it calls `POST /v1/auth/login`
-and navigates to the HTTPS `redirectUrl` returned by the API. The callback then
-sets the HTTP-only session cookies and redirects back to the configured app
-origin. While that navigation is in progress, concurrent console requests reuse
-the same login attempt so they cannot replace its one-time state cookie.
+The console receives its configured authentication provider at startup. In
+WorkOS mode, a missing session goes directly through `POST /v1/auth/login` and
+the HTTPS `redirectUrl` returned by the API; it does not probe or establish the
+development identity. The callback sets the HTTP-only session cookies and
+redirects back to the configured app origin. While that navigation is in
+progress, concurrent console requests reuse the same login attempt so they
+cannot replace its one-time state cookie. If the provider request fails before
+navigation starts, the console releases that failed attempt so a later retry can
+request a new login without requiring a page reload.
 
 In WorkOS mode, the console shows **Log out** beside the signed-in user. It
 posts to `POST /v1/auth/logout`, which clears OAO's HTTP-only session and
@@ -131,6 +134,23 @@ refresh cookies. When WorkOS returns a hosted logout URL, the console follows
 that HTTPS redirect to end the provider session too. Development auth omits the
 button because local requests intentionally resolve to the deterministic
 development principal without an external session.
+
+If a WorkOS browser session is missing, expired, or belongs to a different
+configured application origin, the console starts a fresh hosted sign-in flow
+instead of leaving the current page in an error state. Recovery is limited to
+`401 unauthenticated` responses and the specific `403 forbidden` response
+`Request origin is not allowed`; ordinary authorization failures remain visible
+and are not converted into login loops. `POST /v1/auth/login` accepts this
+recovery even when stale cookies are present and still uses only the
+server-configured callback and application origin. The successful callback
+replaces the stale local session.
+
+The callback state is single-use and expires after ten minutes. If a WorkOS
+callback is reopened after that state was consumed, arrives without its state
+cookie, or contains a mismatched state value, OAO creates a new state cookie and
+redirects directly to a fresh hosted login instead of displaying a JSON
+`Invalid authentication state` error. Development-provider callbacks remain
+strict and return the explicit `400` response for invalid state.
 
 ## Manage project members
 

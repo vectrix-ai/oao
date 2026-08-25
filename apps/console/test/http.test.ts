@@ -204,6 +204,23 @@ describe("HTTP console adapter", () => {
     );
   });
 
+  it("uses the configured development provider without an unauthenticated probe", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ principal: CONTEXT.principal }))
+      .mockResolvedValueOnce(jsonResponse(CONTEXT));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new HttpConsoleApi({ authProvider: "development" });
+    await expect(api.getContext()).resolves.toMatchObject({
+      project: { id: PROJECT_ID },
+    });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/auth/development/login",
+      "/v1/context",
+    ]);
+  });
+
   it("maps delegated parent metadata from session-list responses", async () => {
     const createdAt = "2026-08-21T07:48:00.000Z";
     const fetchMock = vi
@@ -266,6 +283,128 @@ describe("HTTP console adapter", () => {
     ]);
     expect(navigateTo).toHaveBeenCalledWith(redirectUrl);
     expect(navigateTo).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the configured WorkOS provider without probing development login", async () => {
+    const redirectUrl =
+      "https://api.workos.com/user_management/authorize?client_id=client_123";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({}, 401))
+      .mockResolvedValueOnce(jsonResponse({ redirectUrl }));
+    const navigateTo = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new HttpConsoleApi({
+      authProvider: "workos",
+      navigateTo,
+    });
+    await expect(api.getContext()).rejects.toThrow(
+      "Redirecting to WorkOS sign in.",
+    );
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/context",
+      "/v1/auth/login",
+    ]);
+    expect(navigateTo).toHaveBeenCalledWith(redirectUrl);
+  });
+
+  it("starts a fresh WorkOS login when a stale session has the wrong origin", async () => {
+    const redirectUrl =
+      "https://api.workos.com/user_management/authorize?client_id=client_123";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: {
+              code: "forbidden",
+              message: "Request origin is not allowed",
+            },
+          },
+          403,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ redirectUrl }));
+    const navigateTo = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new HttpConsoleApi({
+      authProvider: "workos",
+      navigateTo,
+    });
+    await expect(api.getContext()).rejects.toThrow(
+      "Redirecting to WorkOS sign in.",
+    );
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/context",
+      "/v1/auth/login",
+    ]);
+    expect(navigateTo).toHaveBeenCalledWith(redirectUrl);
+  });
+
+  it("retries WorkOS login after a transient provider failure", async () => {
+    const redirectUrl =
+      "https://api.workos.com/user_management/authorize?client_id=client_123";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({}, 401))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { message: "Authentication provider is unavailable" },
+          503,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({}, 401))
+      .mockResolvedValueOnce(jsonResponse({ redirectUrl }));
+    const navigateTo = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new HttpConsoleApi({
+      authProvider: "workos",
+      navigateTo,
+    });
+    await expect(api.getContext()).rejects.toThrow(
+      "Authentication provider is unavailable",
+    );
+    await expect(api.getContext()).rejects.toThrow(
+      "Redirecting to WorkOS sign in.",
+    );
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/context",
+      "/v1/auth/login",
+      "/v1/context",
+      "/v1/auth/login",
+    ]);
+    expect(navigateTo).toHaveBeenCalledWith(redirectUrl);
+  });
+
+  it("does not turn an authorization failure into a new login", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: {
+              code: "forbidden",
+              message: "Principal lacks the required scope",
+            },
+          },
+          403,
+        ),
+      );
+    const navigateTo = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new HttpConsoleApi({
+      authProvider: "workos",
+      navigateTo,
+    });
+    await expect(api.listAgents({})).rejects.toThrow(
+      "Principal lacks the required scope",
+    );
+    expect(navigateTo).not.toHaveBeenCalled();
   });
 
   it("clears the local session and follows the WorkOS logout redirect", async () => {

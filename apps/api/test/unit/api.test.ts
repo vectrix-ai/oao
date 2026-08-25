@@ -10,6 +10,7 @@ import {
 } from "@oao/auth-core";
 import type { PgPool } from "@oao/db-postgres";
 import { createApiApp } from "../../src/app.js";
+import { apiLogLevel, HttpApiError } from "../../src/errors.js";
 import { PostgresApiStore } from "../../src/store.js";
 import type { RuntimeCommandPort } from "../../src/runtime-commands.js";
 
@@ -52,6 +53,15 @@ class RecordingAuth implements AuthTenantAdapter {
   }
 }
 
+class RecordingWorkOsAuth extends RecordingAuth {
+  override login(input: AuthLoginInput) {
+    this.loginInput = input;
+    return Promise.resolve({
+      redirectUrl: "https://authkit.example.test/authorize",
+    });
+  }
+}
+
 function cookieFrom(header: string, name: string): string {
   const match = new RegExp(`(?:^|,\\s*)${name}=([^;]*)`, "u").exec(header);
   assert.ok(match?.[1]);
@@ -68,6 +78,20 @@ test("health is public and deterministic", async () => {
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { status: "ok" });
   assert.ok(response.headers.get("x-request-id"));
+});
+
+test("expected authentication boundaries are informational in server logs", () => {
+  assert.equal(
+    apiLogLevel(
+      new HttpApiError("unauthenticated", "Authentication is required"),
+    ),
+    "info",
+  );
+  assert.equal(
+    apiLogLevel(new HttpApiError("not_found", "Route not found")),
+    "error",
+  );
+  assert.equal(apiLogLevel(new Error("database unavailable")), "error");
 });
 
 test("route tenant scope is checked before database access", async () => {
@@ -226,7 +250,11 @@ test("login uses configured callback, binds state, and rejects caller redirects"
 
   const login = await app.request("/v1/auth/login", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      cookie: "oao_session=stale-session; oao_refresh=stale-refresh",
+      origin: "https://stale-origin.example.test",
+    },
     body: "{}",
   });
   assert.equal(login.status, 200);
@@ -239,7 +267,10 @@ test("login uses configured callback, binds state, and rejects caller redirects"
     login.headers.get("set-cookie") ?? "",
     "oao_auth_state",
   );
-  assert.match(login.headers.get("set-cookie") ?? "", /HttpOnly; Secure/u);
+  assert.match(
+    login.headers.get("set-cookie") ?? "",
+    /oao_auth_state=[^;]+;[^,]*HttpOnly; Secure/u,
+  );
 
   const mismatch = await app.request(
     "/v1/auth/callback?code=development&state=wrong",
@@ -291,4 +322,36 @@ test("WorkOS mode does not expose deterministic development login", async () => 
     method: "POST",
   });
   assert.equal(response.status, 404);
+});
+
+test("WorkOS callback with stale state starts a fresh hosted login", async () => {
+  const auth = new RecordingWorkOsAuth();
+  const app = createApiApp({
+    store: new PostgresApiStore(unusedPool, "unit-test-api-key-pepper"),
+    auth,
+    runtimeCommands: unusedRuntimeCommands,
+    authConfiguration: {
+      provider: "workos",
+      appOrigins: ["https://app.example.test"],
+      appOrigin: "https://app.example.test",
+      callbackUri: "https://app.example.test/v1/auth/callback",
+      cookieSecure: true,
+    },
+  });
+
+  const response = await app.request(
+    "/v1/auth/callback?code=stale-code&state=stale-state",
+  );
+
+  assert.equal(response.status, 303);
+  assert.equal(
+    response.headers.get("location"),
+    "https://authkit.example.test/authorize",
+  );
+  assert.equal(auth.callbackInput, undefined);
+  assert.ok(auth.loginInput?.state);
+  assert.match(
+    response.headers.get("set-cookie") ?? "",
+    /oao_auth_state=[^;]+;[^,]*HttpOnly; Secure/u,
+  );
 });

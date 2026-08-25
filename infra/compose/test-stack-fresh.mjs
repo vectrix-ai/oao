@@ -189,7 +189,7 @@ async function main() {
     ...commonEnvironment,
     AUTH_PROVIDER: "development",
     NODE_ENV: "development",
-    APP_ORIGIN: "http://127.0.0.1:5173",
+    APP_ORIGIN: "http://127.0.0.1:8080",
     PORT: String(apiPort),
   });
 

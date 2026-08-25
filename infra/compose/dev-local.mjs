@@ -10,7 +10,7 @@ const composeFile = fileURLToPath(
 const databaseDownScript = fileURLToPath(new URL("./down.sh", import.meta.url));
 const apiPort = process.env.OAO_API_PORT ?? "3000";
 const runtimePort = process.env.OAO_RUNTIME_PORT ?? "8788";
-const consolePort = process.env.OAO_CONSOLE_PORT ?? "5173";
+const consolePort = process.env.OAO_CONSOLE_PORT ?? "8080";
 const postgresPort = process.env.OAO_POSTGRES_PORT ?? "5432";
 const databaseUrl =
   process.env.DATABASE_URL ??
@@ -236,6 +236,7 @@ async function main() {
       "--strictPort",
     ],
     {
+      AUTH_PROVIDER: authProvider,
       VITE_OAO_API_MODE: process.env.VITE_OAO_API_MODE ?? "http",
       VITE_OAO_API_PROXY_TARGET:
         process.env.VITE_OAO_API_PROXY_TARGET ?? apiOrigin,
