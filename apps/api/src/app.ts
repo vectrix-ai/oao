@@ -138,6 +138,7 @@ export interface ApiAuthConfiguration {
   readonly appOrigin: string;
   readonly callbackUri: string;
   readonly cookieSecure: boolean;
+  readonly refreshCookieMaxAgeSeconds?: number;
 }
 
 type Variables = { principal: Principal; requestId: string };
@@ -172,6 +173,7 @@ const DEFAULT_AUTH_CONFIGURATION: ApiAuthConfiguration = Object.freeze({
   appOrigin: "http://localhost",
   callbackUri: "http://localhost/v1/auth/callback",
   cookieSecure: false,
+  refreshCookieMaxAgeSeconds: 86_400,
 });
 
 function principal(c: ApiContext): Principal {
@@ -1534,7 +1536,12 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       code: requiredString(c.req.query("code"), "code", 2_000),
       redirectUri: authConfiguration.callbackUri,
     });
-    setSessionCookies(c, session, authConfiguration.cookieSecure);
+    setSessionCookies(
+      c,
+      session,
+      authConfiguration.cookieSecure,
+      authConfiguration.refreshCookieMaxAgeSeconds,
+    );
     return c.redirect(authConfiguration.appOrigin, 303);
   });
 
@@ -1543,7 +1550,12 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     if (!refreshToken)
       throw new HttpApiError("unauthenticated", "Refresh session is required");
     const session = await dependencies.auth.refresh({ refreshToken });
-    setSessionCookies(c, session, authConfiguration.cookieSecure);
+    setSessionCookies(
+      c,
+      session,
+      authConfiguration.cookieSecure,
+      authConfiguration.refreshCookieMaxAgeSeconds,
+    );
     return c.json({
       expiresAt: session.expiresAt.toISOString(),
       principal: publicPrincipal(session.principal),
@@ -1598,7 +1610,12 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       code: "development",
       redirectUri: authConfiguration.callbackUri,
     });
-    setSessionCookies(c, session, authConfiguration.cookieSecure);
+    setSessionCookies(
+      c,
+      session,
+      authConfiguration.cookieSecure,
+      authConfiguration.refreshCookieMaxAgeSeconds,
+    );
     return c.json({
       expiresAt: session.expiresAt.toISOString(),
       principal: publicPrincipal(session.principal),
@@ -2143,6 +2160,7 @@ function setSessionCookies(
   c: ApiContext,
   session: AuthSession,
   secure: boolean,
+  refreshCookieMaxAgeSeconds?: number,
 ): void {
   const maxAge = Math.max(
     0,
@@ -2164,7 +2182,7 @@ function setSessionCookies(
       session.refreshToken,
       "/v1/auth",
       "Strict",
-      maxAge,
+      Math.max(maxAge, refreshCookieMaxAgeSeconds ?? maxAge),
       secure,
     );
   }

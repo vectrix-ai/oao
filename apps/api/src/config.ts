@@ -15,6 +15,7 @@ export interface ApiServerConfiguration {
   readonly appOrigin: string;
   readonly callbackUri: string;
   readonly cookieSecure: boolean;
+  readonly refreshCookieMaxAgeSeconds: number;
   readonly apiKeyPepper: string;
   readonly workos?: WorkOsServerConfiguration;
 }
@@ -62,6 +63,14 @@ export function loadServerConfiguration(
     appOrigin,
     callbackUri,
     cookieSecure: !explicitLocalHttp,
+    refreshCookieMaxAgeSeconds:
+      authProvider === "workos"
+        ? parsePositiveInteger(
+            environment.WORKOS_COOKIE_MAX_AGE,
+            "WORKOS_COOKIE_MAX_AGE",
+            34_560_000,
+          )
+        : 86_400,
     apiKeyPepper,
     ...(authProvider === "workos"
       ? {
@@ -92,6 +101,17 @@ function parsePort(value: string | undefined): number {
   if (!Number.isInteger(port) || port < 1 || port > 65_535)
     throw new Error("PORT must be a valid TCP port");
   return port;
+}
+
+function parsePositiveInteger(
+  value: string | undefined,
+  name: string,
+  fallback: number,
+): number {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isSafeInteger(parsed) || parsed < 1)
+    throw new Error(`${name} must be a positive integer`);
+  return parsed;
 }
 
 function parseAppOrigins(value: string): readonly string[] {

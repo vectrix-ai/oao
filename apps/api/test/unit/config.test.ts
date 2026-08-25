@@ -14,6 +14,7 @@ test("development configuration permits explicit localhost HTTP only", () => {
     NODE_ENV: "development",
   });
   assert.equal(configuration.cookieSecure, false);
+  assert.equal(configuration.refreshCookieMaxAgeSeconds, 86_400);
   assert.equal(
     configuration.callbackUri,
     "http://localhost:5173/v1/auth/callback",
@@ -46,6 +47,7 @@ test("WorkOS configuration requires an allowed fixed callback and secrets", () =
     WORKOS_CALLBACK_URL: "https://app.example.test/v1/auth/callback",
   });
   assert.equal(configuration.cookieSecure, true);
+  assert.equal(configuration.refreshCookieMaxAgeSeconds, 34_560_000);
   assert.equal(configuration.workos?.clientId, "client_not-real");
   assert.throws(
     () =>

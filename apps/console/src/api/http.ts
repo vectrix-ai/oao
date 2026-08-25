@@ -94,12 +94,11 @@ class AuthenticationRedirectError extends Error {
   }
 }
 
-function requiresFreshWorkOsLogin(error: HttpConsoleError): boolean {
+function hasMismatchedWorkOsOrigin(error: HttpConsoleError): boolean {
   return (
-    error.status === 401 ||
-    (error.status === 403 &&
-      error.code === "forbidden" &&
-      error.message === "Request origin is not allowed")
+    error.status === 403 &&
+    error.code === "forbidden" &&
+    error.message === "Request origin is not allowed"
   );
 }
 
@@ -769,6 +768,7 @@ export class HttpConsoleApi implements ConsoleApi {
   readonly #authProvider: "development" | "workos" | undefined;
   #contextPromise: Promise<ProjectContext> | undefined;
   #authenticationRedirectPromise: Promise<never> | undefined;
+  #refreshPromise: Promise<boolean> | undefined;
 
   constructor(
     input: {
@@ -785,7 +785,11 @@ export class HttpConsoleApi implements ConsoleApi {
     this.#authProvider = input.authProvider;
   }
 
-  async #request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  async #request<T>(
+    path: string,
+    init: RequestInit = {},
+    allowRefresh = true,
+  ): Promise<T> {
     const token = await this.#getAccessToken();
     const method = (init.method ?? "GET").toUpperCase();
     const response = await fetch(`${this.#baseUrl}${path}`, {
@@ -819,16 +823,37 @@ export class HttpConsoleApi implements ConsoleApi {
         // The status remains actionable when a proxy returns a non-JSON body.
       }
       const error = new HttpConsoleError(response.status, message, code);
-      if (
-        this.#authProvider === "workos" &&
-        path !== "/auth/login" &&
-        requiresFreshWorkOsLogin(error)
-      )
-        return this.#startWorkOsLogin(error);
+      if (this.#authProvider === "workos" && path !== "/auth/login") {
+        if (error.status === 401 && allowRefresh && path !== "/auth/refresh") {
+          if (await this.#refreshSession())
+            return this.#request<T>(path, init, false);
+          return this.#startWorkOsLogin(error);
+        }
+        if (hasMismatchedWorkOsOrigin(error))
+          return this.#startWorkOsLogin(error);
+      }
       throw error;
     }
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
+  }
+
+  #refreshSession(): Promise<boolean> {
+    this.#refreshPromise ??= this.#request(
+      "/auth/refresh",
+      { method: "POST", body: "{}" },
+      false,
+    )
+      .then(() => true)
+      .catch((error: unknown) => {
+        if (error instanceof HttpConsoleError && error.status === 401)
+          return false;
+        throw error;
+      })
+      .finally(() => {
+        this.#refreshPromise = undefined;
+      });
+    return this.#refreshPromise;
   }
 
   #startWorkOsLogin(cause: unknown): Promise<never> {

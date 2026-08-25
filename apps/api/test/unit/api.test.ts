@@ -190,6 +190,7 @@ test("cookie-authenticated writes enforce APP_ORIGIN", async () => {
       appOrigin: "http://localhost:5173",
       callbackUri: "http://localhost:5173/v1/auth/callback",
       cookieSecure: false,
+      refreshCookieMaxAgeSeconds: 604_800,
     },
   });
   const login = await app.request("/v1/auth/development/login", {
@@ -198,6 +199,10 @@ test("cookie-authenticated writes enforce APP_ORIGIN", async () => {
   const refreshCookie = cookieFrom(
     login.headers.get("set-cookie") ?? "",
     "oao_refresh",
+  );
+  assert.match(
+    login.headers.get("set-cookie") ?? "",
+    /oao_refresh=.*Max-Age=604800/u,
   );
   const rejectedMissing = await app.request("/v1/auth/refresh", {
     method: "POST",

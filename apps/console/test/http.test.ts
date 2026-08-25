@@ -291,6 +291,7 @@ describe("HTTP console adapter", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({}, 401))
+      .mockResolvedValueOnce(jsonResponse({}, 401))
       .mockResolvedValueOnce(jsonResponse({ redirectUrl }));
     const navigateTo = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -304,9 +305,112 @@ describe("HTTP console adapter", () => {
     );
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "/v1/context",
+      "/v1/auth/refresh",
       "/v1/auth/login",
     ]);
     expect(navigateTo).toHaveBeenCalledWith(redirectUrl);
+  });
+
+  it("silently refreshes an expired WorkOS session and retries the request", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({}, 401))
+      .mockResolvedValueOnce(jsonResponse({ expiresAt: "2026-08-26" }))
+      .mockResolvedValueOnce(
+        jsonResponse({ ...CONTEXT, authProvider: "workos" }),
+      );
+    const navigateTo = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new HttpConsoleApi({
+      authProvider: "workos",
+      navigateTo,
+    });
+    await expect(api.getContext()).resolves.toMatchObject({
+      project: { id: PROJECT_ID },
+    });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/context",
+      "/v1/auth/refresh",
+      "/v1/context",
+    ]);
+    expect(navigateTo).not.toHaveBeenCalled();
+  });
+
+  it("shares one WorkOS refresh across concurrent expired requests", async () => {
+    let resolveRefresh: ((response: Response) => void) | undefined;
+    const refreshResponse = new Promise<Response>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    let expiredResponses = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === "/v1/context")
+        return jsonResponse({ ...CONTEXT, authProvider: "workos" });
+      if (url === "/v1/auth/refresh") return refreshResponse;
+      if (url.includes("/agents?") || url.includes("/skills?")) {
+        expiredResponses += 1;
+        if (expiredResponses <= 2) return jsonResponse({}, 401);
+        return jsonResponse({
+          data: [],
+          pageInfo: { hasMore: false, nextCursor: null },
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi({ authProvider: "workos" });
+
+    await api.getContext();
+    const requests = Promise.all([api.listAgents({}), api.listSkills({})]);
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([url]) => url === "/v1/auth/refresh"),
+      ).toHaveLength(1),
+    );
+    resolveRefresh?.(jsonResponse({ expiresAt: "2026-08-26" }));
+
+    await expect(requests).resolves.toHaveLength(2);
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url === "/v1/auth/refresh"),
+    ).toHaveLength(1);
+  });
+
+  it("retries a transient WorkOS refresh failure on the next request", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({}, 401))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { message: "Authentication provider is unavailable" },
+          503,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({}, 401))
+      .mockResolvedValueOnce(jsonResponse({ expiresAt: "2026-08-26" }))
+      .mockResolvedValueOnce(
+        jsonResponse({ ...CONTEXT, authProvider: "workos" }),
+      );
+    const navigateTo = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi({
+      authProvider: "workos",
+      navigateTo,
+    });
+
+    await expect(api.getContext()).rejects.toThrow(
+      "Authentication provider is unavailable",
+    );
+    await expect(api.getContext()).resolves.toMatchObject({
+      project: { id: PROJECT_ID },
+    });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/context",
+      "/v1/auth/refresh",
+      "/v1/context",
+      "/v1/auth/refresh",
+      "/v1/context",
+    ]);
+    expect(navigateTo).not.toHaveBeenCalled();
   });
 
   it("starts a fresh WorkOS login when a stale session has the wrong origin", async () => {
@@ -349,12 +453,14 @@ describe("HTTP console adapter", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({}, 401))
+      .mockResolvedValueOnce(jsonResponse({}, 401))
       .mockResolvedValueOnce(
         jsonResponse(
           { message: "Authentication provider is unavailable" },
           503,
         ),
       )
+      .mockResolvedValueOnce(jsonResponse({}, 401))
       .mockResolvedValueOnce(jsonResponse({}, 401))
       .mockResolvedValueOnce(jsonResponse({ redirectUrl }));
     const navigateTo = vi.fn();
@@ -372,8 +478,10 @@ describe("HTTP console adapter", () => {
     );
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "/v1/context",
+      "/v1/auth/refresh",
       "/v1/auth/login",
       "/v1/context",
+      "/v1/auth/refresh",
       "/v1/auth/login",
     ]);
     expect(navigateTo).toHaveBeenCalledWith(redirectUrl);

@@ -82,6 +82,7 @@ const app = createApiApp({
     appOrigin: configuration.appOrigin,
     callbackUri: configuration.callbackUri,
     cookieSecure: configuration.cookieSecure,
+    refreshCookieMaxAgeSeconds: configuration.refreshCookieMaxAgeSeconds,
   },
   onError: ({ requestId, error }) => {
     process.stderr.write(

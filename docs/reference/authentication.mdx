@@ -128,6 +128,14 @@ cannot replace its one-time state cookie. If the provider request fails before
 navigation starts, the console releases that failed attempt so a later retry can
 request a new login without requiring a page reload.
 
+When the short-lived access session expires, the console uses
+`POST /v1/auth/refresh` once and retries the interrupted request. Concurrent
+requests share that refresh attempt. The refresh credential stays in its own
+HTTP-only, strict-same-site cookie, whose lifetime is configured with
+`WORKOS_COOKIE_MAX_AGE` and defaults to 400 days. A rejected refresh starts a
+fresh hosted login; a transient provider failure remains retryable without
+forcing a logout or requiring a page refresh.
+
 In WorkOS mode, the console shows **Log out** beside the signed-in user. It
 posts to `POST /v1/auth/logout`, which clears OAO's HTTP-only session and
 refresh cookies. When WorkOS returns a hosted logout URL, the console follows
@@ -135,9 +143,9 @@ that HTTPS redirect to end the provider session too. Development auth omits the
 button because local requests intentionally resolve to the deterministic
 development principal without an external session.
 
-If a WorkOS browser session is missing, expired, or belongs to a different
-configured application origin, the console starts a fresh hosted sign-in flow
-instead of leaving the current page in an error state. Recovery is limited to
+If a WorkOS browser session is missing, cannot be refreshed, or belongs to a
+different configured application origin, the console starts a fresh hosted
+sign-in flow instead of leaving the current page in an error state. Recovery is limited to
 `401 unauthenticated` responses and the specific `403 forbidden` response
 `Request origin is not allowed`; ordinary authorization failures remain visible
 and are not converted into login loops. `POST /v1/auth/login` accepts this

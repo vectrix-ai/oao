@@ -33,6 +33,7 @@ API_KEY_PEPPER=... \
 WORKOS_API_KEY=... \
 WORKOS_CLIENT_ID=... \
 WORKOS_COOKIE_PASSWORD=... \
+WORKOS_COOKIE_MAX_AGE=34560000 \
 WORKOS_WEBHOOK_SECRET=... \
 WORKOS_CALLBACK_URL=https://app.example.com/v1/auth/callback \
 pnpm --filter @oao/api start
@@ -49,6 +50,8 @@ Environment contract:
 - `API_KEY_PEPPER`: required outside local development.
 - `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD` (at least 32
   characters), `WORKOS_WEBHOOK_SECRET`: required only for WorkOS.
+- `WORKOS_COOKIE_MAX_AGE`: optional refresh-cookie lifetime in seconds;
+  defaults to `34560000` (400 days). It does not lengthen the access session.
 - `WORKOS_CALLBACK_URL`: must be an `APP_ORIGIN` URL with the exact path
   `/v1/auth/callback`.
 
@@ -65,6 +68,10 @@ The login route remains available when stale cookies were issued for a
 different configured origin, allowing the console to recover into a fresh
 server-owned WorkOS login flow. Other unsafe cookie-authenticated routes
 continue to require an exact allowed origin.
+When the short-lived access session expires, the console uses the longer-lived
+HTTP-only refresh cookie to renew it and retries the interrupted request once.
+Only a rejected refresh starts a new hosted sign-in flow; transient refresh
+failures remain retryable without forcing a logout.
 In WorkOS mode, a callback with missing, expired, or mismatched one-time state
 also creates a new state cookie and redirects directly to a fresh hosted login.
 Development callbacks retain the explicit `400 Invalid authentication state`
