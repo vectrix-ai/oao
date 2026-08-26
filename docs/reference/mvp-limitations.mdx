@@ -28,6 +28,18 @@ and should shape integrations:
   read/search tools instead of attaching the repository.
 - **One run executes at a time per session thread.** Submit the next turn only
   after the latest run is completed, failed, cancelled, or timed out.
+- **Harness Operations inherit the entire parent capability catalog.** An Agent
+  version can publish up to 32 focused scratch loops. They reuse the parent
+  model, rendered instructions, tools, all mounted Skills, and live sandbox;
+  V1 has no per-operation model, capability, sandbox, or Skill binding. Flue
+  does not currently support per-harness Skill scoping, so every operation sees
+  the Agent's full Skill catalog. Operations are temporary, cannot call other
+  Harness Operations, and do not create standalone child Agent records or
+  persistent OAO sessions. Flue retains the internal child-conversation record
+  for durability. A crash after model completion but before a `step.do`
+  checkpoint commits may repeat that model work. OAO adds no scheduler or
+  file-locking layer for sequential/batched operation calls that share the
+  workspace.
 - **Delegate rosters are publication-time and exact.** A coordinator version
   can pin up to 32 child versions and allow 1–8 parallel calls per delegate.
   OAO creates persistent child sessions and shares the root Daytona workspace,

@@ -20,6 +20,12 @@ A Skill can teach the model when and how to call a tool, but it does not grant
 that tool or bypass its authorization. Likewise, storing a document in a
 sandbox does not turn it into a Skill.
 
+A [Harness Operation](/concepts/harness-operations) may ask its temporary
+scratch loop to activate a relevant Skill, but it cannot attach one. Every
+operation inherits the complete catalog already mounted on the parent Agent
+version; `activate_skill` remains progressive prompt behavior rather than a
+hard operation-to-Skill binding.
+
 ## Version binding and session inheritance
 
 OAO stores Skills in PostgreSQL and binds exact Skill version IDs to immutable

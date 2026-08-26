@@ -22,6 +22,7 @@ import {
   parseRotateMcpCredentialInput,
   parseUpdateProjectSandboxProviderConfigurationInput,
   parseToolResultEnvelope,
+  MANAGED_AGENT_RESERVED_TOOL_NAMES,
   RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION,
   validateToolJsonValue,
   validateToolJsonSchema,
@@ -1110,7 +1111,8 @@ function parseFence(value: unknown): bigint {
 
 function parseAgentConfig(value: unknown): ManagedAgentPublicationConfig {
   if (value && typeof value === "object" && !Array.isArray(value)) {
-    const tools = (value as Record<string, unknown>).tools;
+    const configValue = value as Record<string, unknown>;
+    const tools = configValue.tools;
     if (Array.isArray(tools)) {
       for (const [index, tool] of tools.entries()) {
         if (!tool || typeof tool !== "object" || Array.isArray(tool)) continue;
@@ -1131,6 +1133,67 @@ function parseAgentConfig(value: unknown): ManagedAgentPublicationConfig {
         }
       }
     }
+    const operations = configValue.harnessOperations;
+    if (Array.isArray(operations)) {
+      for (const [index, operation] of operations.entries()) {
+        if (
+          !operation ||
+          typeof operation !== "object" ||
+          Array.isArray(operation)
+        )
+          continue;
+        const validation = validateToolJsonSchema(
+          (operation as Record<string, unknown>).resultSchema,
+          { requireObjectRoot: true },
+        );
+        const first = validation.issues[0];
+        if (first)
+          throw new HttpApiError(
+            "bad_request",
+            `harnessOperations[${index}].resultSchema${first.path === "$" ? "" : first.path.slice(1)}: ${first.message}`,
+            {
+              path: `harnessOperations[${index}].resultSchema${first.path === "$" ? "" : first.path.slice(1)}`,
+            },
+          );
+      }
+    }
+    const authoredNames = [
+      ...(Array.isArray(tools)
+        ? tools.flatMap((tool) =>
+            tool &&
+            typeof tool === "object" &&
+            !Array.isArray(tool) &&
+            typeof (tool as Record<string, unknown>).name === "string"
+              ? [(tool as Record<string, unknown>).name as string]
+              : [],
+          )
+        : []),
+      ...(Array.isArray(operations)
+        ? operations.flatMap((operation) =>
+            operation &&
+            typeof operation === "object" &&
+            !Array.isArray(operation) &&
+            typeof (operation as Record<string, unknown>).key === "string"
+              ? [(operation as Record<string, unknown>).key as string]
+              : [],
+          )
+        : []),
+    ];
+    const reserved = new Set<string>(MANAGED_AGENT_RESERVED_TOOL_NAMES);
+    const seen = new Set<string>();
+    for (const name of authoredNames) {
+      if (reserved.has(name))
+        throw new HttpApiError(
+          "bad_request",
+          `Tool name ${name} is reserved by the managed Agent runtime`,
+        );
+      if (seen.has(name))
+        throw new HttpApiError(
+          "bad_request",
+          `Tool name ${name} collides with another Agent tool or Harness Operation`,
+        );
+      seen.add(name);
+    }
   }
   let config: ManagedAgentPublicationConfig;
   try {
@@ -1143,6 +1206,35 @@ function parseAgentConfig(value: unknown): ManagedAgentPublicationConfig {
   }
   assertPublicPayload(config as Readonly<Record<string, PublicValue>>);
   return config;
+}
+
+async function assertAgentToolNamespaceAvailable(
+  transaction: PgClient,
+  actor: Principal,
+  config: ManagedAgentPublicationConfig,
+): Promise<void> {
+  if (config.mcpBindings.length === 0) return;
+  const result = await transaction.query<{ tool_name: string }>(
+    `SELECT oao.mcp_tool_name(requested->>'namespace',selection.remote_tool_name) AS tool_name
+       FROM jsonb_array_elements($3::jsonb) requested
+       JOIN oao.mcp_toolset_version_tools selection
+         ON selection.organization_id=$1 AND selection.project_id=$2
+        AND selection.toolset_version_id=(requested->>'toolsetVersionId')::uuid`,
+    [actor.organizationId, actor.projectId, JSON.stringify(config.mcpBindings)],
+  );
+  const mountedNames = [
+    ...config.tools.map((tool) => tool.name),
+    ...config.harnessOperations.map((operation) => operation.key),
+  ];
+  const seen = new Set(mountedNames);
+  for (const { tool_name: toolName } of result.rows) {
+    if (seen.has(toolName))
+      throw new HttpApiError(
+        "bad_request",
+        `Tool name ${toolName} collides with another Agent tool or Harness Operation`,
+      );
+    seen.add(toolName);
+  }
 }
 
 function sharedSandboxPolicy(
@@ -4908,6 +5000,7 @@ function registerAgentRoutes(
           dependencies.credentialCipher,
           dependencies.sandboxSnapshotCatalog,
         );
+        await assertAgentToolNamespaceAvailable(tx, actor, config);
         await assertAgentDelegatesCompatible(tx, actor, undefined, config);
         const response = await dependencies.store.idempotent(tx, actor, {
           scope: "POST:/agents",
@@ -5087,6 +5180,7 @@ function registerAgentRoutes(
           dependencies.credentialCipher,
           dependencies.sandboxSnapshotCatalog,
         );
+        await assertAgentToolNamespaceAvailable(tx, actor, config);
         await assertAgentDelegatesCompatible(
           tx,
           actor,
@@ -5157,6 +5251,8 @@ function registerRunRoutes(
                 lr.created_at AS started_at,lr.settled_at AS completed_at,
                 COALESCE(ss.input_tokens,0)::float8 AS input_tokens,
                 COALESCE(ss.output_tokens,0)::float8 AS output_tokens,
+                COALESCE(ss.cache_read_tokens,0)::float8 AS cache_read_tokens,
+                COALESCE(ss.cache_write_tokens,0)::float8 AS cache_write_tokens,
                 COALESCE(ss.cost_microunits,0)::float8 AS cost_microunits,
                 CASE WHEN COALESCE(mi.invocations,0)=0 THEN 'unavailable'
                      WHEN mi.unavailable=mi.invocations THEN 'unavailable'
@@ -5461,6 +5557,8 @@ function registerRunRoutes(
                 lr.created_at AS started_at,lr.settled_at AS completed_at,
                 COALESCE(ss.input_tokens,0)::float8 AS input_tokens,
                 COALESCE(ss.output_tokens,0)::float8 AS output_tokens,
+                COALESCE(ss.cache_read_tokens,0)::float8 AS cache_read_tokens,
+                COALESCE(ss.cache_write_tokens,0)::float8 AS cache_write_tokens,
                 COALESCE(ss.cost_microunits,0)::float8 AS cost_microunits,
                 CASE WHEN COALESCE(mi.invocations,0)=0 THEN 'unavailable'
                      WHEN mi.unavailable=mi.invocations THEN 'unavailable'
@@ -5535,7 +5633,8 @@ function registerRunRoutes(
       );
       const invocations = await tx.query(
         `SELECT m.id,m.run_id,m.attempt,m.provider_key,m.model_key,m.provider_request_id,
-                    m.status,m.input_tokens,m.output_tokens,m.cost_microunits,m.usage_source,
+                    m.status,m.input_tokens,m.output_tokens,m.cache_read_tokens,
+                    m.cache_write_tokens,m.cost_microunits,m.usage_source,
                     m.pricing_snapshot,m.provider_route,m.safe_request,m.safe_response,
                     m.started_at,m.completed_at
              FROM oao.model_invocations m JOIN oao.runs r
@@ -5555,9 +5654,13 @@ function registerRunRoutes(
       );
       const toolCalls = await tx.query(
         `SELECT c.id,c.run_id,c.tool_name,c.owner,c.stage,c.safe_arguments,c.claim_fence,
-                    c.lease_expires_at,c.flue_tool_call_ref,c.created_at,c.updated_at
+                    c.lease_expires_at,c.flue_tool_call_ref,c.created_at,c.updated_at,
+                    result.safe_result
              FROM oao.tool_calls c JOIN oao.runs r
                ON r.organization_id=c.organization_id AND r.project_id=c.project_id AND r.id=c.run_id
+             LEFT JOIN oao.tool_call_results result
+               ON result.organization_id=c.organization_id
+              AND result.project_id=c.project_id AND result.tool_call_id=c.id
              WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
              ORDER BY c.created_at,c.id`,
         values,
@@ -5578,7 +5681,7 @@ function registerRunRoutes(
                     NULLIF(c.safe_command->>'commandName','') AS command_name,
                     NULLIF(c.safe_command->>'origin','') AS origin,
                     NULLIF(c.safe_command->>'action','') AS action,
-                    c.safe_command,c.safe_result,
+                    c.command_key,c.safe_command,c.safe_result,
                     c.created_at,c.started_at,c.completed_at
              FROM oao.sandbox_commands c JOIN oao.runs r
                ON r.organization_id=c.organization_id AND r.project_id=c.project_id AND r.id=c.run_id

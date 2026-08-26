@@ -195,11 +195,20 @@ export interface SandboxPolicyInput {
   )[];
 }
 
+export interface HarnessOperationInput {
+  readonly key: string;
+  readonly description: string;
+  readonly instructions: string;
+  readonly resultSchema: Readonly<Record<string, unknown>>;
+  readonly timeoutMs: number;
+}
+
 export interface PublishAgentVersionInput {
   readonly systemPrompt: string;
   readonly modelPreset: string;
   readonly tools: readonly AgentToolInput[];
   readonly skillVersionIds?: readonly string[];
+  readonly harnessOperations?: readonly HarnessOperationInput[];
   readonly mcpBindings?: readonly {
     readonly toolsetVersionId: string;
     readonly credentialPolicyVersionId: string;

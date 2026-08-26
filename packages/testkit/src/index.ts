@@ -63,7 +63,12 @@ export class FakeModel implements ModelPort {
       this.#responses.shift() ?? {
         redactedText: "deterministic response",
         finishReason: "stop",
-        usage: { inputTokens: 1, outputTokens: 1 },
+        usage: {
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
       }
     );
   }

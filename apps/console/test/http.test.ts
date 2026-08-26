@@ -239,6 +239,8 @@ describe("HTTP console adapter", () => {
               agentName: "Shipment extractor",
               inputTokens: 850,
               outputTokens: 17,
+              cacheReadTokens: 640,
+              cacheWriteTokens: 128,
               costMicrounits: 0,
               costProvenance: "estimated",
               createdAt,
@@ -255,6 +257,8 @@ describe("HTTP console adapter", () => {
     expect(result.data[0]).toMatchObject({
       parentSessionId: "6e90d649-a536-4356-98f6-000000000001",
       delegateKey: "shipment-extraction",
+      cacheReadTokens: 640,
+      cacheWriteTokens: 128,
     });
   });
 
@@ -565,6 +569,21 @@ describe("HTTP console adapter", () => {
         systemPrompt: "Act as a deterministic local managed agent.",
         modelPreset: "local-default",
         tools: [],
+        harnessOperations: [
+          {
+            key: "verify_order",
+            description: "Verify an extracted order against shared documents.",
+            instructions:
+              "Read the shared documents, verify each field, and return the validated result.",
+            resultSchema: {
+              type: "object",
+              properties: { valid: { type: "boolean" } },
+              required: ["valid"],
+              additionalProperties: false,
+            },
+            timeoutMs: 120000,
+          },
+        ],
         sandbox: {
           enabled: false,
           provider: "local-fake",
@@ -584,7 +603,12 @@ describe("HTTP console adapter", () => {
     );
     expect(JSON.parse(String(createInit.body))).toMatchObject({
       name: "Local agent",
-      config: { modelPreset: "local-default" },
+      config: {
+        modelPreset: "local-default",
+        harnessOperations: [
+          expect.objectContaining({ key: "verify_order", timeoutMs: 120000 }),
+        ],
+      },
     });
     expect(fetchMock.mock.calls[2]?.[0]).toBe(
       `/v1/projects/${PROJECT_ID}/agents/${agent.id}`,
@@ -770,6 +794,41 @@ describe("HTTP console adapter", () => {
       ],
       timeline: [],
       debug: {
+        productEvents: [
+          {
+            id: "harness-event-1",
+            aggregateId: "88888888-8888-4888-8888-888888888888",
+            eventKind: "harness.operation_completed",
+            publicPayload: {
+              operationKey: "extract_shipment",
+              toolCallId: "tool-call-1",
+              taskCharacters: 184,
+              timeoutMs: 120000,
+              durationMs: 842,
+              resultValidated: true,
+            },
+            occurredAt: "2026-08-20T19:21:44.000Z",
+          },
+          {
+            id: "model-event-2",
+            aggregateId: "88888888-8888-4888-8888-888888888888",
+            eventKind: "model.invocation_failed",
+            publicPayload: {
+              model: "openrouter/test",
+              provider: "openrouter",
+              inputTokens: 12,
+              outputTokens: 3,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              costMicrounits: 0,
+              finishReason: "error",
+              providerFinishReason: "content_filter",
+              errorExplanation:
+                "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run.",
+            },
+            occurredAt: "2026-08-20T19:21:45.300Z",
+          },
+        ],
         modelInvocations: [
           {
             id: "model-1",
@@ -779,12 +838,65 @@ describe("HTTP console adapter", () => {
             modelKey: "openrouter/test",
             inputTokens: 10,
             outputTokens: 4,
+            cacheReadTokens: 6,
+            cacheWriteTokens: 2,
             safeResponse: {
               finishReason: "toolUse",
               thinking: "I should create a CSV with three columns.",
             },
             startedAt: "2026-08-20T19:21:45.000Z",
             completedAt: "2026-08-20T19:21:45.000Z",
+          },
+          {
+            id: "model-2",
+            runId: "88888888-8888-4888-8888-888888888888",
+            status: "failed",
+            attempt: 2,
+            modelKey: "openrouter/test",
+            inputTokens: 12,
+            outputTokens: 3,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            safeResponse: {
+              finishReason: "error",
+              providerFinishReason: "content_filter",
+              errorExplanation:
+                "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run.",
+            },
+            startedAt: "2026-08-20T19:21:45.100Z",
+            completedAt: "2026-08-20T19:21:45.300Z",
+          },
+        ],
+        toolCalls: [
+          {
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaac",
+            runId: "88888888-8888-4888-8888-888888888888",
+            toolName: "lookup_customer",
+            owner: "platform",
+            stage: "result_committed",
+            safeArguments: { customerRef: "NW-4831" },
+            safeResult: {
+              version: 1,
+              status: "success",
+              value: { matches: 2, accountStatus: "active" },
+            },
+            createdAt: "2026-08-20T19:21:46.000Z",
+            updatedAt: "2026-08-20T19:21:46.400Z",
+          },
+          {
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaad",
+            runId: "88888888-8888-4888-8888-888888888888",
+            toolName: "create_refund",
+            owner: "caller",
+            stage: "result_submitted",
+            safeArguments: { chargeId: "charge-1" },
+            safeResult: {
+              version: 1,
+              status: "failure",
+              error: { code: "tool_failed", message: "Refund rejected" },
+            },
+            createdAt: "2026-08-20T19:21:47.000Z",
+            updatedAt: "2026-08-20T19:21:47.300Z",
           },
         ],
         sandboxCommands: [
@@ -839,6 +951,82 @@ describe("HTTP console adapter", () => {
     const detail = await api.getSession(session.id);
     expect(detail.events).toContainEqual(
       expect.objectContaining({
+        id: "harness:tool-call-1",
+        kind: "tool",
+        source: "activity",
+        title: "Harness · extract_shipment",
+        summary: "validated result",
+        durationMs: 842,
+        status: "success",
+        harness: expect.objectContaining({
+          operationKey: "extract_shipment",
+          toolCallId: "tool-call-1",
+          phase: "completed",
+          modelTurns: 0,
+          toolSteps: 0,
+          attribution: "complete",
+          steps: [],
+        }),
+        payload: expect.objectContaining({
+          rendered: expect.objectContaining({
+            operationKey: "extract_shipment",
+            phase: "completed",
+            toolCallId: "tool-call-1",
+            taskCharacters: 184,
+            timeoutMs: 120000,
+            durationMs: 842,
+            resultValidated: true,
+            modelTurns: 0,
+            toolSteps: 0,
+          }),
+          raw: null,
+          redacted: true,
+        }),
+      }),
+    );
+    expect(detail.events).toContainEqual(
+      expect.objectContaining({
+        kind: "reasoning",
+        tokens: { input: 10, output: 4, cacheRead: 6, cacheWrite: 2 },
+      }),
+    );
+    expect(detail.events).toContainEqual(
+      expect.objectContaining({
+        id: "debug:productEvents:model-event-2",
+        kind: "error",
+        source: "runtime",
+        title: "model.invocation failed",
+        summary:
+          "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run.",
+        status: "error",
+        payload: expect.objectContaining({
+          rendered: {
+            model: "openrouter/test",
+            provider: "openrouter",
+            finishReason: "error",
+            providerFinishReason: "content_filter",
+            errorExplanation:
+              "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run.",
+          },
+        }),
+      }),
+    );
+    expect(detail.events).toContainEqual(
+      expect.objectContaining({
+        kind: "reasoning",
+        status: "error",
+        payload: expect.objectContaining({
+          rendered: expect.objectContaining({
+            finishReason: "error",
+            providerFinishReason: "content_filter",
+            errorExplanation:
+              "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run.",
+          }),
+        }),
+      }),
+    );
+    expect(detail.events).toContainEqual(
+      expect.objectContaining({
         kind: "tool",
         source: "activity",
         title: "write",
@@ -852,6 +1040,33 @@ describe("HTTP console adapter", () => {
               content: "id,name\n1,Alice",
             }),
             result: expect.any(Object),
+          }),
+        }),
+      }),
+    );
+    expect(detail.events).toContainEqual(
+      expect.objectContaining({
+        kind: "tool",
+        source: "activity",
+        title: "lookup customer",
+        status: "success",
+        payload: expect.objectContaining({
+          rendered: expect.objectContaining({
+            arguments: { customerRef: "NW-4831" },
+            result: { matches: 2, accountStatus: "active" },
+            resultStatus: "success",
+          }),
+        }),
+      }),
+    );
+    expect(detail.events).toContainEqual(
+      expect.objectContaining({
+        title: "create refund",
+        status: "error",
+        payload: expect.objectContaining({
+          rendered: expect.objectContaining({
+            result: { code: "tool_failed", message: "Refund rejected" },
+            resultStatus: "failure",
           }),
         }),
       }),
@@ -888,6 +1103,514 @@ describe("HTTP console adapter", () => {
         payload: expect.objectContaining({ redacted: false }),
       }),
     );
+  });
+
+  it("consolidates one Harness invocation and its internal turns into one event", async () => {
+    const runId = "88888888-8888-4888-8888-888888888889";
+    const session = {
+      id: "77777777-7777-4777-8777-777777777779",
+      title: "Harness test",
+      status: "completed",
+      agentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentName: "Harness agent",
+      agentVersion: 1,
+      latestRunId: runId,
+      createdAt: "2026-08-20T10:00:00.000Z",
+      lastActivityAt: "2026-08-20T10:00:05.000Z",
+      runs: [
+        {
+          id: runId,
+          state: "completed",
+          createdAt: "2026-08-20T10:00:00.000Z",
+          settledAt: "2026-08-20T10:00:05.000Z",
+        },
+      ],
+      transcript: [],
+      timeline: [],
+      debug: {
+        productEvents: [
+          {
+            id: "harness-start",
+            eventKind: "harness.operation_started",
+            publicPayload: {
+              operationKey: "extract_shipment",
+              toolCallId: "tool-call-harness",
+              taskCharacters: 126,
+              timeoutMs: 120_000,
+            },
+            occurredAt: "2026-08-20T10:00:01.000Z",
+          },
+          {
+            id: "harness-complete",
+            eventKind: "harness.operation_completed",
+            publicPayload: {
+              operationKey: "extract_shipment",
+              toolCallId: "tool-call-harness",
+              taskCharacters: 126,
+              timeoutMs: 120_000,
+              durationMs: 3_000,
+              resultValidated: true,
+            },
+            occurredAt: "2026-08-20T10:00:04.000Z",
+          },
+        ],
+        modelInvocations: [
+          {
+            id: "inner-model-1",
+            runId,
+            status: "completed",
+            attempt: 1,
+            modelKey: "openrouter/test",
+            inputTokens: 30,
+            outputTokens: 8,
+            safeResponse: {
+              finishReason: "toolUse",
+              thinking: "Sensitive shipment content must not enter the modal.",
+            },
+            startedAt: "2026-08-20T10:00:01.100Z",
+            completedAt: "2026-08-20T10:00:01.500Z",
+          },
+          {
+            id: "inner-model-2",
+            runId,
+            status: "completed",
+            attempt: 2,
+            modelKey: "openrouter/test",
+            inputTokens: 42,
+            outputTokens: 12,
+            safeResponse: { finishReason: "stop", thinking: "Private result." },
+            startedAt: "2026-08-20T10:00:03.000Z",
+            completedAt: "2026-08-20T10:00:03.700Z",
+          },
+        ],
+        sandboxCommands: [
+          {
+            id: "inner-read",
+            runId,
+            state: "completed",
+            toolName: "read",
+            path: "/workspace/order.pdf",
+            safeCommand: {
+              toolName: "read",
+              arguments: { path: "/workspace/order.pdf" },
+            },
+            safeResult: { output: "raw document contents" },
+            startedAt: "2026-08-20T10:00:02.000Z",
+            completedAt: "2026-08-20T10:00:02.200Z",
+          },
+        ],
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(CONTEXT))
+        .mockResolvedValueOnce(jsonResponse(session)),
+    );
+
+    const detail = await new HttpConsoleApi().getSession(session.id);
+    const harnessEvents = detail.events.filter((event) => event.harness);
+    expect(harnessEvents).toHaveLength(1);
+    expect(harnessEvents[0]).toEqual(
+      expect.objectContaining({
+        id: "harness:tool-call-harness",
+        summary: "2 model turns · 1 tool step · validated result",
+        durationMs: 3_000,
+        harness: expect.objectContaining({
+          modelTurns: 2,
+          toolSteps: 1,
+          attribution: "complete",
+          steps: [
+            expect.objectContaining({
+              id: "debug:modelInvocations:inner-model-1",
+              title: "Requested read",
+              summary: "Model turn 1. Raw scratch content remains private.",
+              tokens: { input: 30, output: 8, cacheRead: 0, cacheWrite: 0 },
+            }),
+            expect.objectContaining({
+              id: "debug:sandboxCommands:inner-read",
+              title: "read",
+              summary: "/workspace/order.pdf",
+            }),
+            expect.objectContaining({
+              id: "debug:modelInvocations:inner-model-2",
+              title: "Model turn 2",
+            }),
+          ],
+        }),
+      }),
+    );
+    expect(detail.events.map((event) => event.id)).not.toContain(
+      "debug:modelInvocations:inner-model-1",
+    );
+    expect(JSON.stringify(harnessEvents[0])).not.toContain("Private result");
+    expect(JSON.stringify(harnessEvents[0])).not.toContain(
+      "raw document contents",
+    );
+  });
+
+  it("marks overlapping Harness invocations as one parallel batch", async () => {
+    const runId = "88888888-8888-4888-8888-888888888890";
+    const lifecycle = (
+      id: string,
+      eventKind: string,
+      operationKey: string,
+      toolCallId: string,
+      occurredAt: string,
+    ) => ({
+      id,
+      eventKind,
+      publicPayload: { operationKey, toolCallId, timeoutMs: 120_000 },
+      occurredAt,
+    });
+    const session = {
+      id: "77777777-7777-4777-8777-777777777780",
+      title: "Parallel Harness test",
+      status: "completed",
+      agentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentName: "Harness agent",
+      agentVersion: 1,
+      latestRunId: runId,
+      createdAt: "2026-08-20T10:00:00.000Z",
+      lastActivityAt: "2026-08-20T10:00:05.000Z",
+      runs: [{ id: runId, state: "completed" }],
+      transcript: [],
+      timeline: [],
+      debug: {
+        productEvents: [
+          lifecycle(
+            "start-extract",
+            "harness.operation_started",
+            "extract_shipment",
+            "call-extract",
+            "2026-08-20T10:00:01.000Z",
+          ),
+          lifecycle(
+            "start-verify",
+            "harness.operation_started",
+            "verify_shipment",
+            "call-verify",
+            "2026-08-20T10:00:01.100Z",
+          ),
+          lifecycle(
+            "complete-verify",
+            "harness.operation_completed",
+            "verify_shipment",
+            "call-verify",
+            "2026-08-20T10:00:03.000Z",
+          ),
+          lifecycle(
+            "complete-extract",
+            "harness.operation_completed",
+            "extract_shipment",
+            "call-extract",
+            "2026-08-20T10:00:04.000Z",
+          ),
+        ],
+        modelInvocations: [
+          {
+            id: "ambiguous-inner-turn",
+            runId,
+            status: "completed",
+            attempt: 1,
+            modelKey: "openrouter/test",
+            inputTokens: 10,
+            outputTokens: 2,
+            safeResponse: { finishReason: "stop" },
+            startedAt: "2026-08-20T10:00:02.000Z",
+            completedAt: "2026-08-20T10:00:02.200Z",
+          },
+        ],
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(CONTEXT))
+        .mockResolvedValueOnce(jsonResponse(session)),
+    );
+
+    const detail = await new HttpConsoleApi().getSession(session.id);
+    const harnessEvents = detail.events.filter((event) => event.harness);
+    expect(harnessEvents).toHaveLength(2);
+    expect(harnessEvents.map((event) => event.harness?.parallel)).toEqual([
+      {
+        groupId: "parallel:call-extract:call-verify",
+        count: 2,
+        index: 0,
+      },
+      {
+        groupId: "parallel:call-extract:call-verify",
+        count: 2,
+        index: 1,
+      },
+    ]);
+    expect(
+      harnessEvents.every((event) => event.harness?.attribution === "partial"),
+    ).toBe(true);
+    expect(detail.events).toContainEqual(
+      expect.objectContaining({
+        id: "debug:modelInvocations:ambiguous-inner-turn",
+      }),
+    );
+  });
+
+  it("attributes concurrent inner turns and tool calls to the exact Harness invocation", async () => {
+    const runId = "88888888-8888-4888-8888-888888888891";
+    const lifecycle = (
+      id: string,
+      eventKind: string,
+      operationKey: string,
+      toolCallId: string,
+      occurredAt: string,
+    ) => ({
+      id,
+      eventKind,
+      publicPayload: { operationKey, toolCallId, timeoutMs: 120_000 },
+      occurredAt,
+    });
+    const step = (
+      id: string,
+      operationKey: string,
+      harnessToolCallId: string,
+      stepKind: "model" | "tool",
+      stepId: string,
+      stepIndex: number,
+      occurredAt: string,
+      toolName?: string,
+    ) => ({
+      id,
+      eventKind: "harness.operation_step",
+      publicPayload: {
+        operationKey,
+        harnessToolCallId,
+        stepKind,
+        stepId,
+        stepIndex,
+        status: "success",
+        durationMs: 20,
+        ...(toolName
+          ? { toolName, summary: `${toolName} · ${operationKey}.txt` }
+          : { inputTokens: 12, outputTokens: 3 }),
+      },
+      occurredAt,
+    });
+    const session = {
+      id: "77777777-7777-4777-8777-777777777781",
+      title: "Correlated parallel Harness test",
+      status: "completed",
+      agentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentName: "Harness agent",
+      agentVersion: 1,
+      latestRunId: runId,
+      createdAt: "2026-08-20T10:00:00.000Z",
+      lastActivityAt: "2026-08-20T10:00:05.000Z",
+      runs: [{ id: runId, state: "completed" }],
+      transcript: [],
+      timeline: [],
+      debug: {
+        productEvents: [
+          lifecycle(
+            "start-extract",
+            "harness.operation_started",
+            "extract_shipment",
+            "call-extract",
+            "2026-08-20T10:00:01.000Z",
+          ),
+          lifecycle(
+            "start-verify",
+            "harness.operation_started",
+            "verify_shipment",
+            "call-verify",
+            "2026-08-20T10:00:01.010Z",
+          ),
+          step(
+            "extract-model-1-step",
+            "extract_shipment",
+            "call-extract",
+            "model",
+            "turn:extract-1",
+            0,
+            "2026-08-20T10:00:01.100Z",
+          ),
+          step(
+            "verify-model-1-step",
+            "verify_shipment",
+            "call-verify",
+            "model",
+            "turn:verify-1",
+            0,
+            "2026-08-20T10:00:01.120Z",
+          ),
+          step(
+            "extract-read-step",
+            "extract_shipment",
+            "call-extract",
+            "tool",
+            "tool:extract-read",
+            1,
+            "2026-08-20T10:00:01.500Z",
+            "read",
+          ),
+          step(
+            "verify-read-step",
+            "verify_shipment",
+            "call-verify",
+            "tool",
+            "tool:verify-read",
+            1,
+            "2026-08-20T10:00:01.520Z",
+            "read",
+          ),
+          step(
+            "extract-model-2-step",
+            "extract_shipment",
+            "call-extract",
+            "model",
+            "turn:extract-2",
+            2,
+            "2026-08-20T10:00:02.000Z",
+          ),
+          step(
+            "verify-model-2-step",
+            "verify_shipment",
+            "call-verify",
+            "model",
+            "turn:verify-2",
+            2,
+            "2026-08-20T10:00:02.020Z",
+          ),
+          lifecycle(
+            "complete-verify",
+            "harness.operation_completed",
+            "verify_shipment",
+            "call-verify",
+            "2026-08-20T10:00:03.000Z",
+          ),
+          lifecycle(
+            "complete-extract",
+            "harness.operation_completed",
+            "extract_shipment",
+            "call-extract",
+            "2026-08-20T10:00:03.100Z",
+          ),
+        ],
+        modelInvocations: [
+          ...[
+            ["extract-1", "call-extract", 0],
+            ["verify-1", "call-verify", 0],
+            ["extract-2", "call-extract", 2],
+            ["verify-2", "call-verify", 2],
+          ].map(([turnId, harnessToolCallId, harnessStepIndex], index) => ({
+            id: `${turnId}-model`,
+            runId,
+            status: "completed",
+            attempt: index + 1,
+            modelKey: "openrouter/test",
+            inputTokens: 12,
+            outputTokens: 3,
+            safeRequest: {
+              harnessToolCallId,
+              harnessStepId: `turn:${turnId}`,
+              harnessStepIndex,
+              harnessActionSummary: String(turnId).endsWith("-1")
+                ? "Requested read."
+                : "Returned the structured result for validation.",
+            },
+            safeResponse: { finishReason: "toolUse" },
+            startedAt: `2026-08-20T10:00:0${index < 2 ? "1" : "2"}.${100 + index * 20}Z`,
+            completedAt: `2026-08-20T10:00:0${index < 2 ? "1" : "2"}.${200 + index * 20}Z`,
+          })),
+        ],
+        sandboxCommands: [
+          {
+            id: "extract-read-command",
+            runId,
+            commandKey: `sandbox-tool:${runId}:extract-read`,
+            state: "completed",
+            toolName: "read",
+            path: "extract_shipment.txt",
+            safeCommand: {
+              toolName: "read",
+              arguments: { path: "extract_shipment.txt" },
+            },
+            safeResult: { output: "redacted fixture" },
+            startedAt: "2026-08-20T10:00:01.500Z",
+            completedAt: "2026-08-20T10:00:01.550Z",
+          },
+          {
+            id: "verify-read-command",
+            runId,
+            commandKey: `sandbox-tool:${runId}:verify-read`,
+            state: "completed",
+            toolName: "read",
+            path: "verify_shipment.txt",
+            safeCommand: {
+              toolName: "read",
+              arguments: { path: "verify_shipment.txt" },
+            },
+            safeResult: { output: "redacted fixture" },
+            startedAt: "2026-08-20T10:00:01.520Z",
+            completedAt: "2026-08-20T10:00:01.570Z",
+          },
+        ],
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(CONTEXT))
+        .mockResolvedValueOnce(jsonResponse(session)),
+    );
+
+    const detail = await new HttpConsoleApi().getSession(session.id);
+    const harnessEvents = detail.events.filter((event) => event.harness);
+    expect(harnessEvents).toHaveLength(2);
+    const extract = harnessEvents.find(
+      (event) => event.harness?.operationKey === "extract_shipment",
+    )!;
+    const verify = harnessEvents.find(
+      (event) => event.harness?.operationKey === "verify_shipment",
+    )!;
+    expect(extract.harness).toEqual(
+      expect.objectContaining({
+        modelTurns: 2,
+        toolSteps: 1,
+        attribution: "complete",
+      }),
+    );
+    expect(verify.harness).toEqual(
+      expect.objectContaining({
+        modelTurns: 2,
+        toolSteps: 1,
+        attribution: "complete",
+      }),
+    );
+    expect(extract.harness?.steps.map((event) => event.summary)).toEqual([
+      "Model turn 1. Raw scratch content remains private.",
+      "extract_shipment.txt",
+      "Model turn 2. Raw scratch content remains private.",
+    ]);
+    expect(verify.harness?.steps.map((event) => event.summary)).toEqual([
+      "Model turn 1. Raw scratch content remains private.",
+      "verify_shipment.txt",
+      "Model turn 2. Raw scratch content remains private.",
+    ]);
+    expect(extract.harness?.steps.map((event) => event.title)).toEqual([
+      "Requested read",
+      "read",
+      "Returned the structured result for validation",
+    ]);
+    expect(detail.events.map((event) => event.id)).not.toContain(
+      "debug:sandboxCommands:extract-read-command",
+    );
+    expect(detail.events.map((event) => event.id)).not.toContain(
+      "debug:modelInvocations:verify-2-model",
+    );
+    expect(JSON.stringify(harnessEvents)).not.toContain("redacted fixture");
   });
 
   it("ignores shell globs when inferring files for a legacy backup", async () => {

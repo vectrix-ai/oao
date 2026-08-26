@@ -255,6 +255,8 @@ export interface ModelResponse {
   readonly usage: {
     readonly inputTokens: number;
     readonly outputTokens: number;
+    readonly cacheReadTokens: number;
+    readonly cacheWriteTokens: number;
   };
   readonly providerRequestId?: string;
 }

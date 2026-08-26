@@ -49,6 +49,7 @@
         "pages": [
           "agents/create-agent",
           "agents/add-tools",
+          "concepts/harness-operations",
           "concepts/multi-agent-orchestration",
           "concepts/skills",
           "models/adding-models",

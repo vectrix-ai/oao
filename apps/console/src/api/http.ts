@@ -216,6 +216,406 @@ function visiblePayload(
   };
 }
 
+const HARNESS_TERMINAL_PHASES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "timed_out",
+]);
+
+function harnessLifecycle(event: TimelineEvent):
+  | {
+      readonly operationKey: string;
+      readonly toolCallId: string;
+      readonly phase: string;
+    }
+  | undefined {
+  if (!event.title.startsWith("Harness · ")) return undefined;
+  const rendered = event.payload?.rendered;
+  if (!rendered) return undefined;
+  const operationKey = text(rendered.operationKey);
+  const phase = text(rendered.phase);
+  if (!operationKey || !phase) return undefined;
+  return {
+    operationKey,
+    toolCallId: text(rendered.toolCallId, event.id),
+    phase,
+  };
+}
+
+function harnessStepMarker(event: TimelineEvent):
+  | {
+      readonly harnessToolCallId: string;
+      readonly stepId: string;
+      readonly stepIndex: number;
+    }
+  | undefined {
+  const rendered = event.payload?.rendered;
+  if (!rendered || rendered.harnessStepMarker !== true) return undefined;
+  const harnessToolCallId = text(rendered.harnessToolCallId);
+  const stepId = text(rendered.harnessStepId);
+  if (!harnessToolCallId || !stepId) return undefined;
+  return {
+    harnessToolCallId,
+    stepId,
+    stepIndex: numeric(rendered.harnessStepIndex),
+  };
+}
+
+function eventHarnessCorrelation(
+  event: TimelineEvent,
+  correlationByStepId: ReadonlyMap<
+    string,
+    { readonly harnessToolCallId: string; readonly stepIndex: number }
+  >,
+):
+  | {
+      readonly harnessToolCallId: string;
+      readonly stepId?: string;
+      readonly stepIndex?: number;
+    }
+  | undefined {
+  const rendered = event.payload?.rendered;
+  if (!rendered) return undefined;
+  const stepId = text(rendered.harnessStepId);
+  const directOwner = text(rendered.harnessToolCallId);
+  const marker = correlationByStepId.get(stepId);
+  const harnessToolCallId = directOwner || marker?.harnessToolCallId;
+  return harnessToolCallId
+    ? {
+        harnessToolCallId,
+        ...(stepId ? { stepId } : {}),
+        ...(typeof rendered.harnessStepIndex === "number"
+          ? { stepIndex: rendered.harnessStepIndex }
+          : marker
+            ? { stepIndex: marker.stepIndex }
+            : {}),
+      }
+    : undefined;
+}
+
+/**
+ * One Harness invocation should read as one transcript action. The lifecycle
+ * events give us a bounded time window; activity is moved into that invocation
+ * only when exactly one window owns it, so parallel calls are never guessed.
+ */
+function consolidateHarnessActivity(
+  events: readonly TimelineEvent[],
+): readonly TimelineEvent[] {
+  const lifecycles = events
+    .map((event) => ({ event, info: harnessLifecycle(event) }))
+    .filter(
+      (
+        item,
+      ): item is {
+        readonly event: TimelineEvent;
+        readonly info: NonNullable<ReturnType<typeof harnessLifecycle>>;
+      } => Boolean(item.info),
+    );
+  if (lifecycles.length === 0) return events;
+
+  const stepMarkers = events
+    .map((event) => ({ event, info: harnessStepMarker(event) }))
+    .filter(
+      (
+        item,
+      ): item is {
+        readonly event: TimelineEvent;
+        readonly info: NonNullable<ReturnType<typeof harnessStepMarker>>;
+      } => Boolean(item.info),
+    );
+  const correlationByStepId = new Map<
+    string,
+    { readonly harnessToolCallId: string; readonly stepIndex: number }
+  >();
+  for (const marker of stepMarkers)
+    correlationByStepId.set(marker.info.stepId, {
+      harnessToolCallId: marker.info.harnessToolCallId,
+      stepIndex: marker.info.stepIndex,
+    });
+
+  const grouped = new Map<string, typeof lifecycles>();
+  for (const lifecycle of lifecycles) {
+    const current = grouped.get(lifecycle.info.toolCallId) ?? [];
+    current.push(lifecycle);
+    grouped.set(lifecycle.info.toolCallId, current);
+  }
+  const windows = [...grouped.entries()].map(([toolCallId, entries]) => {
+    const ordered = [...entries].sort((left, right) =>
+      left.event.createdAt.localeCompare(right.event.createdAt),
+    );
+    const start =
+      ordered.find(({ info }) => info.phase === "started") ?? ordered[0]!;
+    const terminal = [...ordered]
+      .reverse()
+      .find(({ info }) => HARNESS_TERMINAL_PHASES.has(info.phase));
+    return {
+      toolCallId,
+      entries: ordered,
+      start,
+      terminal,
+      startMs: Date.parse(start.event.createdAt),
+      endMs: terminal ? Date.parse(terminal.event.createdAt) : Infinity,
+      steps: [] as TimelineEvent[],
+      stepIds: new Set<string>(),
+      partial: false,
+      parallel: undefined as
+        | {
+            readonly groupId: string;
+            readonly count: number;
+            readonly index: number;
+          }
+        | undefined,
+    };
+  });
+  const orderedWindows = [...windows].sort(
+    (left, right) => left.startMs - right.startMs,
+  );
+  let overlapping: typeof windows = [];
+  let overlapEnd = -Infinity;
+  const markParallelGroup = () => {
+    if (overlapping.length < 2) return;
+    const groupId = `parallel:${overlapping
+      .map((window) => window.toolCallId)
+      .sort()
+      .join(":")}`;
+    overlapping.forEach((window, index) => {
+      window.parallel = { groupId, count: overlapping.length, index };
+    });
+  };
+  for (const window of orderedWindows) {
+    if (overlapping.length > 0 && window.startMs >= overlapEnd) {
+      markParallelGroup();
+      overlapping = [];
+      overlapEnd = -Infinity;
+    }
+    overlapping.push(window);
+    overlapEnd = Math.max(overlapEnd, window.endMs);
+  }
+  markParallelGroup();
+  const lifecycleIds = new Set(lifecycles.map(({ event }) => event.id));
+  const stepMarkerIds = new Set(stepMarkers.map(({ event }) => event.id));
+  const claimedIds = new Set<string>();
+
+  for (const event of events) {
+    if (
+      lifecycleIds.has(event.id) ||
+      stepMarkerIds.has(event.id) ||
+      event.source !== "activity"
+    )
+      continue;
+    const correlation = eventHarnessCorrelation(event, correlationByStepId);
+    if (!correlation) continue;
+    const owner = windows.find(
+      (window) => window.toolCallId === correlation.harnessToolCallId,
+    );
+    if (!owner) continue;
+    owner.steps.push(
+      correlation.stepIndex === undefined || !event.payload
+        ? event
+        : {
+            ...event,
+            payload: {
+              ...event.payload,
+              rendered: {
+                ...event.payload.rendered,
+                harnessStepIndex: correlation.stepIndex,
+              },
+            },
+          },
+    );
+    if (correlation.stepId) owner.stepIds.add(correlation.stepId);
+    claimedIds.add(event.id);
+  }
+
+  for (const marker of stepMarkers) {
+    const owner = windows.find(
+      (window) => window.toolCallId === marker.info.harnessToolCallId,
+    );
+    if (!owner || owner.stepIds.has(marker.info.stepId)) continue;
+    owner.steps.push(marker.event);
+    owner.stepIds.add(marker.info.stepId);
+  }
+
+  for (const event of events) {
+    if (
+      lifecycleIds.has(event.id) ||
+      stepMarkerIds.has(event.id) ||
+      claimedIds.has(event.id) ||
+      event.source !== "activity"
+    )
+      continue;
+    const timestamp = Date.parse(event.createdAt);
+    if (!Number.isFinite(timestamp)) continue;
+    const owners = windows.filter(
+      (window) => timestamp >= window.startMs && timestamp <= window.endMs,
+    );
+    if (owners.length === 1) {
+      owners[0]!.steps.push(event);
+      claimedIds.add(event.id);
+    } else if (owners.length > 1) {
+      for (const owner of owners) owner.partial = true;
+    }
+  }
+
+  const consolidated = windows.map((window): TimelineEvent => {
+    const lifecycle = window.terminal ?? window.start;
+    const rendered = lifecycle.event.payload?.rendered ?? {};
+    const operationKey = window.start.info.operationKey;
+    const operationToolNames = new Set([
+      operationKey,
+      operationKey.replaceAll("_", " "),
+    ]);
+    const visibleSteps = window.steps
+      .filter((event) => !operationToolNames.has(event.title))
+      .sort((left, right) => {
+        const leftIndex = numeric(
+          left.payload?.rendered.harnessStepIndex ?? Number.MAX_SAFE_INTEGER,
+        );
+        const rightIndex = numeric(
+          right.payload?.rendered.harnessStepIndex ?? Number.MAX_SAFE_INTEGER,
+        );
+        return leftIndex === rightIndex
+          ? left.createdAt.localeCompare(right.createdAt)
+          : leftIndex - rightIndex;
+      });
+    let modelTurn = 0;
+    const steps = visibleSteps.map((event, index) => {
+      if (event.kind === "reasoning") modelTurn += 1;
+      const turnLabel = `Model turn ${modelTurn}`;
+      const followingStep = visibleSteps[index + 1];
+      const inferredActionSummary =
+        event.kind === "reasoning" && followingStep?.kind === "tool"
+          ? followingStep.title === "finish"
+            ? "Returned the structured result for validation."
+            : `Requested ${followingStep.title}.`
+          : "";
+      const harnessActionSummary =
+        event.kind === "reasoning"
+          ? text(event.payload?.rendered.harnessActionSummary) ||
+            (event.payload?.rendered.harnessStepMarker === true
+              ? event.summary
+              : "") ||
+            inferredActionSummary
+          : "";
+      return {
+        id: event.id,
+        kind: event.kind,
+        title:
+          event.kind === "reasoning"
+            ? harnessActionSummary
+              ? harnessActionSummary.replace(/\.$/u, "")
+              : turnLabel
+            : event.title,
+        summary:
+          event.kind === "reasoning"
+            ? event.status === "error"
+              ? "The model turn failed."
+              : harnessActionSummary
+                ? `${turnLabel}. Raw scratch content remains private.`
+                : "The model completed an internal turn."
+            : event.summary,
+        createdAt: event.createdAt,
+        durationMs: event.durationMs,
+        status: event.status,
+        ...(event.tokens ? { tokens: event.tokens } : {}),
+      };
+    });
+    const modelTurns = steps.filter((step) => step.kind === "reasoning").length;
+    const toolSteps = steps.filter((step) => step.kind === "tool").length;
+    const phase = lifecycle.info.phase;
+    const summaryParts = [
+      modelTurns > 0
+        ? `${modelTurns} model ${modelTurns === 1 ? "turn" : "turns"}`
+        : null,
+      toolSteps > 0
+        ? `${toolSteps} tool ${toolSteps === 1 ? "step" : "steps"}`
+        : null,
+      phase === "completed"
+        ? "validated result"
+        : phase === "started"
+          ? "running"
+          : phase.replaceAll("_", " "),
+    ].filter(Boolean);
+    const duration =
+      typeof rendered.durationMs === "number"
+        ? rendered.durationMs
+        : window.terminal
+          ? durationMs(
+              window.start.event.createdAt,
+              window.terminal.event.createdAt,
+            )
+          : null;
+    return {
+      ...lifecycle.event,
+      id: `harness:${window.toolCallId}`,
+      title: `Harness · ${operationKey}`,
+      summary: summaryParts.join(" · "),
+      createdAt: window.start.event.createdAt,
+      durationMs: duration,
+      harness: {
+        operationKey,
+        ...(window.toolCallId !== window.start.event.id
+          ? { toolCallId: window.toolCallId }
+          : {}),
+        phase,
+        startedAt: window.start.event.createdAt,
+        completedAt: window.terminal?.event.createdAt ?? null,
+        ...(rendered.taskCharacters !== undefined
+          ? { taskCharacters: numeric(rendered.taskCharacters) }
+          : {}),
+        ...(rendered.timeoutMs !== undefined
+          ? { timeoutMs: numeric(rendered.timeoutMs) }
+          : {}),
+        ...(rendered.resultValidated !== undefined
+          ? { resultValidated: Boolean(rendered.resultValidated) }
+          : {}),
+        modelTurns,
+        toolSteps,
+        attribution: window.partial ? "partial" : "complete",
+        ...(window.parallel ? { parallel: window.parallel } : {}),
+        steps,
+      },
+      payload: safePayload({
+        operationKey,
+        phase,
+        ...(window.toolCallId !== window.start.event.id
+          ? { toolCallId: window.toolCallId }
+          : {}),
+        ...(rendered.taskCharacters !== undefined
+          ? { taskCharacters: numeric(rendered.taskCharacters) }
+          : {}),
+        ...(rendered.timeoutMs !== undefined
+          ? { timeoutMs: numeric(rendered.timeoutMs) }
+          : {}),
+        ...(duration !== null ? { durationMs: duration } : {}),
+        ...(rendered.resultValidated !== undefined
+          ? { resultValidated: Boolean(rendered.resultValidated) }
+          : {}),
+        modelTurns,
+        toolSteps,
+        ...(window.parallel
+          ? {
+              parallelGroupId: window.parallel.groupId,
+              parallelCount: window.parallel.count,
+              parallelIndex: window.parallel.index,
+            }
+          : {}),
+      }),
+    };
+  });
+
+  return [
+    ...events.filter(
+      (event) =>
+        !lifecycleIds.has(event.id) &&
+        !stepMarkerIds.has(event.id) &&
+        !claimedIds.has(event.id),
+    ),
+    ...consolidated,
+  ].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+}
+
 function sessionSummary(
   value: Readonly<Record<string, unknown>>,
 ): SessionSummary {
@@ -237,6 +637,8 @@ function sessionSummary(
     agentName: text(value.agentName, "Managed agent"),
     inputTokens: numeric(value.inputTokens),
     outputTokens: numeric(value.outputTokens),
+    cacheReadTokens: numeric(value.cacheReadTokens),
+    cacheWriteTokens: numeric(value.cacheWriteTokens),
     observedCostUsd:
       costProvenance === "unavailable" ||
       value.costMicrounits === null ||
@@ -550,15 +952,185 @@ function sessionDetail(
     if (!Array.isArray(items)) continue;
     items.forEach((item, index) => {
       const detail = record(item);
+      const productEventKind = text(detail.eventKind);
+      if (
+        collection === "productEvents" &&
+        productEventKind === "harness.operation_step"
+      ) {
+        const publicPayload = record(detail.publicPayload);
+        const stepKind = text(publicPayload.stepKind);
+        const toolName = text(publicPayload.toolName);
+        const harnessActionSummary = text(publicPayload.summary);
+        const failed = text(publicPayload.status) === "error";
+        debugEvents.push({
+          id: `debug:${collection}:${text(detail.id, String(index))}`,
+          kind: stepKind === "model" ? "reasoning" : "tool",
+          source: "activity",
+          title: stepKind === "model" ? "Reasoning" : toolName || "Tool",
+          summary:
+            stepKind === "model"
+              ? failed
+                ? "The model turn failed."
+                : harnessActionSummary ||
+                  "The model completed an internal turn."
+              : text(publicPayload.summary, toolName || "Tool call"),
+          createdAt: text(detail.occurredAt, summary.createdAt),
+          durationMs:
+            publicPayload.durationMs === undefined
+              ? null
+              : numeric(publicPayload.durationMs),
+          status: failed ? "error" : "success",
+          ...(stepKind === "model"
+            ? {
+                tokens: {
+                  input: numeric(publicPayload.inputTokens),
+                  output: numeric(publicPayload.outputTokens),
+                  cacheRead: numeric(publicPayload.cacheReadTokens),
+                  cacheWrite: numeric(publicPayload.cacheWriteTokens),
+                },
+              }
+            : {}),
+          payload: safePayload({
+            harnessStepMarker: true,
+            harnessToolCallId: text(publicPayload.harnessToolCallId),
+            harnessOperationKey: text(publicPayload.operationKey),
+            harnessStepId: text(publicPayload.stepId),
+            harnessStepIndex: numeric(publicPayload.stepIndex),
+            stepKind,
+            ...(toolName ? { toolName } : {}),
+            ...(harnessActionSummary ? { harnessActionSummary } : {}),
+          }),
+        });
+        return;
+      }
+      if (
+        collection === "productEvents" &&
+        productEventKind.startsWith("harness.operation_")
+      ) {
+        const publicPayload = record(detail.publicPayload);
+        const operationKey = text(publicPayload.operationKey, "operation");
+        const phase = productEventKind.slice("harness.operation_".length);
+        const status =
+          phase === "failed" || phase === "timed_out"
+            ? "error"
+            : phase === "started"
+              ? "pending"
+              : phase === "completed"
+                ? "success"
+                : "info";
+        const summaries: Readonly<Record<string, string>> = {
+          started: "Temporary scratch conversation started.",
+          completed:
+            "Validated structured result returned to the parent Agent.",
+          failed: "Harness Operation failed before returning a valid result.",
+          cancelled: "Harness Operation was cancelled with its parent run.",
+          timed_out: "Harness Operation exceeded its configured timeout.",
+        };
+        debugEvents.push({
+          id: `debug:${collection}:${text(detail.id, String(index))}`,
+          kind: "tool",
+          source: "activity",
+          title: `Harness · ${operationKey}`,
+          summary:
+            summaries[phase] ??
+            `Harness Operation ${phase.replaceAll("_", " ")}.`,
+          createdAt: text(detail.occurredAt, summary.createdAt),
+          durationMs:
+            typeof publicPayload.durationMs === "number"
+              ? publicPayload.durationMs
+              : null,
+          status,
+          payload: safePayload({
+            operationKey,
+            phase,
+            ...(publicPayload.toolCallId !== undefined
+              ? { toolCallId: text(publicPayload.toolCallId) }
+              : {}),
+            ...(publicPayload.taskCharacters !== undefined
+              ? { taskCharacters: numeric(publicPayload.taskCharacters) }
+              : {}),
+            ...(publicPayload.timeoutMs !== undefined
+              ? { timeoutMs: numeric(publicPayload.timeoutMs) }
+              : {}),
+            ...(publicPayload.durationMs !== undefined
+              ? { durationMs: numeric(publicPayload.durationMs) }
+              : {}),
+            ...(publicPayload.resultValidated !== undefined
+              ? { resultValidated: Boolean(publicPayload.resultValidated) }
+              : {}),
+          }),
+        });
+        return;
+      }
+      if (
+        collection === "productEvents" &&
+        productEventKind.startsWith("model.invocation_")
+      ) {
+        const publicPayload = record(detail.publicPayload);
+        const failed = productEventKind === "model.invocation_failed";
+        const finishReason = text(publicPayload.finishReason, "unknown");
+        const providerFinishReason = text(publicPayload.providerFinishReason);
+        const errorExplanation = text(publicPayload.errorExplanation);
+        const harnessActionSummary = text(publicPayload.harnessActionSummary);
+        debugEvents.push({
+          id: `debug:${collection}:${text(detail.id, String(index))}`,
+          kind: failed ? "error" : "reasoning",
+          source: "runtime",
+          title: productEventKind.replaceAll("_", " "),
+          summary:
+            errorExplanation ||
+            (failed
+              ? "The model invocation failed before returning a complete response."
+              : harnessActionSummary ||
+                `The model invocation completed with ${finishReason}.`),
+          createdAt: text(detail.occurredAt, summary.createdAt),
+          durationMs: null,
+          status: failed ? "error" : "success",
+          tokens: {
+            input: numeric(publicPayload.inputTokens),
+            output: numeric(publicPayload.outputTokens),
+            cacheRead: numeric(publicPayload.cacheReadTokens),
+            cacheWrite: numeric(publicPayload.cacheWriteTokens),
+          },
+          ...(publicPayload.costMicrounits !== undefined
+            ? {
+                costUsd: numeric(publicPayload.costMicrounits) / 1_000_000,
+              }
+            : {}),
+          payload: safePayload({
+            model: text(publicPayload.model),
+            provider: text(publicPayload.provider),
+            finishReason,
+            ...(providerFinishReason ? { providerFinishReason } : {}),
+            ...(errorExplanation ? { errorExplanation } : {}),
+            ...(harnessActionSummary ? { harnessActionSummary } : {}),
+          }),
+        });
+        return;
+      }
       if (collection === "modelInvocations") {
         const response = record(detail.safeResponse);
+        const request = record(detail.safeRequest);
         const timing = reasoningTiming(detail);
         const thinking = text(response.thinking);
+        const harnessActionSummary = text(request.harnessActionSummary);
+        const providerFinishReason = text(response.providerFinishReason);
+        const errorExplanation = text(response.errorExplanation);
         const rendered = {
           ...(thinking ? { thinking } : {}),
           model: text(detail.modelKey),
           attempt: numeric(detail.attempt),
           finishReason: text(response.finishReason, "unknown"),
+          ...(providerFinishReason ? { providerFinishReason } : {}),
+          ...(errorExplanation ? { errorExplanation } : {}),
+          ...(request.harnessToolCallId !== undefined
+            ? {
+                harnessToolCallId: text(request.harnessToolCallId),
+                harnessStepId: text(request.harnessStepId),
+                harnessStepIndex: numeric(request.harnessStepIndex),
+                ...(harnessActionSummary ? { harnessActionSummary } : {}),
+              }
+            : {}),
         };
         const state = text(detail.status, "completed");
         debugEvents.push({
@@ -566,7 +1138,7 @@ function sessionDetail(
           kind: "reasoning",
           source: "activity",
           title: "Reasoning",
-          summary: thinking || "Model reasoning",
+          summary: harnessActionSummary || thinking || "Model reasoning",
           createdAt: timing.createdAt,
           durationMs: timing.durationMs,
           status: state.includes("fail")
@@ -577,6 +1149,8 @@ function sessionDetail(
           tokens: {
             input: numeric(detail.inputTokens),
             output: numeric(detail.outputTokens),
+            cacheRead: numeric(detail.cacheReadTokens),
+            cacheWrite: numeric(detail.cacheWriteTokens),
           },
           ...(detail.costMicrounits !== undefined
             ? { costUsd: numeric(detail.costMicrounits) / 1_000_000 }
@@ -593,7 +1167,7 @@ function sessionDetail(
           collection,
         collection,
       );
-      const state = text(detail.state ?? detail.status, "");
+      const state = text(detail.state ?? detail.status ?? detail.stage, "");
       const createdAt =
         detail.occurredAt ??
         detail.startedAt ??
@@ -601,12 +1175,29 @@ function sessionDetail(
         summary.createdAt;
       const command = record(detail.safeCommand);
       const result = record(detail.safeResult);
+      const sandboxToolCallId = text(detail.commandKey).startsWith(
+        "sandbox-tool:",
+      )
+        ? text(detail.commandKey).split(":").at(-1)
+        : undefined;
+      const durableToolCallId = text(
+        detail.flueToolCallId ?? detail.flueToolCallRef,
+      );
+      const toolCallResult =
+        result.status === "success" && result.value !== undefined
+          ? result.value
+          : result.status === "failure" && result.error !== undefined
+            ? result.error
+            : undefined;
       const arguments_ =
         collection === "toolCalls"
           ? record(detail.safeArguments)
           : (command.arguments ?? command);
       const toolPayload = {
         arguments: arguments_,
+        ...(sandboxToolCallId
+          ? { harnessStepId: `tool:${sandboxToolCallId}` }
+          : {}),
         ...(result.output !== undefined
           ? { result: result.output }
           : result.redactedOutput !== undefined
@@ -617,6 +1208,13 @@ function sessionDetail(
       const argumentsRecord = record(arguments_);
       const toolCallPayload = {
         arguments: arguments_,
+        ...(durableToolCallId
+          ? { harnessStepId: `tool:${durableToolCallId}` }
+          : {}),
+        ...(toolCallResult !== undefined ? { result: toolCallResult } : {}),
+        ...(result.status !== undefined
+          ? { resultStatus: text(result.status) }
+          : {}),
         ...(detail.owner !== undefined ? { owner: text(detail.owner) } : {}),
         ...(detail.stage !== undefined ? { stage: text(detail.stage) } : {}),
       };
@@ -646,19 +1244,34 @@ function sessionDetail(
           detail.completedAt ?? detail.updatedAt,
         ),
         status:
-          state.includes("fail") || type.includes("fail")
+          state.includes("fail") ||
+          type.includes("fail") ||
+          result.status === "failure"
             ? "error"
-            : ["reserved", "running"].includes(state)
+            : [
+                  "reserved",
+                  "running",
+                  "caller_pending",
+                  "caller_claimed",
+                  "platform_ready",
+                  "platform_executing",
+                ].includes(state)
               ? "pending"
-              : state === "completed"
+              : state === "completed" ||
+                  state === "result_submitted" ||
+                  state === "result_committed"
                 ? "success"
                 : "info",
         ...(detail.inputTokens !== undefined ||
-        detail.outputTokens !== undefined
+        detail.outputTokens !== undefined ||
+        detail.cacheReadTokens !== undefined ||
+        detail.cacheWriteTokens !== undefined
           ? {
               tokens: {
                 input: numeric(detail.inputTokens),
                 output: numeric(detail.outputTokens),
+                cacheRead: numeric(detail.cacheReadTokens),
+                cacheWrite: numeric(detail.cacheWriteTokens),
               },
             }
           : {}),
@@ -696,9 +1309,11 @@ function sessionDetail(
           : []) as unknown[]
       ).map((item) => numeric(record(item).attempt)),
     ),
-    events: [...transcript, ...timeline, ...debugEvents].sort((left, right) =>
-      left.createdAt.localeCompare(right.createdAt),
-    ),
+    events: consolidateHarnessActivity([
+      ...transcript,
+      ...timeline,
+      ...debugEvents,
+    ]),
     workspaceFiles: workspaceFiles(debug, transcriptRecords),
     capabilities: {
       canCancel: !settled,

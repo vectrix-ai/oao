@@ -39,10 +39,34 @@ const MAX_WORKSPACE_ARCHIVE_BYTES = 512 * 1024 * 1024;
 const MAX_EXPANDED_WORKSPACE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_WORKSPACE_MANIFEST_FILES = 10_000;
 const MAX_WORKSPACE_MANIFEST_DEPTH = 100;
+const WORKSPACE_BACKUP_EXCLUDED_ROOT_FILES = new Set([
+  ".bash_logout",
+  ".bashrc",
+  ".face",
+  ".face.icon",
+  ".profile",
+  ".zshrc",
+]);
+const WORKSPACE_BACKUP_TAR_EXCLUDES = [
+  ".oao-workspace-backup.tar.gz",
+  ".daytona",
+  ...WORKSPACE_BACKUP_EXCLUDED_ROOT_FILES,
+]
+  .map((path) => `--exclude='./${path}'`)
+  .join(" ");
 const workspacePersistenceBySandbox = new WeakMap<
   Sandbox,
   () => Promise<void>
 >();
+
+/** Provider/runtime files are recreated by Daytona and are not agent output. */
+function excludedFromWorkspaceBackup(path: string): boolean {
+  return (
+    path === ".daytona" ||
+    path.startsWith(".daytona/") ||
+    WORKSPACE_BACKUP_EXCLUDED_ROOT_FILES.has(path)
+  );
+}
 
 function safeText(value: unknown, maximumLength: number): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -1318,7 +1342,7 @@ export class DaytonaManagedProvider implements FlueSandboxProviderPort {
     const archivePath = "/tmp/oao-workspace-backup.tar.gz";
     try {
       const result = await native.process.executeCommand(
-        `tar --exclude='./.oao-workspace-backup.tar.gz' -czf ${archivePath} .`,
+        `tar ${WORKSPACE_BACKUP_TAR_EXCLUDES} -czf ${archivePath} .`,
         workspaceDirectory,
         undefined,
         300,
@@ -1373,6 +1397,7 @@ export class DaytonaManagedProvider implements FlueSandboxProviderPort {
         path.length > 1_024
       )
         throw new Error("Daytona returned an invalid workspace file path");
+      if (excludedFromWorkspaceBackup(path)) continue;
       const name = posix.basename(path);
       if (
         name.length < 1 ||
@@ -1400,7 +1425,7 @@ export class DaytonaManagedProvider implements FlueSandboxProviderPort {
     try {
       await native.fs.uploadFile(Buffer.from(archive), archivePath);
       const result = await native.process.executeCommand(
-        `test "$(gzip -cd ${archivePath} | head -c ${MAX_EXPANDED_WORKSPACE_BYTES + 1} | wc -c)" -le ${MAX_EXPANDED_WORKSPACE_BYTES} && tar -tzf ${archivePath} >/dev/null && tar --no-same-owner --no-same-permissions -xzf ${archivePath} -C .`,
+        `test "$(gzip -cd ${archivePath} | head -c ${MAX_EXPANDED_WORKSPACE_BYTES + 1} | wc -c)" -le ${MAX_EXPANDED_WORKSPACE_BYTES} && tar -tzf ${archivePath} >/dev/null && tar ${WORKSPACE_BACKUP_TAR_EXCLUDES} --no-same-owner --no-same-permissions -xzf ${archivePath} -C .`,
         workspaceDirectory,
         undefined,
         300,

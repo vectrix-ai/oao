@@ -605,11 +605,13 @@ describe("management console", () => {
     expect(screen.queryByText(/customer_ref/u)).not.toBeInTheDocument();
     await user.click(tool);
     expect(tool).toHaveAttribute("aria-expanded", "true");
-    // Arguments and result render as highlighted JSON tokens.
+    // Arguments and the tool response render as highlighted JSON tokens.
     expect(screen.getByText('"customer_ref"')).toHaveClass("jt-key");
     expect(screen.getByText('"matches"')).toHaveClass("jt-key");
     expect(
-      within(screen.getByLabelText("Result of lookup_customer")).getByText("2"),
+      within(screen.getByLabelText("Response from lookup_customer")).getByText(
+        "2",
+      ),
     ).toHaveClass("jt-num");
     expect(screen.queryByRole("tab", { name: "Raw" })).not.toBeInTheDocument();
     // Tool events without arguments still open to their safe metadata.
@@ -624,6 +626,49 @@ describe("management console", () => {
       within(skillDetail!).getByText("shipment-intake"),
     ).toBeInTheDocument();
     expect(within(skillDetail!).getByText("true")).toBeInTheDocument();
+  });
+
+  it("decodes a JSON-string tool response into readable structured data", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const session = await api.getSession("session_01J5QTXE7W9M2R6C4A8K3N1P0V");
+    vi.spyOn(api, "getSession").mockResolvedValue({
+      ...session,
+      events: session.events.map((event) =>
+        event.id === "event-tool-1" && event.payload
+          ? {
+              ...event,
+              payload: {
+                ...event.payload,
+                rendered: {
+                  ...event.payload.rendered,
+                  result: {
+                    result: JSON.stringify({
+                      attachment_tms_overrides: {},
+                      created_at: "2026-08-25T20:19:43.741Z",
+                      customer: null,
+                    }),
+                  },
+                },
+              },
+            }
+          : event,
+      ),
+    });
+
+    renderConsole("/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V", api);
+    const tool = await screen.findByRole("button", {
+      name: /^lookup_customer/u,
+    });
+    await user.click(tool);
+    const response = screen.getByLabelText("Response from lookup_customer");
+    expect(
+      within(response).getByText('"attachment_tms_overrides"'),
+    ).toHaveClass("jt-key");
+    expect(within(response).queryByText('"result"')).not.toBeInTheDocument();
+    expect(response.textContent).not.toContain(
+      '\\"attachment_tms_overrides\\"',
+    );
   });
 
   it("shows reasoning and sandbox contents directly in the transcript", async () => {
@@ -840,6 +885,79 @@ describe("management console", () => {
     ).toBeInTheDocument();
   });
 
+  it("explains exact provider finish errors in the event inspector", async () => {
+    const user = userEvent.setup();
+    const explanation =
+      "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run.";
+    class FailedInvocationApi extends DemoConsoleApi {
+      override async getSession(id: string) {
+        const session = await super.getSession(id);
+        return {
+          ...session,
+          status: "failed" as const,
+          events: [
+            {
+              id: "debug:modelInvocations:filtered-1",
+              kind: "error" as const,
+              source: "activity" as const,
+              title: "model.invocation failed",
+              summary: explanation,
+              createdAt: "2026-08-20T19:21:47.000Z",
+              durationMs: 15_321,
+              status: "error" as const,
+              tokens: { input: 0, output: 0 },
+              payload: {
+                rendered: {
+                  model: "@preset/global-medium",
+                  attempt: 1,
+                  finishReason: "error",
+                  providerFinishReason: "content_filter",
+                  errorExplanation: explanation,
+                },
+                raw: null,
+                redacted: true,
+                redactionReason:
+                  "Only public, redacted metadata is available in this view.",
+              },
+            },
+          ],
+        };
+      }
+    }
+
+    renderConsole(
+      "/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V?tab=debug",
+      new FailedInvocationApi({ eventDelayMs: 60_000 }),
+    );
+    const inspector = await screen.findByRole("complementary", {
+      name: "Event inspector",
+    });
+    expect(within(inspector).getByText("Finish reason")).toBeInTheDocument();
+    expect(
+      within(inspector).getByText("Provider finish reason"),
+    ).toBeInTheDocument();
+    expect(within(inspector).getByText("content_filter")).toBeInTheDocument();
+    expect(
+      within(inspector).getByText("Why this is an error"),
+    ).toBeInTheDocument();
+    expect(within(inspector).getAllByText(explanation)).toHaveLength(2);
+    await user.click(
+      within(inspector).getByRole("tab", {
+        name: "Raw",
+      }),
+    );
+    await user.click(
+      within(inspector).getByRole("button", {
+        name: "Reveal redaction detail",
+      }),
+    );
+    expect(
+      within(inspector).getByText(
+        "Only public, redacted metadata is available in this view.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("charts the thread as states with striped idle and a hover card", async () => {
     const user = userEvent.setup();
     const scrolledTo: string[] = [];
@@ -855,9 +973,26 @@ describe("management console", () => {
     });
     expect(elapsed).toHaveTextContent("0s");
     expect(within(elapsed).getAllByText(/s$/u)).toHaveLength(5);
-    // The strip is contiguous states: user, agent, skill activation, tool,
-    // error, retry, approval — plus striped idle before the approval.
-    expect(within(minimap).getAllByRole("button")).toHaveLength(7);
+    // The strip is contiguous states: user, agent, skill activation, two
+    // parallel Harness calls, tool, error, retry, approval, plus idle segments.
+    expect(within(minimap).getAllByRole("button")).toHaveLength(9);
+    const parallelStack = within(minimap).getByRole("group", {
+      name: "2 parallel Harness Operations",
+    });
+    expect(parallelStack).toHaveClass(
+      "minimap-stack",
+      "minimap-stack--parallel",
+    );
+    const parallelSegments = within(parallelStack).getAllByRole("button");
+    expect(parallelSegments).toHaveLength(2);
+    const extractSegment = within(parallelStack).getByRole("button", {
+      name: /Harness · extract_shipment/u,
+    });
+    const verifySegment = within(parallelStack).getByRole("button", {
+      name: /Harness · verify_shipment/u,
+    });
+    expect(extractSegment).toHaveStyle({ width: "100%" });
+    expect(Number.parseFloat(verifySegment.style.width)).toBeLessThan(100);
     expect(
       within(minimap).getAllByRole("img", { name: /^Idle for/u }).length,
     ).toBeGreaterThan(0);
@@ -919,6 +1054,10 @@ describe("management console", () => {
     ).toBeInTheDocument();
     expect(within(panel).getByText("$0.0184")).toBeInTheDocument();
     expect(within(panel).getByText("2,841")).toBeInTheDocument();
+    expect(within(panel).getByText("Cache read tokens")).toBeInTheDocument();
+    expect(within(panel).getByText("1,536")).toBeInTheDocument();
+    expect(within(panel).getByText("Cache write tokens")).toBeInTheDocument();
+    expect(within(panel).getByText("704")).toBeInTheDocument();
     expect(screen.getByText("2 Skills")).toHaveAttribute(
       "title",
       "shipment-intake v1, carrier-codes v1",
@@ -1569,6 +1708,216 @@ describe("management console", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("authors immutable Harness Operations without per-operation Skill controls", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", api);
+    await user.click(
+      await screen.findByRole("button", { name: "Add operation" }),
+    );
+    const dialog = within(
+      screen.getByRole("dialog", { name: "Add Harness Operation" }),
+    );
+    expect(dialog.getByRole("paragraph")).toHaveTextContent("task: string");
+    expect(dialog.queryByLabelText(/Skill/u)).not.toBeInTheDocument();
+    expect(dialog.queryByLabelText(/Model/u)).not.toBeInTheDocument();
+    await user.clear(dialog.getByLabelText("Operation key"));
+    await user.type(dialog.getByLabelText("Operation key"), "verify_order");
+    await user.clear(
+      dialog.getByLabelText("When should the orchestrator call it?"),
+    );
+    await user.type(
+      dialog.getByLabelText("When should the orchestrator call it?"),
+      "Verify extracted order facts against all shared documents.",
+    );
+    fireEvent.change(dialog.getByLabelText("Required result schema (JSON)"), {
+      target: {
+        value: JSON.stringify({
+          type: "object",
+          properties: { valid: { type: "boolean" } },
+          required: ["valid"],
+          additionalProperties: false,
+        }),
+      },
+    });
+    await user.click(dialog.getByRole("button", { name: "Add operation" }));
+    const operation = screen.getByRole("button", { name: /^verify_order/u });
+    await user.click(operation);
+    expect(
+      screen.getByLabelText("Result schema for verify_order"),
+    ).toHaveTextContent('"valid"');
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 4")).toBeInTheDocument();
+    const updated = await api.getAgent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    expect(updated.versions[0]?.config.harnessOperations).toEqual([
+      expect.objectContaining({
+        key: "extract_shipment",
+      }),
+      expect.objectContaining({
+        key: "verify_order",
+        timeoutMs: 120_000,
+        resultSchema: expect.objectContaining({ type: "object" }),
+      }),
+    ]);
+  });
+
+  it("shows Harness Operation activity without prompts, results, or documents", async () => {
+    const user = userEvent.setup();
+    class HarnessActivityApi extends DemoConsoleApi {
+      override async getSession(id: string) {
+        const session = await super.getSession(id);
+        return {
+          ...session,
+          events: [
+            ...session.events.filter((event) => !event.harness),
+            {
+              id: "event-harness-1",
+              kind: "tool" as const,
+              source: "activity" as const,
+              title: "Harness · extract_shipment",
+              summary:
+                "Validated structured result returned to the parent Agent.",
+              createdAt: "2026-08-20T07:02:15.000Z",
+              durationMs: 1_211,
+              status: "success" as const,
+              harness: {
+                operationKey: "extract_shipment",
+                toolCallId: "tool-call-1",
+                phase: "completed",
+                startedAt: "2026-08-20T07:02:13.789Z",
+                completedAt: "2026-08-20T07:02:15.000Z",
+                taskCharacters: 126,
+                timeoutMs: 120_000,
+                resultValidated: true,
+                modelTurns: 2,
+                toolSteps: 2,
+                attribution: "complete" as const,
+                steps: [
+                  {
+                    id: "inner-model-1",
+                    kind: "reasoning" as const,
+                    title: "Model turn 1",
+                    summary: "The model completed an internal turn.",
+                    createdAt: "2026-08-20T07:02:14.000Z",
+                    durationMs: 210,
+                    status: "success" as const,
+                    tokens: { input: 42, output: 9 },
+                  },
+                  {
+                    id: "inner-skill",
+                    kind: "tool" as const,
+                    title: "Skill activated",
+                    summary: "shipment-extraction",
+                    createdAt: "2026-08-20T07:02:14.220Z",
+                    durationMs: 12,
+                    status: "success" as const,
+                  },
+                  {
+                    id: "inner-read",
+                    kind: "tool" as const,
+                    title: "read",
+                    summary: "/workspace/order.pdf",
+                    createdAt: "2026-08-20T07:02:14.300Z",
+                    durationMs: 35,
+                    status: "success" as const,
+                  },
+                  {
+                    id: "inner-model-2",
+                    kind: "reasoning" as const,
+                    title: "Model turn 2",
+                    summary: "The model completed an internal turn.",
+                    createdAt: "2026-08-20T07:02:14.400Z",
+                    durationMs: 500,
+                    status: "success" as const,
+                    tokens: { input: 64, output: 14 },
+                  },
+                ],
+              },
+              payload: {
+                rendered: {
+                  operationKey: "extract_shipment",
+                  phase: "completed",
+                  taskCharacters: 126,
+                  timeoutMs: 120_000,
+                  durationMs: 1_211,
+                  resultValidated: true,
+                },
+                raw: null,
+                redacted: true,
+                redactionReason:
+                  "Harness prompts, structured results, and document contents are not copied into product events.",
+              },
+            },
+          ],
+        };
+      }
+    }
+    renderConsole(
+      "/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V",
+      new HarnessActivityApi({ eventDelayMs: 60_000 }),
+    );
+    const harness = (
+      await screen.findAllByRole("button", {
+        name: /Harness · extract_shipment/u,
+      })
+    ).find((button) => button.getAttribute("aria-haspopup") === "dialog")!;
+    expect(harness).toBeInTheDocument();
+    await user.click(harness);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Harness · extract_shipment",
+    });
+    expect(within(dialog).getAllByText("2", { selector: "dd" })).toHaveLength(
+      2,
+    );
+    expect(within(dialog).getByText("Model turn 1")).toBeInTheDocument();
+    expect(within(dialog).getByText("Skill activated")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("/workspace/order.pdf"),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText("Model turn 2")).toBeInTheDocument();
+    expect(within(dialog).getByText("Result validated")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(
+      "Read the materialized shipment documents",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("draws one shared rail before concurrently overlapping Harness rows", async () => {
+    const user = userEvent.setup();
+    renderConsole(
+      "/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V",
+      new DemoConsoleApi({ eventDelayMs: 60_000 }),
+    );
+    const extract = await screen.findByRole("button", {
+      name: /Harness · extract_shipment 3 model turns/u,
+    });
+    const verify = screen.getByRole("button", {
+      name: /Harness · verify_shipment 2 model turns/u,
+    });
+    expect(extract.closest("article")).toHaveClass(
+      "activity--harness-parallel",
+      "activity--harness-parallel-first",
+    );
+    expect(verify.closest("article")).toHaveClass(
+      "activity--harness-parallel",
+      "activity--harness-parallel-last",
+    );
+    expect(screen.getAllByText("2 parallel")).toHaveLength(2);
+
+    await user.click(verify);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Harness · verify_shipment",
+    });
+    expect(within(dialog).getByText("Parallel batch")).toBeInTheDocument();
+    expect(within(dialog).getByText("2 of 2")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/overlapped another parallel/u),
+    ).toBeInTheDocument();
+  });
+
   it("can remove delegates made incompatible by a snapshot change and publish", async () => {
     class CoordinatorApi extends DemoConsoleApi {
       override async getAgent(id: string) {
@@ -1644,7 +1993,9 @@ describe("management console", () => {
             candidate.id === "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
               ? {
                   ...candidate,
-                  sandbox: { ...candidate.sandbox, enabled: false },
+                  sandbox: candidate.sandbox
+                    ? { ...candidate.sandbox, enabled: false }
+                    : null,
                 }
               : candidate,
           ),
@@ -1663,6 +2014,46 @@ describe("management console", () => {
       screen.getByText(
         /Unavailable — sandbox is disabled for this child, so it cannot share the coordinator workspace/u,
       ),
+    ).toBeInTheDocument();
+  });
+
+  it("renders draft delegate candidates without a published sandbox policy", async () => {
+    class DraftDelegateApi extends DemoConsoleApi {
+      override async listAgents(
+        filters: Parameters<DemoConsoleApi["listAgents"]>[0],
+      ) {
+        const result = await super.listAgents(filters);
+        return {
+          ...result,
+          data: result.data.map((candidate) =>
+            candidate.id === "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+              ? {
+                  ...candidate,
+                  status: "draft" as const,
+                  version: null,
+                  latestVersionId: null,
+                  sandbox: null,
+                }
+              : candidate,
+          ),
+        };
+      }
+    }
+    renderConsole(
+      "/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      new DraftDelegateApi({ eventDelayMs: 60_000 }),
+    );
+    const delegate = await screen.findByRole("checkbox", {
+      name: /Document analyst · draft/u,
+    });
+    expect(delegate).toBeDisabled();
+    expect(
+      screen.getByText(
+        /Unavailable — this child does not have a published sandbox policy/u,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/No published version is available/u),
     ).toBeInTheDocument();
   });
 

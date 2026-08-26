@@ -14,6 +14,7 @@ import type {
   McpCredential,
   McpCredentialPolicy,
   McpToolset,
+  ManagedHarnessOperation,
   CreateMcpServerInput,
   DiscoverMcpServerInput,
   CreateMcpCredentialInput,
@@ -34,6 +35,7 @@ export type {
   McpCredential,
   McpCredentialPolicy,
   McpToolset,
+  ManagedHarnessOperation,
   CreateMcpServerInput,
   DiscoverMcpServerInput,
   CreateMcpCredentialInput,
@@ -159,11 +161,13 @@ export interface AgentSummary {
   readonly name: string;
   readonly key: string;
   readonly description: string;
-  readonly model: string;
+  readonly model: string | null;
   readonly status: AgentStatus;
-  readonly version: number;
-  readonly latestVersionId: string;
-  readonly sandbox: AgentVersionConfig["sandbox"];
+  /** Draft Agent definitions have no immutable version until first publish. */
+  readonly version: number | null;
+  readonly latestVersionId: string | null;
+  /** Draft and legacy Agent rows can legitimately have no published policy. */
+  readonly sandbox: AgentVersionConfig["sandbox"] | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -177,10 +181,13 @@ export interface ToolDefinition {
   readonly outputSchema: Readonly<Record<string, unknown>>;
 }
 
+export type HarnessOperationDefinition = ManagedHarnessOperation;
+
 export interface AgentVersionConfig {
   readonly systemPrompt: string;
   readonly modelPreset: string;
   readonly tools: readonly ToolDefinition[];
+  readonly harnessOperations?: readonly HarnessOperationDefinition[];
   readonly skillVersionIds?: readonly string[];
   readonly mcpBindings?: readonly {
     readonly toolsetVersionId: string;
@@ -312,6 +319,8 @@ export interface SessionSummary {
   readonly agentName: string;
   readonly inputTokens: number;
   readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
   readonly observedCostUsd: number | null;
   readonly costProvenance: "provider_observed" | "estimated" | "unavailable";
   readonly createdAt: string;
@@ -337,6 +346,37 @@ export type TimelineKind =
  */
 export type TimelineSource = "message" | "activity" | "runtime";
 
+export interface HarnessActivityStep {
+  readonly id: string;
+  readonly kind: TimelineKind;
+  readonly title: string;
+  readonly summary: string;
+  readonly createdAt: string;
+  readonly durationMs: number | null;
+  readonly status: "success" | "pending" | "error" | "info";
+  readonly tokens?: TimelineEvent["tokens"];
+}
+
+export interface HarnessActivityDetail {
+  readonly operationKey: string;
+  readonly toolCallId?: string;
+  readonly phase: string;
+  readonly startedAt: string;
+  readonly completedAt: string | null;
+  readonly taskCharacters?: number;
+  readonly timeoutMs?: number;
+  readonly resultValidated?: boolean;
+  readonly modelTurns: number;
+  readonly toolSteps: number;
+  readonly attribution: "complete" | "partial";
+  readonly parallel?: {
+    readonly groupId: string;
+    readonly count: number;
+    readonly index: number;
+  };
+  readonly steps: readonly HarnessActivityStep[];
+}
+
 export interface TimelineEvent {
   readonly id: string;
   readonly kind: TimelineKind;
@@ -353,8 +393,14 @@ export interface TimelineEvent {
     readonly sizeBytes: number;
     readonly sha256: string;
   }[];
-  readonly tokens?: { readonly input: number; readonly output: number };
+  readonly tokens?: {
+    readonly input: number;
+    readonly output: number;
+    readonly cacheRead?: number;
+    readonly cacheWrite?: number;
+  };
   readonly costUsd?: number;
+  readonly harness?: HarnessActivityDetail;
   readonly payload?: {
     readonly rendered: Readonly<Record<string, unknown>>;
     readonly raw: string | null;

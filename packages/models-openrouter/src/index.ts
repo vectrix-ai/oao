@@ -109,6 +109,21 @@ function deepFreeze<T>(value: T): Readonly<T> {
   return value;
 }
 
+function openRouterModelCompat(
+  model: Model<"openai-completions">,
+  routing?: Readonly<OpenRouterRouting>,
+) {
+  return {
+    ...model.compat,
+    ...(model.id.startsWith("anthropic/")
+      ? { cacheControlFormat: "anthropic" as const }
+      : {}),
+    sendSessionAffinityHeaders: true,
+    sessionAffinityFormat: "openrouter" as const,
+    ...(routing ? { openRouterRouting: structuredClone(routing) } : {}),
+  };
+}
+
 export class ImmutableModelPresetRegistry {
   readonly #presets: ReadonlyMap<
     string,
@@ -176,10 +191,7 @@ export function createOpenRouterProvider(
   const models = native.getModels().map((model) =>
     deepFreeze({
       ...model,
-      compat: {
-        ...model.compat,
-        ...(routing ? { openRouterRouting: structuredClone(routing) } : {}),
-      },
+      compat: openRouterModelCompat(model, routing),
     }),
   );
   return createProvider({
@@ -216,10 +228,7 @@ export function createOpenRouterPresetProviders(
     const model = deepFreeze({
       ...nativeModel,
       provider: id,
-      compat: {
-        ...nativeModel.compat,
-        ...(routing ? { openRouterRouting: structuredClone(routing) } : {}),
-      },
+      compat: openRouterModelCompat(nativeModel, routing),
     });
     return createProvider({
       id,
@@ -792,12 +801,7 @@ function dynamicOpenRouterModel(input: {
       };
   return deepFreeze({
     ...model,
-    compat: {
-      ...model.compat,
-      ...(input.routing
-        ? { openRouterRouting: structuredClone(input.routing) }
-        : {}),
-    },
+    compat: openRouterModelCompat(model, input.routing),
   });
 }
 

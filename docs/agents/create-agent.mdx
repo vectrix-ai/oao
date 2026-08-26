@@ -118,6 +118,7 @@ cookies.
       "systemPrompt": "You are <agent name>, a helpful managed agent. Complete the user's request carefully and do not expose secrets or internal reasoning.",
       "modelPreset": "<selected preset key>",
       "tools": [],
+      "harnessOperations": [],
       "skillVersionIds": [
         "44444444-4444-4444-8444-444444444445"
       ],
@@ -149,7 +150,7 @@ cookies.
 
   <Step title="Review and publish a new version">
     On the agent detail page, edit the latest version's system instructions,
-    approved model preset, bound Skill versions, exact delegate roster, sandbox switch, network policy, or timeout. The
+    approved model preset, Harness Operations, bound Skill versions, exact delegate roster, sandbox switch, network policy, or timeout. The
     searchable model list is the project's approved preset catalog, and the
     editor shows the resolved model and routing policy for the selected preset
     with a link to **Manage models**. Select **Publish new version** to append an immutable
@@ -161,6 +162,13 @@ cookies.
     Publishing a newer Skill does not update an existing agent version.
     Existing sessions stay attached to the agent and Skill versions they were
     created with. See [Versioned Skills](/concepts/skills).
+
+    Harness Operations are authored under their own editor section. Each one
+    becomes a focused model-callable tool that inherits this Agent version's
+    model, rendered instructions, tools, complete Skill catalog, and live
+    sandbox. It receives `{ task: string }` and returns a schema-validated
+    object. It is not a separate Agent, and there is no per-operation Skill
+    selection. See [Harness Operations](/concepts/harness-operations).
 
     Delegate selection works the same way: the editor records the selected
     agent's exact latest version. A coordinator can delegate only to that
@@ -771,6 +779,11 @@ The detailed response contains the session summary plus:
 - `pendingWork`: unresolved tool and approval work.
 - `debug.productEvents`, `debug.modelInvocations`, `debug.toolCalls`,
   `debug.approvals`, `debug.sandboxes`, and `debug.workspaceBackups`.
+
+The top-level session usage includes `inputTokens`, `outputTokens`,
+`cacheReadTokens`, and `cacheWriteTokens`. Cache reads are prompt tokens reused
+from the provider cache; cache writes are prompt tokens newly added to it. The
+same fields are available for each entry in `debug.modelInvocations`.
 
 The run state progression can include `queued`, `running`,
 `waiting_for_tool`, `waiting_for_approval`, and `retry_scheduled` before a

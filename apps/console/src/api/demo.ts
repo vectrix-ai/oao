@@ -104,6 +104,25 @@ const supportConfig: AgentVersionConfig = {
       },
     },
   ],
+  harnessOperations: [
+    {
+      key: "extract_shipment",
+      description:
+        "Inspect the available shipment documents when a structured shipment record is needed.",
+      instructions:
+        "Read the materialized shipment documents from the shared workspace. Activate any relevant Agent-level Skill, verify each extracted fact, and return only the structured result.",
+      resultSchema: {
+        type: "object",
+        properties: {
+          shipmentReference: { type: "string" },
+          confidence: { type: "number" },
+        },
+        required: ["shipmentReference", "confidence"],
+        additionalProperties: false,
+      },
+      timeoutMs: 120_000,
+    },
+  ],
   sandbox: {
     enabled: true,
     provider: "daytona-primary",
@@ -302,6 +321,8 @@ const sessionsSeed: SessionDetail[] = [
     agentName: agentsSeed[0]!.name,
     inputTokens: 2841,
     outputTokens: 612,
+    cacheReadTokens: 1536,
+    cacheWriteTokens: 704,
     observedCostUsd: 0.0184,
     costProvenance: "provider_observed",
     createdAt: "2026-08-20T07:02:10.000Z",
@@ -409,6 +430,185 @@ const sessionsSeed: SessionDetail[] = [
         },
       },
       {
+        id: "event-harness-1",
+        kind: "tool",
+        source: "activity",
+        title: "Harness · extract_shipment",
+        summary: "3 model turns · 2 tool steps · validated result",
+        createdAt: "2026-08-20T07:02:14.300Z",
+        durationMs: 1_612,
+        status: "success",
+        harness: {
+          operationKey: "extract_shipment",
+          toolCallId: "tool-call-harness-demo",
+          phase: "completed",
+          startedAt: "2026-08-20T07:02:14.300Z",
+          completedAt: "2026-08-20T07:02:15.912Z",
+          taskCharacters: 126,
+          timeoutMs: 120_000,
+          resultValidated: true,
+          modelTurns: 3,
+          toolSteps: 2,
+          attribution: "partial",
+          parallel: {
+            groupId: "parallel:tool-call-harness-demo:tool-call-verify-demo",
+            count: 2,
+            index: 0,
+          },
+          steps: [
+            {
+              id: "event-harness-model-1",
+              kind: "reasoning",
+              title: "Model turn 1",
+              summary: "The model completed an internal turn.",
+              createdAt: "2026-08-20T07:02:14.320Z",
+              durationMs: 284,
+              status: "success",
+              tokens: { input: 312, output: 44 },
+            },
+            {
+              id: "event-harness-skill",
+              kind: "tool",
+              title: "Skill activated",
+              summary: "shipment-intake",
+              createdAt: "2026-08-20T07:02:14.610Z",
+              durationMs: 18,
+              status: "success",
+            },
+            {
+              id: "event-harness-model-2",
+              kind: "reasoning",
+              title: "Model turn 2",
+              summary: "The model completed an internal turn.",
+              createdAt: "2026-08-20T07:02:14.640Z",
+              durationMs: 302,
+              status: "success",
+              tokens: { input: 428, output: 51 },
+            },
+            {
+              id: "event-harness-read",
+              kind: "tool",
+              title: "read",
+              summary: "/workspace/shipments/order-4831.pdf",
+              createdAt: "2026-08-20T07:02:14.950Z",
+              durationMs: 36,
+              status: "success",
+            },
+            {
+              id: "event-harness-model-3",
+              kind: "reasoning",
+              title: "Model turn 3",
+              summary: "The model completed an internal turn.",
+              createdAt: "2026-08-20T07:02:15.000Z",
+              durationMs: 874,
+              status: "success",
+              tokens: { input: 516, output: 63 },
+            },
+          ],
+        },
+        payload: {
+          rendered: {
+            operationKey: "extract_shipment",
+            phase: "completed",
+            toolCallId: "tool-call-harness-demo",
+            taskCharacters: 126,
+            timeoutMs: 120_000,
+            durationMs: 1_612,
+            resultValidated: true,
+            modelTurns: 3,
+            toolSteps: 2,
+            parallelGroupId:
+              "parallel:tool-call-harness-demo:tool-call-verify-demo",
+            parallelCount: 2,
+            parallelIndex: 0,
+          },
+          raw: null,
+          redacted: true,
+          redactionReason:
+            "Harness prompts, structured results, and document contents are not copied into the session read model.",
+        },
+      },
+      {
+        id: "event-harness-2",
+        kind: "tool",
+        source: "activity",
+        title: "Harness · verify_shipment",
+        summary: "2 model turns · 1 tool step · validated result",
+        createdAt: "2026-08-20T07:02:14.350Z",
+        durationMs: 1_350,
+        status: "success",
+        harness: {
+          operationKey: "verify_shipment",
+          toolCallId: "tool-call-verify-demo",
+          phase: "completed",
+          startedAt: "2026-08-20T07:02:14.350Z",
+          completedAt: "2026-08-20T07:02:15.700Z",
+          taskCharacters: 98,
+          timeoutMs: 120_000,
+          resultValidated: true,
+          modelTurns: 2,
+          toolSteps: 1,
+          attribution: "partial",
+          parallel: {
+            groupId: "parallel:tool-call-harness-demo:tool-call-verify-demo",
+            count: 2,
+            index: 1,
+          },
+          steps: [
+            {
+              id: "event-verify-model-1",
+              kind: "reasoning",
+              title: "Model turn 1",
+              summary: "The model completed an internal turn.",
+              createdAt: "2026-08-20T07:02:14.370Z",
+              durationMs: 390,
+              status: "success",
+              tokens: { input: 298, output: 37 },
+            },
+            {
+              id: "event-verify-bash",
+              kind: "tool",
+              title: "bash",
+              summary: "verify shipment reference",
+              createdAt: "2026-08-20T07:02:14.770Z",
+              durationMs: 42,
+              status: "success",
+            },
+            {
+              id: "event-verify-model-2",
+              kind: "reasoning",
+              title: "Model turn 2",
+              summary: "The model completed an internal turn.",
+              createdAt: "2026-08-20T07:02:14.820Z",
+              durationMs: 842,
+              status: "success",
+              tokens: { input: 384, output: 48 },
+            },
+          ],
+        },
+        payload: {
+          rendered: {
+            operationKey: "verify_shipment",
+            phase: "completed",
+            toolCallId: "tool-call-verify-demo",
+            taskCharacters: 98,
+            timeoutMs: 120_000,
+            durationMs: 1_350,
+            resultValidated: true,
+            modelTurns: 2,
+            toolSteps: 1,
+            parallelGroupId:
+              "parallel:tool-call-harness-demo:tool-call-verify-demo",
+            parallelCount: 2,
+            parallelIndex: 1,
+          },
+          raw: null,
+          redacted: true,
+          redactionReason:
+            "Harness prompts, structured results, and document contents are not copied into the session read model.",
+        },
+      },
+      {
         id: "event-tool-1",
         kind: "tool",
         title: "lookup_customer",
@@ -488,6 +688,8 @@ const sessionsSeed: SessionDetail[] = [
     agentName: agentsSeed[1]!.name,
     inputTokens: 12941,
     outputTokens: 1833,
+    cacheReadTokens: 8440,
+    cacheWriteTokens: 2150,
     observedCostUsd: 0.1042,
     costProvenance: "provider_observed",
     createdAt: "2026-08-19T14:20:00.000Z",
@@ -554,6 +756,8 @@ const sessionsSeed: SessionDetail[] = [
     agentName: agentsSeed[2]!.name,
     inputTokens: 920,
     outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
     observedCostUsd: null,
     costProvenance: "unavailable",
     createdAt: "2026-08-18T11:08:00.000Z",
@@ -973,7 +1177,7 @@ export class DemoConsoleApi implements ConsoleApi {
     const agent = this.#agents.find((item) => item.id === id);
     if (!agent) throw new Error("Agent not found");
     this.#assertApprovedPreset(config.modelPreset);
-    const version = agent.version + 1;
+    const version = (agent.version ?? 0) + 1;
     const now = new Date().toISOString();
     const updated: AgentDetail = {
       ...agent,
@@ -1661,6 +1865,8 @@ export class DemoConsoleApi implements ConsoleApi {
   }) {
     const agent = this.#agents.find((item) => item.id === input.agentId);
     if (!agent) throw new Error("Agent not found");
+    if (agent.version == null)
+      throw new Error("Publish an Agent version before creating a session");
     this.#counter += 1;
     const now = new Date().toISOString();
     const messageId = `message_demo_${this.#counter}`;
@@ -1672,6 +1878,8 @@ export class DemoConsoleApi implements ConsoleApi {
       agentName: agent.name,
       inputTokens: 0,
       outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
       observedCostUsd: null,
       costProvenance: "unavailable",
       createdAt: now,

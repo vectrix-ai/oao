@@ -45,7 +45,10 @@ using their original provider.
 At each awaited agent-finish seam, OAO:
 
 1. asks Daytona for the sandbox workdir used by the agent and creates a
-   gzip-compressed tar archive of that directory inside the sandbox;
+   gzip-compressed tar archive of that directory inside the sandbox, excluding
+   Daytona's `.daytona/` runtime directory and the snapshot's standard root
+   shell/profile files (`.bash_logout`, `.bashrc`, `.face`, `.face.icon`,
+   `.profile`, and `.zshrc`);
 2. lists the regular files in that workdir and uploads a bounded JSON manifest
    beside the archive in the same tenant-scoped object-storage prefix;
 3. uploads the archive to the thread's deterministic tenant-scoped object key;
@@ -55,7 +58,10 @@ At each awaited agent-finish seam, OAO:
 
 The file manifest contains relative paths, names, and byte sizes. It is bound to
 the archive's byte length and SHA-256, and it stays in object storage. PostgreSQL
-does not store the workspace file list or any file contents.
+does not store the workspace file list or any file contents. The manifest uses
+the same exclusions as the archive, so ignored Daytona runtime files do not
+appear in the session's **Files** list. Restoration also applies these
+exclusions to older archives that may still contain those paths.
 
 The finish hook is at least once. Repeating it is safe because the object key is
 stable and PostgreSQL advances the recorded generation. A backup failure fails

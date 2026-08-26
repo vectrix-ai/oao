@@ -30,6 +30,10 @@ test("route builders scope resources to a project and allow a custom prefix", ()
     routes.mcpServerDiscovery("project/one", "server one"),
     "/platform/v2/projects/project%2Fone/mcp-servers/server%20one/discover",
   );
+  assert.equal(
+    routes.agentVersion("project/one", "agent one", "version/one"),
+    "/platform/v2/projects/project%2Fone/agents/agent%20one/versions/version%2Fone",
+  );
 });
 
 test("client returns the provider logout redirect and includes browser credentials", async () => {
@@ -428,6 +432,24 @@ test("client publishes the exact managed-agent configuration contract", async ()
       },
     ],
     skillVersionIds: ["00000000-0000-4000-8000-000000000042"],
+    harnessOperations: [
+      {
+        key: "review_changes",
+        description: "Review a focused set of repository changes.",
+        instructions:
+          "Inspect the requested files and return a structured review.",
+        resultSchema: {
+          type: "object",
+          properties: {
+            summary: { type: "string" },
+            approved: { type: "boolean" },
+          },
+          required: ["summary", "approved"],
+          additionalProperties: false,
+        },
+        timeoutMs: 45_000,
+      },
+    ],
     sandbox: {
       enabled: false,
       provider: "daytona-primary",

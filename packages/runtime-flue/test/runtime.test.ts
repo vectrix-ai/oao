@@ -9,12 +9,59 @@ import * as v from "valibot";
 import {
   FLUE_PACKAGE_VERSIONS,
   PostgresSkillRegistry,
+  createManagedHarnessOperationTool,
   createManagedRunDeliveredMessage,
   createProjectModelPresetActivator,
   managedRunFileSandboxPath,
   materializeManagedRunFiles,
   runtimeTesting,
 } from "../src/index.js";
+
+const harnessOperation = {
+  key: "extract_shipment",
+  description: "Extract one shipment document.",
+  instructions:
+    "Activate the shipment-extraction Skill, read the shared fixture, and return the shipment reference.",
+  resultSchema: {
+    type: "object" as const,
+    properties: { shipmentReference: { type: "string" } },
+    required: ["shipmentReference"],
+    additionalProperties: false as const,
+  },
+  timeoutMs: 5_000,
+};
+
+type HarnessOperationRun = (context: {
+  readonly data: { readonly task: string };
+  readonly harness: {
+    readonly sandbox?: {
+      readFile(path: string): Promise<string>;
+    };
+    readonly prompt: (
+      prompt: string,
+      options: {
+        readonly result: v.GenericSchema;
+        readonly signal: AbortSignal;
+      },
+    ) => Promise<{ readonly data: unknown }>;
+  };
+  readonly signal?: AbortSignal;
+  readonly step: {
+    do<T>(name: string, callback: () => Promise<T> | T): Promise<T>;
+  };
+  readonly log: {
+    info(message: string, attributes?: Record<string, unknown>): void;
+    warn(message: string, attributes?: Record<string, unknown>): void;
+  };
+  readonly toolCallId: string;
+}) => Promise<{ readonly output?: unknown }>;
+
+function harnessOperationRun(
+  operation = harnessOperation,
+): HarnessOperationRun {
+  return createManagedHarnessOperationTool(operation)
+    .run as HarnessOperationRun;
+}
 
 test("Flue packages are pinned to the planned release", () => {
   assert.deepEqual(FLUE_PACKAGE_VERSIONS, {
@@ -137,6 +184,161 @@ test("rich tool schemas guide the model and fail closed at execution", () => {
   assert.match(retryPrompt, /tool_retry_exhausted/u);
 });
 
+test("Harness Operations use one durable structured prompt over the inherited sandbox", async () => {
+  const files = new Map([
+    ["/.oao/attachments/run-1/shipment.txt", "shipment_reference=SHP-4815"],
+  ]);
+  const sharedSandbox = {
+    async readFile(path: string) {
+      const value = files.get(path);
+      if (!value) throw new Error("Fixture not found");
+      return value;
+    },
+  };
+  let promptCount = 0;
+  const completedSteps = new Map<string, unknown>();
+  const step = {
+    async do<T>(name: string, callback: () => Promise<T> | T): Promise<T> {
+      if (completedSteps.has(name)) return completedSteps.get(name) as T;
+      const value = await callback();
+      completedSteps.set(name, value);
+      return value;
+    },
+  };
+  const run = harnessOperationRun();
+  const context = {
+    data: { task: "Extract the already-materialized shipment document." },
+    toolCallId: "harness-call-1",
+    step,
+    log: { info() {}, warn() {} },
+    harness: {
+      sandbox: sharedSandbox,
+      async prompt(prompt: string, options: { result: v.GenericSchema }) {
+        promptCount += 1;
+        assert.match(prompt, /Activate the shipment-extraction Skill/u);
+        assert.match(prompt, /already-materialized shipment document/u);
+        assert.match(prompt, /full Skill catalog|mounted Skill catalog/u);
+        assert.match(prompt, /shared sandbox/u);
+        const content = await sharedSandbox.readFile(
+          "/.oao/attachments/run-1/shipment.txt",
+        );
+        assert.equal(content, "shipment_reference=SHP-4815");
+        return {
+          data: v.parse(options.result, {
+            shipmentReference: content.split("=")[1],
+          }),
+        };
+      },
+    },
+  };
+  assert.deepEqual(await run(context), {
+    output: { shipmentReference: "SHP-4815" },
+  });
+  assert.deepEqual(await run(context), {
+    output: { shipmentReference: "SHP-4815" },
+  });
+  assert.equal(promptCount, 1, "durable recovery must not repeat the prompt");
+});
+
+test("Harness Operations reject invalid structured output and nesting", async () => {
+  const run = harnessOperationRun();
+  await assert.rejects(
+    run({
+      data: { task: "Return malformed data." },
+      toolCallId: "invalid-output",
+      step: {
+        async do(_name, callback) {
+          return callback();
+        },
+      },
+      log: { info() {}, warn() {} },
+      harness: {
+        async prompt(_prompt, options) {
+          return { data: v.parse(options.result, { wrong: true }) };
+        },
+      },
+    }),
+    /shipmentReference/u,
+  );
+
+  const nested = harnessOperationRun({
+    ...harnessOperation,
+    key: "verify_shipment",
+  });
+  await assert.rejects(
+    run({
+      data: { task: "Attempt recursion." },
+      toolCallId: "outer",
+      step: {
+        async do(_name, callback) {
+          return callback();
+        },
+      },
+      log: { info() {}, warn() {} },
+      harness: {
+        async prompt() {
+          await nested({
+            data: { task: "Nested work." },
+            toolCallId: "inner",
+            step: {
+              async do(_name, callback) {
+                return callback();
+              },
+            },
+            log: { info() {}, warn() {} },
+            harness: {
+              async prompt() {
+                return { data: {} };
+              },
+            },
+          });
+          return { data: { shipmentReference: "unreachable" } };
+        },
+      },
+    }),
+    /Nested Harness Operation calls are not allowed/u,
+  );
+});
+
+test("Harness Operations honor timeout and parent cancellation signals", async () => {
+  const run = harnessOperationRun({ ...harnessOperation, timeoutMs: 1_000 });
+  const waitForAbort = (signal: AbortSignal) =>
+    new Promise<never>((_resolve, reject) => {
+      if (signal.aborted) reject(signal.reason);
+      else
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+    });
+  const base = {
+    data: { task: "Wait until stopped." },
+    toolCallId: "timeout",
+    step: {
+      async do<T>(_name: string, callback: () => Promise<T> | T) {
+        return callback();
+      },
+    },
+    log: { info() {}, warn() {} },
+    harness: {
+      async prompt(_prompt: string, options: { signal: AbortSignal }) {
+        return waitForAbort(options.signal);
+      },
+    },
+  };
+  await assert.rejects(run(base), (error) => {
+    assert.equal((error as DOMException).name, "TimeoutError");
+    return true;
+  });
+
+  const controller = new AbortController();
+  const cancelled = run({ ...base, signal: controller.signal });
+  controller.abort(new DOMException("cancelled", "AbortError"));
+  await assert.rejects(cancelled, (error) => {
+    assert.equal((error as DOMException).name, "AbortError");
+    return true;
+  });
+});
+
 test("runtime projections retain full model timing and thinking text", () => {
   const timing = runtimeTesting.turnWindow({
     timestamp: "2026-08-20T17:31:17.187Z",
@@ -154,6 +356,53 @@ test("runtime projections retain full model timing and thinking text", () => {
       ],
     }),
     "Count the words first.\n\nThen count the letters.",
+  );
+});
+
+test("runtime projections explain exact provider finish errors safely", () => {
+  assert.deepEqual(
+    runtimeTesting.modelInvocationDiagnostics(
+      {
+        finishReason: "error",
+        error: { message: "Provider finish_reason: content_filter" },
+      },
+      true,
+    ),
+    {
+      finishReason: "error",
+      providerFinishReason: "content_filter",
+      errorExplanation:
+        "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run.",
+    },
+  );
+  assert.deepEqual(
+    runtimeTesting.modelInvocationDiagnostics(
+      {
+        finishReason: "error",
+        providerFinishReason: "provider-specific_stop",
+      },
+      true,
+    ),
+    {
+      finishReason: "error",
+      providerFinishReason: "provider-specific_stop",
+      errorExplanation:
+        'The provider ended the response with "provider-specific_stop", which OAO treats as an incomplete model response and a failed run.',
+    },
+  );
+  assert.deepEqual(
+    runtimeTesting.modelInvocationDiagnostics(
+      {
+        finishReason: "error",
+        error: { message: "Provider finish_reason: unsafe reason with spaces" },
+      },
+      true,
+    ),
+    {
+      finishReason: "error",
+      errorExplanation:
+        "The model invocation ended before a complete response was returned, so OAO failed the run.",
+    },
   );
 });
 

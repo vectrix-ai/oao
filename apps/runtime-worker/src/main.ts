@@ -69,6 +69,8 @@ export async function startRuntimeWorker(input: {
   readonly fakeResponses?: readonly FauxResponseStep[];
   readonly platformTools?: ReadonlyMap<string, PlatformToolHandler>;
   readonly mcpRemote?: McpRemotePort;
+  /** Tests may admit one explicit run without claiming unrelated queued work. */
+  readonly backgroundWakes?: boolean;
 }): Promise<RuntimeWorkerHandle> {
   const env = input.env ?? process.env;
   const pool = createPool(input.databaseUrl);
@@ -213,8 +215,10 @@ export async function startRuntimeWorker(input: {
     (job) => orchestrator.handleWake(job),
     { workerId: `runtime-${process.pid}`, pollMilliseconds: 100 },
   );
-  await orchestrator.enqueueRecovery();
-  wakeWorker.start();
+  if (input.backgroundWakes !== false) {
+    await orchestrator.enqueueRecovery();
+    wakeWorker.start();
+  }
 
   let ready = true;
   let server: ServerType | undefined;

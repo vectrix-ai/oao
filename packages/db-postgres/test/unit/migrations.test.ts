@@ -407,3 +407,86 @@ test("MCP runtime hardening remains additive after the immutable base migration"
   assert.match(sql, /CREATE FUNCTION oao\.mcp_tool_name/u);
   assert.doesNotMatch(sql, /DROP TABLE|DELETE FROM/u);
 });
+
+test("cached token usage migration is additive and rejects negative counts", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0024_cached_token_usage.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /ALTER TABLE oao\.model_invocations/u);
+  assert.match(sql, /ALTER TABLE oao\.session_summaries/u);
+  assert.match(
+    sql,
+    /ADD COLUMN cache_read_tokens bigint NOT NULL DEFAULT 0/gmu,
+  );
+  assert.match(
+    sql,
+    /ADD COLUMN cache_write_tokens bigint NOT NULL DEFAULT 0/gmu,
+  );
+  assert.match(sql, /CHECK \(cache_read_tokens >= 0\)/gmu);
+  assert.match(sql, /CHECK \(cache_write_tokens >= 0\)/gmu);
+  assert.doesNotMatch(sql, /DROP TABLE|DROP COLUMN|DELETE FROM/u);
+});
+
+test("Harness Operations are immutable version-scoped rows with tenant isolation", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0025_harness_operations.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE oao\.agent_version_harness_operations/u);
+  assert.match(
+    sql,
+    /PRIMARY KEY \(organization_id, project_id, agent_version_id, operation_key\)/u,
+  );
+  assert.match(sql, /result_schema jsonb NOT NULL/u);
+  assert.match(sql, /timeout_ms BETWEEN 1000 AND 300000/u);
+  assert.match(sql, /agent_version_harness_operations_immutable/u);
+  assert.match(sql, /capture_agent_version_harness_operations/u);
+  assert.match(sql, /oao\.mcp_tool_name/u);
+  assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
+  assert.match(
+    sql,
+    /GRANT SELECT, INSERT ON oao\.agent_version_harness_operations TO oao_app/u,
+  );
+  assert.doesNotMatch(sql, /skill_version_id|DROP TABLE|DELETE FROM/u);
+  assert.equal(
+    createHash("sha256").update(sql).digest("hex"),
+    "6f96b804fc8b4e54e6733ab665272d42b1c721d6fc6c6fce9e9e9f84f1b60ef3",
+    "0025 is already applied locally and must remain byte-for-byte immutable",
+  );
+});
+
+test("Harness Operation events are added without rewriting their schema migration", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0026_harness_operation_events.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(sql, /harness\.operation_started/u);
+  assert.match(sql, /harness\.operation_completed/u);
+  assert.match(sql, /harness\.operation_failed/u);
+  assert.match(sql, /harness\.operation_cancelled/u);
+  assert.match(sql, /harness\.operation_timed_out/u);
+  assert.doesNotMatch(
+    sql,
+    /agent_version_harness_operations|DROP TABLE|DELETE FROM/u,
+  );
+});
+
+test("Harness inner-step events extend the immutable lifecycle vocabulary additively", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0027_harness_operation_steps.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(sql, /harness\.operation_step/u);
+  assert.match(sql, /ALTER TABLE oao\.product_events/u);
+  assert.doesNotMatch(
+    sql,
+    /agent_version_harness_operations|DROP TABLE|DELETE FROM|UPDATE /u,
+  );
+});

@@ -185,6 +185,25 @@ test("workspace backup and restore use Daytona's model-facing workdir", async ()
     fs: {
       downloadFile: async () => Buffer.from([31, 139, 8, 0]),
       listFiles: async () => [
+        ...[
+          ".bash_logout",
+          ".bashrc",
+          ".face",
+          ".face.icon",
+          ".profile",
+          ".zshrc",
+        ].map((name) => ({
+          name,
+          path: `/root/${name}`,
+          isDir: false,
+          size: 10,
+        })),
+        {
+          name: "output.log",
+          path: "/root/.daytona/sessions/entrypoint/output.log",
+          isDir: false,
+          size: 12,
+        },
         {
           name: ".oao",
           path: "/root/.oao",
@@ -225,6 +244,16 @@ test("workspace backup and restore use Daytona's model-facing workdir", async ()
   );
   assert.equal(capture?.cwd, "/root");
   assert.doesNotMatch(capture?.command ?? "", /home\/daytona/u);
+  for (const path of [
+    ".daytona",
+    ".bash_logout",
+    ".bashrc",
+    ".face",
+    ".face.icon",
+    ".profile",
+    ".zshrc",
+  ])
+    assert.ok(capture?.command.includes(`--exclude='./${path}'`));
   assert.deepEqual(await provider.listWorkspaceFiles(handle), [
     {
       name: "input.xlsx",
@@ -237,10 +266,11 @@ test("workspace backup and restore use Daytona's model-facing workdir", async ()
   commands.length = 0;
   await provider.restoreWorkspace(handle, new Uint8Array([31, 139, 8, 0]));
   const restore = commands.find((entry) =>
-    entry.command.includes("tar --no-same-owner"),
+    entry.command.includes("--no-same-owner --no-same-permissions -xzf"),
   );
   assert.equal(restore?.cwd, "/root");
   assert.doesNotMatch(restore?.command ?? "", /home\/daytona/u);
+  assert.match(restore?.command ?? "", /--exclude='\.\/\.daytona'/u);
   assert.deepEqual(uploads, [
     {
       path: "/tmp/oao-workspace-restore.tar.gz",

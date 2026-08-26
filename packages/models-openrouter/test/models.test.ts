@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Provider } from "@earendil-works/pi-ai";
+import type { OpenAICompletionsCompat, Provider } from "@earendil-works/pi-ai";
 import {
   DEFAULT_LOCAL_PRESETS,
   ImmutableModelPresetRegistry,
@@ -116,6 +116,65 @@ test("each immutable preset owns its routing variant even for the same model", (
   assert.notEqual(
     registry.resolve("zdr").model,
     registry.resolve("fallback").model,
+  );
+});
+
+test("OpenRouter Anthropic presets send cache markers and stable session affinity", async () => {
+  const provider = createOpenRouterPresetProviders([
+    {
+      key: "cached-claude",
+      model: "openrouter/anthropic/claude-sonnet-4.6",
+      routing: { zdr: true },
+    },
+  ])[0];
+  const model = provider?.getModels()[0];
+  assert.ok(provider);
+  assert.ok(model);
+  assert.equal(model.compat?.cacheControlFormat, "anthropic");
+  assert.equal(model.compat?.sendSessionAffinityHeaders, true);
+  assert.equal(model.compat?.sessionAffinityFormat, "openrouter");
+
+  let payload: unknown;
+  let request: Request | undefined;
+  const response = await provider
+    .stream(
+      model,
+      {
+        systemPrompt: "Stable extraction instructions and source document.",
+        messages: [
+          {
+            role: "user",
+            content: "Extract the shipment references.",
+            timestamp: 1,
+          },
+        ],
+      },
+      {
+        apiKey: "sk-openrouter-test",
+        sessionId: "session-cache-affinity",
+        maxRetries: 0,
+        onPayload: (value) => {
+          payload = value;
+        },
+        fetch: async (input, init) => {
+          request = new Request(input, init);
+          return new Response(
+            JSON.stringify({ error: { message: "expected test stop" } }),
+            {
+              status: 503,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        },
+      },
+    )
+    .result();
+
+  assert.equal(response.stopReason, "error");
+  assert.equal(request?.headers.get("x-session-id"), "session-cache-affinity");
+  assert.match(
+    JSON.stringify(payload),
+    /"cache_control":\{"type":"ephemeral"\}/u,
   );
 });
 
@@ -284,13 +343,17 @@ test("provider-neutral policy maps onto the OpenRouter routing contract", () => 
 
 function projectRegistry() {
   const registered: string[] = [];
+  const providers: Provider[] = [];
   const registry = new ProjectModelPresetRegistry({
     deployment: new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
       hostedEnabled: false,
     }),
-    registerProvider: (provider) => registered.push(provider.id),
+    registerProvider: (provider) => {
+      registered.push(provider.id);
+      providers.push(provider);
+    },
   });
-  return { registered, registry };
+  return { providers, registered, registry };
 }
 
 const tenantA = {
@@ -311,7 +374,7 @@ const tenantB = {
 };
 
 test("project presets resolve only inside their own project", () => {
-  const { registered, registry } = projectRegistry();
+  const { providers, registered, registry } = projectRegistry();
   registry.activate({
     ...tenantA,
     key: "claude-sonnet-4-6-zdr-v1",
@@ -326,6 +389,13 @@ test("project presets resolve only inside their own project", () => {
   );
   assert.match(resolved.model, /^project-model-[0-9a-f]{24}\//u);
   assert.equal(registered.length, 1);
+  const projectModel = providers[0]?.getModels()[0];
+  assert.ok(projectModel);
+  if (projectModel.api !== "openai-completions")
+    throw new Error("Expected an OpenRouter completions model");
+  const compat = projectModel.compat as OpenAICompletionsCompat | undefined;
+  assert.equal(compat?.cacheControlFormat, "anthropic");
+  assert.equal(compat?.sendSessionAffinityHeaders, true);
   assert.throws(
     () => registry.resolve("claude-sonnet-4-6-zdr-v1", tenantB),
     /not approved/u,

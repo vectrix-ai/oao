@@ -1450,6 +1450,14 @@ function SessionSidebar({
             <dd className="mono">{formatNumber(session.outputTokens)}</dd>
           </div>
           <div>
+            <dt>Cache read tokens</dt>
+            <dd className="mono">{formatNumber(session.cacheReadTokens)}</dd>
+          </div>
+          <div>
+            <dt>Cache write tokens</dt>
+            <dd className="mono">{formatNumber(session.cacheWriteTokens)}</dd>
+          </div>
+          <div>
             <dt>Cost provenance</dt>
             <dd>{humanize(session.costProvenance)}</dd>
           </div>
@@ -1475,7 +1483,7 @@ function threadMarkdown(session: SessionDetail): string {
     `- Status: ${humanize(session.status)}`,
     `- Created: ${formatDate(session.createdAt)}`,
     `- Last activity: ${formatDate(session.lastActivityAt)}`,
-    `- Usage: ${formatNumber(session.inputTokens)} in / ${formatNumber(session.outputTokens)} out`,
+    `- Usage: ${formatNumber(session.inputTokens)} in / ${formatNumber(session.outputTokens)} out / ${formatNumber(session.cacheReadTokens)} cache read / ${formatNumber(session.cacheWriteTokens)} cache write`,
     `- Cost: ${formatCost(session.observedCostUsd)} (${humanize(session.costProvenance)})`,
     "",
   ];
@@ -1557,7 +1565,21 @@ interface MinimapSegment {
   readonly durationMs: number;
   readonly offsetMs: number;
   readonly weight: number;
+  readonly parallel?: {
+    readonly groupId: string;
+    readonly count: number;
+    readonly index: number;
+  };
 }
+
+interface MinimapParallelStack {
+  readonly kind: "parallel";
+  readonly key: string;
+  readonly weight: number;
+  readonly segments: readonly MinimapSegment[];
+}
+
+type MinimapItem = MinimapSegment | MinimapParallelStack;
 
 const IDLE_MIN_MS = 3000;
 
@@ -1644,10 +1666,59 @@ function minimapSegments(
       durationMs: duration,
       offsetMs: segmentStart - sessionStart,
       weight: clamp(Math.sqrt(Math.max(duration, 500)), 26, 140),
+      ...(event.harness?.parallel ? { parallel: event.harness.parallel } : {}),
     });
     previousEnd = Math.max(previousEnd, at + own, at);
   }
   return segments;
+}
+
+/**
+ * Parallel Harness Operations occupy one elapsed-time slot. Their individual
+ * buttons remain clickable, but stack vertically instead of implying that one
+ * operation started after the other.
+ */
+function minimapItems(
+  segments: readonly MinimapSegment[],
+): readonly MinimapItem[] {
+  const parallelGroups = new Map<string, MinimapSegment[]>();
+  for (const segment of segments) {
+    const groupId = segment.parallel?.groupId;
+    if (!groupId) continue;
+    const group = parallelGroups.get(groupId) ?? [];
+    group.push(segment);
+    parallelGroups.set(groupId, group);
+  }
+
+  const renderedGroups = new Set<string>();
+  return segments.flatMap((segment): readonly MinimapItem[] => {
+    const groupId = segment.parallel?.groupId;
+    if (!groupId || renderedGroups.has(groupId))
+      return groupId ? [] : [segment];
+    renderedGroups.add(groupId);
+    const group = [...(parallelGroups.get(groupId) ?? [])].sort(
+      (left, right) =>
+        (left.parallel?.index ?? 0) - (right.parallel?.index ?? 0),
+    );
+    if (group.length < 2) return [segment];
+    return [
+      {
+        kind: "parallel",
+        key: groupId,
+        weight: Math.max(...group.map((item) => item.weight)),
+        segments: group,
+      },
+    ];
+  });
+}
+
+function parallelSegmentWidth(
+  segment: MinimapSegment,
+  group: readonly MinimapSegment[],
+): string {
+  const longestDuration = Math.max(0, ...group.map((item) => item.durationMs));
+  if (longestDuration === 0) return "100%";
+  return `${Math.max(16, (segment.durationMs / longestDuration) * 100)}%`;
 }
 
 /**
@@ -1664,6 +1735,7 @@ function SessionMinimap({
   readonly onJump: (id: string) => void;
 }) {
   const segments = useMemo(() => minimapSegments(events), [events]);
+  const items = useMemo(() => minimapItems(segments), [segments]);
   const totalDurationMs = useMemo(
     () =>
       segments.reduce(
@@ -1687,7 +1759,11 @@ function SessionMinimap({
   } | null>(null);
   const showTip = (segment: MinimapSegment, target: HTMLElement) => {
     const width = wrap.current?.clientWidth ?? 0;
-    const center = target.offsetLeft + target.offsetWidth / 2;
+    const wrapBounds = wrap.current?.getBoundingClientRect();
+    const targetBounds = target.getBoundingClientRect();
+    const center = wrapBounds
+      ? targetBounds.left - wrapBounds.left + targetBounds.width / 2
+      : target.offsetLeft + target.offsetWidth / 2;
     setTip({ segment, left: clampTip(center, width) });
   };
   const tipMeta = (segment: MinimapSegment) =>
@@ -1736,27 +1812,56 @@ function SessionMinimap({
         role="group"
         aria-label="Session timeline"
       >
-        {segments.map((segment) =>
-          segment.kind === "idle" ? (
+        {items.map((item) =>
+          item.kind === "parallel" ? (
+            <div
+              key={item.key}
+              className="minimap-stack minimap-stack--parallel"
+              role="group"
+              aria-label={`${item.segments.length} parallel Harness Operations`}
+              style={{
+                flexGrow: item.weight,
+                gridTemplateRows: `repeat(${item.segments.length}, minmax(3px, 1fr))`,
+              }}
+            >
+              {item.segments.map((segment) => (
+                <button
+                  key={segment.key}
+                  type="button"
+                  className={`minimap-seg minimap-seg--${segment.actor} minimap-seg--parallel-harness${segment.id === highlightId ? " minimap-seg--hot" : ""}`}
+                  style={{
+                    width: parallelSegmentWidth(segment, item.segments),
+                  }}
+                  aria-label={`Jump to ${segment.chip}: ${segment.snippet}`}
+                  onMouseEnter={(event) =>
+                    showTip(segment, event.currentTarget)
+                  }
+                  onFocus={(event) => showTip(segment, event.currentTarget)}
+                  onBlur={() => setTip(null)}
+                  onClick={() => onJump(segment.id!)}
+                />
+              ))}
+            </div>
+          ) : item.kind === "idle" ? (
             <span
-              key={segment.key}
+              key={item.key}
               role="img"
               className="minimap-seg minimap-seg--idle"
-              style={{ flexGrow: segment.weight }}
-              aria-label={`Idle for ${formatCompactDuration(segment.durationMs)}`}
-              onMouseEnter={(event) => showTip(segment, event.currentTarget)}
+              style={{ flexGrow: item.weight }}
+              aria-label={`Idle for ${formatCompactDuration(item.durationMs)}`}
+              onMouseEnter={(event) => showTip(item, event.currentTarget)}
             />
           ) : (
             <button
-              key={segment.key}
+              key={item.key}
               type="button"
-              className={`minimap-seg minimap-seg--${segment.actor}${segment.id === highlightId ? " minimap-seg--hot" : ""}`}
-              style={{ flexGrow: segment.weight }}
-              aria-label={`Jump to ${segment.chip}: ${segment.snippet}`}
-              onMouseEnter={(event) => showTip(segment, event.currentTarget)}
-              onFocus={(event) => showTip(segment, event.currentTarget)}
+              className={`minimap-seg minimap-seg--${item.actor}${item.id === highlightId ? " minimap-seg--hot" : ""}`}
+              style={{ flexGrow: item.weight }}
+              aria-label={`Jump to ${item.chip}: ${item.snippet}`}
+              onMouseEnter={(event) => showTip(item, event.currentTarget)}
+              onFocus={(event) => showTip(item, event.currentTarget)}
               onBlur={() => setTip(null)}
-              onClick={() => onJump(segment.id!)}
+              onClick={() => onJump(item.id!)}
             />
           ),
         )}
@@ -1994,6 +2099,16 @@ function ActivityRow({
   readonly flashed?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  if (event.harness)
+    return (
+      <HarnessActivity
+        event={event}
+        flashed={flashed}
+        open={open}
+        onOpen={() => setOpen(true)}
+        onClose={() => setOpen(false)}
+      />
+    );
   if (event.kind === "reasoning")
     return (
       <ReasoningActivity
@@ -2076,6 +2191,203 @@ function ActivityRow({
   );
 }
 
+/** One invocation stays one row; its bounded scratch-loop detail opens in a modal. */
+function HarnessActivity({
+  event,
+  flashed,
+  open,
+  onOpen,
+  onClose,
+}: {
+  readonly event: TimelineEvent;
+  readonly flashed: boolean;
+  readonly open: boolean;
+  readonly onOpen: () => void;
+  readonly onClose: () => void;
+}) {
+  const harness = event.harness!;
+  const statusLabel =
+    event.status === "success"
+      ? "Completed"
+      : event.status === "error"
+        ? "Failed"
+        : event.status === "pending"
+          ? "Running"
+          : humanize(harness.phase);
+  const parallelPosition = harness.parallel
+    ? harness.parallel.index === 0
+      ? "first"
+      : harness.parallel.index === harness.parallel.count - 1
+        ? "last"
+        : "middle"
+    : null;
+  return (
+    <article
+      id={`event-${event.id}`}
+      className={`activity activity--harness activity--${event.status}${parallelPosition ? ` activity--harness-parallel activity--harness-parallel-${parallelPosition}` : ""}${flashed ? " is-flashed" : ""}`}
+    >
+      <button
+        type="button"
+        className="activity-row activity-row--harness"
+        aria-haspopup="dialog"
+        onClick={onOpen}
+      >
+        <ChevronRight className="caret" size={13} aria-hidden="true" />
+        <span className="activity-icon" aria-hidden="true">
+          <Layers size={13} />
+        </span>
+        <span className="activity-name">{event.title}</span>
+        <span className="activity-summary">{event.summary}</span>
+        {harness.parallel ? (
+          <span className="activity-parallel-badge">
+            {formatNumber(harness.parallel.count)} parallel
+          </span>
+        ) : null}
+        {event.status === "error" ? (
+          <span className="activity-flag activity-flag--error">Failed</span>
+        ) : event.status === "pending" ? (
+          <span className="activity-flag activity-flag--pending">Running</span>
+        ) : null}
+        <span className="activity-duration">
+          {formatCompactDuration(event.durationMs)}
+        </span>
+      </button>
+      {open ? (
+        <Dialog
+          title={event.title}
+          description="Temporary scratch conversation using the parent Agent's model, tools, Skills, and live sandbox."
+          wide
+          onClose={onClose}
+          footer={<Button onClick={onClose}>Close</Button>}
+        >
+          <dl className="detail-facts harness-facts">
+            <div>
+              <dt>Status</dt>
+              <dd>{statusLabel}</dd>
+            </div>
+            <div>
+              <dt>Duration</dt>
+              <dd className="mono">{formatDuration(event.durationMs)}</dd>
+            </div>
+            <div>
+              <dt>Model turns</dt>
+              <dd className="mono">{formatNumber(harness.modelTurns)}</dd>
+            </div>
+            <div>
+              <dt>Tool steps</dt>
+              <dd className="mono">{formatNumber(harness.toolSteps)}</dd>
+            </div>
+            {harness.parallel ? (
+              <div>
+                <dt>Parallel batch</dt>
+                <dd className="mono">
+                  {formatNumber(harness.parallel.index + 1)} of{" "}
+                  {formatNumber(harness.parallel.count)}
+                </dd>
+              </div>
+            ) : null}
+            <div>
+              <dt>Started</dt>
+              <dd>{formatTimestamp(harness.startedAt)}</dd>
+            </div>
+            <div>
+              <dt>Completed</dt>
+              <dd>
+                {harness.completedAt
+                  ? formatTimestamp(harness.completedAt)
+                  : "Still running"}
+              </dd>
+            </div>
+            {harness.taskCharacters !== undefined ? (
+              <div>
+                <dt>Task size</dt>
+                <dd className="mono">
+                  {formatNumber(harness.taskCharacters)} characters
+                </dd>
+              </div>
+            ) : null}
+            {harness.timeoutMs !== undefined ? (
+              <div>
+                <dt>Timeout</dt>
+                <dd className="mono">{formatDuration(harness.timeoutMs)}</dd>
+              </div>
+            ) : null}
+            {harness.resultValidated !== undefined ? (
+              <div>
+                <dt>Result validated</dt>
+                <dd>{harness.resultValidated ? "Yes" : "No"}</dd>
+              </div>
+            ) : null}
+            {harness.toolCallId ? (
+              <div>
+                <dt>Tool call</dt>
+                <dd className="mono">{shortId(harness.toolCallId)}</dd>
+              </div>
+            ) : null}
+          </dl>
+
+          <section
+            className="harness-steps"
+            aria-labelledby={`steps-${event.id}`}
+          >
+            <header>
+              <div>
+                <h3 id={`steps-${event.id}`}>Internal activity</h3>
+                <p>
+                  Sequential model and tool turns attributed to this invocation.
+                </p>
+              </div>
+              <span className="mono">
+                {formatNumber(harness.steps.length)} steps
+              </span>
+            </header>
+            {harness.steps.length > 0 ? (
+              <ol aria-label={`Internal activity for ${harness.operationKey}`}>
+                {harness.steps.map((step) => (
+                  <li
+                    key={step.id}
+                    className={`harness-step harness-step--${step.status}`}
+                  >
+                    <span className="activity-icon" aria-hidden="true">
+                      <EventIcon kind={step.kind} />
+                    </span>
+                    <div>
+                      <strong>{step.title}</strong>
+                      <p>{step.summary}</p>
+                    </div>
+                    <small>
+                      {step.tokens
+                        ? `${formatNumber(step.tokens.input)} in / ${formatNumber(step.tokens.output)} out · `
+                        : ""}
+                      {formatCompactDuration(step.durationMs)}
+                    </small>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="harness-empty">
+                No attributable internal steps were recorded.
+              </p>
+            )}
+          </section>
+
+          {harness.attribution === "partial" ? (
+            <p className="harness-notice harness-notice--warning">
+              Some activity overlapped another parallel Harness Operation and
+              remains in the parent timeline instead of being assigned
+              speculatively.
+            </p>
+          ) : null}
+          <p className="harness-notice">
+            Detailed prompts, scratch messages, structured results, Skill
+            contents, and document contents are not shown here.
+          </p>
+        </Dialog>
+      ) : null}
+    </article>
+  );
+}
+
 /** Reasoning reads as transcript prose with only the facts useful to a user. */
 function ReasoningActivity({
   event,
@@ -2148,11 +2460,61 @@ function ReasoningActivity({
 /** Payload keys already rendered as dedicated blocks in the tool detail. */
 const TOOL_DETAIL_KEYS = new Set(["arguments", "result", "exitCode"]);
 
+/** Parse only JSON containers; JSON-looking primitives remain ordinary text. */
+function parseJsonContainer(value: string): unknown | undefined {
+  const trimmed = value.trim();
+  const isContainer =
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"));
+  if (!isContainer) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    return parsed !== null && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Decode JSON strings nested inside a public response without changing storage. */
+function decodeToolResponse(value: unknown, depth = 0): unknown {
+  if (depth >= 8) return value;
+  if (typeof value === "string") {
+    const parsed = parseJsonContainer(value);
+    return parsed === undefined ? value : decodeToolResponse(parsed, depth + 1);
+  }
+  if (Array.isArray(value))
+    return value.map((item) => decodeToolResponse(item, depth + 1));
+  if (value !== null && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        decodeToolResponse(item, depth + 1),
+      ]),
+    );
+  return value;
+}
+
+/** Connector adapters often wrap one JSON-string response in `{ result }`. */
+function readableToolResponse(value: unknown): unknown {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const entries = Object.entries(value);
+    if (
+      entries.length === 1 &&
+      entries[0]?.[0] === "result" &&
+      typeof entries[0][1] === "string"
+    ) {
+      const parsed = parseJsonContainer(entries[0][1]);
+      if (parsed !== undefined) return decodeToolResponse(parsed);
+    }
+  }
+  return decodeToolResponse(value);
+}
+
 /**
  * Tool use shows its input and outcome directly, without inspector tabs.
  *
  * Any tool event with a safe payload can be opened: caller tool calls show
- * their arguments and result as formatted JSON, and events that only carry
+ * their arguments and response as formatted JSON, and events that only carry
  * other metadata (Skill activations, sandbox reads) list that instead.
  */
 function ToolActivity({
@@ -2246,11 +2608,11 @@ function ToolActivity({
               ) : null}
               {"result" in rendered ? (
                 <div>
-                  <dt>Result</dt>
+                  <dt>Response</dt>
                   <dd>
                     <JsonBlock
-                      value={rendered.result}
-                      label={`Result of ${event.title}`}
+                      value={readableToolResponse(rendered.result)}
+                      label={`Response from ${event.title}`}
                     />
                   </dd>
                 </div>
@@ -2300,6 +2662,9 @@ function detailType(event: TimelineEvent): string {
 
 /** Read-model payload keys are camelCase, which `humanize` alone leaves shouting. */
 function payloadLabel(key: string): string {
+  if (key === "finishReason") return "Finish reason";
+  if (key === "providerFinishReason") return "Provider finish reason";
+  if (key === "errorExplanation") return "Why this is an error";
   return humanize(key.replaceAll(/([a-z0-9])([A-Z])/gu, "$1 $2"));
 }
 

@@ -12,6 +12,7 @@ import {
   UpdateProjectMemberInputSchema,
   PublicPrincipalSchema,
   RunSchema,
+  SessionSchema,
   ToolCallSchema,
   parseCreateModelPresetInput,
   parseCreateProjectSandboxProviderInput,
@@ -109,6 +110,45 @@ test("run and event public contracts accept safe wire representations", () => {
       occurredAt: timestamp,
     }).projectPosition,
     "9007199254740993",
+  );
+  assert.equal(
+    v.parse(ProductEventSchema, {
+      id,
+      organizationId: id,
+      projectId: id,
+      aggregateType: "run",
+      aggregateId: id,
+      aggregateSequence: 2,
+      projectPosition: "9007199254740994",
+      kind: "harness.operation_completed",
+      publicPayload: {
+        operationKey: "extract_shipment",
+        resultValidated: true,
+      },
+      occurredAt: timestamp,
+    }).kind,
+    "harness.operation_completed",
+  );
+});
+
+test("session contract exposes non-negative cached token usage", () => {
+  const session = {
+    id,
+    organizationId: id,
+    projectId: id,
+    threadId: id,
+    agentVersionId: id,
+    status: "active" as const,
+    inputTokens: 120,
+    outputTokens: 24,
+    cacheReadTokens: 80,
+    cacheWriteTokens: 16,
+    createdAt: timestamp,
+    lastActivityAt: timestamp,
+  };
+  assert.equal(v.parse(SessionSchema, session).cacheReadTokens, 80);
+  assert.throws(() =>
+    v.parse(SessionSchema, { ...session, cacheWriteTokens: -1 }),
   );
 });
 
@@ -487,6 +527,111 @@ test("agent publications pin a unique, bounded delegate roster", () => {
           },
         },
       ],
+    }),
+  );
+});
+
+test("agent publications pin focused Harness Operations with structured results", () => {
+  const base = {
+    systemPrompt: "Coordinate shipment extraction with focused operations.",
+    modelPreset: "coordinator-v1",
+    tools: [],
+    sandbox: {
+      enabled: true,
+      provider: "daytona-primary",
+      snapshotId: id,
+      network: "none" as const,
+    },
+    limits: { maxTurns: PLATFORM_MAX_TURNS, timeoutMs: 60_000 },
+  };
+  const operation = {
+    key: "extract_shipment",
+    description: "Extract normalized shipment facts from mounted documents.",
+    instructions:
+      "Inspect the original mounted shipment documents and return verified facts.",
+    resultSchema: {
+      type: "object" as const,
+      properties: {
+        shipmentReference: { type: "string" },
+      },
+      required: ["shipmentReference"],
+      additionalProperties: false,
+    },
+    timeoutMs: 45_000,
+  };
+  const parsed = parseManagedAgentSnapshotForPublication({
+    ...base,
+    harnessOperations: [operation],
+  });
+  assert.deepEqual(parsed.harnessOperations, [operation]);
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...base,
+      harnessOperations: [operation, operation],
+    }),
+  );
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...base,
+      harnessOperations: [{ ...operation, key: "finish" }],
+    }),
+  );
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...base,
+      tools: [
+        {
+          schemaVersion: 1,
+          name: operation.key,
+          description: "Collides with the Harness Operation.",
+          owner: "platform",
+          approval: "never",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            required: [],
+            additionalProperties: false,
+          },
+          outputSchema: {
+            type: "object",
+            properties: {},
+            required: [],
+            additionalProperties: false,
+          },
+        },
+      ],
+      harnessOperations: [operation],
+    }),
+  );
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...base,
+      harnessOperations: [
+        {
+          ...operation,
+          resultSchema: { type: "string" },
+        },
+      ],
+    }),
+  );
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...base,
+      harnessOperations: [
+        {
+          ...operation,
+          resultSchema: {
+            ...operation.resultSchema,
+            examples: ["x".repeat(65_536)],
+          },
+        },
+      ],
+    }),
+  );
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...base,
+      harnessOperations: [{ ...operation, timeoutMs: 300_001 }],
     }),
   );
 });

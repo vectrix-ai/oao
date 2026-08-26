@@ -99,12 +99,61 @@ const service = "00000000-0000-4000-8000-000000000099" as PrincipalId;
 const objectSchema = (properties: Record<string, Record<string, unknown>>) => ({
   type: "object" as const,
   properties,
-  required: Object.keys(properties),
+  required: Object.keys(properties).sort(),
   additionalProperties: false as const,
 });
 
 const fakeResponse: FauxResponseStep = (context) => {
   const transcript = JSON.stringify(context.messages);
+  if (transcript.includes("harness-sequence exact")) {
+    if (transcript.includes("Execute the Harness Operation")) {
+      if (!transcript.includes("SKILL-ACTIVATED-TOKEN"))
+        return fauxAssistantMessage(
+          [fauxToolCall("activate_skill", { name: "shipment-extraction" })],
+          { stopReason: "toolUse" },
+        );
+      if (!transcript.includes("shipment_reference=SHP-4815"))
+        return fauxAssistantMessage(
+          [fauxToolCall("read", { path: "shipment.txt" })],
+          { stopReason: "toolUse" },
+        );
+      if (!transcript.includes("sandbox-multi-turn-ok"))
+        return fauxAssistantMessage(
+          [fauxToolCall("bash", { command: "printf sandbox-multi-turn-ok" })],
+          { stopReason: "toolUse" },
+        );
+      return fauxAssistantMessage(
+        [
+          fauxToolCall("finish", {
+            shipmentReference: "SHP-4815",
+            skillActivated: true,
+            sequentialToolTurns: 3,
+          }),
+        ],
+        { stopReason: "toolUse" },
+      );
+    }
+    if (!transcript.includes("shipment_reference=SHP-4815"))
+      return fauxAssistantMessage(
+        [
+          fauxToolCall("write", {
+            path: "shipment.txt",
+            content: "shipment_reference=SHP-4815",
+          }),
+        ],
+        { stopReason: "toolUse" },
+      );
+    if (!transcript.includes('"shipmentReference":"SHP-4815"'))
+      return fauxAssistantMessage(
+        [
+          fauxToolCall("extract_shipment", {
+            task: "harness-sequence exact: read shipment.txt using the shipment-extraction Skill and verify it with a second sandbox tool turn.",
+          }),
+        ],
+        { stopReason: "toolUse" },
+      );
+    return fauxAssistantMessage("harness-sequence:completed");
+  }
   if (transcript.includes("turn-two: recall alpha")) {
     if (!transcript.includes("memory:alpha"))
       throw new Error("Second run did not receive first-turn history");
@@ -114,6 +163,11 @@ const fakeResponse: FauxResponseStep = (context) => {
     return fauxAssistantMessage("memory:alpha");
   if (transcript.includes("daytona exact"))
     return fauxAssistantMessage("daytona:ok");
+  if (transcript.includes("content-filter exact"))
+    return fauxAssistantMessage("filtered partial response", {
+      stopReason: "error",
+      errorMessage: "Provider finish_reason: content_filter",
+    });
 
   const toolResult = context.messages.some(
     (message) => message.role === "toolResult",
@@ -164,6 +218,68 @@ async function seedBase(pool: PgPool): Promise<void> {
   );
 }
 
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, nested]) => `${JSON.stringify(key)}:${stableJson(nested)}`)
+    .join(",")}}`;
+}
+
+async function seedHarnessSkill(pool: PgPool, label: string): Promise<string> {
+  const skillId = uuid(`${label}:skill`);
+  const versionId = uuid(`${label}:skill-version`);
+  const instructions =
+    "SKILL-ACTIVATED-TOKEN: read the shipment fixture from the shared sandbox and verify it with another sandbox tool before returning the result.";
+  const canonical = {
+    schemaVersion: 1,
+    name: "shipment-extraction",
+    description: "Extract shipment references from materialized documents.",
+    instructions,
+    metadata: {},
+    files: [],
+  };
+  const contentHash = createHash("sha256")
+    .update(stableJson(canonical))
+    .digest();
+  await pool.query(
+    `INSERT INTO oao.skills (
+       organization_id,project_id,id,skill_key,display_name,created_by_principal_id
+     ) VALUES ($1,$2,$3,'shipment-extraction','Shipment extraction',$4)`,
+    [tenant.organizationId, tenant.projectId, skillId, human],
+  );
+  await pool.query(
+    `INSERT INTO oao.skill_versions (
+       organization_id,project_id,id,skill_id,version,skill_name,description,
+       instructions,metadata,content_hash,total_bytes,created_by_principal_id
+     ) VALUES ($1,$2,$3,$4,1,'shipment-extraction',$5,$6,'{}'::jsonb,$7,$8,$9)`,
+    [
+      tenant.organizationId,
+      tenant.projectId,
+      versionId,
+      skillId,
+      canonical.description,
+      instructions,
+      contentHash,
+      Buffer.byteLength(instructions),
+      human,
+    ],
+  );
+  await pool.query(
+    `INSERT INTO oao.skill_version_lifecycle (
+       organization_id,project_id,skill_version_id,status,updated_by_principal_id
+     ) VALUES ($1,$2,$3,'active',$4)`,
+    [tenant.organizationId, tenant.projectId, versionId, human],
+  );
+  await pool.query(
+    `UPDATE oao.skills SET latest_version_id=$4
+      WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+    [tenant.organizationId, tenant.projectId, skillId, versionId],
+  );
+  return versionId;
+}
+
 async function seedFixture(
   pool: PgPool,
   label: string,
@@ -174,6 +290,8 @@ async function seedFixture(
     readonly timeoutMs?: number;
     readonly sandboxEnabled?: boolean;
     readonly sandboxProvider?: string;
+    readonly harnessOperations?: readonly Record<string, unknown>[];
+    readonly skillVersionIds?: readonly string[];
   } = {},
 ): Promise<Fixture> {
   const runId = uuid(`${label}:run`) as RunId;
@@ -187,6 +305,8 @@ async function seedFixture(
       systemPrompt: "Execute the deterministic scenario.",
       modelPreset: "local-default",
       tools,
+      harnessOperations: options.harnessOperations ?? [],
+      skillVersionIds: options.skillVersionIds ?? [],
       sandbox: {
         enabled: options.sandboxEnabled ?? false,
         provider: options.sandboxProvider ?? "test-daytona",
@@ -219,6 +339,15 @@ async function seedFixture(
         human,
       ],
     );
+    for (const skillVersionId of options.skillVersionIds ?? [])
+      await pool.query(
+        `INSERT INTO oao.agent_version_skill_bindings (
+           organization_id,project_id,agent_version_id,skill_version_id,skill_name
+         )
+         SELECT $1,$2,$3,id,skill_name FROM oao.skill_versions
+          WHERE organization_id=$1 AND project_id=$2 AND id=$4`,
+        [tenant.organizationId, tenant.projectId, versionId, skillVersionId],
+      );
     await pool.query(
       "INSERT INTO oao.threads (organization_id,project_id,id,title) VALUES ($1,$2,$3,$4)",
       [tenant.organizationId, tenant.projectId, threadId, label],
@@ -228,6 +357,22 @@ async function seedFixture(
        VALUES ($1,$2,$3,$4,$5)`,
       [tenant.organizationId, tenant.projectId, sessionId, threadId, versionId],
     );
+    for (const skillVersionId of options.skillVersionIds ?? [])
+      await pool.query(
+        `INSERT INTO oao.session_skill_bindings (
+           organization_id,project_id,session_id,agent_version_id,
+           skill_version_id,skill_name
+         )
+         SELECT $1,$2,$3,$4,id,skill_name FROM oao.skill_versions
+          WHERE organization_id=$1 AND project_id=$2 AND id=$5`,
+        [
+          tenant.organizationId,
+          tenant.projectId,
+          sessionId,
+          versionId,
+          skillVersionId,
+        ],
+      );
   }
   await pool.query(
     `INSERT INTO oao.runs (
@@ -439,6 +584,52 @@ test(
           fixture.input,
         );
       }
+      const filtered = await seedFixture(
+        admin,
+        "content-filter",
+        "content-filter exact",
+        [],
+      );
+      await enqueue(worker, filtered);
+      await waitRun(admin, filtered.runId, "failed");
+      const filteredProjection = await admin.query<{
+        invocation_finish_reason: string;
+        invocation_provider_finish_reason: string;
+        invocation_error_explanation: string;
+        timeline_provider_finish_reason: string;
+        event_provider_finish_reason: string;
+        event_error_explanation: string;
+      }>(
+        `SELECT m.safe_response->>'finishReason' AS invocation_finish_reason,
+                m.safe_response->>'providerFinishReason' AS invocation_provider_finish_reason,
+                m.safe_response->>'errorExplanation' AS invocation_error_explanation,
+                t.safe_detail->>'providerFinishReason' AS timeline_provider_finish_reason,
+                e.public_payload->>'providerFinishReason' AS event_provider_finish_reason,
+                e.public_payload->>'errorExplanation' AS event_error_explanation
+           FROM oao.model_invocations m
+           JOIN oao.timeline_entries t
+             ON t.organization_id=m.organization_id
+            AND t.project_id=m.project_id
+            AND t.run_id=m.run_id
+            AND t.entry_type='model_invocation'
+           JOIN oao.product_events e
+             ON e.organization_id=m.organization_id
+            AND e.project_id=m.project_id
+            AND e.aggregate_id=m.run_id
+            AND e.event_kind='model.invocation_failed'
+          WHERE m.organization_id=$1 AND m.project_id=$2 AND m.run_id=$3`,
+        [tenant.organizationId, tenant.projectId, filtered.runId],
+      );
+      const contentFilterExplanation =
+        "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run.";
+      assert.deepEqual(filteredProjection.rows[0], {
+        invocation_finish_reason: "error",
+        invocation_provider_finish_reason: "content_filter",
+        invocation_error_explanation: contentFilterExplanation,
+        timeline_provider_finish_reason: "content_filter",
+        event_provider_finish_reason: "content_filter",
+        event_error_explanation: contentFilterExplanation,
+      });
       const projectionState = async () => {
         const [invocations, timeline, summary] = await Promise.all([
           admin.query<{ count: string }>(
@@ -453,9 +644,11 @@ test(
             summary_version: string;
             input_tokens: string;
             output_tokens: string;
+            cache_read_tokens: string;
+            cache_write_tokens: string;
             cost_microunits: string;
           }>(
-            "SELECT summary_version,input_tokens,output_tokens,cost_microunits FROM oao.session_summaries WHERE organization_id=$1 AND project_id=$2 AND session_id=$3",
+            "SELECT summary_version,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_microunits FROM oao.session_summaries WHERE organization_id=$1 AND project_id=$2 AND session_id=$3",
             [tenant.organizationId, tenant.projectId, first.sessionId],
           ),
         ]);
@@ -466,6 +659,34 @@ test(
         };
       };
       const beforeReplay = await projectionState();
+      const invocationUsage = await admin.query<{
+        cache_read_tokens: string;
+        cache_write_tokens: string;
+      }>(
+        `SELECT COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
+                COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens
+           FROM oao.model_invocations m
+           JOIN oao.runs r
+             ON r.organization_id=m.organization_id
+            AND r.project_id=m.project_id
+            AND r.id=m.run_id
+          WHERE m.organization_id=$1 AND m.project_id=$2 AND r.session_id=$3`,
+        [tenant.organizationId, tenant.projectId, first.sessionId],
+      );
+      assert.equal(
+        beforeReplay.summary?.cache_read_tokens,
+        invocationUsage.rows[0]?.cache_read_tokens,
+      );
+      assert.equal(
+        beforeReplay.summary?.cache_write_tokens,
+        invocationUsage.rows[0]?.cache_write_tokens,
+      );
+      assert.ok(
+        Number(beforeReplay.summary?.cache_read_tokens ?? 0) +
+          Number(beforeReplay.summary?.cache_write_tokens ?? 0) >
+          0,
+        "the provider cache usage should survive runtime projection",
+      );
       assert.equal(await worker.projection.replayLastTurn(first.runId), true);
       assert.deepEqual(await projectionState(), beforeReplay);
 
@@ -821,6 +1042,70 @@ test(
         daytonaProvider: fakeDaytona,
         fakeResponses,
         platformTools,
+      });
+      const harnessSkillVersionId = await seedHarnessSkill(
+        admin,
+        "harness-sequence",
+      );
+      const harness = await seedFixture(
+        admin,
+        "harness-sequence",
+        "harness-sequence exact",
+        [],
+        {
+          sandboxEnabled: true,
+          sandboxProvider: "test-daytona",
+          skillVersionIds: [harnessSkillVersionId],
+          harnessOperations: [
+            {
+              key: "extract_shipment",
+              description:
+                "Extract and verify one shipment document when a structured shipment result is required.",
+              instructions:
+                "Activate the shipment-extraction Skill, read the already-materialized shipment.txt fixture from the shared sandbox, verify it with another sandbox tool turn, and return the structured extraction.",
+              resultSchema: objectSchema({
+                shipmentReference: { type: "string" },
+                skillActivated: { type: "boolean" },
+                sequentialToolTurns: { type: "integer" },
+              }),
+              timeoutMs: 10_000,
+            },
+          ],
+        },
+      );
+      await enqueue(worker, harness);
+      await waitRun(admin, harness.runId, "completed");
+      const harnessEvidence = await admin.query<{
+        assistant_reply: string;
+        skill_events: string;
+        harness_started: string;
+        harness_completed: string;
+        sandbox_tools: string;
+      }>(
+        `SELECT
+           (SELECT redacted_content FROM oao.messages
+             WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+               AND role='assistant' ORDER BY created_at DESC LIMIT 1) AS assistant_reply,
+           (SELECT COUNT(*) FROM oao.product_events
+             WHERE organization_id=$1 AND project_id=$2 AND aggregate_id=$3
+               AND event_kind='skill.activated') AS skill_events,
+           (SELECT COUNT(*) FROM oao.product_events
+             WHERE organization_id=$1 AND project_id=$2 AND aggregate_id=$3
+               AND event_kind='harness.operation_started') AS harness_started,
+           (SELECT COUNT(*) FROM oao.product_events
+             WHERE organization_id=$1 AND project_id=$2 AND aggregate_id=$3
+               AND event_kind='harness.operation_completed') AS harness_completed,
+           (SELECT COUNT(*) FROM oao.sandbox_commands
+             WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+               AND safe_command->>'toolName' IN ('write','read','bash')) AS sandbox_tools`,
+        [tenant.organizationId, tenant.projectId, harness.runId],
+      );
+      assert.deepEqual(harnessEvidence.rows[0], {
+        assistant_reply: "harness-sequence:completed",
+        skill_events: "1",
+        harness_started: "1",
+        harness_completed: "1",
+        sandbox_tools: "3",
       });
       const daytona = await seedFixture(
         admin,

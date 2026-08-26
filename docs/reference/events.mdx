@@ -44,6 +44,50 @@ interface ProductEvent {
 The cursor is backed by committed PostgreSQL state. `LISTEN/NOTIFY` is only a
 latency optimization inside OAO, so missed notifications do not create gaps.
 
+## Model usage events
+
+`model.invocation_completed` and `model.invocation_failed` payloads include
+`inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, and
+`costMicrounits`, plus OAO's normalized `finishReason`. Cache reads represent
+prompt tokens reused from the provider cache; cache writes represent prompt
+tokens newly stored there. A provider that does not report cache usage
+contributes zero for those fields.
+
+When a model call fails because of a provider finish condition, the failed
+event also includes the provider's exact bounded `providerFinishReason` when it
+is available, plus a safe `errorExplanation` describing why OAO classified the
+response as failed. For example, `providerFinishReason: "content_filter"`
+explains that the provider's content filter stopped the response and OAO could
+not treat the partial output as a completed reply. These payloads never include
+prompt or response content, raw provider error messages, or credentials.
+
+## Harness Operation events
+
+The runtime emits `harness.operation_started`,
+`harness.operation_completed`, `harness.operation_failed`, and the applicable
+cancellation or timeout event for focused scratch-loop work. It also emits one
+`harness.operation_step` event for each completed inner model or tool step. Safe
+payloads can
+include `operationKey`, `toolCallId`, `taskCharacters`, `timeoutMs`,
+`durationMs`, and `resultValidated`. Step payloads use `harnessToolCallId`,
+`stepKind`, `stepId`, `stepIndex`, status, duration, bounded token counts, and a
+safe summary. Model-step summaries are derived only from bounded tool names—for
+example, `Requested activate_skill.` or `Returned the structured result for
+validation.` Tool steps can include a safe tool label or path summary.
+
+These events are correlated to the aggregate run and tool call. They never
+contain the detailed task, scratch conversation, structured result, Skill
+instructions/resources, tool payloads, authorization material, or raw shared
+documents. The authorized console groups the start and terminal lifecycle
+events by `toolCallId` into one Harness transcript row. Opening that row shows a
+details modal with safe, sequential inner-turn metadata. New events carry the
+owning Harness tool-call ID, so concurrent scratch loops are attributed exactly
+instead of by timing. Lifecycle windows that overlap are shown as one parallel
+group with a shared colored rail and count in the console. Legacy activity that
+does not contain explicit correlation is folded only when its timing identifies
+one unambiguous invocation; ambiguous legacy activity remains in the parent
+timeline and the affected Harness modals are marked as partial.
+
 ## Filter in the client
 
 The server feed is project-wide. A session UI normally stores its cursor, then

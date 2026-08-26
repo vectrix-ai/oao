@@ -925,6 +925,10 @@ export const SessionSchema = v.object({
   threadId: IdSchema,
   agentVersionId: IdSchema,
   status: SessionStatusSchema,
+  inputTokens: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  outputTokens: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  cacheReadTokens: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  cacheWriteTokens: v.pipe(v.number(), v.integer(), v.minValue(0)),
   createdAt: TimestampSchema,
   lastActivityAt: TimestampSchema,
 });
@@ -1114,6 +1118,12 @@ export const ProductEventKindSchema = v.picklist([
   "mcp.call_completed",
   "mcp.call_failed",
   "mcp.call_cancelled",
+  "harness.operation_started",
+  "harness.operation_completed",
+  "harness.operation_failed",
+  "harness.operation_cancelled",
+  "harness.operation_timed_out",
+  "harness.operation_step",
   "run.created",
   "run.state_changed",
   "run.cancellation_requested",
@@ -1194,6 +1204,57 @@ export const ManagedMcpToolSnapshotSchema = v.strictObject({
 });
 
 export const PLATFORM_MAX_TURNS = 32;
+
+/**
+ * Names installed by Flue, OAO orchestration, Skills, or the shared sandbox.
+ * Agent-authored tools and Harness Operations may not shadow them.
+ */
+export const MANAGED_AGENT_RESERVED_TOOL_NAMES = Object.freeze([
+  "task",
+  "finish",
+  "give_up",
+  "activate_skill",
+  "read_skill_resource",
+  "read",
+  "write",
+  "edit",
+  "bash",
+  "grep",
+  "glob",
+  "delegate_agent",
+  "message_agent",
+] as const);
+
+const ManagedHarnessOperationKeySchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(64),
+  v.regex(/^[a-z][a-z0-9_-]*$/u),
+);
+
+export const ManagedHarnessOperationSchema = v.strictObject({
+  key: ManagedHarnessOperationKeySchema,
+  description: v.pipe(v.string(), v.minLength(1), v.maxLength(2_000)),
+  instructions: v.pipe(v.string(), v.minLength(1), v.maxLength(100_000)),
+  resultSchema: PublishedObjectSchema,
+  timeoutMs: v.pipe(
+    v.number(),
+    v.integer(),
+    v.minValue(1_000),
+    v.maxValue(300_000),
+  ),
+});
+
+const ManagedHarnessOperationsSchema = v.pipe(
+  v.array(ManagedHarnessOperationSchema),
+  v.maxLength(32),
+  v.check(
+    (operations) =>
+      new Set(operations.map((operation) => operation.key)).size ===
+      operations.length,
+    "Harness Operation keys must be unique",
+  ),
+);
 
 export const SandboxCapabilitySchema = v.picklist([
   "filesystem_read",
@@ -1283,6 +1344,7 @@ export const ManagedAgentPublicationConfigSchema = v.pipe(
       ),
     ),
     skillVersionIds: v.optional(v.array(IdSchema), []),
+    harnessOperations: v.optional(ManagedHarnessOperationsSchema, []),
     mcpBindings: v.optional(
       v.pipe(
         v.array(ManagedMcpBindingSchema),
@@ -1322,6 +1384,14 @@ export const ManagedAgentPublicationConfigSchema = v.pipe(
       !config.sandbox.enabled || config.sandbox.snapshotId !== undefined,
     "sandbox.snapshotId is required when the sandbox is enabled",
   ),
+  v.check((config) => {
+    const names = [
+      ...MANAGED_AGENT_RESERVED_TOOL_NAMES,
+      ...config.tools.map((tool) => tool.name),
+      ...config.harnessOperations.map((operation) => operation.key),
+    ];
+    return new Set(names).size === names.length;
+  }, "Agent tools and Harness Operations must not collide with another mounted tool name"),
 );
 
 export function parseManagedAgentSnapshotForPublication(
@@ -1336,6 +1406,7 @@ export const ManagedAgentSnapshotSchema = v.strictObject({
   systemPrompt: ManagedAgentPublicationConfigSchema.entries.systemPrompt,
   modelPreset: ManagedAgentPublicationConfigSchema.entries.modelPreset,
   tools: ManagedAgentPublicationConfigSchema.entries.tools,
+  harnessOperations: v.optional(ManagedHarnessOperationsSchema, []),
   skills: v.optional(v.array(ManagedSkillBindingSnapshotSchema), []),
   mcpTools: v.optional(v.array(ManagedMcpToolSnapshotSchema), []),
   delegates: v.optional(ManagedAgentDelegatesSchema, []),
@@ -1520,6 +1591,9 @@ export type ManagedSkillBindingSnapshot = v.InferOutput<
 >;
 export type ManagedAgentDelegate = v.InferOutput<
   typeof ManagedAgentDelegateSchema
+>;
+export type ManagedHarnessOperation = v.InferOutput<
+  typeof ManagedHarnessOperationSchema
 >;
 export type ManagedMcpBinding = v.InferOutput<typeof ManagedMcpBindingSchema>;
 export type ManagedMcpToolSnapshot = v.InferOutput<

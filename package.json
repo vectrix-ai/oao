@@ -22,6 +22,7 @@
     "db:up": "infra/compose/up.sh",
     "test": "turbo run test",
     "test:integration": "pnpm --filter @oao/db-postgres test:integration && pnpm --filter @oao/api test:integration",
+    "test:harness:fresh": "infra/compose/test-harness-fresh.sh",
     "test:stack:fresh": "node --env-file-if-exists=.env infra/compose/test-stack-fresh.mjs",
     "test:postgres:fresh": "infra/compose/test-fresh.sh",
     "typecheck": "turbo run typecheck"

@@ -87,6 +87,24 @@ retention, data collection, upstream allow/deny lists, preference order, sort,
 and price caps. OpenAI is a direct provider connection, so OpenRouter routing
 controls must be empty.
 
+## Prompt caching
+
+OAO passes each Flue conversation's stable session identity to OpenRouter as
+`x-session-id`, allowing OpenRouter to keep later turns on the same cache-aware
+provider endpoint. For direct `openrouter/anthropic/*` models, OAO also adds
+Anthropic-compatible ephemeral cache markers to the stable system prompt, the
+last tool definition, and the latest conversation content. A qualifying first
+request can therefore report `cacheWriteTokens`; later requests with the same
+prefix can report `cacheReadTokens` in the session usage panel and API.
+
+Some providers use implicit prompt caching and do not report writes because
+creating the cache is free. In that case `cacheWriteTokens` remains zero even
+when later calls report cache reads. OpenRouter saved presets
+(`openrouter/@preset/<slug>`) can resolve to different model families, so their
+explicit cache behavior must be configured in the saved preset; OAO still
+sends session affinity. Provider minimum prompt sizes and cache TTLs continue
+to apply.
+
 ## Link a model to an agent
 
 Open **Agents**, create or edit an agent, and choose an available model preset.

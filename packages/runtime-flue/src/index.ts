@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Provider } from "@earendil-works/pi-ai";
 import { createOpenTelemetryInstrumentation } from "@flue/opentelemetry";
 import { postgres } from "@flue/postgres";
 import {
   AgentInstanceExistsError,
   AgentRunError,
+  defineTool,
   dispatch,
   defineSkill,
   getAgentInstance,
@@ -42,6 +44,7 @@ import {
   TOOL_RETRY_POLICY,
   ToolResultFailureCodeSchema,
   type ManagedAgentSnapshot,
+  type ManagedHarnessOperation,
   type ManagedMcpToolSnapshot,
   type ManagedSkillBindingSnapshot,
   type ManagedAgentInstanceData,
@@ -224,6 +227,155 @@ function runtimeConfig(): ManagedAgentRuntimeConfig {
 
 type PublishedObjectSchema =
   ManagedAgentSnapshot["tools"][number]["inputSchema"];
+
+interface ActiveHarnessOperationContext {
+  readonly key: string;
+  readonly toolCallId: string;
+  nextStepIndex: number;
+  readonly stepIndexes: Map<string, number>;
+}
+
+interface HarnessObservationCorrelation {
+  readonly operationKey: string;
+  readonly harnessToolCallId: string;
+  readonly stepId: string;
+  readonly stepIndex: number;
+}
+
+const activeHarnessOperation =
+  new AsyncLocalStorage<ActiveHarnessOperationContext>();
+
+function harnessObservationCorrelation(
+  event: FlueObservation,
+): HarnessObservationCorrelation | undefined {
+  const active = activeHarnessOperation.getStore();
+  if (!active) return undefined;
+  const stepId =
+    event.type === "turn"
+      ? `turn:${event.turnId}`
+      : event.type === "tool_start" || event.type === "tool"
+        ? `tool:${event.toolCallId}`
+        : undefined;
+  if (!stepId) return undefined;
+  let stepIndex = active.stepIndexes.get(stepId);
+  if (stepIndex === undefined) {
+    stepIndex = active.nextStepIndex;
+    active.nextStepIndex += 1;
+    active.stepIndexes.set(stepId, stepIndex);
+  }
+  return {
+    operationKey: active.key,
+    harnessToolCallId: active.toolCallId,
+    stepId,
+    stepIndex,
+  };
+}
+
+const HARNESS_OPERATION_TASK_MAX_CHARACTERS = 100_000;
+
+function harnessOperationPrompt(
+  operation: ManagedHarnessOperation,
+  task: string,
+): string {
+  return [
+    `Execute the Harness Operation ${JSON.stringify(operation.key)}.`,
+    "",
+    "Focused operation instructions:",
+    operation.instructions,
+    "",
+    "Run-specific task:",
+    task,
+    "",
+    "Use the current Agent's inherited model, tools, mounted Skill catalog, and live sandbox. Original session files are already materialized in that shared sandbox. Activate a relevant Agent-level Skill when helpful. Do not call any Harness Operation from this scratch conversation. Return the required structured result through Flue's result mechanism.",
+  ].join("\n");
+}
+
+function harnessOperationSignal(
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+/**
+ * Builds one version-pinned Harness Operation as a Flue harness tool. Keeping
+ * the prompt inside a durable step makes recovery replay the validated value
+ * instead of repeating completed model work.
+ */
+export function createManagedHarnessOperationTool(
+  operation: ManagedHarnessOperation,
+) {
+  const result = compileObjectSchema(
+    operation.resultSchema,
+  ) as ToolOutputSchema;
+  return defineTool({
+    name: operation.key,
+    description: operation.description,
+    input: v.strictObject({
+      task: v.pipe(
+        v.string(),
+        v.minLength(1),
+        v.maxLength(HARNESS_OPERATION_TASK_MAX_CHARACTERS),
+      ),
+    }),
+    output: result,
+    harness: true,
+    durable: true,
+    async run({ data, harness, signal, step, log, toolCallId }) {
+      const parent = activeHarnessOperation.getStore();
+      if (parent)
+        throw new Error(
+          `Nested Harness Operation calls are not allowed (${parent.key} -> ${operation.key})`,
+        );
+      const startedAt = Date.now();
+      log.info("Harness Operation started", {
+        operationKey: operation.key,
+        taskCharacters: data.task.length,
+        timeoutMs: operation.timeoutMs,
+      });
+      try {
+        const output = await activeHarnessOperation.run(
+          {
+            key: operation.key,
+            toolCallId,
+            nextStepIndex: 0,
+            stepIndexes: new Map(),
+          },
+          () =>
+            step.do("harness-prompt", async () => {
+              const response = await harness.prompt(
+                harnessOperationPrompt(operation, data.task),
+                {
+                  result,
+                  signal: harnessOperationSignal(operation.timeoutMs, signal),
+                },
+              );
+              return response.data;
+            }),
+        );
+        log.info("Harness Operation completed", {
+          operationKey: operation.key,
+          durationMs: Date.now() - startedAt,
+          resultValidated: true,
+        });
+        return { output };
+      } catch (error) {
+        log.warn("Harness Operation failed", {
+          operationKey: operation.key,
+          durationMs: Date.now() - startedAt,
+          outcome:
+            error instanceof DOMException
+              ? error.name === "TimeoutError"
+                ? "timed_out"
+                : "cancelled"
+              : "failed",
+        });
+        throw error;
+      }
+    },
+  });
+}
 
 function schemaType(schema: Record<string, unknown>): string | undefined {
   if (typeof schema.type === "string") return schema.type;
@@ -531,6 +683,22 @@ function safeArguments(value: unknown): Readonly<Record<string, PublicValue>> {
   return redacted as Readonly<Record<string, PublicValue>>;
 }
 
+/** A bounded label for Harness transcript UX; never copies document contents. */
+function safeHarnessToolSummary(toolName: string, value: unknown): string {
+  const arguments_ = safeArguments(value);
+  for (const key of ["path", "name", "url", "action"]) {
+    const candidate = arguments_[key];
+    if (typeof candidate === "string" && candidate.trim())
+      return `${toolName} · ${candidate.trim().slice(0, 240)}`;
+  }
+  const command = arguments_.command;
+  if (typeof command === "string") {
+    const executable = command.trim().split(/\s+/u)[0];
+    if (executable) return `${toolName} · ${executable.slice(0, 80)}`;
+  }
+  return toolName;
+}
+
 const DELIVERY_FILENAME_PREFIX = "oao-run-v1.";
 
 function deliveryContext(delivered: DeliveredMessage): ManagedRunDelivery {
@@ -587,7 +755,11 @@ function managedSystemPrompt(snapshot: ManagedAgentSnapshot): string {
     snapshot.delegates.length === 0
       ? ""
       : "\n\nYou may delegate work with delegate_agent. Keep the returned delegationId and use message_agent for later questions to that same isolated child thread.";
-  return `${snapshot.systemPrompt}${retryInstructions}${delegationInstructions}`;
+  const harnessOperationInstructions =
+    (snapshot.harnessOperations?.length ?? 0) === 0
+      ? ""
+      : "\n\nFocused Harness Operations are available as tools. Call them with a detailed task when their descriptions match the work. Each call runs a temporary scratch agentic loop with this Agent's model, instructions, tools, full Skill catalog, and live sandbox, then returns a validated structured result. Calls may be sequential or submitted in one model tool batch. Harness Operations cannot call another Harness Operation.";
+  return `${snapshot.systemPrompt}${retryInstructions}${delegationInstructions}${harnessOperationInstructions}`;
 }
 
 function mcpToolName(namespace: string, remoteToolName: string): string {
@@ -768,6 +940,9 @@ export function ManagedAgent(): string {
         binding,
       ),
     );
+
+  for (const operation of initial.snapshot.harnessOperations)
+    useTool(createManagedHarnessOperationTool(operation));
 
   const delegationValue = v.strictObject({
     delegationId: v.string(),
@@ -1162,6 +1337,95 @@ function turnThinking(output: unknown): string | undefined {
     .filter(Boolean)
     .join("\n\n");
   return thinking || undefined;
+}
+
+/**
+ * Describe an inner model turn without publishing its scratch text, prompt,
+ * arguments, result, Skill contents, or document contents.
+ */
+function harnessModelActionSummary(output: unknown, isError: boolean): string {
+  if (isError) return "The scratch model invocation failed.";
+  if (!output || typeof output !== "object")
+    return "The scratch model produced an internal response.";
+  const content = (output as { readonly content?: unknown }).content;
+  if (!Array.isArray(content))
+    return "The scratch model produced an internal response.";
+  const toolNames = [
+    ...new Set(
+      content
+        .filter(
+          (
+            part,
+          ): part is { readonly type: "toolCall"; readonly name: string } =>
+            Boolean(
+              part &&
+              typeof part === "object" &&
+              (part as { readonly type?: unknown }).type === "toolCall" &&
+              typeof (part as { readonly name?: unknown }).name === "string",
+            ),
+        )
+        .map((part) => part.name.trim())
+        .filter((name) => /^[a-z0-9][a-z0-9_.:/-]{0,127}$/iu.test(name))
+        .slice(0, 8),
+    ),
+  ];
+  if (toolNames.length === 0)
+    return "The scratch model produced an internal response without requesting a tool.";
+  if (toolNames.length === 1 && toolNames[0] === "finish")
+    return "Returned the structured result for validation.";
+  return toolNames.length === 1
+    ? `Requested ${toolNames[0]}.`
+    : `Requested ${toolNames.join(", ")} in one tool batch.`;
+}
+
+/** Keep exact provider finish values public only when they are bounded tokens. */
+function publicProviderFinishReason(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const reason = value.trim();
+  return /^[a-z0-9][a-z0-9._:/-]{0,119}$/iu.test(reason) ? reason : undefined;
+}
+
+/**
+ * Project provider failure diagnostics without persisting raw provider errors.
+ *
+ * pi-ai exposes standardized finish errors as messages such as
+ * `Provider finish_reason: content_filter`; newer Flue providers can supply the
+ * exact value directly as `providerFinishReason`. Both paths are restricted to
+ * the same token grammar before they enter a public payload.
+ */
+function modelInvocationDiagnostics(
+  response: {
+    readonly finishReason?: string;
+    readonly providerFinishReason?: string;
+    readonly error?: { readonly message?: string };
+  },
+  isError: boolean,
+): Readonly<Record<string, string>> {
+  const finishReason =
+    publicProviderFinishReason(response.finishReason) ?? "unknown";
+  const standardizedReason =
+    typeof response.error?.message === "string"
+      ? /^Provider (?:finish_reason|stopped with):\s*([a-z0-9][a-z0-9._:/-]{0,119})$/iu.exec(
+          response.error.message.trim(),
+        )?.[1]
+      : undefined;
+  const providerFinishReason =
+    publicProviderFinishReason(response.providerFinishReason) ??
+    publicProviderFinishReason(standardizedReason);
+  const errorExplanation = !isError
+    ? undefined
+    : providerFinishReason === "content_filter"
+      ? "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run."
+      : providerFinishReason === "network_error"
+        ? "The provider reported a network error before producing a complete response, so OAO failed the run."
+        : providerFinishReason
+          ? `The provider ended the response with "${providerFinishReason}", which OAO treats as an incomplete model response and a failed run.`
+          : "The model invocation ended before a complete response was returned, so OAO failed the run.";
+  return {
+    finishReason,
+    ...(providerFinishReason ? { providerFinishReason } : {}),
+    ...(errorExplanation ? { errorExplanation } : {}),
+  };
 }
 
 async function appendEventOnce(
@@ -2553,6 +2817,38 @@ export class ManagedRuntimeOrchestrator {
             contentHash: Buffer.from(binding.content_hash).toString("hex"),
           }) satisfies ManagedSkillBindingSnapshot,
       );
+      const harnessResult = await transaction.query<{
+        operation_key: string;
+        description: string;
+        instructions: string;
+        result_schema: ManagedHarnessOperation["resultSchema"];
+        timeout_ms: number;
+      }>(
+        `SELECT operation_key,description,instructions,result_schema,timeout_ms
+           FROM oao.agent_version_harness_operations
+          WHERE organization_id=$1 AND project_id=$2 AND agent_version_id=$3
+          ORDER BY operation_key`,
+        [tenant.organizationId, tenant.projectId, row.agent_version_id],
+      );
+      const harnessOperations = harnessResult.rows.map(
+        (operation) =>
+          ({
+            key: operation.operation_key,
+            description: operation.description,
+            instructions: operation.instructions,
+            resultSchema: operation.result_schema,
+            timeoutMs: operation.timeout_ms,
+          }) satisfies ManagedHarnessOperation,
+      );
+      const expectedHarnessOperations = [...publication.harnessOperations].sort(
+        (left, right) => left.key.localeCompare(right.key),
+      );
+      if (
+        stableJson(harnessOperations) !== stableJson(expectedHarnessOperations)
+      )
+        throw new Error(
+          "Normalized Harness Operations do not match the agent version",
+        );
       const mcpResult = await transaction.query<{
         toolset_version_id: string;
         credential_policy_version_id: string;
@@ -2672,6 +2968,7 @@ export class ManagedRuntimeOrchestrator {
       );
       const visibleToolNames = [
         ...publication.tools.map((tool) => tool.name),
+        ...harnessOperations.map((operation) => operation.key),
         ...mcpTools.map((tool) => tool.name),
         ...(publication.delegates.length
           ? ["delegate_agent", "message_agent"]
@@ -2684,6 +2981,7 @@ export class ManagedRuntimeOrchestrator {
         systemPrompt: publication.systemPrompt,
         modelPreset: publication.modelPreset,
         tools: publication.tools,
+        harnessOperations,
         mcpTools,
         delegates: publication.delegates,
         sandbox: publication.sandbox,
@@ -2746,6 +3044,18 @@ export class RuntimeProjection {
       readonly args: Readonly<Record<string, PublicValue>>;
     }
   >();
+  readonly #harnessToolCalls = new Map<
+    string,
+    {
+      readonly operationKey: string;
+      readonly taskCharacters: number;
+      readonly timeoutMs: number;
+    }
+  >();
+  readonly #harnessStepToolStarts = new Map<
+    string,
+    { readonly summary: string }
+  >();
   readonly #lastTurns = new Map<
     RunId,
     {
@@ -2764,8 +3074,9 @@ export class RuntimeProjection {
     if (this.#unsubscribe) return;
     this.#unsubscribe = observe((event) => {
       if (!event.conversationId) return;
+      const harnessCorrelation = harnessObservationCorrelation(event);
       this.#pending = this.#pending
-        .then(() => this.project(event))
+        .then(() => this.project(event, harnessCorrelation))
         .catch(() => undefined);
     });
   }
@@ -2794,7 +3105,10 @@ export class RuntimeProjection {
     return true;
   }
 
-  private async project(event: FlueObservation): Promise<void> {
+  private async project(
+    event: FlueObservation,
+    harnessCorrelation?: HarnessObservationCorrelation,
+  ): Promise<void> {
     const dispatchResult = await this.pool.query<DispatchRow>(
       `SELECT * FROM oao.runtime_dispatches
        WHERE flue_submission_id=$1 OR
@@ -2805,6 +3119,63 @@ export class RuntimeProjection {
     );
     const runtimeDispatch = dispatchResult.rows[0];
     if (!runtimeDispatch) return;
+    if (event.type === "tool_start" && harnessCorrelation) {
+      this.#harnessStepToolStarts.set(
+        `${harnessCorrelation.harnessToolCallId}:${event.toolCallId}`,
+        { summary: safeHarnessToolSummary(event.toolName, event.args) },
+      );
+    }
+    if (event.type === "tool_start" && !harnessCorrelation) {
+      const operation = await this.harnessOperation(
+        runtimeDispatch,
+        event.toolName,
+      );
+      if (operation) {
+        const args = safeArguments(event.args);
+        const taskCharacters =
+          typeof args.task === "string" ? args.task.length : 0;
+        this.#harnessToolCalls.set(event.toolCallId, {
+          operationKey: operation.key,
+          taskCharacters,
+          timeoutMs: operation.timeoutMs,
+        });
+        await this.appendPublicEvent(
+          runtimeDispatch,
+          event,
+          "harness.operation_started",
+          {
+            operationKey: operation.key,
+            toolCallId: event.toolCallId,
+            taskCharacters,
+            timeoutMs: operation.timeoutMs,
+          },
+          `harness:${event.toolCallId}:started`,
+        );
+        return;
+      }
+    }
+    if (event.type === "tool" && harnessCorrelation) {
+      const startKey = `${harnessCorrelation.harnessToolCallId}:${event.toolCallId}`;
+      const start = this.#harnessStepToolStarts.get(startKey);
+      this.#harnessStepToolStarts.delete(startKey);
+      await this.appendPublicEvent(
+        runtimeDispatch,
+        event,
+        "harness.operation_step",
+        {
+          operationKey: harnessCorrelation.operationKey,
+          harnessToolCallId: harnessCorrelation.harnessToolCallId,
+          stepKind: "tool",
+          stepId: harnessCorrelation.stepId,
+          stepIndex: harnessCorrelation.stepIndex,
+          toolName: event.toolName,
+          summary: start?.summary ?? event.toolName,
+          status: event.isError ? "error" : "success",
+          durationMs: event.durationMs,
+        },
+        `harness:${harnessCorrelation.harnessToolCallId}:${harnessCorrelation.stepId}`,
+      );
+    }
     if (
       event.type === "tool_start" &&
       (event.toolName === "activate_skill" ||
@@ -2817,6 +3188,33 @@ export class RuntimeProjection {
       return;
     }
     if (event.type === "tool") {
+      const harnessCall = this.#harnessToolCalls.get(event.toolCallId);
+      if (harnessCall) {
+        this.#harnessToolCalls.delete(event.toolCallId);
+        const errorType = event.errorInfo?.type ?? event.errorInfo?.name ?? "";
+        const outcome = !event.isError
+          ? "completed"
+          : /timeout/iu.test(errorType)
+            ? "timed_out"
+            : /abort|cancel/iu.test(errorType)
+              ? "cancelled"
+              : "failed";
+        await this.appendPublicEvent(
+          runtimeDispatch,
+          event,
+          `harness.operation_${outcome}`,
+          {
+            operationKey: harnessCall.operationKey,
+            toolCallId: event.toolCallId,
+            taskCharacters: harnessCall.taskCharacters,
+            timeoutMs: harnessCall.timeoutMs,
+            durationMs: event.durationMs,
+            resultValidated: !event.isError,
+          },
+          `harness:${event.toolCallId}:settled`,
+        );
+        return;
+      }
       const call = this.#skillToolCalls.get(event.toolCallId);
       if (call) {
         this.#skillToolCalls.delete(event.toolCallId);
@@ -2840,7 +3238,34 @@ export class RuntimeProjection {
         dispatch: runtimeDispatch,
         event,
       });
-      await this.projectTurn(runtimeDispatch, event);
+      await this.projectTurn(runtimeDispatch, event, harnessCorrelation);
+      if (harnessCorrelation) {
+        const usage = event.response.usage;
+        const actionSummary = harnessModelActionSummary(
+          event.response.output,
+          event.isError,
+        );
+        await this.appendPublicEvent(
+          runtimeDispatch,
+          event,
+          "harness.operation_step",
+          {
+            operationKey: harnessCorrelation.operationKey,
+            harnessToolCallId: harnessCorrelation.harnessToolCallId,
+            stepKind: "model",
+            stepId: harnessCorrelation.stepId,
+            stepIndex: harnessCorrelation.stepIndex,
+            summary: actionSummary,
+            status: event.isError ? "error" : "success",
+            durationMs: event.durationMs,
+            inputTokens: usage?.input ?? 0,
+            outputTokens: usage?.output ?? 0,
+            cacheReadTokens: usage?.cacheRead ?? 0,
+            cacheWriteTokens: usage?.cacheWrite ?? 0,
+          },
+          `harness:${harnessCorrelation.harnessToolCallId}:${harnessCorrelation.stepId}`,
+        );
+      }
       return;
     }
     if (event.type === "submission_recovery") {
@@ -3001,10 +3426,18 @@ export class RuntimeProjection {
   private async projectTurn(
     runtimeDispatch: DispatchRow,
     event: Extract<FlueObservation, { type: "turn" }>,
+    harnessCorrelation?: HarnessObservationCorrelation,
   ): Promise<void> {
     const usage = event.response.usage;
     const timing = turnWindow(event);
     const thinking = turnThinking(event.response.output);
+    const harnessActionSummary = harnessCorrelation
+      ? harnessModelActionSummary(event.response.output, event.isError)
+      : undefined;
+    const diagnostics = modelInvocationDiagnostics(
+      event.response,
+      event.isError,
+    );
     const invocationId = eventUuid(
       `turn:${runtimeDispatch.run_id}:${event.turnId}`,
     );
@@ -3029,9 +3462,10 @@ export class RuntimeProjection {
         const inserted = await transaction.query<{ attempt: string }>(
           `INSERT INTO oao.model_invocations (
           organization_id,project_id,id,run_id,attempt,provider_key,model_key,status,
-          input_tokens,output_tokens,cost_microunits,safe_request,safe_response,
+          input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,
+          cost_microunits,safe_request,safe_response,
           started_at,completed_at,usage_source,pricing_snapshot,provider_route
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
         ON CONFLICT (organization_id,project_id,id) DO NOTHING
         RETURNING attempt`,
           [
@@ -3045,10 +3479,23 @@ export class RuntimeProjection {
             event.isError ? "failed" : "completed",
             usage?.input ?? 0,
             usage?.output ?? 0,
+            usage?.cacheRead ?? 0,
+            usage?.cacheWrite ?? 0,
             Math.round((usage?.cost.total ?? 0) * 1_000_000),
-            { purpose: event.purpose },
             {
-              finishReason: event.response.finishReason ?? "unknown",
+              purpose: event.purpose,
+              ...(harnessCorrelation
+                ? {
+                    harnessOperationKey: harnessCorrelation.operationKey,
+                    harnessToolCallId: harnessCorrelation.harnessToolCallId,
+                    harnessStepId: harnessCorrelation.stepId,
+                    harnessStepIndex: harnessCorrelation.stepIndex,
+                    ...(harnessActionSummary ? { harnessActionSummary } : {}),
+                  }
+                : {}),
+            },
+            {
+              ...diagnostics,
               ...(thinking ? { thinking } : {}),
             },
             timing.startedAt,
@@ -3077,18 +3524,22 @@ export class RuntimeProjection {
               status: event.isError ? "failed" : "completed",
               model: event.request.requestedModel,
               provider: event.request.providerId,
+              ...diagnostics,
             },
           ],
         );
         await transaction.query(
           `INSERT INTO oao.session_summaries (
-          organization_id,project_id,session_id,input_tokens,output_tokens,cost_microunits
-        ) SELECT organization_id,project_id,session_id,$4,$5,$6 FROM oao.runs
+          organization_id,project_id,session_id,input_tokens,output_tokens,
+          cache_read_tokens,cache_write_tokens,cost_microunits
+        ) SELECT organization_id,project_id,session_id,$4,$5,$6,$7,$8 FROM oao.runs
           WHERE organization_id=$1 AND project_id=$2 AND id=$3
         ON CONFLICT (organization_id,project_id,session_id) DO UPDATE SET
           summary_version=oao.session_summaries.summary_version+1,
           input_tokens=oao.session_summaries.input_tokens+EXCLUDED.input_tokens,
           output_tokens=oao.session_summaries.output_tokens+EXCLUDED.output_tokens,
+          cache_read_tokens=oao.session_summaries.cache_read_tokens+EXCLUDED.cache_read_tokens,
+          cache_write_tokens=oao.session_summaries.cache_write_tokens+EXCLUDED.cache_write_tokens,
           cost_microunits=oao.session_summaries.cost_microunits+EXCLUDED.cost_microunits,
           updated_at=clock_timestamp()`,
           [
@@ -3097,6 +3548,8 @@ export class RuntimeProjection {
             runtimeDispatch.run_id,
             usage?.input ?? 0,
             usage?.output ?? 0,
+            usage?.cacheRead ?? 0,
+            usage?.cacheWrite ?? 0,
             Math.round((usage?.cost.total ?? 0) * 1_000_000),
           ],
         );
@@ -3111,7 +3564,19 @@ export class RuntimeProjection {
         provider: event.request.providerId,
         inputTokens: usage?.input ?? 0,
         outputTokens: usage?.output ?? 0,
+        cacheReadTokens: usage?.cacheRead ?? 0,
+        cacheWriteTokens: usage?.cacheWrite ?? 0,
         costMicrounits: Math.round((usage?.cost.total ?? 0) * 1_000_000),
+        ...(harnessCorrelation
+          ? {
+              harnessOperationKey: harnessCorrelation.operationKey,
+              harnessToolCallId: harnessCorrelation.harnessToolCallId,
+              harnessStepId: harnessCorrelation.stepId,
+              harnessStepIndex: harnessCorrelation.stepIndex,
+              ...(harnessActionSummary ? { harnessActionSummary } : {}),
+            }
+          : {}),
+        ...diagnostics,
       },
     );
   }
@@ -3291,14 +3756,60 @@ export class RuntimeProjection {
     });
   }
 
+  private async harnessOperation(
+    runtimeDispatch: DispatchRow,
+    toolName: string,
+  ): Promise<{ readonly key: string; readonly timeoutMs: number } | undefined> {
+    return withTenantTransaction(
+      this.pool,
+      {
+        organizationId: runtimeDispatch.organization_id,
+        projectId: runtimeDispatch.project_id,
+      },
+      async (transaction) => {
+        const result = await transaction.query<{
+          operation_key: string;
+          timeout_ms: string;
+        }>(
+          `SELECT operation->>'key' AS operation_key,
+                  operation->>'timeoutMs' AS timeout_ms
+             FROM oao.runs run
+             JOIN oao.agent_versions version
+               ON version.organization_id=run.organization_id
+              AND version.project_id=run.project_id
+              AND version.id=run.agent_version_id
+             CROSS JOIN LATERAL jsonb_array_elements(
+               COALESCE(version.config->'harnessOperations','[]'::jsonb)
+             ) operation
+            WHERE run.organization_id=$1 AND run.project_id=$2
+              AND run.id=$3 AND operation->>'key'=$4
+            LIMIT 1`,
+          [
+            runtimeDispatch.organization_id,
+            runtimeDispatch.project_id,
+            runtimeDispatch.run_id,
+            toolName,
+          ],
+        );
+        const row = result.rows[0];
+        return row
+          ? { key: row.operation_key, timeoutMs: Number(row.timeout_ms) }
+          : undefined;
+      },
+    );
+  }
+
   private async appendPublicEvent(
     runtimeDispatch: DispatchRow,
     event: FlueObservation,
     kind: string,
     payload: Readonly<Record<string, PublicValue>>,
+    stableKey?: string,
   ): Promise<void> {
     const eventId = eventUuid(
-      `flue:${runtimeDispatch.run_id}:${event.eventIndex}:${kind}`,
+      stableKey
+        ? `flue:${runtimeDispatch.run_id}:${stableKey}`
+        : `flue:${runtimeDispatch.run_id}:${event.eventIndex}:${kind}`,
     );
     await withTenantTransaction(
       this.pool,
@@ -4015,10 +4526,12 @@ export async function startManagedFlueRuntime(input: {
 }
 
 export const runtimeTesting = {
+  observe,
   eventUuid,
   safeArguments,
   turnWindow,
   turnThinking,
+  modelInvocationDiagnostics,
   threadInstanceId,
   compileObjectSchema,
   compileToolInputSchema,

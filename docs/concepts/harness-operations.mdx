@@ -1,0 +1,219 @@
+---
+title: "Harness Operations"
+description: "Expose focused temporary agent loops as structured tools on an immutable OAO Agent version."
+---
+
+A Harness Operation is a model-callable tool on the current OAO Agent. When the
+parent orchestration model invokes it with `{ task: string }`, OAO opens a
+temporary scratch agentic conversation through Flue's public harness API. That
+inner loop can make several sequential model and tool turns before returning
+one schema-valid result to the parent.
+
+Harness Operations are useful when one focused piece of work needs more than a
+single deterministic tool call, but does not need another agent identity or a
+persistent child conversation.
+
+## Skill, Subagent, or Harness Operation?
+
+| Primitive             | What it is                                                                 | Model and context                                                                                           | Tools, Skills, and sandbox                                                                                                                            | Lifetime and result                                                                      |
+| --------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| **Skill**             | Reusable instructions with optional references, pinned to an Agent version | Teaches the current Agent how to do work; progressively activated in the existing conversation              | Does not grant tools. Mounted at the Agent-version level and may be activated with `activate_skill`                                                   | Not an independent loop and does not return a separate result                            |
+| **Subagent**          | A separately configured Agent/delegate with its own role and identity      | Has its own Agent version and persistent context/conversation                                               | May have different tools, Skills, limits, and capabilities; OAO delegates share the root workspace only when their published sandbox identities match | Creates a durable child session that can receive follow-up messages                      |
+| **Harness Operation** | A tool on the current Agent that opens a focused scratch agentic loop      | Inherits the parent Agent's model and rendered instructions, plus an operation-specific prompt and run task | Inherits the parent tools, complete mounted Skill catalog, and same live sandbox                                                                      | Exists only for one invocation and returns one validated structured result to the parent |
+
+Choose a **Skill** to teach the Agent an intake procedure or provide carrier
+reference tables. Choose a **Subagent** when a separate reviewer identity needs
+its own prompt, capabilities, history, or later follow-up. Choose a **Harness
+Operation** when the current Agent should call a focused multi-turn extraction
+or verification loop and immediately consume its typed result.
+
+<Warning>
+  A Harness Operation cannot attach or scope a Skill. Flue does not currently
+  support per-harness or per-prompt Skill attachment. Every scratch conversation
+  sees the parent Agent version's complete mounted Skill catalog. An operation's
+  instructions may ask the loop to activate a relevant Skill through the normal
+  `activate_skill` behavior, but that is prompt steering, not a binding.
+</Warning>
+
+## Shipment extraction example
+
+Suppose an orchestration Agent receives a booking PDF, an email, and a customer
+spreadsheet. OAO first copies the original files into the session's live
+sandbox. The Agent can then use two focused operations:
+
+- `extract_shipment` reads the already-materialized documents, activates the
+  Agent-level `shipment-intake` Skill when relevant, and returns normalized
+  shipment facts.
+- `verify_shipment` compares those facts with the same source files and returns
+  validation issues.
+
+```json
+{
+  "harnessOperations": [
+    {
+      "key": "extract_shipment",
+      "description": "Extract a normalized shipment when source documents are available in the workspace.",
+      "instructions": "Read the materialized shipment documents in the shared workspace. Activate the shipment-intake Skill when relevant. Verify every required field and return only the structured shipment.",
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "shipmentReference": { "type": "string" },
+          "pickupCountry": { "type": "string" },
+          "deliveryCountry": { "type": "string" },
+          "sourceFiles": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": [
+          "shipmentReference",
+          "pickupCountry",
+          "deliveryCountry",
+          "sourceFiles"
+        ],
+        "additionalProperties": false
+      },
+      "timeoutMs": 120000
+    },
+    {
+      "key": "verify_shipment",
+      "description": "Check extracted shipment facts against every available source document.",
+      "instructions": "Read the shared source documents and compare them with the candidate facts in the task. Return each contradiction or missing required field. Do not rewrite the shipment.",
+      "resultSchema": {
+        "type": "object",
+        "properties": {
+          "valid": { "type": "boolean" },
+          "issues": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["valid", "issues"],
+        "additionalProperties": false
+      },
+      "timeoutMs": 60000
+    }
+  ]
+}
+```
+
+The parent might invoke `extract_shipment({ task: "Extract order 4831 and cite
+the filenames used." })`, inspect its structured response, and then invoke
+`verify_shipment` with the candidate facts. It may also request several
+independent operations in one model turn. OAO does not add a separate scheduler:
+normal model tool-call behavior and the runtime's existing batch handling decide
+whether calls are issued sequentially or together. When the model returns both
+tool calls in one batch, Flue executes them concurrently; each scratch loop still
+performs its own internal model and tool turns sequentially.
+
+## Exact inheritance and lifetime
+
+For every invocation, the scratch conversation inherits:
+
+- the exact model preset pinned to the parent Agent version;
+- the parent's fully rendered system instructions;
+- the callable tools and sandbox capabilities admitted for the parent run;
+- all exact Skill versions mounted on the parent Agent version; and
+- the same live session sandbox and workspace files.
+
+The operation adds its immutable focused instructions and the invocation's
+`task`. There is no per-operation model, capability policy, sandbox, or Skill
+binding in V1. The scratch loop is not stored as an Agent or child Agent session,
+has no independent OAO Agent identity, and cannot receive a later message. Flue
+does retain its internal child-conversation record beneath the parent
+conversation for durability and inspection. The invocation ends when Flue
+returns a valid result, the call fails, the operation timeout expires, or the
+parent run is cancelled.
+
+Because the live sandbox is shared, an operation can read files the parent has
+already materialized, including original shipment/order uploads, and can see
+workspace changes made earlier in the session. OAO does not preprocess, index,
+duplicate, or move those documents into another sandbox for a Harness
+Operation. Concurrent operations can observe the same workspace, so avoid
+parallel writes to the same path unless the task provides its own coordination.
+
+## Structured result behavior
+
+`resultSchema` is required and must use OAO's supported top-level JSON object
+schema subset. OAO passes it to `harness.prompt(..., { result })`; Flue's native
+inner agent loop may take multiple sequential LLM/tool turns and finish only
+with a structured result that validates against that schema. The validated
+object becomes the operation tool result visible to the parent orchestration
+model.
+
+Malformed or schema-invalid output does not become an untyped success. The
+operation fails through the normal tool/run error path. Operation timeouts are
+bounded by the parent run deadline, parent cancellation propagates to active
+operations, and nested Harness Operation calls are rejected to prevent
+recursion.
+
+Durable recovery uses Flue's `step.do` semantics to reuse a committed prompt
+step instead of prompting again after that checkpoint. This is
+exactly-once-recorded but at-least-once-executed: a crash after the model
+finishes but before the checkpoint commits may repeat model work. The operation
+tool call and runtime event IDs correlate the attempt without placing its
+prompt, structured result, Skill contents, or raw documents in public product
+events.
+
+## Configure in the console
+
+1. Open **Agents** and select the latest Agent version.
+2. Under **Harness Operations**, choose **Add operation**.
+3. Enter a stable model-facing key and a description that tells the parent when
+   to call it.
+4. Write focused instructions. You may tell the operation to activate a
+   relevant Agent-level Skill, but you cannot select one for the operation.
+5. Define the required object result schema and timeout.
+6. Publish a new immutable Agent version.
+
+Older versions show their exact operation definitions read-only. Editing,
+adding, or removing an operation always publishes another version; existing
+sessions remain pinned to their original version.
+
+Publication accepts at most 32 operations. Each key is 1–64 characters,
+matches `^[a-z][a-z0-9_-]*$`, and must be unique across the complete mounted
+tool namespace. Descriptions are 1–2,000 characters, focused instructions are
+1–100,000 characters, and timeouts are 1,000–300,000 milliseconds. Each run's
+fixed `task` string is 1–100,000 characters. The API validates `resultSchema`
+with the same supported object-schema contract used for published structured
+tool output, and its serialized JSON must not exceed 65,536 bytes.
+
+## Observe an invocation
+
+Session details expose redacted `harness.operation_started`,
+`harness.operation_completed`, `harness.operation_failed`, cancellation, and
+timeout activity, plus safe `harness.operation_step` correlation for each inner
+model or tool step. The console combines one invocation's lifecycle into a single
+**Harness · operation_key** transcript row. Open that row to see a modal with
+its status, timing, task character count, timeout, result-validation state, and
+the sequential model/tool steps that can be attributed safely to that scratch
+loop. This makes multi-turn operation work visible without turning every inner
+turn into a top-level parent transcript row.
+
+When lifecycle windows show that two or more Harness Operations ran at the same
+time, their transcript rows share a colored left rail and a **N parallel** badge.
+The top elapsed timeline places those operations in one horizontal time slot
+and stacks their clickable bars vertically; each bar's relative length reflects
+that operation's duration. The modal identifies the row's position in that
+parallel group. This is a presentation of observed overlap, not a second
+scheduler or a claim that their inner turns share one conversation.
+
+The modal deliberately omits the detailed task, scratch message content,
+structured result, Skill instructions/resources, tool payload bodies, and
+document contents. It shows only safe step labels, paths or action summaries,
+timing, status, and token counts. Each new inner-step event carries the owning
+Harness tool-call ID, so parallel operations retain separate ordered activity
+lists even while their time windows overlap. For legacy sessions that predate
+this correlation, the console still does not guess: activity that cannot be
+assigned to exactly one invocation remains in the parent timeline and each
+affected modal explains that its attribution is partial.
+
+For model turns, the action summary names only the requested tool or validated
+finish action, such as **Requested read** or **Returned the structured result
+for validation**. It does not reproduce the model's scratch text. The following
+tool row shows the safe path or action metadata, so the sequence remains useful
+without leaking the shipment document or the operation result.
+
+See [Versioned Skills](/concepts/skills), [Multi-agent
+orchestration](/concepts/multi-agent-orchestration), [HTTP API](/reference/http-api),
+and [Events](/reference/events) for the neighboring contracts.

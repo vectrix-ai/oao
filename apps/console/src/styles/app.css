@@ -1077,7 +1077,7 @@
   display: flex;
   align-items: stretch;
   gap: 2px;
-  height: 20px;
+  height: 28px;
   padding: 3px;
   border: var(--bw-control) solid var(--line);
   background: var(--surface-2);
@@ -1095,6 +1095,29 @@
 }
 .minimap-seg:hover {
   filter: brightness(0.85);
+}
+.minimap-stack {
+  display: grid;
+  flex-basis: 8px;
+  min-width: 4px;
+  gap: 2px;
+}
+.minimap-stack--parallel {
+  padding: 2px;
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.minimap-stack > .minimap-seg {
+  min-width: 0;
+  justify-self: start;
+}
+.minimap-stack > .minimap-seg--parallel-harness {
+  background: var(--accent);
+  outline: 0;
+  box-shadow: none;
+}
+.minimap-stack > .minimap-seg--parallel-harness:nth-child(even) {
+  background: color-mix(in srgb, var(--accent) 72%, var(--surface));
 }
 .minimap-seg--user {
   background: var(--ink-600);
@@ -1511,6 +1534,126 @@
 }
 .activity--tool .activity-icon {
   color: var(--text);
+}
+.activity--harness {
+  border-left: 4px solid var(--ink-700);
+}
+.activity--harness .activity-icon {
+  color: var(--ink-800);
+}
+.activity-row--harness {
+  grid-template-columns:
+    13px 18px minmax(70px, 0.65fr) minmax(0, 1.35fr)
+    auto auto auto;
+}
+.activity-row--harness .caret {
+  transform: none;
+}
+.activity-row--harness .activity-flag {
+  grid-column: auto;
+}
+.activity--harness-parallel {
+  border-left: 6px solid var(--accent);
+}
+.activity-parallel-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 0 7px;
+  border: var(--bw) solid var(--ink-950);
+  background: var(--accent);
+  color: var(--ink-950);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.harness-facts {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.harness-steps {
+  border: var(--bw) solid var(--line);
+}
+.harness-steps > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: var(--bw) solid var(--line);
+  background: var(--surface-2);
+}
+.harness-steps h3,
+.harness-steps p {
+  margin: 0;
+}
+.harness-steps h3 {
+  font-size: 13px;
+}
+.harness-steps header p {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 11px;
+}
+.harness-steps header > span {
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.harness-steps ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.harness-step {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+}
+.harness-step + .harness-step {
+  border-top: var(--bw) solid var(--border-soft);
+}
+.harness-step strong {
+  display: block;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.harness-step p {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 11px;
+}
+.harness-step small {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.harness-step--error {
+  box-shadow: inset 3px 0 var(--ink-950);
+}
+.harness-empty {
+  padding: var(--sp-4);
+  color: var(--text-3);
+  font-size: 12px;
+}
+.harness-notice {
+  margin: 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: var(--bw) solid var(--line);
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.harness-notice--warning {
+  border-left: 4px solid var(--ink-700);
+  color: var(--text-2);
 }
 .activity-row--static {
   cursor: default;

@@ -403,6 +403,8 @@ test(
     let runId = "";
     let skillId = "";
     let skillVersionId = "";
+    let mcpToolsetVersionId = "";
+    let mcpPolicyVersionId = "";
 
     await t.test(
       "MCP credentials remain redacted while immutable toolsets bind to agent versions",
@@ -507,6 +509,8 @@ test(
         const toolset = (await toolsetResponse.json()) as {
           latestVersionId: string;
         };
+        mcpToolsetVersionId = toolset.latestVersionId;
+        mcpPolicyVersionId = policy.latestVersionId;
 
         const agentResponse = await app.request(
           `${projectPath}/agents`,
@@ -963,6 +967,208 @@ test(
         1,
       );
     });
+
+    await t.test(
+      "Harness Operations publish as immutable Agent-version configuration with namespace validation",
+      async () => {
+        const operation = {
+          key: "extract_shipment",
+          description: "Extract shipment facts from mounted documents.",
+          instructions:
+            "Inspect the original shipment documents and return verified facts.",
+          resultSchema: {
+            type: "object",
+            properties: { shipmentReference: { type: "string" } },
+            required: ["shipmentReference"],
+            additionalProperties: false,
+          },
+          timeoutMs: 45_000,
+        };
+        const created = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "harness-agent",
+              name: "Harness agent",
+              config: {
+                systemPrompt: "Coordinate focused shipment extraction.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                skillVersionIds: [skillVersionId],
+                harnessOperations: [operation],
+                sandbox: fileSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "harness-agent-create-1",
+          ),
+        );
+        assert.equal(created.status, 201, await created.clone().text());
+        const createdBody = (await created.json()) as {
+          id: string;
+          latestVersionId: string;
+        };
+        const detail = await app.request(
+          `${projectPath}/agents/${createdBody.id}`,
+        );
+        assert.equal(detail.status, 200);
+        const detailBody = (await detail.json()) as {
+          versions: readonly {
+            id: string;
+            config: { harnessOperations: readonly (typeof operation)[] };
+          }[];
+        };
+        assert.deepEqual(detailBody.versions[0]?.config.harnessOperations, [
+          operation,
+        ]);
+        const version = await app.request(
+          `${projectPath}/agents/${createdBody.id}/versions/${createdBody.latestVersionId}`,
+        );
+        assert.deepEqual(
+          (
+            (await version.json()) as {
+              config: { harnessOperations: readonly (typeof operation)[] };
+            }
+          ).config.harnessOperations,
+          [operation],
+        );
+        const normalized = await pool.query<{
+          operation_key: string;
+          timeout_ms: number;
+        }>(
+          `SELECT operation_key,timeout_ms
+             FROM oao.agent_version_harness_operations
+            WHERE organization_id=$1 AND project_id=$2 AND agent_version_id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            createdBody.latestVersionId,
+          ],
+        );
+        assert.deepEqual(normalized.rows, [
+          { operation_key: operation.key, timeout_ms: operation.timeoutMs },
+        ]);
+
+        const invalidResult = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "invalid-harness-result",
+              name: "Invalid Harness result",
+              config: {
+                systemPrompt: "Invalid schema must not publish.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                harnessOperations: [
+                  { ...operation, resultSchema: { type: "string" } },
+                ],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "invalid-harness-result-1",
+          ),
+        );
+        assert.equal(invalidResult.status, 400);
+        assert.match(
+          ((await invalidResult.json()) as { error: { message: string } }).error
+            .message,
+          /harnessOperations\[0\]\.resultSchema/u,
+        );
+
+        const oversizedResult = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "oversized-harness-result",
+              name: "Oversized Harness result",
+              config: {
+                systemPrompt: "Oversized schemas must not publish.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                harnessOperations: [
+                  {
+                    ...operation,
+                    resultSchema: {
+                      ...operation.resultSchema,
+                      examples: ["x".repeat(65_536)],
+                    },
+                  },
+                ],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "oversized-harness-result-1",
+          ),
+        );
+        assert.equal(oversizedResult.status, 400);
+        assert.match(
+          ((await oversizedResult.json()) as { error: { message: string } })
+            .error.message,
+          /exceeds 65536 UTF-8 bytes/u,
+        );
+
+        const reservedName = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "reserved-harness-name",
+              name: "Reserved Harness name",
+              config: {
+                systemPrompt: "Reserved names must not publish.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                harnessOperations: [{ ...operation, key: "finish" }],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "reserved-harness-name-1",
+          ),
+        );
+        assert.equal(reservedName.status, 400);
+        assert.match(
+          ((await reservedName.json()) as { error: { message: string } }).error
+            .message,
+          /reserved/u,
+        );
+
+        const mcpCollision = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "mcp-harness-collision",
+              name: "MCP Harness collision",
+              config: {
+                systemPrompt: "Colliding names must not publish.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                mcpBindings: [
+                  {
+                    toolsetVersionId: mcpToolsetVersionId,
+                    credentialPolicyVersionId: mcpPolicyVersionId,
+                    namespace: "traces",
+                  },
+                ],
+                harnessOperations: [
+                  { ...operation, key: "mcp__traces__lookup_trace" },
+                ],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "mcp-harness-collision-1",
+          ),
+        );
+        assert.equal(mcpCollision.status, 400);
+        assert.match(
+          ((await mcpCollision.json()) as { error: { message: string } }).error
+            .message,
+          /collides/u,
+        );
+      },
+    );
 
     await t.test(
       "caller results are validated before persistence and normalized for agent retry",
@@ -1422,6 +1628,17 @@ test(
         };
         sessionId = sessionBody.id;
         assert.equal(sessionBody.run.state, "queued");
+        await pool.query(
+          `INSERT INTO oao.session_summaries (
+             organization_id,project_id,session_id,input_tokens,output_tokens,
+             cache_read_tokens,cache_write_tokens
+           ) VALUES ($1,$2,$3,850,17,640,128)`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            sessionId,
+          ],
+        );
         const sessionList = await app.request(
           `${projectPath}/sessions?limit=100`,
         );
@@ -1432,12 +1649,16 @@ test(
               id: string;
               parentSessionId: string | null;
               delegateKey: string | null;
+              cacheReadTokens: number;
+              cacheWriteTokens: number;
             }[];
           }
         ).data.find((item) => item.id === sessionId);
         assert.ok(listedSession);
         assert.equal(listedSession.parentSessionId, null);
         assert.equal(listedSession.delegateKey, null);
+        assert.equal(listedSession.cacheReadTokens, 640);
+        assert.equal(listedSession.cacheWriteTokens, 128);
         const inheritedSkills = await pool.query<{
           skill_version_id: string;
         }>(
@@ -1856,6 +2077,7 @@ test(
         assert.ok(identity);
         const sandboxId = randomUUID();
         const commandId = randomUUID();
+        const toolCallId = randomUUID();
         await pool.query(
           `INSERT INTO oao.sandbox_instances (
            organization_id,project_id,id,run_id,thread_id,session_id,provider,
@@ -1901,6 +2123,38 @@ test(
             },
           ],
         );
+        await pool.query(
+          `INSERT INTO oao.tool_calls (
+             organization_id,project_id,id,run_id,tool_name,owner,stage,
+             safe_arguments
+           ) VALUES ($1,$2,$3,$4,'lookup_customer','caller','result_committed',$5)`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            toolCallId,
+            runId,
+            { customerRef: "NW-4831" },
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.tool_call_results (
+             organization_id,project_id,tool_call_id,claim_fence,idempotency_key,
+             request_hash,safe_result,submitted_by_principal_id,committed_at
+           ) VALUES ($1,$2,$3,0,$4,$5,$6,$7,clock_timestamp())`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            toolCallId,
+            `session-tool-result:${toolCallId}`,
+            createHash("sha256").update(toolCallId).digest(),
+            {
+              version: 1,
+              status: "success",
+              value: { matches: 2, accountStatus: "active" },
+            },
+            integrationPrincipal.id,
+          ],
+        );
 
         const response = await app.request(
           `${projectPath}/sessions/${sessionId}`,
@@ -1909,8 +2163,23 @@ test(
         const body = (await response.json()) as {
           debug: {
             sandboxCommands: readonly Record<string, unknown>[];
+            toolCalls: readonly Record<string, unknown>[];
           };
         };
+        assert.partialDeepStrictEqual(
+          body.debug.toolCalls.find((call) => call.id === toolCallId),
+          {
+            id: toolCallId,
+            toolName: "lookup_customer",
+            stage: "result_committed",
+            safeArguments: { customerRef: "NW-4831" },
+            safeResult: {
+              version: 1,
+              status: "success",
+              value: { matches: 2, accountStatus: "active" },
+            },
+          },
+        );
         assert.deepEqual(
           body.debug.sandboxCommands.map((command) => ({
             id: command.id,

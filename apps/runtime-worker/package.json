@@ -9,6 +9,7 @@
     "lint": "eslint src test",
     "start": "node dist/main.js",
     "test": "node --import tsx --test test/**/*.test.ts",
+    "test:harness:e2e": "node --import tsx --test test/harness-operation-e2e.test.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {

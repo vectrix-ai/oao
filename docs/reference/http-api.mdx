@@ -361,6 +361,22 @@ UUIDs from the same project. Names must also be unique within one agent
 version. The server records immutable agent-version bindings; the array is not
 a reference to each Skill's moving latest version.
 
+Set `config.harnessOperations` to up to 32 immutable entries with `{ key,
+description, instructions, resultSchema, timeoutMs }`. Keys are 1–64
+characters matching `^[a-z][a-z0-9_-]*$` and must be unique across the complete
+mounted tool namespace. Descriptions are 1–2,000 characters, instructions are
+1–100,000 characters, timeouts are 1,000–300,000 milliseconds, and
+`resultSchema` is a required supported top-level object schema. The invocation
+schema's serialized JSON is limited to 65,536 bytes. The invocation input is
+fixed by OAO as `{ task: string }`, where `task` is 1–100,000
+characters; clients do not publish an input schema.
+
+Operations inherit the parent Agent version's model, rendered instructions,
+tools, complete Skill catalog, and live session sandbox. They do not accept a
+model, capability policy, sandbox, or `skillVersionId`. See [Harness
+Operations](/concepts/harness-operations) for lifetime, shared-document,
+structured-output, and sequential/batch behavior.
+
 Set `config.delegates` to a unique roster of `{ key, description,
 agentVersionId, maxParallel }`. Each UUID names an exact version of another
 agent in the same project. The maximum is 32 bindings and `maxParallel` is 1–8.
@@ -417,6 +433,13 @@ Each session-list item created by delegation includes `parentSessionId` and
 persistent child session beneath its coordinator without fetching every
 session detail record.
 
+Session list and detail responses report cumulative model usage as
+`inputTokens`, `outputTokens`, `cacheReadTokens`, and `cacheWriteTokens`.
+`cacheReadTokens` counts input tokens reused from a provider prompt cache;
+`cacheWriteTokens` counts input tokens newly written to that cache. Providers
+that do not report either value contribute zero. The detailed response repeats
+these fields per model call under `debug.modelInvocations`.
+
 A later turn accepts either `{ "message": "..." }` or the SDK-compatible
 `{ "redactedInput": "..." }`, plus the same optional `files` array used during
 session creation. Message text is limited to 100,000 characters and raw file
@@ -442,11 +465,16 @@ The session detail response includes `debug.sandboxCommands`. Each item returns
 the recorded `safeCommand` and `safeResult`, including model-facing arguments,
 file/edit text, shell input, browser values, and tool output. The transcript
 renders each call as a collapsed activity row; expanding it shows arguments
-and results directly as formatted, highlighted JSON, without a second payload
+and responses directly as formatted, highlighted JSON, without a second payload
 inspector. Caller tool calls from `debug.toolCalls` expand the same way and
-show their recorded `safeArguments`; tool events that carry only other safe
-metadata (for example Skill activations) expand to that metadata instead.
+show their recorded `safeArguments` and immutable `safeResult` once submitted;
+successful envelopes display the response `value`, while failed envelopes
+display the safe `error`. Tool events that carry only other safe metadata (for
+example Skill activations) expand to that metadata instead.
 Credential-bearing fields and obvious authorization values remain masked.
+When a connector returns a JSON object or array encoded as a string, the console
+decodes that string for display and unwraps a sole `{ "result": "{...}" }`
+wrapper. This presentation step does not mutate the immutable stored result.
 
 The same response includes top-level `skills` metadata with `skillId`, exact
 `skillVersionId`, version number, name, description, content hash, and current
@@ -459,12 +487,20 @@ these next to the bound Skills and marks how many times each tool was called
 during the session.
 
 `debug.modelInvocations` includes each invocation's actual start/completion
-window and any provider thinking text returned with the response. The
-transcript renders that record as a collapsed **Reasoning** row. Expanding it
-shows the full duration, token counts, and thinking text without duplicating it
-in a payload tab. Provider reasoning signatures are not returned. Older invocations
-whose runtime projection recorded a zero-length window use the preceding
-message or tool completion to reconstruct their visible duration.
+window, OAO's normalized `finishReason`, and any provider thinking text returned
+with the response. A failed invocation also includes the provider's exact
+bounded `providerFinishReason` when available and a safe `errorExplanation`
+describing why that finish condition is an error. The Console event inspector
+labels these as **Provider finish reason** and **Why this is an error**.
+
+The transcript renders each invocation as a collapsed **Reasoning** row.
+Expanding it shows the full duration, token counts, and thinking text without
+duplicating it in a payload tab. Provider reasoning signatures, raw provider
+error messages, and partial response content are not returned. Invocation
+records created before these diagnostics were projected can omit
+`providerFinishReason` and `errorExplanation`. Older invocations whose runtime
+projection recorded a zero-length window use the preceding message or tool
+completion to reconstruct their visible duration.
 
 ## Delegations
 

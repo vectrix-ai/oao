@@ -15,6 +15,7 @@ import { useApi } from "../api/context";
 import type {
   AgentSummary,
   AgentVersionConfig,
+  HarnessOperationDefinition,
   ModelPreset,
   ProjectSandboxProvider,
   SandboxSnapshotEntry,
@@ -131,6 +132,32 @@ const TOOL_TEMPLATE = {
   },
 };
 
+const HARNESS_OPERATION_RESULT_SCHEMA = {
+  type: "object",
+  properties: {
+    result: { type: "string", description: "The validated operation result." },
+  },
+  required: ["result"],
+  additionalProperties: false,
+};
+
+function isObjectResultSchema(
+  value: unknown,
+): value is Readonly<Record<string, unknown>> {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value as Readonly<Record<string, unknown>>).type === "object"
+  );
+}
+
+function serializedSchemaBytes(
+  value: Readonly<Record<string, unknown>>,
+): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
 const sandboxCapabilityOptions = [
   [
     "filesystem_read",
@@ -178,8 +205,9 @@ function snapshotLabel(snapshot: SandboxSnapshotEntry): string {
 
 function delegateSandboxMismatch(
   coordinator: AgentVersionConfig["sandbox"],
-  child: AgentVersionConfig["sandbox"],
+  child: AgentVersionConfig["sandbox"] | null | undefined,
 ): string | undefined {
+  if (!child) return "this child does not have a published sandbox policy";
   if (coordinator.enabled !== child.enabled)
     return child.enabled
       ? "sandbox is enabled for this child but disabled for the coordinator"
@@ -202,6 +230,7 @@ function initialAgentConfig(
     systemPrompt: `You are ${name}, a helpful managed agent. Complete the user's request carefully and do not expose secrets or internal reasoning.`,
     modelPreset,
     tools: [],
+    harnessOperations: [],
     skillVersionIds: [],
     mcpBindings: [],
     delegates: [],
@@ -398,11 +427,13 @@ export function AgentsPage() {
                     />
                   </Link>
                 </td>
-                <td className="mono">{agent.model}</td>
+                <td className="mono">{agent.model ?? "Not published"}</td>
                 <td>
                   <StatusChip value={agent.status} />
                 </td>
-                <td className="mono">v{agent.version}</td>
+                <td className="mono">
+                  {agent.version == null ? "Draft" : `v${agent.version}`}
+                </td>
                 <td>{formatDate(agent.createdAt)}</td>
                 <td>{formatDate(agent.updatedAt)}</td>
               </tr>
@@ -903,7 +934,13 @@ function AgentEditor({
   const [tools, setTools] = useState<readonly ToolDefinition[]>(
     baseConfig.tools,
   );
+  const [harnessOperations, setHarnessOperations] = useState<
+    readonly HarnessOperationDefinition[]
+  >(baseConfig.harnessOperations ?? []);
   const [toolEditor, setToolEditor] = useState<number | "new" | null>(null);
+  const [harnessOperationEditor, setHarnessOperationEditor] = useState<
+    number | "new" | null
+  >(null);
   const [bulkToolEditor, setBulkToolEditor] = useState(false);
   const selectedSandboxProvider = sandboxProviders.find(
     (provider) => provider.key === sandboxProvider,
@@ -933,12 +970,14 @@ function AgentEditor({
     setMcpBindings(next.config.mcpBindings ?? []);
     setDelegates(next.config.delegates ?? []);
     setTools(next.config.tools);
+    setHarnessOperations(next.config.harnessOperations ?? []);
   };
   const config: AgentVersionConfig = {
     ...baseConfig,
     systemPrompt: instructions,
     modelPreset,
     tools,
+    harnessOperations,
     skillVersionIds,
     mcpBindings,
     delegates,
@@ -972,6 +1011,60 @@ function AgentEditor({
   if (duplicateToolNames.length > 0)
     validation.push(
       `Tool names must be unique: ${duplicateToolNames.join(", ")}.`,
+    );
+  const duplicateHarnessKeys = [
+    ...new Set(
+      harnessOperations
+        .map((operation) => operation.key)
+        .filter((key, index, all) => all.indexOf(key) !== index),
+    ),
+  ];
+  if (duplicateHarnessKeys.length > 0)
+    validation.push(
+      `Harness Operation keys must be unique: ${duplicateHarnessKeys.join(", ")}.`,
+    );
+  const harnessToolCollisions = harnessOperations
+    .map((operation) => operation.key)
+    .filter((key) => tools.some((tool) => tool.name === key));
+  if (harnessToolCollisions.length > 0)
+    validation.push(
+      `Harness Operations collide with configured tools: ${[...new Set(harnessToolCollisions)].join(", ")}.`,
+    );
+  for (const operation of harnessOperations) {
+    if (!/^[a-z][a-z0-9_-]{0,63}$/u.test(operation.key))
+      validation.push(
+        `Harness Operation key ${operation.key || "(empty)"} must start with a lowercase letter and contain only lowercase letters, numbers, underscores, and hyphens.`,
+      );
+    if (
+      operation.description.trim().length === 0 ||
+      operation.description.length > 2_000
+    )
+      validation.push(
+        `Harness Operation ${operation.key || "(empty)"} needs a model-facing description.`,
+      );
+    if (
+      operation.instructions.trim().length === 0 ||
+      operation.instructions.length > 100_000
+    )
+      validation.push(
+        `Harness Operation ${operation.key || "(empty)"} needs focused instructions between 1 and 100,000 characters.`,
+      );
+    if (!isObjectResultSchema(operation.resultSchema))
+      validation.push(
+        `Harness Operation ${operation.key || "(empty)"} needs a top-level object result schema.`,
+      );
+    else if (serializedSchemaBytes(operation.resultSchema) > 65_536)
+      validation.push(
+        `Harness Operation ${operation.key || "(empty)"} result schema must not exceed 65,536 serialized bytes.`,
+      );
+    if (operation.timeoutMs < 1_000 || operation.timeoutMs > 300_000)
+      validation.push(
+        `Harness Operation ${operation.key || "(empty)"} timeout must be between 1,000 and 300,000 ms.`,
+      );
+  }
+  if (harnessOperations.length > 32)
+    validation.push(
+      "An Agent version can define at most 32 Harness Operations.",
     );
   if (timeout < 1_000 || timeout > 3_600_000)
     validation.push("Run timeout must be between 1,000 and 3,600,000 ms.");
@@ -1024,7 +1117,7 @@ function AgentEditor({
           { label: "Agents", to: "/agents" },
           { label: agent.name },
         ]}
-        eyebrow={`${agent.key} · v${agent.version}`}
+        eyebrow={`${agent.key} · ${agent.version == null ? "draft" : `v${agent.version}`}`}
         title={agent.name}
         description={agent.description}
         actions={
@@ -1183,6 +1276,54 @@ function AgentEditor({
                   onEdit={() => setToolEditor(index)}
                   onRemove={() =>
                     setTools((current) =>
+                      current.filter((_, position) => position !== index),
+                    )
+                  }
+                />
+              ))}
+            </div>
+          )}
+        </Panel>
+        <Panel
+          title="Harness Operations"
+          description={
+            harnessOperations.length === 0
+              ? "No focused scratch operations are exposed to this Agent."
+              : `${harnessOperations.length} focused operation ${harnessOperations.length === 1 ? "is" : "are"} exposed as model-callable tools.`
+          }
+          actions={
+            <Button
+              size="sm"
+              icon={<Plus size={14} />}
+              disabled={!isLatest || harnessOperations.length >= 32}
+              onClick={() => setHarnessOperationEditor("new")}
+            >
+              Add operation
+            </Button>
+          }
+        >
+          <Alert tone="info" role="status">
+            Each call receives <code>{`{ task: string }`}</code> and opens a
+            temporary inner agent loop. It inherits this version&apos;s model,
+            rendered instructions, tools, complete Skill catalog, and live
+            sandbox. Operations cannot attach an individual Skill.
+          </Alert>
+          {harnessOperations.length === 0 ? (
+            <EmptyState
+              icon="↻"
+              title="No Harness Operations"
+              description="Add a focused operation when the orchestrator should be able to run multi-turn model and tool work and receive one validated structured result."
+            />
+          ) : (
+            <div className="tool-list">
+              {harnessOperations.map((operation, index) => (
+                <HarnessOperationListItem
+                  key={`${operation.key}:${index}`}
+                  operation={operation}
+                  editable={isLatest}
+                  onEdit={() => setHarnessOperationEditor(index)}
+                  onRemove={() =>
+                    setHarnessOperations((current) =>
                       current.filter((_, position) => position !== index),
                     )
                   }
@@ -1378,6 +1519,10 @@ function AgentEditor({
                 </Alert>
               ) : null}
               {availableAgents.map((candidate) => {
+                const hasPublishedVersion =
+                  candidate.status === "published" &&
+                  candidate.version != null &&
+                  candidate.latestVersionId != null;
                 const checked = delegates.some(
                   (delegate) =>
                     delegate.agentVersionId === candidate.latestVersionId,
@@ -1389,19 +1534,25 @@ function AgentEditor({
                 return (
                   <CheckboxRow
                     key={candidate.id}
-                    label={`${candidate.name} · v${candidate.version}`}
+                    label={`${candidate.name} · ${candidate.version == null ? "draft" : `v${candidate.version}`}`}
                     description={`${candidate.description} ${
                       mismatch
                         ? `Unavailable — ${mismatch}. Publish a compatible child version first.`
                         : "Sandbox-compatible with this coordinator."
-                    } Exact version ${candidate.latestVersionId}.`}
+                    } ${
+                      candidate.latestVersionId == null
+                        ? "No published version is available."
+                        : `Exact version ${candidate.latestVersionId}.`
+                    }`}
                     checked={checked}
                     disabled={
                       !isLatest ||
-                      candidate.status !== "published" ||
+                      !hasPublishedVersion ||
                       (!checked && mismatch !== undefined)
                     }
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      if (!candidate.latestVersionId) return;
+                      const candidateVersionId = candidate.latestVersionId;
                       setDelegates((current) =>
                         event.target.checked
                           ? [
@@ -1410,17 +1561,16 @@ function AgentEditor({
                                 key: candidate.key,
                                 description:
                                   candidate.description || candidate.name,
-                                agentVersionId: candidate.latestVersionId,
+                                agentVersionId: candidateVersionId,
                                 maxParallel: 1,
                               },
                             ]
                           : current.filter(
                               (delegate) =>
-                                delegate.agentVersionId !==
-                                candidate.latestVersionId,
+                                delegate.agentVersionId !== candidateVersionId,
                             ),
-                      )
-                    }
+                      );
+                    }}
                   />
                 );
               })}
@@ -1577,6 +1727,27 @@ function AgentEditor({
           }}
         />
       ) : null}
+      {harnessOperationEditor !== null ? (
+        <HarnessOperationEditorDialog
+          operation={
+            harnessOperationEditor === "new"
+              ? null
+              : (harnessOperations[harnessOperationEditor] ?? null)
+          }
+          readOnly={!isLatest}
+          onClose={() => setHarnessOperationEditor(null)}
+          onSave={(operation) => {
+            setHarnessOperations((current) =>
+              harnessOperationEditor === "new"
+                ? [...current, operation]
+                : current.map((item, position) =>
+                    position === harnessOperationEditor ? operation : item,
+                  ),
+            );
+            setHarnessOperationEditor(null);
+          }}
+        />
+      ) : null}
       {bulkToolEditor ? (
         <ToolsJsonDialog
           tools={tools}
@@ -1588,6 +1759,243 @@ function AgentEditor({
         />
       ) : null}
     </Page>
+  );
+}
+
+function HarnessOperationListItem({
+  operation,
+  editable,
+  onEdit,
+  onRemove,
+}: {
+  readonly operation: HarnessOperationDefinition;
+  readonly editable: boolean;
+  readonly onEdit: () => void;
+  readonly onRemove: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const detailId = useId();
+  return (
+    <article className="tool-item">
+      <button
+        type="button"
+        className="tool-item-row"
+        aria-expanded={open}
+        aria-controls={detailId}
+        onClick={() => setOpen(!open)}
+      >
+        <ChevronRight className="caret" size={13} aria-hidden="true" />
+        <Bot size={14} aria-hidden="true" />
+        <code>{operation.key || "unnamed operation"}</code>
+        <span className="tool-item-summary">{operation.description}</span>
+        <span className="tool-item-meta">
+          <span>{operation.timeoutMs.toLocaleString()} ms</span>
+          <StatusChip value="structured result" />
+        </span>
+      </button>
+      <div id={detailId} hidden={!open} className="tool-item-body">
+        {open ? (
+          <>
+            <p>{operation.instructions}</p>
+            <div className="tool-item-schemas">
+              <div>
+                <h4>Fixed input</h4>
+                <JsonBlock
+                  value={{ task: "Detailed instructions for this invocation" }}
+                  label={`Fixed input for ${operation.key}`}
+                />
+              </div>
+              <div>
+                <h4>Result schema</h4>
+                <JsonBlock
+                  value={operation.resultSchema}
+                  label={`Result schema for ${operation.key}`}
+                />
+              </div>
+            </div>
+            <p className="muted">
+              Inherits the parent model, tools, Agent-level Skills, and live
+              sandbox. The invocation cannot receive a follow-up; Flue retains
+              its internal child-conversation record for durability.
+            </p>
+            <div className="tool-item-actions">
+              <Button size="sm" icon={<Pencil size={14} />} onClick={onEdit}>
+                {editable ? "Edit operation" : "View operation"}
+              </Button>
+              {editable ? (
+                <Button
+                  size="sm"
+                  variant="danger"
+                  icon={<Trash2 size={14} />}
+                  onClick={onRemove}
+                >
+                  Remove
+                </Button>
+              ) : null}
+            </div>
+          </>
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
+function HarnessOperationEditorDialog({
+  operation,
+  readOnly,
+  onClose,
+  onSave,
+}: {
+  readonly operation: HarnessOperationDefinition | null;
+  readonly readOnly: boolean;
+  readonly onClose: () => void;
+  readonly onSave: (operation: HarnessOperationDefinition) => void;
+}) {
+  const [key, setKey] = useState(operation?.key ?? "extract_shipment");
+  const [description, setDescription] = useState(
+    operation?.description ??
+      "Extract a validated shipment record from the available documents.",
+  );
+  const [instructions, setInstructions] = useState(
+    operation?.instructions ??
+      "Read the materialized shipment documents in the shared sandbox, verify each required field, and return only the structured result.",
+  );
+  const [timeoutMs, setTimeoutMs] = useState(operation?.timeoutMs ?? 120_000);
+  const [resultSchemaJson, setResultSchemaJson] = useState(() =>
+    JSON.stringify(
+      operation?.resultSchema ?? HARNESS_OPERATION_RESULT_SCHEMA,
+      null,
+      2,
+    ),
+  );
+  let resultSchema: Readonly<Record<string, unknown>> | undefined;
+  let schemaError = "";
+  try {
+    const parsed: unknown = JSON.parse(resultSchemaJson);
+    if (!isObjectResultSchema(parsed))
+      schemaError = 'Result schema must be a JSON object with type "object".';
+    else if (serializedSchemaBytes(parsed) > 65_536)
+      schemaError = "Result schema must not exceed 65,536 serialized bytes.";
+    else resultSchema = parsed;
+  } catch (error) {
+    schemaError =
+      error instanceof Error ? error.message : "Result schema is invalid JSON.";
+  }
+  const keyValid = /^[a-z][a-z0-9_-]{0,63}$/u.test(key);
+  const valid =
+    keyValid &&
+    description.trim().length > 0 &&
+    description.length <= 2_000 &&
+    instructions.trim().length > 0 &&
+    instructions.length <= 100_000 &&
+    timeoutMs >= 1_000 &&
+    timeoutMs <= 300_000 &&
+    resultSchema !== undefined;
+  return (
+    <Dialog
+      title={
+        operation
+          ? `Harness Operation · ${operation.key}`
+          : "Add Harness Operation"
+      }
+      description="Configure a focused temporary agent loop. Invocation input is always { task: string }; the parent model, tools, Skills, and sandbox are inherited."
+      wide
+      onClose={onClose}
+      onSubmit={(event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        if (!readOnly && valid && resultSchema)
+          onSave({
+            key: key.trim(),
+            description: description.trim(),
+            instructions: instructions.trim(),
+            resultSchema:
+              resultSchema as HarnessOperationDefinition["resultSchema"],
+            timeoutMs,
+          });
+      }}
+      footer={
+        <>
+          <Button onClick={onClose}>{readOnly ? "Close" : "Cancel"}</Button>
+          {readOnly ? null : (
+            <Button variant="primary" type="submit" disabled={!valid}>
+              {operation ? "Save operation" : "Add operation"}
+            </Button>
+          )}
+        </>
+      }
+    >
+      <FieldRow>
+        <Field
+          label="Operation key"
+          hint="Stable model-facing tool name. Use lowercase letters, numbers, underscores, and hyphens."
+        >
+          <Input
+            value={key}
+            onChange={(event) => setKey(event.target.value)}
+            readOnly={readOnly}
+            aria-invalid={!keyValid}
+          />
+        </Field>
+        <Field
+          label="Operation timeout (ms)"
+          hint="Bounded independently inside the parent run."
+        >
+          <Input
+            type="number"
+            min={1_000}
+            max={300_000}
+            value={timeoutMs}
+            onChange={(event) => setTimeoutMs(Number(event.target.value))}
+            readOnly={readOnly}
+          />
+        </Field>
+      </FieldRow>
+      <Field label="When should the orchestrator call it?">
+        <Textarea
+          rows={3}
+          maxLength={2_000}
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+          readOnly={readOnly}
+        />
+      </Field>
+      <Field
+        label="Focused instructions"
+        hint="You may steer the loop to activate a relevant Agent-level Skill. This does not bind a Skill to the operation."
+      >
+        <Textarea
+          rows={7}
+          maxLength={100_000}
+          value={instructions}
+          onChange={(event) => setInstructions(event.target.value)}
+          readOnly={readOnly}
+        />
+      </Field>
+      <Field
+        label="Required result schema (JSON)"
+        hint="A supported top-level object schema. Flue validates the final structured result before returning it to the parent."
+      >
+        <Textarea
+          rows={13}
+          className="textarea--code"
+          value={resultSchemaJson}
+          onChange={(event) => setResultSchemaJson(event.target.value)}
+          readOnly={readOnly}
+          aria-invalid={Boolean(schemaError)}
+        />
+      </Field>
+      {schemaError ? (
+        <Alert tone="danger" role="alert">
+          <strong>Invalid result schema</strong>
+          <span>{schemaError}</span>
+        </Alert>
+      ) : null}
+      <Alert tone="info" role="status">
+        The operation cannot select a model, sandbox policy, capabilities, or
+        Skill. Every invocation sees the complete Skill catalog mounted on this
+        immutable Agent version and reuses its live sandbox.
+      </Alert>
+    </Dialog>
   );
 }
 

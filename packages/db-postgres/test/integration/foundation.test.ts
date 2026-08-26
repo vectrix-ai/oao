@@ -188,7 +188,7 @@ test(
     try {
       await t.test("migration applies cleanly and is idempotent", async () => {
         const first = await migrate(pool);
-        assert.equal(first.applied.length + first.alreadyApplied.length, 20);
+        assert.equal(first.applied.length + first.alreadyApplied.length, 25);
         const second = await migrate(pool);
         assert.deepEqual(second.alreadyApplied, [
           "0001_foundation.sql",
@@ -211,6 +211,11 @@ test(
           "0019_skill_package_drafts.sql",
           "0020_agent_sandbox_snapshot_required.sql",
           "0021_rich_tool_schemas.sql",
+          "0022_mcp_toolsets_credentials.sql",
+          "0023_mcp_runtime_hardening.sql",
+          "0024_cached_token_usage.sql",
+          "0025_harness_operations.sql",
+          "0026_harness_operation_events.sql",
         ]);
         await seed(pool);
       });
@@ -397,6 +402,169 @@ test(
             );
             assert.equal(shared.rows[0]?.count, "1");
           });
+        },
+      );
+
+      await t.test(
+        "Harness Operations are normalized, immutable, validated, and tenant isolated",
+        async () => {
+          const agentId = uuid(320);
+          const versionId = uuid(321);
+          const operation = {
+            key: "extract_shipment",
+            description: "Extract shipment facts from mounted documents.",
+            instructions:
+              "Read the original mounted shipment documents and return verified facts.",
+            resultSchema: {
+              type: "object",
+              properties: { shipmentReference: { type: "string" } },
+              required: ["shipmentReference"],
+              additionalProperties: false,
+            },
+            timeoutMs: 45_000,
+          };
+          const baseConfig = {
+            systemPrompt: "Coordinate shipment extraction.",
+            modelPreset: "local-default",
+            tools: [],
+            skillVersionIds: [],
+            mcpBindings: [],
+            delegates: [],
+            harnessOperations: [operation],
+            sandbox: {
+              enabled: true,
+              provider: "daytona-primary",
+              snapshotId: uuid(322),
+              network: "none",
+              capabilities: ["filesystem_read", "filesystem_write", "shell"],
+            },
+            limits: { maxTurns: 32, timeoutMs: 60_000 },
+          };
+          await withTenantTransaction(pool, tenant, async (transaction) => {
+            await transaction.query(
+              `INSERT INTO oao.agent_definitions
+                 (organization_id,project_id,id,agent_key,name)
+               VALUES ($1,$2,$3,'harness-agent','Harness agent')`,
+              [ids.organization, ids.project, agentId],
+            );
+            await transaction.query(
+              "SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7)",
+              [
+                ids.organization,
+                ids.project,
+                agentId,
+                versionId,
+                baseConfig,
+                createHash("sha256")
+                  .update(JSON.stringify(baseConfig))
+                  .digest(),
+                ids.principal,
+              ],
+            );
+            const normalized = await transaction.query<{
+              operation_key: string;
+              result_schema: Record<string, unknown>;
+              timeout_ms: number;
+            }>(
+              `SELECT operation_key,result_schema,timeout_ms
+                 FROM oao.agent_version_harness_operations
+                WHERE organization_id=$1 AND project_id=$2
+                  AND agent_version_id=$3`,
+              [ids.organization, ids.project, versionId],
+            );
+            assert.deepEqual(normalized.rows, [
+              {
+                operation_key: operation.key,
+                result_schema: operation.resultSchema,
+                timeout_ms: operation.timeoutMs,
+              },
+            ]);
+          });
+
+          await assert.rejects(
+            pool.query(
+              `UPDATE oao.agent_version_harness_operations
+                  SET timeout_ms=46000
+                WHERE organization_id=$1 AND project_id=$2
+                  AND agent_version_id=$3 AND operation_key=$4`,
+              [ids.organization, ids.project, versionId, operation.key],
+            ),
+            /immutable/u,
+          );
+          await assert.rejects(
+            withTenantTransaction(pool, tenant, (transaction) =>
+              transaction.query(
+                "SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7)",
+                [
+                  ids.organization,
+                  ids.project,
+                  agentId,
+                  uuid(323),
+                  {
+                    ...baseConfig,
+                    harnessOperations: [
+                      { ...operation, resultSchema: { type: "string" } },
+                    ],
+                  },
+                  createHash("sha256").update("invalid-result-schema").digest(),
+                  ids.principal,
+                ],
+              ),
+            ),
+            /invalid agent publication config/u,
+          );
+          await assert.rejects(
+            withTenantTransaction(pool, tenant, (transaction) =>
+              transaction.query(
+                "SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7)",
+                [
+                  ids.organization,
+                  ids.project,
+                  agentId,
+                  uuid(324),
+                  {
+                    ...baseConfig,
+                    tools: [
+                      {
+                        schemaVersion: 1,
+                        name: operation.key,
+                        description: "Colliding tool",
+                        owner: "platform",
+                        approval: "never",
+                        inputSchema: {
+                          type: "object",
+                          properties: {},
+                          required: [],
+                          additionalProperties: false,
+                        },
+                        outputSchema: {
+                          type: "object",
+                          properties: {},
+                          required: [],
+                          additionalProperties: false,
+                        },
+                      },
+                    ],
+                  },
+                  createHash("sha256").update("colliding-tool").digest(),
+                  ids.principal,
+                ],
+              ),
+            ),
+            /invalid agent publication config/u,
+          );
+          const otherVisible = await withTenantTransaction(
+            pool,
+            otherTenant,
+            (transaction) =>
+              transaction.query(
+                `SELECT operation_key
+                   FROM oao.agent_version_harness_operations
+                  WHERE organization_id=$1 AND agent_version_id=$2`,
+                [ids.organization, versionId],
+              ),
+          );
+          assert.equal(otherVisible.rowCount, 0);
         },
       );
 
