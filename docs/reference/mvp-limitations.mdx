@@ -55,10 +55,11 @@ and should shape integrations:
   not materialized into Daytona workspaces; Flue reads verified resources from
   the runtime registry. Files under `scripts/` are never run automatically,
   and `allowedTools` is informational rather than a policy control.
-- **Runtime execution requires configured providers.** Add a project-scoped
-  OpenRouter or OpenAI provider and preset plus a Daytona connection before
-  publishing an executable agent version. Test doubles are not selectable in
-  the API or console.
+- **Runtime execution requires a configured model provider.** Add a
+  project-scoped OpenRouter or OpenAI provider and preset before publishing an
+  executable agent version. Daytona is required only for sandbox-enabled
+  versions, and S3-compatible storage is required only for run files and
+  workspace backups. Test doubles are not selectable in the API or console.
 - **Model presets are add-and-link only.** A `project:admin` principal can
   approve a new project preset from the provider catalog and link it to a new
   immutable agent version. Preset rows are append-only: there is no rename,

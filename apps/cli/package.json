@@ -1,0 +1,18 @@
+{
+  "name": "@oao/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "oao": "dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "eslint bootstrap src test",
+    "test": "node --import tsx --test test/**/*.test.ts test/**/*.test.mjs",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@oao/sdk-js": "workspace:*"
+  }
+}

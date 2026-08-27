@@ -34,6 +34,57 @@ test("route builders scope resources to a project and allow a custom prefix", ()
     routes.agentVersion("project/one", "agent one", "version/one"),
     "/platform/v2/projects/project%2Fone/agents/agent%20one/versions/version%2Fone",
   );
+  assert.equal(routes.context, "/platform/v2/context");
+});
+
+test("client reads project context", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({
+        principal: {
+          id: "principal-1",
+          organizationId: "organization-1",
+          projectId: "project-1",
+          kind: "human",
+          subject: "development-user",
+          scopes: ["*"],
+        },
+        organization: { id: "organization-1", name: "Development" },
+        project: { id: "project-1", name: "Default" },
+        organizations: [{ id: "organization-1", name: "Development" }],
+        projects: [{ id: "project-1", name: "Default" }],
+        activeModelPresets: [],
+        authProvider: "development",
+      });
+    },
+  });
+
+  const context = await client.getContext();
+  assert.equal(context.project.id, "project-1");
+  assert.equal(requests[0]?.url, "https://api.example.test/v1/context");
+});
+
+test("client waits until a run reaches a terminal state", async () => {
+  const states = ["queued", "running", "completed"] as const;
+  let requestCount = 0;
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async () => {
+      const state = states[Math.min(requestCount, states.length - 1)];
+      requestCount += 1;
+      return Response.json({ id: "run-1", state });
+    },
+  });
+
+  const run = await client.waitForRunSettled("project-1", "run-1", {
+    timeoutMs: 1_000,
+    pollIntervalMs: 1,
+  });
+  assert.equal(run.state, "completed");
+  assert.equal(requestCount, 3);
 });
 
 test("client returns the provider logout redirect and includes browser credentials", async () => {

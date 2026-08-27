@@ -19,6 +19,31 @@ Idempotency-Key: unique-key-for-this-logical-write
 
 `Idempotency-Key` is required for operations that change application state.
 
+## TypeScript SDK helpers
+
+The workspace SDK exposes the same context and run-settling operations used by
+the guided setup:
+
+```ts
+import { OaoClient } from "@oao/sdk-js";
+
+const oao = new OaoClient({
+  baseUrl: "http://127.0.0.1:3000/v1",
+  apiKey: process.env.OAO_API_KEY,
+});
+
+const context = await oao.getContext();
+const run = await oao.waitForRunSettled(context.project.id, runId, {
+  timeoutMs: 300_000,
+  pollIntervalMs: 1_000,
+});
+```
+
+`waitForRunSettled` polls `GET /projects/{projectId}/runs/{runId}` until the run
+is `completed`, `failed`, `cancelled`, or `timed_out`. It throws
+`run_wait_timeout` when the configured deadline expires; it does not cancel the
+durable run.
+
 ## Browser authentication
 
 | Method | Path             | Purpose                                                    |

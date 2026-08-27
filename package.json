@@ -17,6 +17,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "turbo run lint",
+    "oao": "node apps/cli/bootstrap/oao.mjs",
     "db:down": "infra/compose/down.sh",
     "db:migrate": "pnpm --filter @oao/db-postgres migrate",
     "db:up": "infra/compose/up.sh",

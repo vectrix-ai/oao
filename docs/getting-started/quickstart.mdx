@@ -1,0 +1,124 @@
+---
+title: "Guided quickstart"
+description: "Check your machine, start OAO, and create your first agent and session from the terminal."
+---
+
+The setup wizard takes a fresh repository checkout to a working first session.
+It checks system requirements before installing dependencies or starting
+containers, then explains each resource it creates.
+
+## Prerequisites
+
+Install these system packages before starting:
+
+| Requirement   | Minimum                   | Why it is needed                           |
+| ------------- | ------------------------- | ------------------------------------------ |
+| Node.js       | 22.19.0                   | Runs the workspace and CLI                 |
+| pnpm          | 10.27.0                   | Installs the pinned workspace dependencies |
+| Docker        | Current supported release | Runs PostgreSQL 17                         |
+| Docker daemon | Running and reachable     | Starts and inspects containers             |
+
+Docker Compose is optional because OAO can manage its PostgreSQL container with
+the Docker CLI. The wizard also checks that the repository is complete, the
+workspace is writable, enough disk space is available, and ports `3000`, `5432`,
+`8080`, and `8788` are free or already owned by a healthy OAO stack.
+
+<Note>
+  The wizard cannot install or start system software on your behalf. Failed
+  checks include a platform-appropriate repair command, then setup stops before
+  changing the repository or Docker state.
+</Note>
+
+## Check the machine
+
+Clone the repository, enter it, and run the dependency-free doctor:
+
+```bash
+git clone https://github.com/vectrix-ai/oao.git
+cd oao
+pnpm oao doctor
+```
+
+Use machine-readable output in CI or support scripts:
+
+```bash
+pnpm oao doctor --json
+```
+
+Warnings describe optional or setup-managed items. Resolve every failed system
+check before continuing.
+
+## Run guided setup
+
+```bash
+pnpm oao setup
+```
+
+The wizard:
+
+1. Repeats the non-mutating system checks.
+2. Installs the exact dependencies from `pnpm-lock.yaml` and obtains the pinned
+   PostgreSQL image when it is not cached.
+3. Creates `.env` when needed and generates a 32-byte credential encryption key.
+4. Starts PostgreSQL, applies migrations, seeds the local development tenant,
+   and waits for the API, runtime worker, and console.
+5. Prompts for OpenRouter or OpenAI and reads the API key with terminal echo
+   disabled.
+6. Validates the connection by loading its model catalog, then creates a
+   versioned model preset and a sandbox-disabled `oao-starter` agent.
+7. Starts a durable session, waits for its first run to settle, and prints the
+   assistant response and console URL.
+
+Provider API keys are written only through OAO's encrypted, write-only
+credential API. They are not stored in shell history, `.env`, logs, or
+`.oao/setup-state.json`. The local state file contains only non-secret resource
+identifiers and is created with owner-only permissions.
+
+<Warning>
+  Guided setup uses development authentication, which trusts requests from the
+  local machine. Do not expose this profile to an untrusted network or use it as
+  a production authentication mode.
+</Warning>
+
+Leave the terminal open while using OAO. Press <kbd>Ctrl</kbd>+<kbd>C</kbd> to
+stop processes started by the wizard. PostgreSQL data remains in its named
+Docker volume.
+
+## Resume or inspect setup
+
+Setup is safe to run again:
+
+```bash
+pnpm oao setup
+```
+
+The wizard discovers or reuses the provider connection, model preset, starter
+agent, and recorded session instead of creating duplicates. If validation of an
+existing connection fails, it asks for a replacement key and rotates that
+write-only credential.
+
+Inspect the stack or open the console at any time:
+
+```bash
+pnpm oao status
+pnpm oao open
+```
+
+The console is available at [http://127.0.0.1:8080](http://127.0.0.1:8080).
+
+## Troubleshooting
+
+- **Docker daemon unreachable:** start Docker Desktop, Colima, or another
+  Docker-compatible daemon, then rerun `pnpm oao doctor`.
+- **Wrong Node or pnpm version:** install a supported Node release and activate
+  pnpm `10.27.0` with Corepack.
+- **Port already in use:** stop the conflicting process. A healthy existing OAO
+  stack is detected and reused.
+- **Invalid encryption key:** preserve any key that protects existing
+  credentials. For a new empty environment, remove the invalid local value and
+  let setup generate one.
+- **Provider validation fails:** confirm the API key can list models, then rerun
+  setup and rotate the credential when prompted.
+
+For manual process control, authentication configuration, and service-level
+health checks, continue to [Local development](/getting-started/local-development).

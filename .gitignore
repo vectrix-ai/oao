@@ -9,3 +9,4 @@ coverage/
 .DS_Store
 playwright-report/
 test-results/
+.oao/

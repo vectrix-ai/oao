@@ -118,6 +118,21 @@ export interface AuthSession {
   readonly principal: PublicPrincipal;
 }
 
+export interface ProjectContext {
+  readonly principal: PublicPrincipal;
+  readonly organization: Organization;
+  readonly project: Project;
+  readonly organizations: readonly Organization[];
+  readonly projects: readonly Project[];
+  readonly activeModelPresets: readonly string[];
+  readonly authProvider: "development" | "workos";
+}
+
+export interface WaitForRunOptions extends RequestOptions {
+  readonly timeoutMs?: number;
+  readonly pollIntervalMs?: number;
+}
+
 /** @deprecated Use ProjectMember. */
 export type Member = ProjectMember;
 

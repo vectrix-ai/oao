@@ -3,12 +3,12 @@ title: "Local development"
 description: "Install, start, verify, stop, and troubleshoot the complete OAO development stack."
 ---
 
-OAO's default development profile runs the console, API, runtime worker, and PostgreSQL on your machine. It uses deterministic model, sandbox, and authentication adapters, so the first start does not require hosted-provider credentials.
+OAO's default development profile runs the console, API, runtime worker, and PostgreSQL on your machine. Development authentication is local, but executing an agent requires an OpenRouter or OpenAI connection.
 
 <Info>
-  PostgreSQL is the only application database in the local profile. OpenRouter,
-  Daytona, WorkOS, S3-compatible storage, and an OTLP collector are not required
-  for the default startup path.
+  PostgreSQL is the only application database in the local profile. Daytona is
+  needed only for sandbox-enabled agents. WorkOS, S3-compatible storage, and an
+  OTLP collector are optional for a sandbox-disabled first session.
 </Info>
 
 ## Prerequisites
@@ -49,6 +49,8 @@ docker info
 OAO does not start or stop Docker Desktop or Colima. The current launcher invokes the `docker` CLI; Apple Container is not implemented as a local runtime for these scripts.
 
 ## First start
+
+For the recommended interactive path, use the [guided quickstart](/getting-started/quickstart). The steps below describe the manual development workflow.
 
 From the repository root, install dependencies:
 

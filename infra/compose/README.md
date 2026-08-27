@@ -3,6 +3,15 @@
 PostgreSQL 17 is the only application database in the local foundation profile. No hosted credentials are required.
 
 ```sh
+pnpm oao doctor
+pnpm oao setup
+```
+
+The guided path validates system dependencies before installing or starting
+anything, then creates a first sandbox-disabled agent using OpenRouter or
+OpenAI. For manual process control, use:
+
+```sh
 pnpm dev:local
 ```
 
@@ -34,6 +43,6 @@ transcripts, and debug history survive a full `dev:local` stop/start.
 For isolated clean-room checks, use `pnpm test:postgres:fresh` and
 `pnpm test:stack:fresh`. The first applies migrations twice and runs all
 database/runtime integration suites. The second launches the real API and
-runtime processes and exercises two turns through the real console HTTP
-adapter. Each command removes its temporary PostgreSQL container in an exit
-trap, including after failure or interruption.
+runtime processes and verifies that the runnable stack fails closed without a
+configured real model provider. Each command removes its temporary PostgreSQL
+container in an exit trap, including after failure or interruption.

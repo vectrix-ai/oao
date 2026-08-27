@@ -25,6 +25,7 @@ export function createRoutes(apiPrefix = "/v1") {
   return {
     health: "/healthz",
     readiness: "/readyz",
+    context: `${api}/context`,
     auth: {
       login: `${api}/auth/login`,
       callback: `${api}/auth/callback`,

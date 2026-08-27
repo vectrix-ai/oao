@@ -8,17 +8,14 @@ Flue, and PostgreSQL. It gives teams one place to define versioned agents,
 start durable sessions, inspect their public transcripts and timing, and safely
 hand caller-owned tool work back to an application.
 
-The local MVP runs without hosted credentials. Its deterministic model,
-sandbox, and identity adapters let you develop the whole flow on a laptop
-before opting into OpenRouter, Daytona, or WorkOS.
+The guided local setup checks your machine before making changes, starts the
+stack, connects OpenRouter or OpenAI, creates a starter agent, and runs its first
+session. Development authentication stays local; Daytona is optional until you
+enable sandbox tools.
 
 <CardGroup cols={2}>
-  <Card
-    title="Run OAO locally"
-    icon="play"
-    href="/getting-started/local-development"
-  >
-    Start PostgreSQL, the API, runtime worker, and React console.
+  <Card title="Run OAO locally" icon="play" href="/getting-started/quickstart">
+    Check prerequisites and create your first working agent from the terminal.
   </Card>
   <Card title="Create an agent" icon="robot" href="/agents/create-agent">
     Define instructions, tools, sandbox policy, and an immutable version.
@@ -52,8 +49,8 @@ to client applications.
 
 ## Choose a path
 
-1. Follow [Local development](/getting-started/local-development) to verify the
-   full local stack.
+1. Follow the [guided quickstart](/getting-started/quickstart) to verify your
+   machine and run a first session.
 2. Use [Create an agent](/agents/create-agent) to publish a usable definition.
 3. Follow [Connect a codebase](/integrations/codebase) for a complete Node.js
    integration, including real-time updates and repository file access.

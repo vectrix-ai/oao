@@ -44,6 +44,7 @@ import type {
   ProjectStorageProvider,
   ProjectEventFrame,
   ProjectEventStreamOptions,
+  ProjectContext,
   PublishAgentVersionInput,
   PublishSkillVersionInput,
   CreateSkillInput,
@@ -72,6 +73,7 @@ import type {
   UpdateProjectMemberInput,
   UpdateProjectSandboxProviderConfigurationInput,
   WriteOptions,
+  WaitForRunOptions,
   McpServer,
   McpCredential,
   McpCredentialPolicy,
@@ -149,6 +151,10 @@ export class OaoClient {
 
   readiness(options?: RequestOptions): Promise<ReadinessStatus> {
     return this.#request(this.routes.readiness, options);
+  }
+
+  getContext(options?: RequestOptions): Promise<ProjectContext> {
+    return this.#request(this.routes.context, options);
   }
 
   login(
@@ -1023,6 +1029,34 @@ export class OaoClient {
     return this.#request(this.routes.run(projectId, runId), options);
   }
 
+  async waitForRunSettled(
+    projectId: string,
+    runId: string,
+    options: WaitForRunOptions = {},
+  ): Promise<Run> {
+    const timeoutMs = options.timeoutMs ?? 300_000;
+    const pollIntervalMs = options.pollIntervalMs ?? 1_000;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)
+      throw new TypeError("timeoutMs must be a positive integer");
+    if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1)
+      throw new TypeError("pollIntervalMs must be a positive integer");
+    const deadline = Date.now() + timeoutMs;
+    do {
+      const run = await this.getRun(projectId, runId, options);
+      if (SETTLED_RUN_STATES.has(run.state)) return run;
+      if (Date.now() >= deadline) break;
+      await abortableDelay(
+        Math.min(pollIntervalMs, Math.max(1, deadline - Date.now())),
+        options.signal,
+      );
+    } while (Date.now() <= deadline);
+    throw new OaoApiError(
+      408,
+      "run_wait_timeout",
+      `Run ${runId} did not settle within ${timeoutMs}ms`,
+    );
+  }
+
   cancelRun(
     projectId: string,
     runId: string,
@@ -1350,6 +1384,13 @@ export class OaoClient {
     return `${this.#baseUrl}${query === undefined ? path : this.#path(path, query)}`;
   }
 }
+
+const SETTLED_RUN_STATES = new Set<Run["state"]>([
+  "completed",
+  "failed",
+  "cancelled",
+  "timed_out",
+]);
 
 async function resolveCredential(
   credential: Credential | undefined,

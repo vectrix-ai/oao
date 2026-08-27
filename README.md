@@ -2,7 +2,7 @@
 
 OAO is an open, self-hostable managed-agent platform built around Flue and PostgreSQL.
 
-The first implementation target is a fully functional local environment. Runtime execution uses project-scoped OpenRouter/OpenAI and Daytona connections; deterministic provider doubles are confined to automated tests.
+The first implementation target is a fully functional local environment. Runtime execution uses a project-scoped OpenRouter or OpenAI connection. Daytona is required only for agents that enable a sandbox; deterministic provider doubles are confined to automated tests.
 
 ## Workspace
 
@@ -11,6 +11,7 @@ The first implementation target is a fully functional local environment. Runtime
 - `@oao/db-postgres`: executable migrations, RLS tenant transactions, typed repositories, ledgers, and audit/event storage
 - `@oao/events`: atomic append contracts, resumable cursors, and wake-only notification boundaries
 - `@oao/testkit`: deterministic identities, clocks, providers, and crash barriers
+- `@oao/cli`: dependency preflight and resumable guided local onboarding
 - `infra/compose`: local PostgreSQL 17, the owned-process development launcher,
   and disposable fresh-database verification harnesses
 
@@ -21,18 +22,41 @@ The implemented local profile runs:
 - Flue runtime worker
 - PostgreSQL canonical/control/read-model storage and wake queue
 - Configurable development or WorkOS identity plus real project-scoped model
-  and Daytona adapters
+  providers, with optional Daytona sandboxes
 
 See [docs/architecture.md](docs/architecture.md) for boundaries and implementation order.
 
-## Development
+## Quickstart
 
 Node.js 22.19 or newer and pnpm 10.27 are required.
 
 ```sh
+git clone https://github.com/vectrix-ai/oao.git
+cd oao
+pnpm oao doctor
+pnpm oao setup
+```
+
+`doctor` checks the operating system, repository, Node and pnpm versions, Docker
+CLI and daemon, writable workspace, disk space, and required ports before setup
+changes anything. `setup` installs the pinned workspace dependencies, prepares
+PostgreSQL, creates a secure local encryption key when needed, starts the stack,
+and guides you through connecting OpenRouter or OpenAI, creating a model preset,
+publishing a sandbox-disabled starter agent, and running its first session.
+Provider API keys are sent to OAO's write-only credential endpoint and are not
+written to `.env` or the setup-state file.
+
+Run `pnpm oao setup` again after an interruption; completed resources are reused.
+Use `pnpm oao status` to inspect the local stack and `pnpm oao open` to open the
+console. See the [guided quickstart](docs/getting-started/quickstart.mdx) for the
+full flow and troubleshooting.
+
+## Manual development
+
+```sh
 pnpm install
 cp .env.example .env
-# Set OAO_CREDENTIAL_ENCRYPTION_KEY, then add model and Daytona connections in the console.
+# Set OAO_CREDENTIAL_ENCRYPTION_KEY, then add a model connection in the console.
 pnpm dev:local
 ```
 
@@ -83,9 +107,10 @@ them while the development provider is selected. Never commit `.env` or real
 provider credentials.
 
 There is no runnable fake model or sandbox profile. `.env.example` documents
-the platform encryption key used for project-scoped model and Daytona
-credentials. Add both connections in the console and publish immutable agent
-versions against those provider-backed presets and sandbox policies.
+the platform encryption key used for encrypted project-scoped credentials. A
+model connection is required to run an agent. Daytona is required only when an
+agent enables a sandbox, and S3-compatible storage is required only for run
+files and workspace backups.
 
 ## Verification
 
@@ -97,9 +122,10 @@ pnpm test:stack:fresh
 
 The fresh-PostgreSQL command runs the database and runtime integration/race
 suites. The fresh-stack command additionally starts the real API and runtime
-processes and drives the real console HTTP adapter through two durable turns.
-Both commands use a PostgreSQL container on a random host port and always remove
-it. See [infra/compose/README.md](infra/compose/README.md) for lifecycle details.
+processes and verifies that the runnable stack fails closed when no real model
+provider is configured. Both commands use a PostgreSQL container on a random
+host port and always remove it. See
+[infra/compose/README.md](infra/compose/README.md) for lifecycle details.
 
 See [apps/api/README.md](apps/api/README.md) for the runnable API commands,
 development/Vite proxy setup, exact authentication environment contract, WorkOS
