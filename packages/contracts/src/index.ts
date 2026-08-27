@@ -1685,6 +1685,26 @@ export const ModelRoutingPolicySchema = v.strictObject({
 export const ModelPresetOriginSchema = v.picklist(["deployment", "project"]);
 export const ModelProviderTypeSchema = v.picklist(["openrouter", "openai"]);
 
+/**
+ * Provider-neutral generation controls stored with an immutable model preset.
+ * Adapters translate these names to the selected provider's wire contract.
+ */
+export const ModelGenerationSettingsSchema = v.strictObject({
+  textFormat: v.literal("text"),
+  mode: v.picklist(["standard", "pro"]),
+  effort: v.picklist(["none", "low", "medium", "high", "xhigh", "max"]),
+  verbosity: v.picklist(["low", "medium", "high"]),
+  summary: v.picklist(["auto", "concise", "detailed"]),
+});
+
+export const DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS = Object.freeze({
+  textFormat: "text",
+  mode: "standard",
+  effort: "medium",
+  verbosity: "medium",
+  summary: "auto",
+} as const);
+
 const McpResourceKeySchema = v.pipe(
   v.string(),
   v.minLength(1),
@@ -2119,6 +2139,7 @@ export const ModelPresetSchema = v.object({
   providerType: v.nullable(ModelProviderTypeSchema),
   model: v.pipe(v.string(), v.minLength(1), v.maxLength(300)),
   routing: ModelRoutingPolicySchema,
+  settings: v.nullable(ModelGenerationSettingsSchema),
   hosted: v.boolean(),
   available: v.boolean(),
   createdByPrincipalId: v.nullable(IdSchema),
@@ -2147,6 +2168,7 @@ export const CreateModelPresetInputSchema = v.strictObject({
     ),
   ),
   routing: v.optional(ModelRoutingPolicySchema, {}),
+  settings: v.optional(v.nullable(ModelGenerationSettingsSchema), null),
 });
 
 /** Safe, credential-free metadata for one provider catalog model or preset. */
@@ -2319,6 +2341,9 @@ export type RotateProjectStorageProviderCredentialInput = v.InferOutput<
   typeof RotateProjectStorageProviderCredentialInputSchema
 >;
 export type ModelPreset = v.InferOutput<typeof ModelPresetSchema>;
+export type ModelGenerationSettings = v.InferOutput<
+  typeof ModelGenerationSettingsSchema
+>;
 export type CreateModelPresetInput = v.InferOutput<
   typeof CreateModelPresetInputSchema
 >;

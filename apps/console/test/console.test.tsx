@@ -1360,8 +1360,25 @@ describe("management console", () => {
   });
 
   it("adds and rotates a project-scoped OpenAI provider without rendering its key", async () => {
+    class CatalogTrackingApi extends DemoConsoleApi {
+      openAICatalogLoads = 0;
+      lastPresetInput:
+        Parameters<DemoConsoleApi["createModelPreset"]>[0] | undefined;
+      override async listModelCatalog(providerId: string, search?: string) {
+        const result = await super.listModelCatalog(providerId, search);
+        if (result.providerType === "openai") this.openAICatalogLoads += 1;
+        return result;
+      }
+      override async createModelPreset(
+        input: Parameters<DemoConsoleApi["createModelPreset"]>[0],
+      ) {
+        this.lastPresetInput = input;
+        return super.createModelPreset(input);
+      }
+    }
     const user = userEvent.setup();
-    renderConsole("/models");
+    const api = new CatalogTrackingApi({ eventDelayMs: 60_000 });
+    renderConsole("/models", api);
     await user.click(
       await screen.findByRole("button", { name: "Add provider" }),
     );
@@ -1381,6 +1398,51 @@ describe("management console", () => {
     await user.click(create.getByRole("button", { name: "Add provider" }));
     expect(await screen.findByText("OpenAI primary")).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("sk-openai-secret-value");
+
+    await user.click(screen.getByRole("button", { name: "Add model preset" }));
+    const preset = within(
+      screen.getByRole("dialog", { name: "Add model preset" }),
+    );
+    const openAIOption = preset.getByRole("option", {
+      name: "OpenAI primary — openai",
+    }) as HTMLOptionElement;
+    await user.selectOptions(
+      preset.getByLabelText("Provider connection"),
+      openAIOption.value,
+    );
+    await waitFor(() => expect(api.openAICatalogLoads).toBeGreaterThan(0));
+    const model = preset.getByRole("combobox", { name: /^Model/u });
+    await user.click(model);
+    await user.type(model, "gpt");
+    await user.click(
+      await preset.findByRole("option", { name: /GPT-5\.6 Terra/u }),
+    );
+    expect(preset.getByText(/^openai\/gpt-5\.6-terra/u)).toBeInTheDocument();
+    expect(preset.getByLabelText("Text format")).toHaveValue("text");
+    expect(preset.getByLabelText("Reasoning mode")).toHaveValue("standard");
+    expect(preset.getByLabelText("Reasoning effort")).toHaveValue("medium");
+    expect(preset.getByLabelText("Verbosity")).toHaveValue("medium");
+    expect(preset.getByLabelText("Summary")).toHaveValue("auto");
+    await user.selectOptions(preset.getByLabelText("Reasoning mode"), "pro");
+    await user.selectOptions(preset.getByLabelText("Reasoning effort"), "high");
+    await user.selectOptions(preset.getByLabelText("Verbosity"), "low");
+    await user.selectOptions(preset.getByLabelText("Summary"), "detailed");
+    expect(
+      preset.getByText(/OpenAI presets use direct provider routing/u),
+    ).toBeInTheDocument();
+    expect(
+      preset.queryByText("Routing and data policy"),
+    ).not.toBeInTheDocument();
+    await user.click(preset.getByRole("button", { name: "Add model preset" }));
+    await waitFor(() =>
+      expect(api.lastPresetInput?.settings).toEqual({
+        textFormat: "text",
+        mode: "pro",
+        effort: "high",
+        verbosity: "low",
+        summary: "detailed",
+      }),
+    );
 
     const row = screen.getByText("OpenAI primary").closest("tr");
     expect(row).not.toBeNull();
@@ -2057,7 +2119,7 @@ describe("management console", () => {
     ).toBeInTheDocument();
   });
 
-  it("creates a model preset from the pinned catalog and links it to a new agent version", async () => {
+  it("creates a model preset from the provider catalog and links it to a new agent version", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     const view = renderConsole("/models", api);

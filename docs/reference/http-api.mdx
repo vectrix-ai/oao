@@ -81,7 +81,7 @@ references an OpenRouter or OpenAI provider connection in the same project.
 | `GET`  | `/projects/{projectId}/model-providers`                 | List safe provider and credential metadata.          |
 | `POST` | `/projects/{projectId}/model-providers`                 | Add a provider and encrypted API key.                |
 | `PUT`  | `/projects/{projectId}/model-providers/{id}/credential` | Rotate the write-only API key.                       |
-| `GET`  | `/projects/{projectId}/model-catalog?providerId={id}`   | List the matching pinned provider catalog.           |
+| `GET`  | `/projects/{projectId}/model-catalog?providerId={id}`   | List the matching live provider catalog.             |
 | `GET`  | `/projects/{projectId}/model-presets`                   | List local, project, and unavailable legacy presets. |
 | `POST` | `/projects/{projectId}/model-presets`                   | Add an immutable preset linked to a provider.        |
 
@@ -119,7 +119,25 @@ Create a preset with:
 The model must belong to the selected provider catalog. OpenRouter catalog
 responses include live OpenRouter models and saved presets as
 `openrouter/@preset/<slug>` entries. OpenRouter supports the routing policy
-below. OpenAI presets require an empty routing object.
+below. OpenAI catalog responses include the live models available to the
+selected key that OAO's Responses runtime supports. OpenAI presets require an
+empty routing object and accept the immutable `settings` object below. If an
+older client omits `settings`, the API stores the documented defaults.
+
+### OpenAI model settings
+
+| Field        | Type                                                                  | Default      |
+| ------------ | --------------------------------------------------------------------- | ------------ |
+| `textFormat` | `"text"`                                                              | `"text"`     |
+| `mode`       | `"standard"` \| `"pro"`                                               | `"standard"` |
+| `effort`     | `"none"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | `"medium"`   |
+| `verbosity`  | `"low"` \| `"medium"` \| `"high"`                                     | `"medium"`   |
+| `summary`    | `"auto"` \| `"concise"` \| `"detailed"`                               | `"auto"`     |
+
+The runtime translates these provider-neutral names to `text.format`,
+`text.verbosity`, `reasoning.mode`, `reasoning.effort`, and
+`reasoning.summary` in OpenAI Responses requests. Direct settings are rejected
+for OpenRouter presets.
 
 ### OpenRouter routing policy
 
@@ -140,7 +158,7 @@ below. OpenAI presets require an empty routing object.
 
 | Status | Cause                                                                               |
 | ------ | ----------------------------------------------------------------------------------- |
-| `400`  | Malformed input, catalog/provider mismatch, or routing unsupported by the provider  |
+| `400`  | Malformed input, catalog/provider mismatch, or settings unsupported by the provider |
 | `403`  | Principal lacks the required scope, or the path project is outside its tenant scope |
 | `404`  | Provider connection does not exist in this project                                  |
 | `409`  | Provider or preset key already exists                                               |

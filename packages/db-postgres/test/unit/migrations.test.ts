@@ -180,6 +180,39 @@ test("OpenRouter preset migration allows saved preset model references", async (
   assert.match(sql, /openai\//u);
 });
 
+test("model generation settings migrations are additive and validate safe immutable settings", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0028_model_generation_settings.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(sql, /ADD COLUMN settings jsonb/u);
+  assert.match(sql, /is_valid_model_generation_settings/u);
+  assert.match(sql, /'standard', 'pro'/u);
+  assert.match(sql, /'none', 'low', 'medium', 'high', 'xhigh', 'max'/u);
+  assert.match(sql, /jsonb_has_forbidden_public_key/u);
+  assert.doesNotMatch(sql, /UPDATE oao\.project_model_presets/u);
+
+  const providerNeutralSql = await readFile(
+    new URL(
+      "../../migrations/0029_provider_neutral_model_generation_settings.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(providerNeutralSql, /CREATE OR REPLACE FUNCTION/u);
+  assert.match(
+    providerNeutralSql,
+    /ARRAY\['effort','mode','summary','textFormat','verbosity'\]/u,
+  );
+  assert.doesNotMatch(
+    providerNeutralSql,
+    /ALTER TABLE|DROP TABLE|DELETE FROM|UPDATE /u,
+  );
+});
+
 test("sandbox provider migration encrypts Daytona credentials and versions capabilities", async () => {
   const sql = await readFile(
     new URL("../../migrations/0009_sandbox_providers.sql", import.meta.url),

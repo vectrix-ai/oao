@@ -6,6 +6,7 @@ import {
 import type { AuthSession, AuthTenantAdapter } from "@oao/auth-core";
 import { readCookie } from "@oao/auth-core";
 import {
+  DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS,
   parseCreateProjectSandboxProviderInput,
   parseCreateProjectStorageProviderInput,
   parseCreateProjectModelProviderInput,
@@ -3465,6 +3466,7 @@ function registerModelPresetRoutes(
         providerType: null,
         model,
         routing: {},
+        settings: null,
         hosted: true,
         available: true,
         createdByPrincipalId: null,
@@ -3489,7 +3491,6 @@ function registerModelPresetRoutes(
     actor: Principal,
     provider: ProviderCredentialRow,
   ): string | undefined => {
-    if (provider.provider_type !== "openrouter") return undefined;
     if (
       !Buffer.isBuffer(provider.encrypted_api_key) ||
       !Buffer.isBuffer(provider.encryption_nonce) ||
@@ -3763,7 +3764,7 @@ function registerModelPresetRoutes(
       );
       const result = await tx.query(
         `SELECT p.id,p.organization_id,p.project_id,p.preset_key AS key,p.display_name,
-                'project'::text AS origin,p.provider_id,c.provider_type,p.model,p.routing,
+                'project'::text AS origin,p.provider_id,c.provider_type,p.model,p.routing,p.settings,
                 true AS hosted,(c.id IS NOT NULL AND $3::boolean) AS available,
                 p.created_by_principal_id,p.created_at
          FROM oao.project_model_presets p
@@ -3810,7 +3811,7 @@ function registerModelPresetRoutes(
     } catch {
       throw new HttpApiError(
         "bad_request",
-        "Request must contain a versioned key, display name, approved model, and supported routing policy",
+        "Request must contain a versioned key, display name, approved model, and supported model settings",
       );
     }
     if (activeModelPresetKeys.has(input.key))
@@ -3863,12 +3864,22 @@ function registerModelPresetRoutes(
                 "bad_request",
                 "OpenAI model presets do not support OpenRouter routing policy",
               );
+            if (providerType === "openrouter" && input.settings !== null)
+              throw new HttpApiError(
+                "bad_request",
+                "OpenRouter model presets do not support direct generation settings",
+              );
+            const settings =
+              providerType === "openai"
+                ? (input.settings ?? DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS)
+                : null;
             assertPublicPayload({
               key: input.key,
               displayName: input.displayName,
               providerId: input.providerId,
               model: input.model,
               routing: input.routing,
+              settings,
             } as Readonly<Record<string, PublicValue>>);
             const existing = await tx.query(
               `SELECT 1 FROM oao.project_model_presets
@@ -3882,11 +3893,11 @@ function registerModelPresetRoutes(
               );
             const result = await tx.query(
               `INSERT INTO oao.project_model_presets
-                 (organization_id,project_id,id,preset_key,display_name,provider_id,model,routing,created_by_principal_id)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                 (organization_id,project_id,id,preset_key,display_name,provider_id,model,routing,settings,created_by_principal_id)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
                RETURNING id,organization_id,project_id,preset_key AS key,display_name,
-                         'project'::text AS origin,provider_id,$10::text AS provider_type,
-                         model,routing,true AS hosted,true AS available,
+                         'project'::text AS origin,provider_id,$11::text AS provider_type,
+                         model,routing,settings,true AS hosted,true AS available,
                          created_by_principal_id,created_at`,
               [
                 actor.organizationId,
@@ -3897,6 +3908,7 @@ function registerModelPresetRoutes(
                 input.providerId,
                 input.model,
                 input.routing,
+                settings,
                 actor.id,
                 providerType,
               ],

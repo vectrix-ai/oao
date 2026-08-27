@@ -66,6 +66,10 @@ test("models catalog and preset creation smoke", async ({ page }) => {
   await expect(dialog).toBeVisible();
   await expectAccessible(page);
 
+  await dialog
+    .getByLabel("Provider connection")
+    .selectOption({ label: "OpenAI primary — openai" });
+
   const model = dialog.getByRole("combobox", { name: /^Model/ });
   await model.click();
   await expect(
@@ -74,14 +78,19 @@ test("models catalog and preset creation smoke", async ({ page }) => {
   await expectAccessible(page);
   await model.fill("gpt");
   await dialog
-    .getByRole("option", { name: /GPT-5\.1/ })
+    .getByRole("option", { name: /GPT-5\.6 Terra/ })
     .first()
     .click();
-  await expect(dialog.getByLabel(/^Preset key/)).toHaveValue("gpt-5-1-v1");
-  await dialog.getByLabel(/^Preset key/).fill("gpt-5-1-fast-v1");
-  await dialog.getByLabel(/^Display name/).fill("GPT-5.1 fast");
+  await expect(dialog.getByLabel(/^Preset key/)).toHaveValue(
+    "gpt-5-6-terra-v1",
+  );
+  await expect(dialog.getByLabel("Reasoning mode")).toHaveValue("standard");
+  await expect(dialog.getByLabel("Reasoning effort")).toHaveValue("medium");
+  await expect(dialog.getByLabel("Verbosity")).toHaveValue("medium");
+  await expect(dialog.getByLabel("Summary")).toHaveValue("auto");
+  await dialog.getByLabel(/^Display name/).fill("GPT-5.6 Terra");
   await dialog.getByRole("button", { name: "Add model preset" }).click();
-  await expect(page.getByText("GPT-5.1 fast")).toBeVisible();
+  await expect(page.getByText("GPT-5.6 Terra")).toBeVisible();
 
   await page.goto("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
   const preset = page.getByRole("combobox", {

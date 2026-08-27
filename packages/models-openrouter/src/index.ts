@@ -2,6 +2,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { createProvider } from "@earendil-works/pi-ai";
 import type {
+  Api,
   ApiKeyAuth,
   Model,
   OpenRouterRouting,
@@ -21,10 +22,12 @@ export {
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import type {
+  ModelGenerationSettings,
   ModelCatalogEntry,
   ModelProviderType,
   ModelRoutingPolicy,
 } from "@oao/contracts";
+import { DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS } from "@oao/contracts";
 import * as v from "valibot";
 
 const OPENROUTER_MODEL_IDS = new Set(
@@ -315,6 +318,8 @@ const OPENROUTER_PREFIX = "openrouter/";
 const OPENROUTER_PRESET_PREFIX = "openrouter/@preset/";
 const OPENROUTER_CATALOG_URL = "https://openrouter.ai/api/v1";
 const OPENROUTER_PAGE_SIZE = 1_000;
+const OPENAI_PREFIX = "openai/";
+const OPENAI_CATALOG_URL = "https://api.openai.com/v1";
 
 type Fetcher = typeof fetch;
 
@@ -322,6 +327,10 @@ interface OpenRouterModelResponse {
   readonly data?: readonly unknown[];
   readonly total_count?: unknown;
   readonly links?: { readonly next?: unknown };
+}
+
+interface OpenAIModelResponse {
+  readonly data?: readonly unknown[];
 }
 
 function record(value: unknown): Readonly<Record<string, unknown>> | undefined {
@@ -476,6 +485,63 @@ export async function listOpenRouterModelCatalog(input: {
   return entries.slice(0, input.limit ?? entries.length);
 }
 
+/**
+ * Account-aware projection of OpenAI's live model catalog.
+ *
+ * `GET /v1/models` also returns embeddings, image, audio, fine-tuned, and
+ * other model types. OAO exposes only entries supported by its pinned
+ * Responses provider so every selectable model can be activated safely by the
+ * runtime.
+ */
+export async function listOpenAIModelCatalog(input: {
+  readonly apiKey: string;
+  readonly search?: string;
+  readonly limit?: number;
+  readonly fetcher?: Fetcher;
+}): Promise<readonly ModelCatalogEntry[]> {
+  const fetcher = input.fetcher ?? fetch;
+  const response = await fetcher(`${OPENAI_CATALOG_URL}/models`, {
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${input.apiKey}`,
+    },
+  });
+  if (!response.ok)
+    throw new Error(`OpenAI catalog request failed with ${response.status}`);
+  const json = record(await response.json());
+  if (!json || !Array.isArray(json.data))
+    throw new Error("OpenAI catalog response was not a list");
+
+  const supported = new Map(
+    openaiProvider()
+      .getModels()
+      .map((model) => [model.id, model] as const),
+  );
+  const data = (json as OpenAIModelResponse).data ?? [];
+  const entries = data
+    .flatMap((item) => {
+      const catalogId = stringValue(record(item)?.id);
+      const model = catalogId ? supported.get(catalogId) : undefined;
+      if (!catalogId || !model) return [];
+      return [
+        {
+          providerType: "openai" as const,
+          model: `${OPENAI_PREFIX}${catalogId}`,
+          catalogId,
+          name: model.name,
+          contextWindow: positiveInteger(model.contextWindow),
+          maxOutputTokens: positiveInteger(model.maxTokens),
+          reasoning: model.reasoning === true,
+        },
+      ];
+    })
+    .filter((entry) => catalogMatches(entry, input.search))
+    .sort((left, right) => left.catalogId.localeCompare(right.catalogId));
+  return [
+    ...new Map(entries.map((entry) => [entry.model, entry])).values(),
+  ].slice(0, input.limit ?? entries.length);
+}
+
 function openRouterCatalogId(model: string): string | undefined {
   return model.startsWith(OPENROUTER_PREFIX)
     ? model.slice(OPENROUTER_PREFIX.length)
@@ -497,7 +563,7 @@ function positiveInteger(value: unknown): number | null {
 
 /**
  * Safe, credential-free projection of the deployment OpenRouter/OpenAI catalog.
- * Live OpenRouter project connections use `listOpenRouterModelCatalog`.
+ * Project connections use the provider-specific live catalog functions.
  */
 export function listApprovedModelCatalog(
   providerType?: ModelProviderType,
@@ -516,7 +582,7 @@ export function listApprovedModelCatalog(
       ? [
           {
             type: "openai" as const,
-            prefix: "openai/",
+            prefix: OPENAI_PREFIX,
             provider: openaiProvider(),
           },
         ]
@@ -550,8 +616,8 @@ export function isApprovedCatalogModel(
       isValidOpenRouterCatalogId(catalogId))
   )
     return true;
-  const openAiId = model.startsWith("openai/")
-    ? model.slice("openai/".length)
+  const openAiId = model.startsWith(OPENAI_PREFIX)
+    ? model.slice(OPENAI_PREFIX.length)
     : undefined;
   return (
     (providerType === undefined || providerType === "openai") &&
@@ -604,6 +670,7 @@ export interface ProjectModelPresetInput extends ModelPresetTenant {
   readonly credentialVersion: number;
   readonly model: string;
   readonly routing: ModelRoutingPolicy;
+  readonly settings?: ModelGenerationSettings | null;
 }
 
 export interface ResolvedModelPreset {
@@ -613,6 +680,7 @@ export interface ResolvedModelPreset {
   /** Approved catalog identifier the preset was created from. */
   readonly approvedModel: string;
   readonly origin: "deployment" | "project";
+  readonly settings?: ModelGenerationSettings | null;
 }
 
 function projectPresetProviderId(input: ProjectModelPresetInput): string {
@@ -636,6 +704,7 @@ function presetFingerprint(input: ProjectModelPresetInput): string {
         left.localeCompare(right),
       ),
     ),
+    settings: input.settings,
   });
 }
 
@@ -691,8 +760,16 @@ export class ProjectModelPresetRegistry {
       Object.keys(input.routing).length > 0
     )
       throw new Error("OpenAI model presets do not support routing policy");
+    if (input.providerType === "openrouter" && input.settings != null)
+      throw new Error(
+        "OpenRouter model presets do not support direct generation settings",
+      );
+    const settings =
+      input.providerType === "openai"
+        ? (input.settings ?? DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS)
+        : null;
     const cacheKey = ProjectModelPresetRegistry.#cacheKey(input, input.key);
-    const fingerprint = presetFingerprint(input);
+    const fingerprint = presetFingerprint({ ...input, settings });
     const existing = this.#active.get(cacheKey);
     if (existing) {
       if (existing.fingerprint !== fingerprint)
@@ -712,6 +789,7 @@ export class ProjectModelPresetRegistry {
         label: input.key,
         apiKey: input.apiKey,
         routing: toOpenRouterRouting(input.routing),
+        settings,
       }),
     );
     const resolved: ResolvedModelPreset = deepFreeze({
@@ -719,6 +797,7 @@ export class ProjectModelPresetRegistry {
       model: `${providerId}/${catalogId}`,
       approvedModel: input.model,
       origin: "project",
+      settings,
     });
     this.#active.set(cacheKey, {
       resolved,
@@ -745,6 +824,7 @@ export class ProjectModelPresetRegistry {
         model: preset.model,
         approvedModel: preset.approvedModel,
         origin: "deployment",
+        settings: null,
       };
     }
     throw new Error(`Model preset is not approved: ${key}`);
@@ -812,6 +892,7 @@ function createProjectPresetProvider(input: {
   readonly label: string;
   readonly apiKey: string;
   readonly routing: OpenRouterRouting | undefined;
+  readonly settings: ModelGenerationSettings | null;
 }): Provider {
   const native =
     input.providerType === "openrouter"
@@ -833,7 +914,7 @@ function createProjectPresetProvider(input: {
     input.providerType === "openrouter"
       ? nativeModel
       : deepFreeze({ ...nativeModel, provider: input.providerId });
-  return createProvider({
+  const provider = createProvider({
     id: input.providerId,
     name: `${native.name} (${input.label})`,
     ...(native.baseUrl ? { baseUrl: native.baseUrl } : {}),
@@ -845,6 +926,75 @@ function createProjectPresetProvider(input: {
         ? openAICompletionsApi()
         : openAIResponsesApi(),
   });
+  return input.providerType === "openai" && input.settings
+    ? withOpenAIModelGenerationSettings(provider, input.settings)
+    : provider;
+}
+
+function withOpenAIModelGenerationSettings<T extends Provider>(
+  provider: T,
+  settings: ModelGenerationSettings,
+): T {
+  const withSettings = (options: Record<string, unknown> | undefined) => {
+    const existing = options?.onPayload as
+      | ((payload: unknown, model: Model<Api>) => unknown | Promise<unknown>)
+      | undefined;
+    return {
+      ...options,
+      onPayload: async (payload: unknown, model: Model<Api>) => {
+        const transformed = (await existing?.(payload, model)) ?? payload;
+        if (
+          !transformed ||
+          typeof transformed !== "object" ||
+          Array.isArray(transformed)
+        )
+          return transformed;
+        const record = transformed as Record<string, unknown>;
+        const text =
+          record.text &&
+          typeof record.text === "object" &&
+          !Array.isArray(record.text)
+            ? (record.text as Record<string, unknown>)
+            : {};
+        const reasoning =
+          record.reasoning &&
+          typeof record.reasoning === "object" &&
+          !Array.isArray(record.reasoning)
+            ? (record.reasoning as Record<string, unknown>)
+            : {};
+        return {
+          ...record,
+          text: {
+            ...text,
+            format: { type: settings.textFormat },
+            verbosity: settings.verbosity,
+          },
+          reasoning: {
+            ...reasoning,
+            mode: settings.mode,
+            summary: settings.summary,
+          },
+        };
+      },
+    };
+  };
+  return {
+    ...provider,
+    stream(model, context, options) {
+      return provider.stream(
+        model,
+        context,
+        withSettings(options as Record<string, unknown> | undefined) as never,
+      );
+    },
+    streamSimple(model, context, options) {
+      return provider.streamSimple(
+        model,
+        context,
+        withSettings(options as Record<string, unknown> | undefined) as never,
+      );
+    },
+  } as T;
 }
 
 export interface ModelPresetConfiguration {

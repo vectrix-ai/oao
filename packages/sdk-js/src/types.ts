@@ -6,6 +6,7 @@ import type {
   Approval,
   Message,
   ModelCatalogEntry,
+  ModelGenerationSettings,
   ModelPreset,
   ProjectModelProvider,
   ModelRoutingPolicy,
@@ -48,6 +49,7 @@ export type {
   Approval,
   Message,
   ModelCatalogEntry,
+  ModelGenerationSettings,
   ModelPreset,
   ProjectModelProvider,
   ModelRoutingPolicy,
@@ -348,6 +350,7 @@ export interface CreateModelPresetInput {
   /** Approved catalog model, for example `openrouter/anthropic/claude-sonnet-4.6`. */
   readonly model: string;
   readonly routing?: ModelRoutingPolicy;
+  readonly settings?: ModelGenerationSettings | null;
 }
 
 export interface ModelPresetPage extends Page<ModelPreset> {

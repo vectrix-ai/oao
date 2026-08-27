@@ -702,6 +702,7 @@ test("a durable project preset is loaded, tenant scoped, and activated", async (
       credentialVersion: 1,
       model: "openrouter/anthropic/claude-sonnet-4.6",
       routing: { zeroDataRetention: true, providerAllowlist: ["anthropic"] },
+      settings: null,
     },
   ]);
   const lookup = queries.find((query) =>

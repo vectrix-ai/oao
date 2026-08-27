@@ -30,6 +30,8 @@ export function describeRouting(routing: ModelRoutingPolicy): string {
 export function describePresetRouting(preset: ModelPreset): string {
   if (preset.origin === "deployment" && preset.hosted)
     return "Deployment-managed routing";
+  if (preset.settings)
+    return `${preset.settings.mode} · ${preset.settings.effort} reasoning · ${preset.settings.verbosity} verbosity · ${preset.settings.summary} summary`;
   return describeRouting(preset.routing);
 }
 

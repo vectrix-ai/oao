@@ -657,6 +657,7 @@ describe("HTTP console adapter", () => {
       providerType: "openrouter",
       model: "openrouter/anthropic/claude-sonnet-4.6",
       routing: { zeroDataRetention: true },
+      settings: null,
       hosted: true,
       available: true,
       createdByPrincipalId: CONTEXT.principal.id,
@@ -1101,6 +1102,104 @@ describe("HTTP console adapter", () => {
         summary: "I should create a CSV with three columns.",
         durationMs: 5_000,
         payload: expect.objectContaining({ redacted: false }),
+      }),
+    );
+  });
+
+  it("orders ordinary session activity chronologically and treats a running sandbox as ready", async () => {
+    const runId = "88888888-8888-4888-8888-888888888880";
+    const session = {
+      id: "77777777-7777-4777-8777-777777777770",
+      title: "Ordered file test",
+      status: "completed",
+      agentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentName: "Sandbox agent",
+      agentVersion: 1,
+      latestRunId: runId,
+      createdAt: "2026-08-20T10:00:00.000Z",
+      lastActivityAt: "2026-08-20T10:00:05.000Z",
+      runs: [
+        {
+          id: runId,
+          state: "completed",
+          createdAt: "2026-08-20T10:00:00.000Z",
+          settledAt: "2026-08-20T10:00:05.000Z",
+        },
+      ],
+      transcript: [
+        {
+          id: "message-user",
+          runId,
+          role: "user",
+          redactedContent: "Create the file.",
+          createdAt: "2026-08-20T10:00:00.000Z",
+        },
+        {
+          id: "message-assistant",
+          runId,
+          role: "assistant",
+          redactedContent: "The file is ready.",
+          createdAt: "2026-08-20T10:00:05.000Z",
+        },
+      ],
+      timeline: [],
+      debug: {
+        sandboxes: [
+          {
+            id: "sandbox-1",
+            state: "running",
+            createdAt: "2026-08-20T10:00:00.500Z",
+            updatedAt: "2026-08-20T10:00:01.000Z",
+          },
+        ],
+        modelInvocations: [
+          {
+            id: "model-1",
+            runId,
+            status: "completed",
+            attempt: 1,
+            modelKey: "openai/gpt-5.6-terra",
+            startedAt: "2026-08-20T10:00:01.000Z",
+            completedAt: "2026-08-20T10:00:02.000Z",
+          },
+        ],
+        sandboxCommands: [
+          {
+            id: "command-1",
+            runId,
+            state: "completed",
+            toolName: "write",
+            safeCommand: {
+              toolName: "write",
+              arguments: { path: "/root/test.txt", content: "ready" },
+            },
+            safeResult: { exitCode: 0, output: "Wrote 5 bytes" },
+            createdAt: "2026-08-20T10:00:03.000Z",
+            startedAt: "2026-08-20T10:00:03.000Z",
+            completedAt: "2026-08-20T10:00:04.000Z",
+          },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(jsonResponse(session));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const detail = await new HttpConsoleApi().getSession(session.id);
+
+    expect(detail.events.map((event) => event.id)).toEqual([
+      "message-user",
+      "debug:sandboxes:sandbox-1",
+      "debug:modelInvocations:model-1",
+      "debug:sandboxCommands:command-1",
+      "message-assistant",
+    ]);
+    expect(detail.events[1]).toEqual(
+      expect.objectContaining({
+        id: "debug:sandboxes:sandbox-1",
+        status: "success",
       }),
     );
   });

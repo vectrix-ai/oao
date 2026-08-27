@@ -10,6 +10,7 @@ import {
   createOpenRouterPresetProviders,
   isApprovedCatalogModel,
   listApprovedModelCatalog,
+  listOpenAIModelCatalog,
   listOpenRouterModelCatalog,
   loadModelPresetConfiguration,
   parseApprovedModelPresets,
@@ -312,6 +313,70 @@ test("OpenRouter live catalog combines models and saved presets", async () => {
   assert.ok(requests.every((url) => !url.includes("sk-openrouter-test")));
 });
 
+test("OpenAI live catalog exposes account-available Responses models", async () => {
+  let request: Request | undefined;
+  const fetcher = async (input: string | URL | Request, init?: RequestInit) => {
+    request = new Request(input, init);
+    return new Response(
+      JSON.stringify({
+        object: "list",
+        data: [
+          { id: "gpt-5.6-sol", object: "model", owned_by: "openai" },
+          { id: "gpt-4.1-mini", object: "model", owned_by: "openai" },
+          {
+            id: "text-embedding-3-large",
+            object: "model",
+            owned_by: "openai-internal",
+          },
+          { id: "gpt-5.6-sol", object: "model", owned_by: "openai" },
+        ],
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
+  };
+
+  const catalog = await listOpenAIModelCatalog({
+    apiKey: "sk-openai-test",
+    fetcher: fetcher as typeof fetch,
+  });
+
+  assert.deepEqual(
+    catalog.map((entry) => entry.model),
+    ["openai/gpt-4.1-mini", "openai/gpt-5.6-sol"],
+  );
+  const filtered = await listOpenAIModelCatalog({
+    apiKey: "sk-openai-test",
+    search: "5.6",
+    fetcher: fetcher as typeof fetch,
+  });
+  assert.deepEqual(
+    filtered.map((entry) => entry.model),
+    ["openai/gpt-5.6-sol"],
+  );
+  assert.equal(request?.url, "https://api.openai.com/v1/models");
+  assert.equal(request?.headers.get("authorization"), "Bearer sk-openai-test");
+  assert.equal(request?.url.includes("sk-openai-test"), false);
+});
+
+test("OpenAI live catalog rejects provider errors and malformed responses", async () => {
+  await assert.rejects(
+    listOpenAIModelCatalog({
+      apiKey: "sk-openai-test",
+      fetcher: (async () =>
+        new Response(null, { status: 401 })) as typeof fetch,
+    }),
+    /OpenAI catalog request failed with 401/u,
+  );
+  await assert.rejects(
+    listOpenAIModelCatalog({
+      apiKey: "sk-openai-test",
+      fetcher: (async () =>
+        new Response(JSON.stringify({ object: "list" }))) as typeof fetch,
+    }),
+    /OpenAI catalog response was not a list/u,
+  );
+});
+
 test("provider-neutral policy maps onto the OpenRouter routing contract", () => {
   assert.equal(toOpenRouterRouting({}), undefined);
   assert.deepEqual(
@@ -552,4 +617,68 @@ test("OpenAI project presets use direct routing and credentials can rotate", asy
     () => registry.activate({ ...input, routing: { allowFallbacks: false } }),
     /do not support routing policy/u,
   );
+});
+
+test("OpenAI project preset settings reach the Responses API payload", async () => {
+  const providers: Provider[] = [];
+  const registry = new ProjectModelPresetRegistry({
+    deployment: new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
+      hostedEnabled: false,
+    }),
+    registerProvider: (provider) => providers.push(provider),
+  });
+  const resolved = registry.activate({
+    ...tenantA,
+    providerType: "openai",
+    apiKey: "sk-openai-settings-test",
+    key: "gpt-5-6-terra-v1",
+    model: "openai/gpt-5.6-terra",
+    routing: {},
+    settings: {
+      textFormat: "text",
+      mode: "standard",
+      effort: "medium",
+      verbosity: "medium",
+      summary: "auto",
+    },
+  });
+  assert.equal(resolved.settings?.effort, "medium");
+  const provider = providers[0];
+  const model = provider?.getModels()[0];
+  assert.ok(provider);
+  assert.ok(model);
+  let payload: Record<string, unknown> | undefined;
+  const response = await provider
+    .streamSimple(
+      model,
+      {
+        messages: [{ role: "user", content: "Say hello.", timestamp: 1 }],
+      },
+      {
+        apiKey: "sk-openai-settings-test",
+        reasoning: "medium",
+        maxRetries: 0,
+        fetch: async (_input, init) => {
+          payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(
+            JSON.stringify({ error: { message: "expected test stop" } }),
+            {
+              status: 503,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        },
+      },
+    )
+    .result();
+  assert.equal(response.stopReason, "error");
+  assert.deepEqual(payload?.text, {
+    format: { type: "text" },
+    verbosity: "medium",
+  });
+  assert.deepEqual(payload?.reasoning, {
+    effort: "medium",
+    mode: "standard",
+    summary: "auto",
+  });
 });

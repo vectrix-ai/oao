@@ -30,14 +30,15 @@ async function insertPreset(
     readonly key: string;
     readonly model: string;
     readonly routing?: unknown;
+    readonly settings?: unknown;
     readonly principalId: PrincipalId;
   },
 ): Promise<void> {
   await withTenantTransaction(pool, scope, (transaction) =>
     transaction.query(
       `INSERT INTO oao.project_model_presets
-         (organization_id,project_id,id,preset_key,display_name,model,routing,created_by_principal_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+         (organization_id,project_id,id,preset_key,display_name,model,routing,settings,created_by_principal_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
       [
         scope.organizationId,
         scope.projectId,
@@ -46,6 +47,7 @@ async function insertPreset(
         "Approved preset",
         input.model,
         input.routing ?? {},
+        input.settings ?? null,
         input.principalId,
       ],
     ),
@@ -135,6 +137,52 @@ test(
           /immutable/u,
         );
       });
+
+      await t.test(
+        "OpenAI generation settings are stored and validated",
+        async () => {
+          const id = "00000000-0000-4000-8000-000000000623";
+          await insertPreset(pool, tenant, {
+            id,
+            key: "gpt-5-6-terra-v1",
+            model: "openai/gpt-5.6-terra",
+            settings: {
+              textFormat: "text",
+              mode: "standard",
+              effort: "medium",
+              verbosity: "medium",
+              summary: "auto",
+            },
+            principalId: ids.principal,
+          });
+          const stored = await withTenantTransaction(
+            pool,
+            tenant,
+            (transaction) =>
+              transaction.query(
+                "SELECT settings FROM oao.project_model_presets WHERE organization_id=$1 AND project_id=$2 AND id=$3",
+                [ids.organization, ids.project, id],
+              ),
+          );
+          assert.equal(stored.rows[0]?.settings.effort, "medium");
+          await assert.rejects(
+            insertPreset(pool, tenant, {
+              id: "00000000-0000-4000-8000-000000000624",
+              key: "gpt-invalid-settings-v1",
+              model: "openai/gpt-5.6-terra",
+              settings: {
+                textFormat: "text",
+                mode: "unsupported",
+                effort: "medium",
+                verbosity: "medium",
+                summary: "auto",
+              },
+              principalId: ids.principal,
+            }),
+            /check constraint/u,
+          );
+        },
+      );
 
       await t.test("preset keys are unique inside one project", async () => {
         await assert.rejects(

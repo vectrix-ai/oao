@@ -276,8 +276,13 @@ OAO_CREDENTIAL_ENCRYPTION_KEY=replace-with-generated-base64-value
 Restart the API and runtime, then add an OpenRouter or OpenAI provider on the
 console **Models** page. Enter provider API keys there; OAO encrypts them before
 storing them in PostgreSQL for the current organization and project. Add a
-model preset linked to that connection. No process restart is needed for later
-provider or preset additions.
+model preset linked to that connection. The model selector loads the live
+catalog available to the selected provider key; for OpenAI it offers the
+returned models supported by OAO's Responses runtime. No process restart is
+needed for later provider or preset additions. Direct OpenAI presets also pin
+plain-text output, reasoning mode and effort, verbosity, and reasoning-summary
+settings; the runtime applies them to every OpenAI Responses session using that
+preset.
 
 <Warning>
   Do not set `OPENROUTER_API_KEY` or `OPENAI_API_KEY` in `.env`. Provider keys

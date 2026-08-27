@@ -83,6 +83,9 @@ and should shape integrations:
 - **Routing price caps are not budgets.** There is no project budget,
   reservation ledger, quota, or spend alerting, and no autonomous per-run model
   routing.
+- **OpenAI preset text format is plain text only.** The preset stores the
+  Responses `text.format` choice, but JSON Schema authoring and structured
+  output validation are not part of this control yet.
 - **Daytona target selection is not an EU-residency guarantee.** Strict EU
   controls and evidence are deferred beyond the MVP.
 - **Daytona browser tools require Chromium in the sandbox image.** The runtime

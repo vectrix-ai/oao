@@ -61,10 +61,12 @@ The runtime replaces its in-memory provider on the next activation.
 
 1. Select **Add model preset**.
 2. Choose a provider connection.
-3. In **Model**, type to search the provider catalog and pick a model or
-   OpenRouter saved preset. The picker lists the first matches with their model
-   identifier, context window, and reasoning support, and reports how many
-   further matches the search is hiding.
+3. In **Model**, type to search the live catalog available to that connection
+   and pick a model or OpenRouter saved preset. For OpenAI, OAO calls
+   `GET /v1/models` with the selected connection's key and lists the returned
+   models that its Responses runtime supports. The picker shows the first
+   matches with their model identifier, context window, and reasoning support,
+   and reports how many further matches the search is hiding.
 4. Check the suggested preset key and display name. Both are derived from the
    chosen model — for example `claude-sonnet-4-6-v1` — with the version suffix
    moved forward past keys this project already uses. Editing either field
@@ -72,20 +74,29 @@ The runtime replaces its in-memory provider on the next activation.
 5. For OpenRouter, open **Routing and data policy** to set routing and
    data-handling constraints. It stays folded away while it is unset, and the
    summary next to it always shows the policy that will be stored.
-6. Select **Add model preset**.
+6. For OpenAI, review **Model settings**. New presets default to plain text,
+   standard reasoning mode, medium reasoning effort, medium verbosity, and an
+   automatic reasoning summary. GPT-5.6 presets can select standard or pro
+   mode and reasoning effort from none through max.
+7. Select **Add model preset**.
 
 The dialog lists what is still missing under **Validation** and keeps the
 submit button disabled until nothing is.
 
 Preset rows are append-only. A published agent version keeps referring to the
-same reviewed model and routing policy. To change either, create a new preset
-key and publish a new agent version.
+same reviewed model, routing policy, and generation settings. To change any of
+them, create a new preset key and publish a new agent version.
 
 OpenRouter presets may use live OpenRouter models or saved OpenRouter presets
 (`@preset/<slug>`), plus routing controls including fallbacks, zero-data
 retention, data collection, upstream allow/deny lists, preference order, sort,
 and price caps. OpenAI is a direct provider connection, so OpenRouter routing
 controls must be empty.
+
+For direct OpenAI presets, OAO maps the stored controls to the Responses API as
+`text.format`, `text.verbosity`, `reasoning.mode`, `reasoning.effort`, and
+`reasoning.summary`. Reasoning effort is also the Flue default for the agent;
+an explicitly configured Harness Operation may still override its own effort.
 
 ## Prompt caching
 
@@ -165,8 +176,11 @@ The provider ID is required. OAO reads its type from PostgreSQL and returns only
 the matching provider catalog. For OpenRouter connections, OAO decrypts the
 project provider key server-side and fetches OpenRouter's live `/models` catalog
 plus saved `/presets`, exposing saved presets as `openrouter/@preset/<slug>`
-options. Direct OpenAI connections use OAO's deployment catalog. Catalog
-responses contain public metadata only.
+options. For direct OpenAI connections, OAO decrypts the selected project key
+server-side and fetches OpenAI's live `/v1/models` catalog. The response is
+intersected with OAO's supported Responses models so embeddings, image, audio,
+and other incompatible model types are not offered for agent presets. Catalog
+responses contain public metadata only; neither provider key is returned.
 
 ### Create a preset
 
@@ -189,7 +203,25 @@ curl -sS -X POST "$API/v1/projects/$PROJECT_ID/model-presets" \
 ```
 
 For a direct OpenAI connection, use an `openai/<catalog-id>` model returned by
-the catalog and send an empty `routing` object.
+the catalog, send an empty `routing` object, and include the immutable model
+settings:
+
+```json
+{
+  "key": "gpt-5-6-terra-v1",
+  "displayName": "GPT-5.6 Terra",
+  "providerId": "55555555-5555-4555-8555-555555555555",
+  "model": "openai/gpt-5.6-terra",
+  "routing": {},
+  "settings": {
+    "textFormat": "text",
+    "mode": "standard",
+    "effort": "medium",
+    "verbosity": "medium",
+    "summary": "auto"
+  }
+}
+```
 
 ## Tenant and lifecycle guarantees
 
@@ -223,9 +255,10 @@ identity is authenticated, so copied ciphertext intentionally fails.
 Search `/model-catalog` with the intended provider connection. OpenRouter and
 OpenAI use separate catalogs and prefixes. If an OpenRouter model or saved
 preset is missing, confirm the provider API key can read the OpenRouter catalog.
-For direct OpenAI connections, update the pinned Pi model catalog dependency
-through a reviewed code change before approving a newly released model that is
-not yet present.
+If a direct OpenAI model is missing, confirm the selected key can list it through
+OpenAI's `/v1/models` endpoint. OAO also requires matching Responses-runtime
+metadata, so a newly released or non-text model remains unavailable until the
+pinned Pi catalog supports it.
 
 ### A preset is unavailable
 

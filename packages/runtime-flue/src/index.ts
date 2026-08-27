@@ -40,6 +40,7 @@ import {
   parseManagedAgentSnapshotForPublication,
   ManagedRunDeliverySchema,
   ManagedRunInputV1Schema,
+  ModelGenerationSettingsSchema,
   ModelRoutingPolicySchema,
   TOOL_RETRY_POLICY,
   ToolResultFailureCodeSchema,
@@ -51,6 +52,7 @@ import {
   type ManagedRunDelivery,
   type ManagedRunInputV1,
   type ModelProviderType,
+  type ModelGenerationSettings,
   type ModelRoutingPolicy,
 } from "@oao/contracts";
 import type { PgPool, Queryable, TenantContext } from "@oao/db-postgres";
@@ -891,7 +893,16 @@ export function ManagedAgent(): string {
     organizationId: initial.organizationId,
     projectId: initial.projectId,
   });
-  useModel(preset.model);
+  useModel(preset.model, {
+    ...(preset.settings
+      ? {
+          thinkingLevel:
+            preset.settings.effort === "none"
+              ? ("off" as const)
+              : preset.settings.effort,
+        }
+      : {}),
+  });
   if (initial.snapshot.sandbox.enabled && config.sandboxFactory) {
     const sandbox = config.sandboxFactory(initial, delivery);
     useSandbox(sandbox);
@@ -4204,6 +4215,7 @@ interface ProjectModelPresetRow {
   preset_key: string;
   model: string;
   routing: unknown;
+  settings: unknown;
   provider_id: string;
   provider_type: ModelProviderType;
   encrypted_api_key: Buffer;
@@ -4234,6 +4246,7 @@ export function createProjectModelPresetActivator(input: {
         readonly credentialVersion: number;
         readonly model: string;
         readonly routing: ModelRoutingPolicy;
+        readonly settings?: ModelGenerationSettings | null;
       },
     ): ResolvedModelPreset;
   };
@@ -4246,7 +4259,7 @@ export function createProjectModelPresetActivator(input: {
         tenant,
         (transaction) =>
           transaction.query<ProjectModelPresetRow>(
-            `SELECT p.preset_key,p.model,p.routing,p.provider_id,
+            `SELECT p.preset_key,p.model,p.routing,p.settings,p.provider_id,
                     c.provider_type,c.encrypted_api_key,c.encryption_nonce,
                     c.encryption_tag,c.encryption_key_version
              FROM oao.project_model_presets p
@@ -4287,6 +4300,10 @@ export function createProjectModelPresetActivator(input: {
         credentialVersion: row.encryption_key_version,
         model: row.model,
         routing: v.parse(ModelRoutingPolicySchema, row.routing ?? {}),
+        settings:
+          row.settings == null
+            ? null
+            : v.parse(ModelGenerationSettingsSchema, row.settings),
       });
     },
   };

@@ -1,5 +1,6 @@
 import type {
   ModelCatalogEntry,
+  ModelGenerationSettings,
   ModelPreset,
   ModelRoutingPolicy,
   ProjectModelProvider,
@@ -25,6 +26,7 @@ import type {
 
 export type {
   ModelCatalogEntry,
+  ModelGenerationSettings,
   ModelPreset,
   ModelRoutingPolicy,
   ProjectModelProvider,
@@ -79,6 +81,7 @@ export interface CreateModelPresetInput {
   readonly providerId: string;
   readonly model: string;
   readonly routing: ModelRoutingPolicy;
+  readonly settings?: ModelGenerationSettings | null;
 }
 
 export interface CreateModelProviderInput {

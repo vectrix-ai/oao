@@ -762,11 +762,18 @@ test("client reads and approves model presets over HTTP", async () => {
   );
 
   const input = {
-    key: "claude-sonnet-4-6-zdr-v1",
-    displayName: "Claude Sonnet 4.6 (zero retention)",
+    key: "gpt-5-6-terra-v1",
+    displayName: "GPT-5.6 Terra",
     providerId: "provider-1",
-    model: "openrouter/anthropic/claude-sonnet-4.6",
-    routing: { zeroDataRetention: true, providerAllowlist: ["anthropic"] },
+    model: "openai/gpt-5.6-terra",
+    routing: {},
+    settings: {
+      textFormat: "text" as const,
+      mode: "standard" as const,
+      effort: "medium" as const,
+      verbosity: "medium" as const,
+      summary: "auto" as const,
+    },
   };
   await client.createModelPreset("project-1", input, {
     idempotencyKey: "preset-1",

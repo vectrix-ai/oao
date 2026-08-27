@@ -412,6 +412,43 @@ test("model preset input requires a versioned key and supported routing", () => 
     }).routing,
     {},
   );
+  assert.deepEqual(
+    parseCreateModelPresetInput({
+      key: "gpt-5-6-terra-v1",
+      displayName: "GPT-5.6 Terra",
+      providerId: "55555555-5555-4555-8555-555555555555",
+      model: "openai/gpt-5.6-terra",
+      settings: {
+        textFormat: "text",
+        mode: "standard",
+        effort: "medium",
+        verbosity: "medium",
+        summary: "auto",
+      },
+    }).settings,
+    {
+      textFormat: "text",
+      mode: "standard",
+      effort: "medium",
+      verbosity: "medium",
+      summary: "auto",
+    },
+  );
+  assert.throws(() =>
+    parseCreateModelPresetInput({
+      key: "gpt-invalid-settings-v1",
+      displayName: "Invalid settings",
+      providerId: "55555555-5555-4555-8555-555555555555",
+      model: "openai/gpt-5.6-terra",
+      settings: {
+        textFormat: "text",
+        mode: "turbo",
+        effort: "medium",
+        verbosity: "medium",
+        summary: "auto",
+      },
+    }),
+  );
 
   assert.ok(MODEL_PRESET_KEY_PATTERN.test("claude-sonnet-4-6-zdr-v1"));
   for (const key of [

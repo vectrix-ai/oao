@@ -7,6 +7,7 @@ import { createPool, migrate, PostgresWakeNotifier } from "@oao/db-postgres";
 import {
   isApprovedCatalogModel,
   listApprovedModelCatalog,
+  listOpenAIModelCatalog,
   listOpenRouterModelCatalog,
 } from "@oao/models-openrouter";
 import { McpRemoteClient } from "@oao/mcp-remote";
@@ -53,18 +54,29 @@ const app = createApiApp({
     deploymentPresets: [],
     listCatalog: (input) => {
       const apiKey = input?.apiKey;
-      return input?.providerType === "openrouter" && apiKey
-        ? listOpenRouterModelCatalog({
-            apiKey,
-            ...(input.search ? { search: input.search } : {}),
-            ...(input.limit === undefined ? {} : { limit: input.limit }),
-          })
-        : listApprovedModelCatalog(input?.providerType);
+      if (!apiKey) return listApprovedModelCatalog(input?.providerType);
+      const catalogInput = {
+        apiKey,
+        ...(input?.search ? { search: input.search } : {}),
+        ...(input?.limit === undefined ? {} : { limit: input.limit }),
+      };
+      if (input?.providerType === "openrouter")
+        return listOpenRouterModelCatalog(catalogInput);
+      if (input?.providerType === "openai")
+        return listOpenAIModelCatalog(catalogInput);
+      return listApprovedModelCatalog(input?.providerType);
     },
     isApprovedModel: async (model, providerType, input) => {
       const apiKey = input?.apiKey;
-      if (providerType === "openrouter" && apiKey) {
-        const catalog = await listOpenRouterModelCatalog({
+      if (
+        apiKey &&
+        (providerType === "openrouter" || providerType === "openai")
+      ) {
+        const listCatalog =
+          providerType === "openrouter"
+            ? listOpenRouterModelCatalog
+            : listOpenAIModelCatalog;
+        const catalog = await listCatalog({
           apiKey,
           search: model,
         });

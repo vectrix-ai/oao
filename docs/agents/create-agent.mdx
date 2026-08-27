@@ -152,7 +152,7 @@ cookies.
     On the agent detail page, edit the latest version's system instructions,
     approved model preset, Harness Operations, bound Skill versions, exact delegate roster, sandbox switch, network policy, or timeout. The
     searchable model list is the project's approved preset catalog, and the
-    editor shows the resolved model and routing policy for the selected preset
+    editor shows the resolved model plus routing policy or OpenAI generation settings for the selected preset
     with a link to **Manage models**. Select **Publish new version** to append an immutable
     version.
 
@@ -847,9 +847,11 @@ new version.
 
 Open a session and use:
 
-- **Transcript** for user, assistant, reasoning, and tool-facing records. User and
-  assistant messages render CommonMark plus GitHub Flavored Markdown, including
-  lists, emphasis, links, code, task lists, and tables. Raw HTML is not rendered.
+- **Transcript** for user, assistant, reasoning, and tool-facing records in
+  chronological order. User and assistant messages render CommonMark plus
+  GitHub Flavored Markdown, including lists, emphasis, links, code, task lists,
+  and tables. Raw HTML is not rendered. A persistent sandbox in `running` state
+  is ready for the session and is not shown as pending work.
 - The message composer for another durable run after the latest run settles.
   Select **Send** or press <kbd>Command</kbd>+<kbd>Enter</kbd>; Enter by itself
   adds a new line.

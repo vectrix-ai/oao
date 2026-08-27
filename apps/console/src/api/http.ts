@@ -312,7 +312,10 @@ function consolidateHarnessActivity(
         readonly info: NonNullable<ReturnType<typeof harnessLifecycle>>;
       } => Boolean(item.info),
     );
-  if (lifecycles.length === 0) return events;
+  if (lifecycles.length === 0)
+    return [...events].sort((left, right) =>
+      left.createdAt.localeCompare(right.createdAt),
+    );
 
   const stepMarkers = events
     .map((event) => ({ event, info: harnessStepMarker(event) }))
@@ -1248,20 +1251,22 @@ function sessionDetail(
           type.includes("fail") ||
           result.status === "failure"
             ? "error"
-            : [
-                  "reserved",
-                  "running",
-                  "caller_pending",
-                  "caller_claimed",
-                  "platform_ready",
-                  "platform_executing",
-                ].includes(state)
-              ? "pending"
-              : state === "completed" ||
-                  state === "result_submitted" ||
-                  state === "result_committed"
-                ? "success"
-                : "info",
+            : collection === "sandboxes" && state === "running"
+              ? "success"
+              : [
+                    "reserved",
+                    "running",
+                    "caller_pending",
+                    "caller_claimed",
+                    "platform_ready",
+                    "platform_executing",
+                  ].includes(state)
+                ? "pending"
+                : state === "completed" ||
+                    state === "result_submitted" ||
+                    state === "result_committed"
+                  ? "success"
+                  : "info",
         ...(detail.inputTokens !== undefined ||
         detail.outputTokens !== undefined ||
         detail.cacheReadTokens !== undefined ||

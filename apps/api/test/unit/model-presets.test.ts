@@ -25,9 +25,19 @@ const catalog: ModelCatalogPort = {
       maxOutputTokens: 64_000,
       reasoning: true,
     },
+    {
+      providerType: "openai",
+      model: "openai/gpt-5.6-terra",
+      catalogId: "gpt-5.6-terra",
+      name: "GPT-5.6 Terra",
+      contextWindow: 1_050_000,
+      maxOutputTokens: 128_000,
+      reasoning: true,
+    },
   ],
   isApprovedModel: (model) =>
-    model === "openrouter/anthropic/claude-sonnet-4.6",
+    model === "openrouter/anthropic/claude-sonnet-4.6" ||
+    model === "openai/gpt-5.6-terra",
 };
 const credentialCipher = new ProviderCredentialCipher(Buffer.alloc(32, 3));
 const organizationId = "00000000-0000-4000-8000-000000000001";
@@ -47,6 +57,21 @@ const defaultProviderRow = {
   encryption_nonce: encryptedProviderKey.nonce,
   encryption_tag: encryptedProviderKey.tag,
   encryption_key_version: encryptedProviderKey.keyVersion,
+};
+const encryptedOpenAIProviderKey = credentialCipher.encrypt("sk-openai-live", {
+  organizationId,
+  projectId,
+  providerId,
+  providerType: "openai",
+  keyVersion: 1,
+});
+const openAIProviderRow = {
+  id: providerId,
+  provider_type: "openai",
+  encrypted_api_key: encryptedOpenAIProviderKey.ciphertext,
+  encryption_nonce: encryptedOpenAIProviderKey.nonce,
+  encryption_tag: encryptedOpenAIProviderKey.tag,
+  encryption_key_version: encryptedOpenAIProviderKey.keyVersion,
 };
 
 interface QueryLog {
@@ -255,6 +280,31 @@ test("OpenRouter catalog lookup uses the decrypted project provider key", async 
   assert.equal(observedApiKey, "sk-openrouter-live");
 });
 
+test("OpenAI catalog lookup uses the decrypted project provider key", async () => {
+  let observedApiKey: string | undefined;
+  let observedProviderType: string | undefined;
+  const liveCatalog: ModelCatalogPort = {
+    ...catalog,
+    listCatalog: (input) => {
+      observedApiKey = input?.apiKey;
+      observedProviderType = input?.providerType;
+      return catalog.listCatalog(input);
+    },
+  };
+  const harness = app({
+    catalog: liveCatalog,
+    rows: { "FROM oao.project_model_providers": [openAIProviderRow] },
+  });
+  const { cookie, projectId } = await authenticate(harness.app);
+  const response = await harness.app.request(
+    `/v1/projects/${projectId}/model-catalog?providerId=${providerId}`,
+    { headers: { cookie } },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(observedProviderType, "openai");
+  assert.equal(observedApiKey, "sk-openai-live");
+});
+
 test("preset creation validates keys, catalog membership, and routing", async () => {
   const harness = app({ catalog });
   const { cookie, projectId } = await authenticate(harness.app);
@@ -367,6 +417,7 @@ test("a valid preset is inserted, audited, and returned without credentials", as
     provider_type: "openrouter",
     model: validPreset.model,
     routing: validPreset.routing,
+    settings: null,
     hosted: true,
     available: true,
     created_by_principal_id: "00000000-0000-4000-8000-000000000003",
@@ -387,6 +438,7 @@ test("a valid preset is inserted, audited, and returned without credentials", as
   assert.equal(body.origin, "project");
   assert.equal(body.available, true);
   assert.deepEqual(body.routing, validPreset.routing);
+  assert.equal(body.settings, null);
 
   const insert = harness.queries.find((query) =>
     query.text.includes("INSERT INTO oao.project_model_presets"),
@@ -403,6 +455,59 @@ test("a valid preset is inserted, audited, and returned without credentials", as
         query.values.includes("model_preset.created"),
     ),
   );
+});
+
+test("OpenAI preset creation persists Responses API generation settings", async () => {
+  const settings = {
+    textFormat: "text" as const,
+    mode: "standard" as const,
+    effort: "medium" as const,
+    verbosity: "medium" as const,
+    summary: "auto" as const,
+  };
+  const input = {
+    key: "gpt-5-6-terra-v1",
+    displayName: "GPT-5.6 Terra",
+    providerId,
+    model: "openai/gpt-5.6-terra",
+    routing: {},
+    settings,
+  };
+  const created = {
+    id: "00000000-0000-4000-8000-000000000702",
+    organization_id: organizationId,
+    project_id: projectId,
+    key: input.key,
+    display_name: input.displayName,
+    origin: "project",
+    provider_id: providerId,
+    provider_type: "openai",
+    model: input.model,
+    routing: {},
+    settings,
+    hosted: true,
+    available: true,
+    created_by_principal_id: "00000000-0000-4000-8000-000000000003",
+    created_at: new Date("2026-08-27T09:00:00.000Z"),
+  };
+  const harness = app({
+    catalog,
+    rows: {
+      "FROM oao.project_model_providers": [openAIProviderRow],
+      "INSERT INTO oao.project_model_presets": [created],
+    },
+  });
+  const { cookie, projectId: actorProjectId } = await authenticate(harness.app);
+  const response = await harness.app.request(
+    `/v1/projects/${actorProjectId}/model-presets`,
+    createRequest(cookie, input, "openai-terra-settings"),
+  );
+  assert.equal(response.status, 201);
+  assert.deepEqual((await response.json()).settings, settings);
+  const insert = harness.queries.find((query) =>
+    query.text.includes("INSERT INTO oao.project_model_presets"),
+  );
+  assert.deepEqual(insert?.values[8], settings);
 });
 
 test("agent publication rejects a preset the project never approved", async () => {

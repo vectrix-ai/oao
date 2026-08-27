@@ -6,6 +6,7 @@ import type {
   CreateModelPresetInput,
   CreateModelProviderInput,
   ModelCatalogEntry,
+  ModelGenerationSettings,
   ModelRoutingPolicy,
   ProjectModelProvider,
 } from "../api/types";
@@ -289,7 +290,7 @@ export function ModelsPage() {
                 <th>Preset</th>
                 <th>Model</th>
                 <th>Source</th>
-                <th>Routing policy</th>
+                <th>Policy / settings</th>
                 <th>Created</th>
               </tr>
             </thead>
@@ -409,6 +410,26 @@ function CreateModelPresetDialog({
   const [sort, setSort] = useState<"" | "price" | "throughput" | "latency">("");
   const [maxPrompt, setMaxPrompt] = useState("");
   const [maxCompletion, setMaxCompletion] = useState("");
+  const [reasoningMode, setReasoningMode] = useState<"standard" | "pro">(
+    "standard",
+  );
+  const [reasoningEffort, setReasoningEffort] =
+    useState<ModelGenerationSettings["effort"]>("medium");
+  const [verbosity, setVerbosity] =
+    useState<ModelGenerationSettings["verbosity"]>("medium");
+  const [reasoningSummary, setReasoningSummary] =
+    useState<ModelGenerationSettings["summary"]>("auto");
+
+  const settings: ModelGenerationSettings | null =
+    provider?.providerType === "openai"
+      ? {
+          textFormat: "text",
+          mode: reasoningMode,
+          effort: reasoningEffort,
+          verbosity,
+          summary: reasoningSummary,
+        }
+      : null;
 
   const catalogOptions = useMemo<readonly ComboboxOption[]>(
     () =>
@@ -514,7 +535,14 @@ function CreateModelPresetDialog({
       onSubmit={(event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
         if (validation.length > 0 || !model) return;
-        onSubmit({ key, displayName, providerId, model: model.model, routing });
+        onSubmit({
+          key,
+          displayName,
+          providerId,
+          model: model.model,
+          routing,
+          settings,
+        });
       }}
       footer={
         <>
@@ -554,7 +582,7 @@ function CreateModelPresetDialog({
         hint={
           model
             ? `${model.model}${model.contextWindow === null ? "" : ` · ${formatNumber(model.contextWindow)} token context`}`
-            : "Search the provider catalog: live OpenRouter models and saved presets, or the pinned catalog of a direct OpenAI connection."
+            : "Search the live catalog available to this OpenRouter or OpenAI connection."
         }
       >
         <Combobox
@@ -583,6 +611,85 @@ function CreateModelPresetDialog({
       </Field>
       {catalogQuery.isError ? (
         <FormError>{catalogQuery.error.message}</FormError>
+      ) : null}
+      {provider?.providerType === "openai" ? (
+        <details className="policy-details" open>
+          <summary>
+            Model settings
+            <span className="policy-summary">
+              {reasoningMode} · {reasoningEffort} reasoning · {verbosity}
+              {" verbosity"}
+            </span>
+          </summary>
+          <div className="policy-body">
+            <FieldRow>
+              <Field label="Text format">
+                <Select value="text" disabled>
+                  <option value="text">text</option>
+                </Select>
+              </Field>
+              <Field label="Reasoning mode">
+                <Select
+                  value={reasoningMode}
+                  onChange={(event) =>
+                    setReasoningMode(event.target.value as "standard" | "pro")
+                  }
+                >
+                  <option value="standard">standard</option>
+                  <option value="pro">pro</option>
+                </Select>
+              </Field>
+              <Field label="Reasoning effort">
+                <Select
+                  value={reasoningEffort}
+                  onChange={(event) =>
+                    setReasoningEffort(
+                      event.target.value as ModelGenerationSettings["effort"],
+                    )
+                  }
+                >
+                  <option value="none">none</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="xhigh">xhigh</option>
+                  <option value="max">max</option>
+                </Select>
+              </Field>
+            </FieldRow>
+            <FieldRow>
+              <Field label="Verbosity">
+                <Select
+                  value={verbosity}
+                  onChange={(event) =>
+                    setVerbosity(
+                      event.target
+                        .value as ModelGenerationSettings["verbosity"],
+                    )
+                  }
+                >
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </Select>
+              </Field>
+              <Field label="Summary">
+                <Select
+                  value={reasoningSummary}
+                  onChange={(event) =>
+                    setReasoningSummary(
+                      event.target.value as ModelGenerationSettings["summary"],
+                    )
+                  }
+                >
+                  <option value="auto">auto</option>
+                  <option value="concise">concise</option>
+                  <option value="detailed">detailed</option>
+                </Select>
+              </Field>
+            </FieldRow>
+          </div>
+        </details>
       ) : null}
       <FieldRow>
         <Field

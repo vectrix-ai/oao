@@ -91,7 +91,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 - `@oao/runtime-flue`: generic compiled `ManagedAgent`, pinned `@flue/postgres`, verified PostgreSQL Skill registry, progressive Flue Skill activation, durable child-session coordinator, and history projection.
 - `@oao/queue-postgres`: PostgreSQL wake jobs and platform dispatch leases.
 - `@oao/tool-broker`: caller requests/claims/results and single-approver gates.
-- `@oao/models-openrouter`: pinned OpenRouter/OpenAI catalog projections, provider-neutral routing translation, project-scoped preset activation, and provider construction. The package name is retained while the adapter seam expands beyond OpenRouter.
+- `@oao/models-openrouter`: live OpenRouter/OpenAI catalog projections constrained by pinned runtime metadata, provider-neutral routing and generation-setting translation, project-scoped preset activation, and provider construction. The package name is retained while the adapter seam expands beyond OpenRouter.
 - `@oao/provider-credentials`: AES-256-GCM encryption and decryption for tenant-scoped provider credentials. PostgreSQL stores ciphertext; the platform encryption key remains outside the database.
 - `@oao/sandbox-daytona`: committed Flue Daytona blueprint plus thread-workspace lifecycle, project connection resolution, capability-filtered file/shell/browser tools, durable safe tool audit, target diagnostics, and egress-policy manager.
 - `@oao/artifact-s3`: tenant-keyed S3 artifact adapter plus encrypted project storage resolution and latest-thread workspace backup records.
