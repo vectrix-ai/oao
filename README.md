@@ -4,7 +4,116 @@ OAO is an open, self-hostable managed-agent platform built around Flue and Postg
 
 The first implementation target is a fully functional local environment. Runtime execution uses a project-scoped OpenRouter or OpenAI connection. Daytona is required only for agents that enable a sandbox; deterministic provider doubles are confined to automated tests.
 
-## Workspace
+## Get started locally
+
+The guided setup takes a fresh checkout to a running OAO console, starter agent,
+and first session. It checks the machine before changing configuration or
+starting a container.
+
+### 1. Install the prerequisites
+
+You need:
+
+| Requirement        | Version              | Notes                                                       |
+| ------------------ | -------------------- | ----------------------------------------------------------- |
+| Git                | Current release      | Used to clone this repository                               |
+| Node.js            | 22.19.0 or newer     | Runs the workspace and setup CLI                            |
+| pnpm               | Exactly 10.27.0      | The version pinned by this repository                       |
+| Docker             | Current release      | The CLI and a running Docker-compatible daemon are required |
+| Model provider key | OpenRouter or OpenAI | Entered securely during setup; it is not stored in `.env`   |
+
+Docker Desktop, Colima, and other Docker-compatible runtimes are supported.
+Docker Compose is optional. If pnpm is unavailable or has the wrong version,
+activate the pinned version with Corepack:
+
+```sh
+corepack enable
+corepack prepare pnpm@10.27.0 --activate
+```
+
+Allow at least 2 GiB of free space and make sure ports `3000`, `5432`, `8080`,
+and `8788` are available. The doctor command below checks the exact requirements
+and suggests a repair for every blocking failure.
+
+### 2. Clone OAO and check the machine
+
+```sh
+git clone https://github.com/vectrix-ai/oao.git
+cd oao
+pnpm oao doctor
+```
+
+`doctor` is read-only. It checks the repository, Node and pnpm versions, Docker
+CLI and daemon, writable workspace, disk space, required ports, local settings,
+workspace dependencies, and the PostgreSQL image. Missing dependencies and the
+image are expected on a fresh checkout; guided setup installs them after every
+required system check passes.
+
+### 3. Run the guided setup
+
+```sh
+pnpm oao setup
+```
+
+The wizard will:
+
+1. Install the exact dependencies from `pnpm-lock.yaml` and download the pinned
+   PostgreSQL image when needed.
+2. Create safe local settings, start PostgreSQL, apply migrations, and wait for
+   the API, runtime worker, and console.
+3. Let you choose OpenRouter or OpenAI with the arrow keys, then securely enter
+   the provider API key.
+4. Open a searchable model picker. Type part of the model name or ID, use the
+   arrow keys to select a result, and press Enter.
+5. Create a model preset and sandbox-disabled `oao-starter` agent, run its first
+   session, and print the assistant response and console URL.
+
+Provider credentials are encrypted through OAO's write-only credential API.
+They are never written to `.env`, setup state, logs, or shell history.
+
+Leave the setup terminal open while using OAO. The local console is available
+at <http://127.0.0.1:8080>. Press Ctrl-C when you want to stop the processes
+started by the wizard; the PostgreSQL data is preserved.
+
+### 4. Use OAO again
+
+Run setup again to resume an interrupted setup or start the existing local
+environment on a later day:
+
+```sh
+pnpm oao setup
+```
+
+Completed resources are reused instead of duplicated. While the stack is
+running, use these commands from another terminal:
+
+```sh
+pnpm oao status  # Check API, runtime, and console readiness
+pnpm oao open    # Open the console in the default browser
+```
+
+For the complete walkthrough and troubleshooting, see the
+[guided quickstart](docs/getting-started/quickstart.mdx).
+
+### Reset everything and start over
+
+First stop the terminal running OAO with Ctrl-C, then run:
+
+```sh
+pnpm oao reset
+```
+
+Reset shows its deletion scope and requires you to type `RESET`. It permanently
+deletes the local PostgreSQL volume—including agents, sessions, runs, and
+provider connections—plus `.env` and `.oao` setup state. Dependencies and cached
+Docker images are kept. The command refuses to proceed while OAO services are
+running or when the active Docker context differs from the one used during
+setup.
+
+After a reset, run `pnpm oao doctor` and `pnpm oao setup` again. Do not use reset
+for ordinary troubleshooting when you need to preserve local data.
+
+## Workspace overview
 
 - `@oao/contracts`: public Valibot schemas and wire types
 - `@oao/domain`: branded IDs, authorization, run/admission rules, provider ports, and redaction
@@ -25,36 +134,6 @@ The implemented local profile runs:
   providers, with optional Daytona sandboxes
 
 See [docs/architecture.md](docs/architecture.md) for boundaries and implementation order.
-
-## Quickstart
-
-Node.js 22.19 or newer and pnpm 10.27 are required.
-
-```sh
-git clone https://github.com/vectrix-ai/oao.git
-cd oao
-pnpm oao doctor
-pnpm oao setup
-```
-
-`doctor` checks the operating system, repository, Node and pnpm versions, Docker
-CLI and daemon, writable workspace, disk space, and required ports before setup
-changes anything. `setup` installs the pinned workspace dependencies, prepares
-PostgreSQL, creates a secure local encryption key when needed, starts the stack,
-and guides you through connecting OpenRouter or OpenAI, creating a model preset,
-publishing a sandbox-disabled starter agent, and running its first session.
-Provider choice uses an arrow-key selector, and the model catalog uses a live
-search box with arrow-key result navigation.
-Provider API keys are sent to OAO's write-only credential endpoint and are not
-written to `.env` or the setup-state file.
-
-Run `pnpm oao setup` again after an interruption; completed resources are reused.
-Use `pnpm oao status` to inspect the local stack and `pnpm oao open` to open the
-console. To start over completely, stop the stack and run `pnpm oao reset`; the
-confirmation-gated command permanently removes the local database, `.env`, and
-`.oao` state while keeping dependencies and Docker images. See the
-[guided quickstart](docs/getting-started/quickstart.mdx) for the full flow and
-troubleshooting.
 
 ## Manual development
 
