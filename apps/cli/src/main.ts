@@ -17,6 +17,7 @@ Usage:
   pnpm oao doctor [--json]    Check system prerequisites without changing them
   pnpm oao status             Check local service readiness
   pnpm oao open               Open the local console
+  pnpm oao reset [--yes]      Permanently delete local settings and database
 
 The setup command keeps services attached to this terminal. Press Ctrl-C to stop
 services started by this invocation.

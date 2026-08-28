@@ -48,8 +48,11 @@ written to `.env` or the setup-state file.
 
 Run `pnpm oao setup` again after an interruption; completed resources are reused.
 Use `pnpm oao status` to inspect the local stack and `pnpm oao open` to open the
-console. See the [guided quickstart](docs/getting-started/quickstart.mdx) for the
-full flow and troubleshooting.
+console. To start over completely, stop the stack and run `pnpm oao reset`; the
+confirmation-gated command permanently removes the local database, `.env`, and
+`.oao` state while keeping dependencies and Docker images. See the
+[guided quickstart](docs/getting-started/quickstart.mdx) for the full flow and
+troubleshooting.
 
 ## Manual development
 

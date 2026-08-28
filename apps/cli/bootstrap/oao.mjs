@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { collectPreflight, printPreflight } from "./preflight.mjs";
+import { recordDockerContext, resetLocalState } from "./reset.mjs";
 
 const repositoryRoot = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -41,6 +42,18 @@ if (commandName === "doctor") {
   });
   printPreflight(report, { json });
   process.exitCode = report.ok ? 0 : 1;
+} else if (commandName === "reset") {
+  try {
+    await resetLocalState({
+      repositoryRoot,
+      assumeYes: args.includes("--yes"),
+    });
+  } catch (error) {
+    process.stderr.write(
+      `${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    process.exitCode = 1;
+  }
 } else if (commandName === "setup") {
   const report = await collectPreflight({
     repositoryRoot,
@@ -76,6 +89,7 @@ if (commandName === "doctor") {
           printPreflight(fullReport, { json: false });
           process.exitCode = 1;
         } else {
+          await recordDockerContext(repositoryRoot);
           process.exitCode = run(process.execPath, [
             resolve(repositoryRoot, "apps/cli/dist/main.js"),
             ...args,

@@ -225,18 +225,22 @@ Inspect the volume without changing it:
 docker volume inspect oao-postgres-data
 ```
 
-To deliberately reset all local OAO data, first stop the stack, then remove the named volume:
+To deliberately reset the complete local environment, first stop the stack and
+use the confirmation-gated CLI command:
 
 ```bash
-pnpm db:down
-docker volume rm oao-postgres-data
+pnpm oao reset
 ```
 
 <Warning>
-  Removing `oao-postgres-data` permanently deletes the local database. The next
-  `pnpm dev:local` creates a fresh volume, reapplies migrations, and reseeds
-  only the deterministic development tenant.
+  Reset permanently deletes `oao-postgres-data`, `.env`, and `.oao`. It refuses
+  to run while OAO services are active. The next `pnpm oao setup` creates a
+  fresh volume, reapplies migrations, seeds the development tenant, and guides
+  you through provider and starter-agent creation again.
 </Warning>
+
+`pnpm db:down` remains the non-destructive database stop command: it removes the
+container but preserves the named volume and all local records.
 
 ## Change local ports
 

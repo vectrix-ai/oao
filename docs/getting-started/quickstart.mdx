@@ -106,6 +106,38 @@ pnpm oao open
 
 The console is available at [http://127.0.0.1:8080](http://127.0.0.1:8080).
 
+## Reset and start over
+
+First stop the terminal running `pnpm oao setup` or `pnpm dev:local` with
+
+<kbd>Ctrl</kbd>+<kbd>C</kbd>. Then run:
+
+```bash
+pnpm oao reset
+```
+
+The command refuses to continue while an OAO API, runtime worker, or console is
+still active. It shows the exact deletion scope and requires you to type
+`RESET`. A successful reset permanently removes:
+
+- the `oao-postgres-data` volume, including every local agent, session, run,
+  provider connection, and encrypted credential;
+- `.env`, including local authentication and port settings; and
+- `.oao`, including setup identifiers and wizard logs.
+
+Workspace dependencies and cached Docker images remain available. Run
+`pnpm oao doctor` followed by `pnpm oao setup` to create a fresh environment.
+For intentional non-interactive automation, `pnpm oao reset --yes` skips only
+the confirmation prompt; it does not bypass the running-service safety check.
+New setups also record the active Docker context, and reset refuses to delete a
+same-named volume after the user switches to a different context.
+
+<Warning>
+  Reset is irreversible unless the Docker volume is backed up separately. Do not
+  use it as a troubleshooting step when you need to preserve local agents,
+  transcripts, or provider configuration.
+</Warning>
+
 ## Troubleshooting
 
 - **Docker daemon unreachable:** start Docker Desktop, Colima, or another

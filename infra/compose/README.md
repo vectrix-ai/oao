@@ -40,6 +40,11 @@ Both the Compose path and the Docker CLI fallback keep the same named
 `oao-postgres-data` volume when the service is stopped, so agents, sessions,
 transcripts, and debug history survive a full `dev:local` stop/start.
 
+To permanently remove the database together with generated local settings and
+wizard state, stop the application processes and run `pnpm oao reset`. The
+command requires an explicit confirmation and retains dependencies and Docker
+images. `pnpm db:down` remains non-destructive and keeps the named volume.
+
 For isolated clean-room checks, use `pnpm test:postgres:fresh` and
 `pnpm test:stack:fresh`. The first applies migrations twice and runs all
 database/runtime integration suites. The second launches the real API and
