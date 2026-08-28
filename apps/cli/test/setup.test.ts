@@ -67,6 +67,8 @@ class FakeIo implements SetupIo {
   readonly output: string[] = [];
   readonly secrets: string[] = [];
   readonly questions: string[] = [];
+  readonly selectPrompts: string[] = [];
+  readonly searchPrompts: string[] = [];
 
   constructor(
     private readonly selections: string[],
@@ -88,7 +90,15 @@ class FakeIo implements SetupIo {
     return this.secretAnswers.shift() ?? "";
   }
 
-  async select(): Promise<string> {
+  async select(prompt: string): Promise<string> {
+    this.selectPrompts.push(prompt);
+    const value = this.selections.shift();
+    if (!value) throw new Error("No fake selection remains");
+    return value;
+  }
+
+  async search(prompt: string): Promise<string> {
+    this.searchPrompts.push(prompt);
     const value = this.selections.shift();
     if (!value) throw new Error("No fake selection remains");
     return value;
@@ -100,6 +110,7 @@ class FakeApi implements SetupApi {
   presets: ModelPreset[] = [];
   agents: AgentDefinition[] = [];
   sessionCreates = 0;
+  catalogLimits: number[] = [];
 
   getContext: SetupApi["getContext"] = async () => context;
 
@@ -135,21 +146,27 @@ class FakeApi implements SetupApi {
       return provider;
     };
 
-  listModelCatalog: SetupApi["listModelCatalog"] = async () => ({
-    ...page<ModelCatalogEntry>([
-      {
-        providerType: "openrouter",
-        model: "openrouter/anthropic/claude-sonnet-4.6",
-        catalogId: "anthropic/claude-sonnet-4.6",
-        name: "Claude Sonnet 4.6",
-        contextWindow: 200_000,
-        maxOutputTokens: 64_000,
-        reasoning: true,
-      },
-    ]),
-    providerId: "provider-1",
-    providerType: "openrouter",
-  });
+  listModelCatalog: SetupApi["listModelCatalog"] = async (
+    _projectId,
+    query,
+  ) => {
+    this.catalogLimits.push(query.limit ?? 0);
+    return {
+      ...page<ModelCatalogEntry>([
+        {
+          providerType: "openrouter",
+          model: "openrouter/anthropic/claude-sonnet-4.6",
+          catalogId: "anthropic/claude-sonnet-4.6",
+          name: "Claude Sonnet 4.6",
+          contextWindow: 200_000,
+          maxOutputTokens: 64_000,
+          reasoning: true,
+        },
+      ]),
+      providerId: "provider-1",
+      providerType: "openrouter",
+    };
+  };
 
   listModelPresets: SetupApi["listModelPresets"] = async () => ({
     ...page(this.presets),
@@ -271,6 +288,11 @@ test("guided setup is resumable and never persists the provider credential", asy
     assert.equal(api.presets.length, 1);
     assert.equal(api.agents.length, 1);
     assert.equal(api.sessionCreates, 1);
+    assert.deepEqual(api.catalogLimits, [200]);
+    assert.deepEqual(firstIo.selectPrompts, ["Choose a model provider"]);
+    assert.deepEqual(firstIo.searchPrompts, [
+      "Choose the model for your first agent",
+    ]);
 
     const second = await runSetup({
       repositoryRoot: directory,

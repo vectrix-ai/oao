@@ -90,7 +90,7 @@ async function readCatalog(
     try {
       const catalog = await api.listModelCatalog(projectId, {
         providerId: provider.id,
-        limit: 20,
+        limit: 200,
       });
       if (catalog.data.length === 0)
         throw new Error("The provider returned an empty model catalog");
@@ -183,11 +183,11 @@ async function ensurePreset(
     io.write(`✓ Reusing model preset ${existing.displayName}.\n`);
     return existing;
   }
-  const choices = catalog.slice(0, 10).map((entry) => ({
+  const choices = catalog.map((entry) => ({
     label: `${entry.name} (${entry.model})`,
     value: entry.model,
   }));
-  const model = await io.select(
+  const model = await io.search(
     "Choose the model for your first agent",
     choices,
   );

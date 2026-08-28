@@ -43,6 +43,8 @@ changes anything. `setup` installs the pinned workspace dependencies, prepares
 PostgreSQL, creates a secure local encryption key when needed, starts the stack,
 and guides you through connecting OpenRouter or OpenAI, creating a model preset,
 publishing a sandbox-disabled starter agent, and running its first session.
+Provider choice uses an arrow-key selector, and the model catalog uses a live
+search box with arrow-key result navigation.
 Provider API keys are sent to OAO's write-only credential endpoint and are not
 written to `.env` or the setup-state file.
 
