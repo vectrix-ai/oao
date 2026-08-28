@@ -2,7 +2,7 @@
 
 OAO is an open, self-hostable managed-agent platform built around Flue and PostgreSQL.
 
-The first implementation target is a fully functional local environment. Runtime execution uses a project-scoped OpenRouter or OpenAI connection. Daytona is required only for agents that enable a sandbox; deterministic provider doubles are confined to automated tests.
+The first implementation target is a fully functional local environment. Runtime execution uses a project-scoped OpenRouter, OpenAI, or Anthropic connection. Daytona is required only for agents that enable a sandbox; deterministic provider doubles are confined to automated tests.
 
 ## Get started locally
 
@@ -14,13 +14,13 @@ starting a container.
 
 You need:
 
-| Requirement        | Version              | Notes                                                       |
-| ------------------ | -------------------- | ----------------------------------------------------------- |
-| Git                | Current release      | Used to clone this repository                               |
-| Node.js            | 22.19.0 or newer     | Runs the workspace and setup CLI                            |
-| pnpm               | Exactly 10.27.0      | The version pinned by this repository                       |
-| Docker             | Current release      | The CLI and a running Docker-compatible daemon are required |
-| Model provider key | OpenRouter or OpenAI | Entered securely during setup; it is not stored in `.env`   |
+| Requirement        | Version                          | Notes                                                       |
+| ------------------ | -------------------------------- | ----------------------------------------------------------- |
+| Git                | Current release                  | Used to clone this repository                               |
+| Node.js            | 22.19.0 or newer                 | Runs the workspace and setup CLI                            |
+| pnpm               | Exactly 10.27.0                  | The version pinned by this repository                       |
+| Docker             | Current release                  | The CLI and a running Docker-compatible daemon are required |
+| Model provider key | OpenRouter, OpenAI, or Anthropic | Entered securely during setup; it is not stored in `.env`   |
 
 Docker Desktop, Colima, and other Docker-compatible runtimes are supported.
 Docker Compose is optional. If pnpm is unavailable or has the wrong version,
@@ -61,7 +61,7 @@ The wizard will:
    PostgreSQL image when needed.
 2. Create safe local settings, start PostgreSQL, apply migrations, and wait for
    the API, runtime worker, and console.
-3. Let you choose OpenRouter or OpenAI with the arrow keys, then securely enter
+3. Let you choose OpenRouter, OpenAI, or Anthropic with the arrow keys, then securely enter
    the provider API key.
 4. Open a searchable model picker. Type part of the model name or ID, use the
    arrow keys to select a result, and press Enter.

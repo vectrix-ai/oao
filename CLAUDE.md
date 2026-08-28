@@ -52,7 +52,7 @@ Before committing: `greptile review --agent`, review every finding, fix the corr
 
 ## Architecture
 
-Runtime topology: React/Vite console → Hono API (auth, tenancy, config, read models, SSE) → PostgreSQL ← Flue runtime worker (one active owner per submission; talks to OpenRouter/OpenAI and Daytona adapters). PostgreSQL is the only application database: control state, audit, product events, wake/lease queue, and Flue canonical state (`@flue/postgres`). S3-compatible object storage holds run attachments and workspace archives. See `docs/architecture.md` for the invariants list — read it before touching run lifecycle, tools, or workspaces.
+Runtime topology: React/Vite console → Hono API (auth, tenancy, config, read models, SSE) → PostgreSQL ← Flue runtime worker (one active owner per submission; talks to OpenRouter/OpenAI/Anthropic and Daytona adapters). PostgreSQL is the only application database: control state, audit, product events, wake/lease queue, and Flue canonical state (`@flue/postgres`). S3-compatible object storage holds run attachments and workspace archives. See `docs/architecture.md` for the invariants list — read it before touching run lifecycle, tools, or workspaces.
 
 Package layers (workspace `@oao/*`):
 

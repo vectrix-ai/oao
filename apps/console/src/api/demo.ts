@@ -42,6 +42,7 @@ const ORG_ID = "11111111-1111-4111-8111-111111111111";
 const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
 const principalId = "33333333-3333-4333-8333-333333333333";
 const OPENROUTER_PROVIDER_ID = "55555555-5555-4555-8555-555555555555";
+const ANTHROPIC_PROVIDER_ID = "56565656-5656-4565-8565-565656565656";
 const DAYTONA_PROVIDER_ID = "66666666-6666-4666-8666-666666666666";
 const DAYTONA_SNAPSHOT_ID = "77777777-7777-4777-8777-777777777777";
 const DAYTONA_LARGE_SNAPSHOT_ID = "78787878-7878-4787-8787-787878787878";
@@ -962,6 +963,18 @@ const modelCatalogSeed: readonly ModelCatalogEntry[] = [
     maxOutputTokens: 128_000,
     reasoning: true,
   },
+  {
+    providerType: "anthropic",
+    model: "anthropic/claude-sonnet-5",
+    catalogId: "claude-sonnet-5",
+    name: "Claude Sonnet 5",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 128_000,
+    reasoning: true,
+    adaptiveThinking: true,
+    thinkingCanBeDisabled: true,
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
 ];
 
 const modelProvidersSeed: readonly ProjectModelProvider[] = [
@@ -978,6 +991,20 @@ const modelProvidersSeed: readonly ProjectModelProvider[] = [
     createdByPrincipalId: principalId,
     createdAt: "2026-08-18T11:00:00.000Z",
     updatedAt: "2026-08-18T11:00:00.000Z",
+  },
+  {
+    id: ANTHROPIC_PROVIDER_ID,
+    organizationId: ORG_ID,
+    projectId: PROJECT_ID,
+    key: "anthropic-primary",
+    displayName: "Anthropic primary",
+    providerType: "anthropic",
+    credentialConfigured: true,
+    credentialFingerprint: "c3d4e5f6a1b2",
+    credentialVersion: 1,
+    createdByPrincipalId: principalId,
+    createdAt: "2026-08-18T11:05:00.000Z",
+    updatedAt: "2026-08-18T11:05:00.000Z",
   },
 ];
 

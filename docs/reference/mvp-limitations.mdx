@@ -56,7 +56,7 @@ and should shape integrations:
   the runtime registry. Files under `scripts/` are never run automatically,
   and `allowedTools` is informational rather than a policy control.
 - **Runtime execution requires a configured model provider.** Add a
-  project-scoped OpenRouter or OpenAI provider and preset before publishing an
+  project-scoped OpenRouter, OpenAI, or Anthropic provider and preset before publishing an
   executable agent version. Daytona is required only for sandbox-enabled
   versions, and S3-compatible storage is required only for run files and
   workspace backups. Test doubles are not selectable in the API or console.

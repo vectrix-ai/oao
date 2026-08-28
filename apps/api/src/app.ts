@@ -6,6 +6,7 @@ import {
 import type { AuthSession, AuthTenantAdapter } from "@oao/auth-core";
 import { readCookie } from "@oao/auth-core";
 import {
+  DEFAULT_ANTHROPIC_MODEL_GENERATION_SETTINGS,
   DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS,
   parseCreateProjectSandboxProviderInput,
   parseCreateProjectStorageProviderInput,
@@ -3847,22 +3848,34 @@ function registerModelPresetRoutes(
               throw new HttpApiError("not_found", "Model provider not found");
             const providerType = provider.provider_type;
             const apiKey = providerApiKey(actor, provider);
-            if (
-              !(await catalog.isApprovedModel(input.model, providerType, {
-                ...(apiKey ? { apiKey } : {}),
-              }))
-            )
+            const anthropicCatalogEntry =
+              providerType === "anthropic"
+                ? (
+                    await catalog.listCatalog({
+                      providerType,
+                      ...(apiKey ? { apiKey } : {}),
+                      search: input.model,
+                    })
+                  ).find((entry) => entry.model === input.model)
+                : undefined;
+            const approved =
+              providerType === "anthropic"
+                ? anthropicCatalogEntry !== undefined
+                : await catalog.isApprovedModel(input.model, providerType, {
+                    ...(apiKey ? { apiKey } : {}),
+                  });
+            if (!approved)
               throw new HttpApiError(
                 "bad_request",
                 "model is not present in the provider catalog",
               );
             if (
-              providerType === "openai" &&
+              providerType !== "openrouter" &&
               Object.keys(input.routing).length > 0
             )
               throw new HttpApiError(
                 "bad_request",
-                "OpenAI model presets do not support OpenRouter routing policy",
+                "Direct provider model presets do not support OpenRouter routing policy",
               );
             if (providerType === "openrouter" && input.settings !== null)
               throw new HttpApiError(
@@ -3872,7 +3885,77 @@ function registerModelPresetRoutes(
             const settings =
               providerType === "openai"
                 ? (input.settings ?? DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS)
-                : null;
+                : providerType === "anthropic"
+                  ? (input.settings ??
+                    DEFAULT_ANTHROPIC_MODEL_GENERATION_SETTINGS)
+                  : null;
+            if (
+              providerType === "openai" &&
+              settings !== null &&
+              "thinking" in settings
+            )
+              throw new HttpApiError(
+                "bad_request",
+                "OpenAI model presets require OpenAI generation settings",
+              );
+            if (
+              providerType === "anthropic" &&
+              (settings === null || !("thinking" in settings))
+            )
+              throw new HttpApiError(
+                "bad_request",
+                "Anthropic model presets require Anthropic generation settings",
+              );
+            if (
+              providerType === "anthropic" &&
+              settings !== null &&
+              "thinking" in settings
+            ) {
+              if (
+                settings.thinking === "adaptive" &&
+                anthropicCatalogEntry?.adaptiveThinking === false
+              )
+                throw new HttpApiError(
+                  "bad_request",
+                  "Selected Anthropic model does not support adaptive thinking",
+                );
+              if (
+                settings.thinking === "disabled" &&
+                anthropicCatalogEntry?.thinkingCanBeDisabled === false
+              )
+                throw new HttpApiError(
+                  "bad_request",
+                  "Selected Anthropic model requires thinking",
+                );
+              if (
+                anthropicCatalogEntry?.maxOutputTokens !== null &&
+                anthropicCatalogEntry?.maxOutputTokens !== undefined &&
+                settings.maxTokens > anthropicCatalogEntry.maxOutputTokens
+              )
+                throw new HttpApiError(
+                  "bad_request",
+                  "Anthropic max tokens exceeds the selected model limit",
+                );
+              if (
+                (anthropicCatalogEntry?.effortLevels?.length ?? 0) > 0 &&
+                !anthropicCatalogEntry?.effortLevels?.includes(settings.effort)
+              )
+                throw new HttpApiError(
+                  "bad_request",
+                  "Selected Anthropic model does not support this effort level",
+                );
+              if (
+                /^claude-opus-5(?:-|$)/u.test(
+                  anthropicCatalogEntry?.catalogId ?? "",
+                ) &&
+                settings.thinking === "disabled" &&
+                (settings.effort === "xhigh" || settings.effort === "max")
+              )
+                throw new HttpApiError(
+                  "bad_request",
+                  "Claude Opus 5 cannot disable thinking at xhigh or max effort",
+                );
+            }
             assertPublicPayload({
               key: input.key,
               displayName: input.displayName,

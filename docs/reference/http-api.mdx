@@ -99,7 +99,8 @@ The active principal cannot remove itself.
 ## Model providers, presets, and catalog
 
 A published agent version names an immutable model preset. A hosted preset
-references an OpenRouter or OpenAI provider connection in the same project.
+references an OpenRouter, OpenAI, or Anthropic provider connection in the same
+project.
 
 | Method | Path                                                    | Purpose                                              |
 | ------ | ------------------------------------------------------- | ---------------------------------------------------- |
@@ -114,7 +115,7 @@ Reads require `agent:read`; writes require `project:admin`. Every write requires
 an `Idempotency-Key`.
 
 Create a provider with `{ key, displayName, providerType, apiKey }`, where
-`providerType` is `openrouter` or `openai`. Responses contain
+`providerType` is `openrouter`, `openai`, or `anthropic`. Responses contain
 `credentialConfigured`, a 12-character `credentialFingerprint`, and an
 incrementing `credentialVersion`; they never contain the API key or encryption
 material. Rotate a key with `{ "apiKey": "..." }`.
@@ -122,7 +123,9 @@ material. Rotate a key with `{ "apiKey": "..." }`.
 `GET /model-catalog` requires `providerId`, accepts `search` and `limit`, and
 returns `providerId`, `providerType`, and safe catalog entries. Each entry
 includes `providerType`, prefixed `model`, `catalogId`, display name, context
-window, output limit, and reasoning support.
+window, output limit, and reasoning support. Anthropic entries may additionally
+include `adaptiveThinking`, `thinkingCanBeDisabled`, and `effortLevels` from
+the live model capabilities.
 
 Create a preset with:
 
@@ -146,8 +149,12 @@ responses include live OpenRouter models and saved presets as
 `openrouter/@preset/<slug>` entries. OpenRouter supports the routing policy
 below. OpenAI catalog responses include the live models available to the
 selected key that OAO's Responses runtime supports. OpenAI presets require an
-empty routing object and accept the immutable `settings` object below. If an
-older client omits `settings`, the API stores the documented defaults.
+empty routing object and accept the immutable OpenAI `settings` object below.
+Anthropic catalog responses likewise include the live models available to the
+selected key that OAO's native Messages runtime supports. Anthropic presets
+require empty routing and accept the immutable Claude settings below. If an
+older client omits `settings`, the API stores the provider's documented OAO
+defaults.
 
 ### OpenAI model settings
 
@@ -163,6 +170,23 @@ The runtime translates these provider-neutral names to `text.format`,
 `text.verbosity`, `reasoning.mode`, `reasoning.effort`, and
 `reasoning.summary` in OpenAI Responses requests. Direct settings are rejected
 for OpenRouter presets.
+
+### Anthropic model settings
+
+| Field       | Type                                                      | Default      |
+| ----------- | --------------------------------------------------------- | ------------ |
+| `thinking`  | `"disabled"` \| `"adaptive"`                              | `"adaptive"` |
+| `maxTokens` | integer from 1 through 300,000                            | `20000`      |
+| `effort`    | `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | `"high"`     |
+
+The selected live model must support the saved thinking mode and effort, and
+`maxTokens` cannot exceed its advertised output limit. The runtime translates
+these values to `thinking.type`, `max_tokens`, and `output_config.effort` in
+Anthropic Messages requests. Anthropic's `max_tokens` is the combined ceiling
+for thinking tokens and the visible response, not a separate thinking budget.
+Models without live effort support are omitted from the OAO catalog. Manual
+`thinking.type: "enabled"` and `budget_tokens` are not accepted by this preset
+contract.
 
 ### OpenRouter routing policy
 

@@ -1,3 +1,4 @@
+import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { createProvider } from "@earendil-works/pi-ai";
@@ -21,14 +22,27 @@ export {
 } from "@earendil-works/pi-ai/providers/faux";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import type {
   ModelGenerationSettings,
   ModelCatalogEntry,
   ModelProviderType,
   ModelRoutingPolicy,
 } from "@oao/contracts";
-import { DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS } from "@oao/contracts";
+import {
+  DEFAULT_ANTHROPIC_MODEL_GENERATION_SETTINGS,
+  DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS,
+} from "@oao/contracts";
 import * as v from "valibot";
+
+type OpenAIModelSettings = Extract<
+  ModelGenerationSettings,
+  { readonly textFormat: "text" }
+>;
+type AnthropicModelSettings = Extract<
+  ModelGenerationSettings,
+  { readonly thinking: "disabled" | "adaptive" }
+>;
 
 const OPENROUTER_MODEL_IDS = new Set(
   openrouterProvider()
@@ -37,6 +51,11 @@ const OPENROUTER_MODEL_IDS = new Set(
 );
 const OPENAI_MODEL_IDS = new Set(
   openaiProvider()
+    .getModels()
+    .map((model) => model.id),
+);
+const ANTHROPIC_MODEL_IDS = new Set(
+  anthropicProvider()
     .getModels()
     .map((model) => model.id),
 );
@@ -320,6 +339,9 @@ const OPENROUTER_CATALOG_URL = "https://openrouter.ai/api/v1";
 const OPENROUTER_PAGE_SIZE = 1_000;
 const OPENAI_PREFIX = "openai/";
 const OPENAI_CATALOG_URL = "https://api.openai.com/v1";
+const ANTHROPIC_PREFIX = "anthropic/";
+const ANTHROPIC_CATALOG_URL = "https://api.anthropic.com/v1";
+const ANTHROPIC_API_VERSION = "2023-06-01";
 
 type Fetcher = typeof fetch;
 
@@ -331,6 +353,12 @@ interface OpenRouterModelResponse {
 
 interface OpenAIModelResponse {
   readonly data?: readonly unknown[];
+}
+
+interface AnthropicModelResponse {
+  readonly data?: readonly unknown[];
+  readonly has_more?: unknown;
+  readonly last_id?: unknown;
 }
 
 function record(value: unknown): Readonly<Record<string, unknown>> | undefined {
@@ -347,6 +375,10 @@ function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value)
     ? value
     : undefined;
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function stringArray(value: unknown): readonly string[] {
@@ -421,6 +453,9 @@ function openRouterModelEntry(input: unknown): ModelCatalogEntry | undefined {
       positiveInteger(topProvider?.context_length),
     maxOutputTokens: positiveInteger(topProvider?.max_completion_tokens),
     reasoning: stringArray(model.supported_parameters).includes("reasoning"),
+    adaptiveThinking: false,
+    thinkingCanBeDisabled: true,
+    effortLevels: [],
   };
 }
 
@@ -438,6 +473,9 @@ function openRouterPresetEntry(input: unknown): ModelCatalogEntry | undefined {
     contextWindow: null,
     maxOutputTokens: null,
     reasoning: false,
+    adaptiveThinking: false,
+    thinkingCanBeDisabled: true,
+    effortLevels: [],
   };
 }
 
@@ -532,6 +570,108 @@ export async function listOpenAIModelCatalog(input: {
           contextWindow: positiveInteger(model.contextWindow),
           maxOutputTokens: positiveInteger(model.maxTokens),
           reasoning: model.reasoning === true,
+          adaptiveThinking: false,
+          thinkingCanBeDisabled: true,
+          effortLevels: [],
+        },
+      ];
+    })
+    .filter((entry) => catalogMatches(entry, input.search))
+    .sort((left, right) => left.catalogId.localeCompare(right.catalogId));
+  return [
+    ...new Map(entries.map((entry) => [entry.model, entry])).values(),
+  ].slice(0, input.limit ?? entries.length);
+}
+
+/** Account-aware projection of Anthropic's paginated live Models API. */
+export async function listAnthropicModelCatalog(input: {
+  readonly apiKey: string;
+  readonly search?: string;
+  readonly limit?: number;
+  readonly fetcher?: Fetcher;
+}): Promise<readonly ModelCatalogEntry[]> {
+  const fetcher = input.fetcher ?? fetch;
+  const data: unknown[] = [];
+  let afterId: string | undefined;
+  for (;;) {
+    const query = new URLSearchParams({ limit: "1000" });
+    if (afterId) query.set("after_id", afterId);
+    const response = await fetcher(
+      `${ANTHROPIC_CATALOG_URL}/models?${query.toString()}`,
+      {
+        headers: {
+          accept: "application/json",
+          "anthropic-version": ANTHROPIC_API_VERSION,
+          "x-api-key": input.apiKey,
+        },
+      },
+    );
+    if (!response.ok)
+      throw new Error(
+        `Anthropic catalog request failed with ${response.status}`,
+      );
+    const json = record(await response.json());
+    if (!json || !Array.isArray(json.data))
+      throw new Error("Anthropic catalog response was not a list");
+    const page = json as AnthropicModelResponse;
+    data.push(...(page.data ?? []));
+    const lastId = stringValue(page.last_id);
+    if (
+      booleanValue(page.has_more) !== true ||
+      !lastId ||
+      lastId === afterId ||
+      data.length >= 10_000
+    )
+      break;
+    afterId = lastId;
+  }
+
+  const supported = new Map(
+    anthropicProvider()
+      .getModels()
+      .map((model) => [model.id, model] as const),
+  );
+  const effortOrder = ["low", "medium", "high", "xhigh", "max"] as const;
+  const entries = data
+    .flatMap((item) => {
+      const live = record(item);
+      const catalogId = stringValue(live?.id);
+      const model = catalogId ? supported.get(catalogId) : undefined;
+      if (!catalogId || !model) return [];
+      const capabilities = record(live?.capabilities);
+      const thinking = record(capabilities?.thinking);
+      const thinkingTypes = record(thinking?.types);
+      const effort = record(capabilities?.effort);
+      const adaptiveThinking =
+        booleanValue(record(thinkingTypes?.adaptive)?.supported) ??
+        model.compat?.forceAdaptiveThinking === true;
+      const effortLevels = effortOrder.filter(
+        (level) =>
+          booleanValue(record(effort?.[level])?.supported) === true ||
+          (effort === undefined &&
+            adaptiveThinking &&
+            (["low", "medium", "high"].includes(level) ||
+              model.thinkingLevelMap?.[level] === level)),
+      );
+      // OAO's immutable Anthropic settings always pin effort. Do not offer
+      // older Claude models whose live capabilities cannot honor that control.
+      if (effortLevels.length === 0) return [];
+      return [
+        {
+          providerType: "anthropic" as const,
+          model: `${ANTHROPIC_PREFIX}${catalogId}`,
+          catalogId,
+          name: stringValue(live?.display_name) ?? model.name,
+          contextWindow:
+            positiveInteger(live?.max_input_tokens) ??
+            positiveInteger(model.contextWindow),
+          maxOutputTokens:
+            positiveInteger(live?.max_tokens) ??
+            positiveInteger(model.maxTokens),
+          reasoning: model.reasoning === true,
+          adaptiveThinking,
+          thinkingCanBeDisabled: model.thinkingLevelMap?.off !== null,
+          effortLevels,
         },
       ];
     })
@@ -562,7 +702,7 @@ function positiveInteger(value: unknown): number | null {
 }
 
 /**
- * Safe, credential-free projection of the deployment OpenRouter/OpenAI catalog.
+ * Safe, credential-free projection of the deployment provider catalogs.
  * Project connections use the provider-specific live catalog functions.
  */
 export function listApprovedModelCatalog(
@@ -587,18 +727,44 @@ export function listApprovedModelCatalog(
           },
         ]
       : []),
+    ...(providerType === undefined || providerType === "anthropic"
+      ? [
+          {
+            type: "anthropic" as const,
+            prefix: ANTHROPIC_PREFIX,
+            provider: anthropicProvider(),
+          },
+        ]
+      : []),
   ];
   return providers
     .flatMap(({ type, prefix, provider }) =>
-      provider.getModels().map((model) => ({
-        providerType: type,
-        model: `${prefix}${model.id}`,
-        catalogId: model.id,
-        name: model.name,
-        contextWindow: positiveInteger(model.contextWindow),
-        maxOutputTokens: positiveInteger(model.maxTokens),
-        reasoning: model.reasoning === true,
-      })),
+      provider.getModels().map((model) => {
+        const adaptiveThinking =
+          type === "anthropic" &&
+          model.api === "anthropic-messages" &&
+          model.compat?.forceAdaptiveThinking === true;
+        return {
+          providerType: type,
+          model: `${prefix}${model.id}`,
+          catalogId: model.id,
+          name: model.name,
+          contextWindow: positiveInteger(model.contextWindow),
+          maxOutputTokens: positiveInteger(model.maxTokens),
+          reasoning: model.reasoning === true,
+          adaptiveThinking,
+          thinkingCanBeDisabled:
+            type !== "anthropic" || model.thinkingLevelMap?.off !== null,
+          effortLevels:
+            type === "anthropic" && adaptiveThinking
+              ? (["low", "medium", "high", "xhigh", "max"] as const).filter(
+                  (level) =>
+                    ["low", "medium", "high"].includes(level) ||
+                    model.thinkingLevelMap?.[level] === level,
+                )
+              : [],
+        };
+      }),
     )
     .sort((left, right) => left.catalogId.localeCompare(right.catalogId));
 }
@@ -619,10 +785,19 @@ export function isApprovedCatalogModel(
   const openAiId = model.startsWith(OPENAI_PREFIX)
     ? model.slice(OPENAI_PREFIX.length)
     : undefined;
-  return (
+  if (
     (providerType === undefined || providerType === "openai") &&
     openAiId !== undefined &&
     OPENAI_MODEL_IDS.has(openAiId)
+  )
+    return true;
+  const anthropicId = model.startsWith(ANTHROPIC_PREFIX)
+    ? model.slice(ANTHROPIC_PREFIX.length)
+    : undefined;
+  return (
+    (providerType === undefined || providerType === "anthropic") &&
+    anthropicId !== undefined &&
+    ANTHROPIC_MODEL_IDS.has(anthropicId)
   );
 }
 
@@ -756,10 +931,12 @@ export class ProjectModelPresetRegistry {
         `Model is not present in the pinned ${input.providerType} catalog: ${input.model}`,
       );
     if (
-      input.providerType === "openai" &&
+      input.providerType !== "openrouter" &&
       Object.keys(input.routing).length > 0
     )
-      throw new Error("OpenAI model presets do not support routing policy");
+      throw new Error(
+        `${input.providerType} model presets do not support routing policy`,
+      );
     if (input.providerType === "openrouter" && input.settings != null)
       throw new Error(
         "OpenRouter model presets do not support direct generation settings",
@@ -767,7 +944,14 @@ export class ProjectModelPresetRegistry {
     const settings =
       input.providerType === "openai"
         ? (input.settings ?? DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS)
-        : null;
+        : input.providerType === "anthropic"
+          ? (input.settings ?? DEFAULT_ANTHROPIC_MODEL_GENERATION_SETTINGS)
+          : null;
+    assertGenerationSettingsMatchProvider(
+      input.providerType,
+      input.model,
+      settings,
+    );
     const cacheKey = ProjectModelPresetRegistry.#cacheKey(input, input.key);
     const fingerprint = presetFingerprint({ ...input, settings });
     const existing = this.#active.get(cacheKey);
@@ -897,7 +1081,9 @@ function createProjectPresetProvider(input: {
   const native =
     input.providerType === "openrouter"
       ? openrouterProvider()
-      : openaiProvider();
+      : input.providerType === "openai"
+        ? openaiProvider()
+        : anthropicProvider();
   const nativeModel =
     input.providerType === "openrouter"
       ? dynamicOpenRouterModel({
@@ -924,16 +1110,102 @@ function createProjectPresetProvider(input: {
     api:
       input.providerType === "openrouter"
         ? openAICompletionsApi()
-        : openAIResponsesApi(),
+        : input.providerType === "openai"
+          ? openAIResponsesApi()
+          : anthropicMessagesApi(),
   });
-  return input.providerType === "openai" && input.settings
-    ? withOpenAIModelGenerationSettings(provider, input.settings)
-    : provider;
+  if (
+    input.providerType === "openai" &&
+    input.settings &&
+    !("thinking" in input.settings)
+  )
+    return withOpenAIModelGenerationSettings(provider, input.settings);
+  if (
+    input.providerType === "anthropic" &&
+    input.settings &&
+    "thinking" in input.settings
+  )
+    return withAnthropicModelGenerationSettings(provider, input.settings);
+  return provider;
+}
+
+function assertGenerationSettingsMatchProvider(
+  providerType: ModelProviderType,
+  model: string,
+  settings: ModelGenerationSettings | null,
+): void {
+  if (settings === null) return;
+  const anthropic = "thinking" in settings;
+  if (providerType === "anthropic" && !anthropic)
+    throw new TypeError("Anthropic model presets require Anthropic settings");
+  if (providerType === "openai" && anthropic)
+    throw new TypeError("OpenAI model presets require OpenAI settings");
+  if (
+    providerType === "anthropic" &&
+    anthropic &&
+    /^anthropic\/claude-opus-5(?:-|$)/u.test(model) &&
+    settings.thinking === "disabled" &&
+    (settings.effort === "xhigh" || settings.effort === "max")
+  )
+    throw new TypeError(
+      "Claude Opus 5 cannot disable thinking at xhigh or max effort",
+    );
+}
+
+function withAnthropicModelGenerationSettings<T extends Provider>(
+  provider: T,
+  settings: AnthropicModelSettings,
+): T {
+  const withSettings = (options: Record<string, unknown> | undefined) => {
+    const existing = options?.onPayload as
+      | ((payload: unknown, model: Model<Api>) => unknown | Promise<unknown>)
+      | undefined;
+    return {
+      ...options,
+      maxTokens: settings.maxTokens,
+      onPayload: async (payload: unknown, model: Model<Api>) => {
+        const transformed = (await existing?.(payload, model)) ?? payload;
+        if (
+          !transformed ||
+          typeof transformed !== "object" ||
+          Array.isArray(transformed)
+        )
+          return transformed;
+        const payloadRecord = transformed as Record<string, unknown>;
+        return {
+          ...payloadRecord,
+          max_tokens: settings.maxTokens,
+          thinking: { type: settings.thinking },
+          output_config: {
+            ...(record(payloadRecord.output_config) ?? {}),
+            effort: settings.effort,
+          },
+        };
+      },
+    };
+  };
+  return {
+    ...provider,
+    stream(model, context, options) {
+      return provider.stream(
+        model,
+        context,
+        withSettings(options as Record<string, unknown>) as never,
+      );
+    },
+    streamSimple(model, context, options) {
+      return provider.streamSimple(
+        model,
+        context,
+        withSettings(options as Record<string, unknown>) as never,
+      );
+    },
+  } as T;
 }
 
 function withOpenAIModelGenerationSettings<T extends Provider>(
   provider: T,
-  settings: ModelGenerationSettings,
+  settings: OpenAIModelSettings,
 ): T {
   const withSettings = (options: Record<string, unknown> | undefined) => {
     const existing = options?.onPayload as

@@ -7,6 +7,7 @@ import { createPool, migrate, PostgresWakeNotifier } from "@oao/db-postgres";
 import {
   isApprovedCatalogModel,
   listApprovedModelCatalog,
+  listAnthropicModelCatalog,
   listOpenAIModelCatalog,
   listOpenRouterModelCatalog,
 } from "@oao/models-openrouter";
@@ -64,18 +65,24 @@ const app = createApiApp({
         return listOpenRouterModelCatalog(catalogInput);
       if (input?.providerType === "openai")
         return listOpenAIModelCatalog(catalogInput);
+      if (input?.providerType === "anthropic")
+        return listAnthropicModelCatalog(catalogInput);
       return listApprovedModelCatalog(input?.providerType);
     },
     isApprovedModel: async (model, providerType, input) => {
       const apiKey = input?.apiKey;
       if (
         apiKey &&
-        (providerType === "openrouter" || providerType === "openai")
+        (providerType === "openrouter" ||
+          providerType === "openai" ||
+          providerType === "anthropic")
       ) {
         const listCatalog =
           providerType === "openrouter"
             ? listOpenRouterModelCatalog
-            : listOpenAIModelCatalog;
+            : providerType === "openai"
+              ? listOpenAIModelCatalog
+              : listAnthropicModelCatalog;
         const catalog = await listCatalog({
           apiKey,
           search: model,

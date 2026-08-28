@@ -211,6 +211,23 @@ test("model generation settings migrations are additive and validate safe immuta
     providerNeutralSql,
     /ALTER TABLE|DROP TABLE|DELETE FROM|UPDATE /u,
   );
+
+  const anthropicSql = await readFile(
+    new URL(
+      "../../migrations/0030_anthropic_model_provider.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(
+    anthropicSql,
+    /provider_type IN \('openrouter', 'openai', 'anthropic'\)/u,
+  );
+  assert.match(anthropicSql, /anthropic\//u);
+  assert.match(anthropicSql, /ARRAY\['effort','maxTokens','thinking'\]/u);
+  assert.match(anthropicSql, /'disabled', 'adaptive'/u);
+  assert.match(anthropicSql, /BETWEEN 1 AND 300000/u);
+  assert.doesNotMatch(anthropicSql, /UPDATE |DELETE FROM/u);
 });
 
 test("sandbox provider migration encrypts Daytona credentials and versions capabilities", async () => {

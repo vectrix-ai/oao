@@ -374,13 +374,13 @@ export interface ModelPresetPage extends Page<ModelPreset> {
 
 export interface ModelCatalogPage extends Page<ModelCatalogEntry> {
   readonly providerId: string;
-  readonly providerType: "openrouter" | "openai";
+  readonly providerType: "openrouter" | "openai" | "anthropic";
 }
 
 export interface CreateProjectModelProviderInput {
   readonly key: string;
   readonly displayName: string;
-  readonly providerType: "openrouter" | "openai";
+  readonly providerType: "openrouter" | "openai" | "anthropic";
   readonly apiKey: string;
 }
 

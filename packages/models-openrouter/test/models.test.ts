@@ -10,6 +10,7 @@ import {
   createOpenRouterPresetProviders,
   isApprovedCatalogModel,
   listApprovedModelCatalog,
+  listAnthropicModelCatalog,
   listOpenAIModelCatalog,
   listOpenRouterModelCatalog,
   loadModelPresetConfiguration,
@@ -231,17 +232,21 @@ test("the pinned catalog is exposed without provider credentials", () => {
   const entry = catalog[0];
   assert.ok(entry);
   assert.deepEqual(Object.keys(entry).sort(), [
+    "adaptiveThinking",
     "catalogId",
     "contextWindow",
+    "effortLevels",
     "maxOutputTokens",
     "model",
     "name",
     "providerType",
     "reasoning",
+    "thinkingCanBeDisabled",
   ]);
   assert.ok(
     catalog.some((model) => model.providerType === "openrouter") &&
-      catalog.some((model) => model.providerType === "openai"),
+      catalog.some((model) => model.providerType === "openai") &&
+      catalog.some((model) => model.providerType === "anthropic"),
   );
   assert.ok(entry.model.startsWith(`${entry.providerType}/`));
   assert.equal(isApprovedCatalogModel(entry.model), true);
@@ -251,6 +256,11 @@ test("the pinned catalog is exposed without provider credentials", () => {
   assert.ok(
     listApprovedModelCatalog("openai").every(
       (model) => model.providerType === "openai",
+    ),
+  );
+  assert.ok(
+    listApprovedModelCatalog("anthropic").every(
+      (model) => model.providerType === "anthropic",
     ),
   );
   assert.equal(
@@ -375,6 +385,92 @@ test("OpenAI live catalog rejects provider errors and malformed responses", asyn
     }),
     /OpenAI catalog response was not a list/u,
   );
+});
+
+test("Anthropic live catalog paginates account models and exposes capabilities", async () => {
+  const requests: Request[] = [];
+  const fetcher = async (input: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(input, init);
+    requests.push(request);
+    const afterId = new URL(request.url).searchParams.get("after_id");
+    return new Response(
+      JSON.stringify(
+        afterId
+          ? {
+              data: [
+                {
+                  id: "claude-haiku-4-5",
+                  display_name: "Claude Haiku 4.5",
+                  max_input_tokens: 200_000,
+                  max_tokens: 64_000,
+                  capabilities: {
+                    thinking: {
+                      supported: true,
+                      types: { adaptive: { supported: false } },
+                    },
+                    effort: { high: { supported: true } },
+                  },
+                },
+              ],
+              has_more: false,
+              last_id: "claude-haiku-4-5",
+            }
+          : {
+              data: [
+                {
+                  id: "claude-sonnet-5",
+                  display_name: "Claude Sonnet 5",
+                  max_input_tokens: 1_000_000,
+                  max_tokens: 128_000,
+                  capabilities: {
+                    thinking: {
+                      supported: true,
+                      types: { adaptive: { supported: true } },
+                    },
+                    effort: {
+                      low: { supported: true },
+                      medium: { supported: true },
+                      high: { supported: true },
+                      xhigh: { supported: true },
+                      max: { supported: true },
+                    },
+                  },
+                },
+                { id: "not-in-pinned-runtime", display_name: "Unknown" },
+              ],
+              has_more: true,
+              last_id: "claude-sonnet-5",
+            },
+      ),
+      { headers: { "content-type": "application/json" } },
+    );
+  };
+
+  const catalog = await listAnthropicModelCatalog({
+    apiKey: "sk-ant-test",
+    fetcher: fetcher as typeof fetch,
+  });
+  assert.deepEqual(
+    catalog.map((entry) => entry.model),
+    ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5"],
+  );
+  const sonnet = catalog.find(
+    (entry) => entry.model === "anthropic/claude-sonnet-5",
+  );
+  assert.equal(sonnet?.adaptiveThinking, true);
+  assert.deepEqual(sonnet?.effortLevels, [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ]);
+  assert.equal(sonnet?.contextWindow, 1_000_000);
+  assert.equal(sonnet?.maxOutputTokens, 128_000);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0]?.headers.get("x-api-key"), "sk-ant-test");
+  assert.equal(requests[0]?.headers.get("anthropic-version"), "2023-06-01");
+  assert.equal(requests[0]?.url.includes("sk-ant-test"), false);
 });
 
 test("provider-neutral policy maps onto the OpenRouter routing contract", () => {
@@ -681,4 +777,86 @@ test("OpenAI project preset settings reach the Responses API payload", async () 
     mode: "standard",
     summary: "auto",
   });
+});
+
+test("Anthropic project preset settings reach the Messages API payload", async () => {
+  const providers: Provider[] = [];
+  const registry = new ProjectModelPresetRegistry({
+    deployment: new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
+      hostedEnabled: false,
+    }),
+    registerProvider: (provider) => providers.push(provider),
+  });
+  const resolved = registry.activate({
+    ...tenantA,
+    providerType: "anthropic",
+    apiKey: "sk-ant-settings-test",
+    key: "claude-sonnet-5-v1",
+    model: "anthropic/claude-sonnet-5",
+    routing: {},
+    settings: {
+      thinking: "adaptive",
+      maxTokens: 20_000,
+      effort: "high",
+    },
+  });
+  assert.deepEqual(resolved.settings, {
+    thinking: "adaptive",
+    maxTokens: 20_000,
+    effort: "high",
+  });
+  const provider = providers[0];
+  const model = provider?.getModels()[0];
+  assert.ok(provider);
+  assert.ok(model);
+  let payload: Record<string, unknown> | undefined;
+  const response = await provider
+    .streamSimple(
+      model,
+      {
+        messages: [{ role: "user", content: "Say hello.", timestamp: 1 }],
+      },
+      {
+        apiKey: "sk-ant-settings-test",
+        reasoning: "high",
+        maxRetries: 0,
+        fetch: async (_input, init) => {
+          payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(
+            JSON.stringify({ error: { message: "expected test stop" } }),
+            {
+              status: 503,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        },
+      },
+    )
+    .result();
+  assert.equal(response.stopReason, "error");
+  assert.equal(payload?.model, "claude-sonnet-5");
+  assert.equal(payload?.max_tokens, 20_000);
+  assert.deepEqual(payload?.thinking, { type: "adaptive" });
+  assert.deepEqual(payload?.output_config, { effort: "high" });
+});
+
+test("Anthropic rejects disabled thinking at unsupported Opus 5 effort levels", () => {
+  const { registry } = projectRegistry();
+  assert.throws(
+    () =>
+      registry.activate({
+        ...tenantA,
+        providerType: "anthropic",
+        apiKey: "sk-ant-settings-test",
+        key: "claude-opus-5-disabled-max-v1",
+        model: "anthropic/claude-opus-5",
+        routing: {},
+        settings: {
+          thinking: "disabled",
+          maxTokens: 20_000,
+          effort: "max",
+        },
+      }),
+    /cannot disable thinking at xhigh or max effort/u,
+  );
 });

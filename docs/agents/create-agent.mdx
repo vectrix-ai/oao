@@ -127,7 +127,7 @@ cookies.
       "delegates": [],
       "sandbox": {
         "enabled": false,
-        "provider": "daytona-primary",
+        "provider": "not-configured",
         "network": "none",
         "capabilities": ["filesystem_read", "filesystem_write", "shell"]
       },
@@ -138,9 +138,10 @@ cookies.
     }
     ```
 
-    The form selects the first available provider-backed project preset and
-    Daytona connection. The sandbox starts disabled until you enable it. The
-    picker searches every preset returned by
+    The form selects the first available provider-backed project preset. The
+    sandbox starts disabled and does not require a Daytona connection until you
+    enable it; when enabled, the form selects the first available Daytona
+    connection. The picker searches every preset returned by
     `GET /projects/{projectId}/model-presets`, showing the preset key and
     whether it is a deployment or project preset, and leaves an unavailable
     preset visible but unselectable. The generated agent key is the normalized
@@ -630,17 +631,17 @@ consecutive-failure count.
 ### Model presets
 
 `config.modelPreset` must name a durable project preset linked to an
-OpenRouter/OpenAI provider in PostgreSQL. Runnable deployments do not expose a
+OpenRouter, OpenAI, or Anthropic provider in PostgreSQL. Runnable deployments do not expose a
 built-in deterministic preset.
 
 The check runs inside the same tenant transaction as the write, so an unknown
 key is rejected with `400` before an agent or version row is created. Hosted
 publication requires a provider connection in the same project and platform
-credential encryption. OpenRouter/OpenAI API keys are write-only and stored as
+credential encryption. Provider API keys are write-only and stored as
 tenant-scoped ciphertext, never in the agent config.
 
-Hosted model identifiers start with `openrouter/` or `openai/` and must exist in
-the matching provider catalog. OpenRouter saved presets are exposed as
+Hosted model identifiers start with `openrouter/`, `openai/`, or `anthropic/`
+and must exist in the matching provider catalog. OpenRouter saved presets are exposed as
 `openrouter/@preset/<slug>`. See [Adding models](/models/adding-models) for the
 approval workflow and [HTTP API](/reference/http-api) for the preset contract.
 

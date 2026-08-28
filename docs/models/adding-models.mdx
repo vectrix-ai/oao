@@ -1,10 +1,11 @@
 ---
 title: Adding models and providers
-description: Configure project-scoped OpenRouter or OpenAI credentials and link approved models to agents.
+description: Configure project-scoped OpenRouter, OpenAI, or Anthropic credentials and link approved models to agents.
 ---
 
 OAO stores hosted model configuration in PostgreSQL per organization and
-project. The MVP supports two provider types: **OpenRouter** and **OpenAI**.
+project. The MVP supports three provider types: **OpenRouter**, **OpenAI**, and
+**Anthropic**.
 An agent version never contains a raw model identifier or credential. It names
 an immutable model preset, and that preset references a provider connection in
 the same project.
@@ -34,8 +35,9 @@ openssl rand -base64 32
 OAO_CREDENTIAL_ENCRYPTION_KEY=replace-with-the-generated-base64-value
 ```
 
-Do not put `OPENROUTER_API_KEY` or `OPENAI_API_KEY` in `.env`. Those keys are
-entered through the project UI or API and stored as tenant-scoped ciphertext.
+Do not put `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` in
+`.env`. Those keys are entered through the project UI or API and stored as
+tenant-scoped ciphertext.
 Without `OAO_CREDENTIAL_ENCRYPTION_KEY`, provider creation, preset publication,
 and runtime execution are unavailable. OAO does not fall back to a local fake
 model.
@@ -44,7 +46,7 @@ model.
 
 1. Open **Models**.
 2. Select **Add provider**.
-3. Choose **OpenRouter** or **OpenAI**.
+3. Choose **OpenRouter**, **OpenAI**, or **Anthropic**.
 4. Enter a stable project-local key, display name, and API key.
 5. Select **Add provider**.
 
@@ -62,9 +64,9 @@ The runtime replaces its in-memory provider on the next activation.
 1. Select **Add model preset**.
 2. Choose a provider connection.
 3. In **Model**, type to search the live catalog available to that connection
-   and pick a model or OpenRouter saved preset. For OpenAI, OAO calls
-   `GET /v1/models` with the selected connection's key and lists the returned
-   models that its Responses runtime supports. The picker shows the first
+   and pick a model or OpenRouter saved preset. For direct providers, OAO calls
+   their authenticated `GET /v1/models` endpoint and lists returned models that
+   the corresponding runtime supports. The picker shows the first
    matches with their model identifier, context window, and reasoning support,
    and reports how many further matches the search is hiding.
 4. Check the suggested preset key and display name. Both are derived from the
@@ -78,7 +80,12 @@ The runtime replaces its in-memory provider on the next activation.
    standard reasoning mode, medium reasoning effort, medium verbosity, and an
    automatic reasoning summary. GPT-5.6 presets can select standard or pro
    mode and reasoning effort from none through max.
-7. Select **Add model preset**.
+7. For Anthropic, review **Claude settings**. Thinking can be disabled or set
+   to adaptive when the model advertises that capability. `maxTokens` is the
+   total output ceiling shared by thinking and the visible answer. Effort is
+   limited to the levels advertised by the selected model; new adaptive
+   presets use 20,000 tokens and high effort when supported.
+8. Select **Add model preset**.
 
 The dialog lists what is still missing under **Validation** and keeps the
 submit button disabled until nothing is.
@@ -90,13 +97,22 @@ them, create a new preset key and publish a new agent version.
 OpenRouter presets may use live OpenRouter models or saved OpenRouter presets
 (`@preset/<slug>`), plus routing controls including fallbacks, zero-data
 retention, data collection, upstream allow/deny lists, preference order, sort,
-and price caps. OpenAI is a direct provider connection, so OpenRouter routing
-controls must be empty.
+and price caps. OpenAI and Anthropic are direct provider connections, so
+OpenRouter routing controls must be empty.
 
 For direct OpenAI presets, OAO maps the stored controls to the Responses API as
 `text.format`, `text.verbosity`, `reasoning.mode`, `reasoning.effort`, and
 `reasoning.summary`. Reasoning effort is also the Flue default for the agent;
 an explicitly configured Harness Operation may still override its own effort.
+
+For direct Anthropic presets, OAO maps the stored controls to the Messages API
+as `thinking.type`, `max_tokens`, and `output_config.effort`. Anthropic counts
+thinking tokens against `max_tokens`, so this setting is the hard ceiling for
+the combined thinking and visible response. Adaptive thinking and the available
+effort values are model capabilities rather than assumptions made by OAO.
+Manual `thinking.type: "enabled"` and `budget_tokens` are not part of this
+preset contract; use adaptive thinking for supported current models or disable
+thinking.
 
 ## Prompt caching
 
@@ -176,11 +192,14 @@ The provider ID is required. OAO reads its type from PostgreSQL and returns only
 the matching provider catalog. For OpenRouter connections, OAO decrypts the
 project provider key server-side and fetches OpenRouter's live `/models` catalog
 plus saved `/presets`, exposing saved presets as `openrouter/@preset/<slug>`
-options. For direct OpenAI connections, OAO decrypts the selected project key
-server-side and fetches OpenAI's live `/v1/models` catalog. The response is
-intersected with OAO's supported Responses models so embeddings, image, audio,
-and other incompatible model types are not offered for agent presets. Catalog
-responses contain public metadata only; neither provider key is returned.
+options. For direct OpenAI and Anthropic connections, OAO decrypts the selected
+project key server-side and fetches the provider's live `/v1/models` catalog.
+Each response is intersected with OAO's pinned runtime models so unsupported
+model types are not offered for agent presets. Anthropic entries also expose
+the model's adaptive-thinking, thinking-disable, and effort capabilities.
+Claude models whose live capabilities do not support effort are not offered,
+because every OAO Anthropic preset pins that setting.
+Catalog responses contain public metadata only; no provider key is returned.
 
 ### Create a preset
 
@@ -223,6 +242,25 @@ settings:
 }
 ```
 
+For a direct Anthropic connection, use an `anthropic/<catalog-id>` model
+returned by the catalog, send an empty `routing` object, and include the
+immutable Claude settings:
+
+```json
+{
+  "key": "claude-sonnet-5-v1",
+  "displayName": "Claude Sonnet 5",
+  "providerId": "55555555-5555-4555-8555-555555555555",
+  "model": "anthropic/claude-sonnet-5",
+  "routing": {},
+  "settings": {
+    "thinking": "adaptive",
+    "maxTokens": 20000,
+    "effort": "high"
+  }
+}
+```
+
 ## Tenant and lifecycle guarantees
 
 - Provider and preset primary keys include organization and project identity.
@@ -252,13 +290,18 @@ identity is authenticated, so copied ciphertext intentionally fails.
 
 ### A model is not in the catalog
 
-Search `/model-catalog` with the intended provider connection. OpenRouter and
-OpenAI use separate catalogs and prefixes. If an OpenRouter model or saved
-preset is missing, confirm the provider API key can read the OpenRouter catalog.
-If a direct OpenAI model is missing, confirm the selected key can list it through
-OpenAI's `/v1/models` endpoint. OAO also requires matching Responses-runtime
-metadata, so a newly released or non-text model remains unavailable until the
-pinned Pi catalog supports it.
+Search `/model-catalog` with the intended provider connection. OpenRouter,
+OpenAI, and Anthropic use separate catalogs and prefixes. If an OpenRouter model
+or saved preset is missing, confirm the provider API key can read the OpenRouter
+catalog. If a direct OpenAI model is missing, confirm the selected key can list
+it through OpenAI's `/v1/models` endpoint. OAO also requires matching
+Responses-runtime metadata, so a newly released or non-text model remains
+unavailable until the pinned Pi catalog supports it.
+
+If a direct Anthropic model is missing, confirm the selected key can list it
+through Anthropic's `/v1/models` endpoint. OAO must also have matching native
+Anthropic runtime metadata. The model catalog controls whether adaptive
+thinking can be enabled or disabled and which effort levels can be saved.
 
 ### A preset is unavailable
 

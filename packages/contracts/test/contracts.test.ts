@@ -434,6 +434,33 @@ test("model preset input requires a versioned key and supported routing", () => 
       summary: "auto",
     },
   );
+  assert.deepEqual(
+    parseCreateModelPresetInput({
+      key: "claude-sonnet-5-v1",
+      displayName: "Claude Sonnet 5",
+      providerId: "55555555-5555-4555-8555-555555555555",
+      model: "anthropic/claude-sonnet-5",
+      settings: {
+        thinking: "adaptive",
+        maxTokens: 20_000,
+        effort: "high",
+      },
+    }).settings,
+    { thinking: "adaptive", maxTokens: 20_000, effort: "high" },
+  );
+  assert.throws(() =>
+    parseCreateModelPresetInput({
+      key: "claude-invalid-v1",
+      displayName: "Invalid Claude",
+      providerId: "55555555-5555-4555-8555-555555555555",
+      model: "anthropic/claude-sonnet-5",
+      settings: {
+        thinking: "adaptive",
+        maxTokens: 0,
+        effort: "high",
+      },
+    }),
+  );
   assert.throws(() =>
     parseCreateModelPresetInput({
       key: "gpt-invalid-settings-v1",

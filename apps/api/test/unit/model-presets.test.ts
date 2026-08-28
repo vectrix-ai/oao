@@ -34,10 +34,23 @@ const catalog: ModelCatalogPort = {
       maxOutputTokens: 128_000,
       reasoning: true,
     },
+    {
+      providerType: "anthropic",
+      model: "anthropic/claude-sonnet-5",
+      catalogId: "claude-sonnet-5",
+      name: "Claude Sonnet 5",
+      contextWindow: 1_000_000,
+      maxOutputTokens: 128_000,
+      reasoning: true,
+      adaptiveThinking: true,
+      thinkingCanBeDisabled: true,
+      effortLevels: ["low", "medium", "high", "xhigh", "max"],
+    },
   ],
   isApprovedModel: (model) =>
     model === "openrouter/anthropic/claude-sonnet-4.6" ||
-    model === "openai/gpt-5.6-terra",
+    model === "openai/gpt-5.6-terra" ||
+    model === "anthropic/claude-sonnet-5",
 };
 const credentialCipher = new ProviderCredentialCipher(Buffer.alloc(32, 3));
 const organizationId = "00000000-0000-4000-8000-000000000001";
@@ -72,6 +85,24 @@ const openAIProviderRow = {
   encryption_nonce: encryptedOpenAIProviderKey.nonce,
   encryption_tag: encryptedOpenAIProviderKey.tag,
   encryption_key_version: encryptedOpenAIProviderKey.keyVersion,
+};
+const encryptedAnthropicProviderKey = credentialCipher.encrypt(
+  "sk-ant-api-live",
+  {
+    organizationId,
+    projectId,
+    providerId,
+    providerType: "anthropic",
+    keyVersion: 1,
+  },
+);
+const anthropicProviderRow = {
+  id: providerId,
+  provider_type: "anthropic",
+  encrypted_api_key: encryptedAnthropicProviderKey.ciphertext,
+  encryption_nonce: encryptedAnthropicProviderKey.nonce,
+  encryption_tag: encryptedAnthropicProviderKey.tag,
+  encryption_key_version: encryptedAnthropicProviderKey.keyVersion,
 };
 
 interface QueryLog {
@@ -305,6 +336,31 @@ test("OpenAI catalog lookup uses the decrypted project provider key", async () =
   assert.equal(observedApiKey, "sk-openai-live");
 });
 
+test("Anthropic catalog lookup uses the decrypted project provider key", async () => {
+  let observedApiKey: string | undefined;
+  let observedProviderType: string | undefined;
+  const liveCatalog: ModelCatalogPort = {
+    ...catalog,
+    listCatalog: (input) => {
+      observedApiKey = input?.apiKey;
+      observedProviderType = input?.providerType;
+      return catalog.listCatalog(input);
+    },
+  };
+  const harness = app({
+    catalog: liveCatalog,
+    rows: { "FROM oao.project_model_providers": [anthropicProviderRow] },
+  });
+  const { cookie, projectId } = await authenticate(harness.app);
+  const response = await harness.app.request(
+    `/v1/projects/${projectId}/model-catalog?providerId=${providerId}`,
+    { headers: { cookie } },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(observedProviderType, "anthropic");
+  assert.equal(observedApiKey, "sk-ant-api-live");
+});
+
 test("preset creation validates keys, catalog membership, and routing", async () => {
   const harness = app({ catalog });
   const { cookie, projectId } = await authenticate(harness.app);
@@ -508,6 +564,72 @@ test("OpenAI preset creation persists Responses API generation settings", async 
     query.text.includes("INSERT INTO oao.project_model_presets"),
   );
   assert.deepEqual(insert?.values[8], settings);
+});
+
+test("Anthropic preset creation persists validated Claude settings", async () => {
+  const settings = {
+    thinking: "adaptive" as const,
+    maxTokens: 20_000,
+    effort: "high" as const,
+  };
+  const input = {
+    key: "claude-sonnet-5-v1",
+    displayName: "Claude Sonnet 5",
+    providerId,
+    model: "anthropic/claude-sonnet-5",
+    routing: {},
+    settings,
+  };
+  const created = {
+    id: "00000000-0000-4000-8000-000000000703",
+    organization_id: organizationId,
+    project_id: projectId,
+    key: input.key,
+    display_name: input.displayName,
+    origin: "project",
+    provider_id: providerId,
+    provider_type: "anthropic",
+    model: input.model,
+    routing: {},
+    settings,
+    hosted: true,
+    available: true,
+    created_by_principal_id: "00000000-0000-4000-8000-000000000003",
+    created_at: new Date("2026-08-28T09:00:00.000Z"),
+  };
+  const harness = app({
+    catalog,
+    rows: {
+      "FROM oao.project_model_providers": [anthropicProviderRow],
+      "INSERT INTO oao.project_model_presets": [created],
+    },
+  });
+  const { cookie, projectId: actorProjectId } = await authenticate(harness.app);
+  const response = await harness.app.request(
+    `/v1/projects/${actorProjectId}/model-presets`,
+    createRequest(cookie, input, "anthropic-sonnet-settings"),
+  );
+  assert.equal(response.status, 201);
+  assert.deepEqual((await response.json()).settings, settings);
+  const insert = harness.queries.find((query) =>
+    query.text.includes("INSERT INTO oao.project_model_presets"),
+  );
+  assert.deepEqual(insert?.values[8], settings);
+
+  const excessive = await harness.app.request(
+    `/v1/projects/${actorProjectId}/model-presets`,
+    createRequest(
+      cookie,
+      {
+        ...input,
+        key: ["claude", "too", "large", "v1"].join("-"),
+        settings: { ...settings, maxTokens: 128_001 },
+      },
+      "anthropic-too-large",
+    ),
+  );
+  assert.equal(excessive.status, 400);
+  assert.match((await excessive.json()).error.message, /exceeds/u);
 });
 
 test("agent publication rejects a preset the project never approved", async () => {

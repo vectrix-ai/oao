@@ -520,11 +520,11 @@ function CreateAgentDialog({
     !modelPresetsPending &&
     !modelPresetsError &&
     availablePresets.some((preset) => preset.key === modelPreset) &&
-    !sandboxProvidersPending &&
-    !sandboxProvidersError &&
-    sandboxProviders.some((provider) => provider.key === sandboxProvider) &&
     (!sandboxEnabled ||
-      (snapshotId.length > 0 &&
+      (!sandboxProvidersPending &&
+        !sandboxProvidersError &&
+        sandboxProviders.some((provider) => provider.key === sandboxProvider) &&
+        snapshotId.length > 0 &&
         (snapshots.data?.data ?? []).some(
           (snapshot) => snapshot.id === snapshotId && snapshot.available,
         )));
@@ -544,8 +544,8 @@ function CreateAgentDialog({
           modelPreset: String(data.get("modelPreset") ?? ""),
           sandbox: {
             enabled: sandboxEnabled,
-            provider: sandboxProvider,
-            ...(snapshotId ? { snapshotId } : {}),
+            provider: sandboxEnabled ? sandboxProvider : "not-configured",
+            ...(sandboxEnabled && snapshotId ? { snapshotId } : {}),
             network,
             capabilities: sandboxCapabilities,
           },

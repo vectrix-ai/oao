@@ -1683,13 +1683,17 @@ export const ModelRoutingPolicySchema = v.strictObject({
 });
 
 export const ModelPresetOriginSchema = v.picklist(["deployment", "project"]);
-export const ModelProviderTypeSchema = v.picklist(["openrouter", "openai"]);
+export const ModelProviderTypeSchema = v.picklist([
+  "openrouter",
+  "openai",
+  "anthropic",
+]);
 
 /**
  * Provider-neutral generation controls stored with an immutable model preset.
  * Adapters translate these names to the selected provider's wire contract.
  */
-export const ModelGenerationSettingsSchema = v.strictObject({
+export const OpenAIModelGenerationSettingsSchema = v.strictObject({
   textFormat: v.literal("text"),
   mode: v.picklist(["standard", "pro"]),
   effort: v.picklist(["none", "low", "medium", "high", "xhigh", "max"]),
@@ -1697,12 +1701,34 @@ export const ModelGenerationSettingsSchema = v.strictObject({
   summary: v.picklist(["auto", "concise", "detailed"]),
 });
 
+export const AnthropicModelGenerationSettingsSchema = v.strictObject({
+  thinking: v.picklist(["disabled", "adaptive"]),
+  maxTokens: v.pipe(
+    v.number(),
+    v.integer(),
+    v.minValue(1),
+    v.maxValue(300_000),
+  ),
+  effort: v.picklist(["low", "medium", "high", "xhigh", "max"]),
+});
+
+export const ModelGenerationSettingsSchema = v.union([
+  OpenAIModelGenerationSettingsSchema,
+  AnthropicModelGenerationSettingsSchema,
+]);
+
 export const DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS = Object.freeze({
   textFormat: "text",
   mode: "standard",
   effort: "medium",
   verbosity: "medium",
   summary: "auto",
+} as const);
+
+export const DEFAULT_ANTHROPIC_MODEL_GENERATION_SETTINGS = Object.freeze({
+  thinking: "adaptive",
+  maxTokens: 20_000,
+  effort: "high",
 } as const);
 
 const McpResourceKeySchema = v.pipe(
@@ -2163,8 +2189,8 @@ export const CreateModelPresetInputSchema = v.strictObject({
     v.minLength(1),
     v.maxLength(300),
     v.regex(
-      /^(?:openrouter\/(?:@preset\/)?[a-zA-Z0-9~][a-zA-Z0-9._:~/-]*|openai\/[a-z0-9~][a-z0-9._:~/-]*)$/u,
-      "model must be an approved OpenRouter/OpenAI model or OpenRouter preset reference",
+      /^(?:openrouter\/(?:@preset\/)?[a-zA-Z0-9~][a-zA-Z0-9._:~/-]*|(?:openai|anthropic)\/[a-z0-9~][a-z0-9._:~/-]*)$/u,
+      "model must be an approved OpenRouter, OpenAI, or Anthropic model or OpenRouter preset reference",
     ),
   ),
   routing: v.optional(ModelRoutingPolicySchema, {}),
@@ -2180,6 +2206,11 @@ export const ModelCatalogEntrySchema = v.object({
   contextWindow: v.nullable(v.pipe(v.number(), v.integer(), v.minValue(0))),
   maxOutputTokens: v.nullable(v.pipe(v.number(), v.integer(), v.minValue(0))),
   reasoning: v.boolean(),
+  adaptiveThinking: v.optional(v.boolean()),
+  thinkingCanBeDisabled: v.optional(v.boolean()),
+  effortLevels: v.optional(
+    v.array(v.picklist(["low", "medium", "high", "xhigh", "max"])),
+  ),
 });
 
 export function parseCreateModelPresetInput(

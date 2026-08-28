@@ -47,6 +47,14 @@ import {
 
 /** Optional policy fields stay unset unless the operator chooses explicitly. */
 type Tristate = "" | "yes" | "no";
+type OpenAISettings = Extract<
+  ModelGenerationSettings,
+  { readonly textFormat: "text" }
+>;
+type AnthropicSettings = Extract<
+  ModelGenerationSettings,
+  { readonly thinking: "disabled" | "adaptive" }
+>;
 
 function tristate(value: Tristate): boolean | undefined {
   return value === "" ? undefined : value === "yes";
@@ -183,7 +191,7 @@ export function ModelsPage() {
           <EmptyState
             icon="⚿"
             title="No provider connections yet"
-            description="Add an OpenRouter or OpenAI connection before creating a hosted model preset."
+            description="Add an OpenRouter, OpenAI, or Anthropic connection before creating a hosted model preset."
             action={
               encryptionConfigured ? (
                 <Button
@@ -414,11 +422,16 @@ function CreateModelPresetDialog({
     "standard",
   );
   const [reasoningEffort, setReasoningEffort] =
-    useState<ModelGenerationSettings["effort"]>("medium");
+    useState<OpenAISettings["effort"]>("medium");
   const [verbosity, setVerbosity] =
-    useState<ModelGenerationSettings["verbosity"]>("medium");
+    useState<OpenAISettings["verbosity"]>("medium");
   const [reasoningSummary, setReasoningSummary] =
-    useState<ModelGenerationSettings["summary"]>("auto");
+    useState<OpenAISettings["summary"]>("auto");
+  const [anthropicThinking, setAnthropicThinking] =
+    useState<AnthropicSettings["thinking"]>("adaptive");
+  const [anthropicMaxTokens, setAnthropicMaxTokens] = useState(20_000);
+  const [anthropicEffort, setAnthropicEffort] =
+    useState<AnthropicSettings["effort"]>("high");
 
   const settings: ModelGenerationSettings | null =
     provider?.providerType === "openai"
@@ -429,7 +442,13 @@ function CreateModelPresetDialog({
           verbosity,
           summary: reasoningSummary,
         }
-      : null;
+      : provider?.providerType === "anthropic"
+        ? {
+            thinking: anthropicThinking,
+            maxTokens: anthropicMaxTokens,
+            effort: anthropicEffort,
+          }
+        : null;
 
   const catalogOptions = useMemo<readonly ComboboxOption[]>(
     () =>
@@ -454,6 +473,15 @@ function CreateModelPresetDialog({
     const entry = catalog.find((candidate) => candidate.model === value);
     if (!entry) return;
     setModel(entry);
+    if (entry.providerType === "anthropic") {
+      const thinking = entry.adaptiveThinking ? "adaptive" : "disabled";
+      setAnthropicThinking(thinking);
+      setAnthropicMaxTokens(Math.min(20_000, entry.maxOutputTokens ?? 20_000));
+      const efforts = entry.effortLevels ?? [];
+      setAnthropicEffort(
+        efforts.includes("high") ? "high" : (efforts[0] ?? "high"),
+      );
+    }
     if (!keyEdited) setKey(suggestPresetKey(entry.name, existingKeys));
     if (!displayNameEdited) setDisplayName(entry.name);
   };
@@ -523,8 +551,29 @@ function CreateModelPresetDialog({
       Number.isNaN(routing.maxCompletionPriceUsdPerMillion)
     )
       errors.push("Price caps must be numbers.");
+    if (
+      provider?.providerType === "anthropic" &&
+      (!Number.isInteger(anthropicMaxTokens) || anthropicMaxTokens < 1)
+    )
+      errors.push("Anthropic max tokens must be a positive whole number.");
+    if (
+      provider?.providerType === "anthropic" &&
+      model.maxOutputTokens !== null &&
+      anthropicMaxTokens > model.maxOutputTokens
+    )
+      errors.push(
+        `Anthropic max tokens cannot exceed ${formatNumber(model.maxOutputTokens)} for this model.`,
+      );
     return errors;
-  }, [displayName, existingKeys, key, model, provider, routing]);
+  }, [
+    anthropicMaxTokens,
+    displayName,
+    existingKeys,
+    key,
+    model,
+    provider,
+    routing,
+  ]);
 
   return (
     <Dialog
@@ -582,7 +631,7 @@ function CreateModelPresetDialog({
         hint={
           model
             ? `${model.model}${model.contextWindow === null ? "" : ` · ${formatNumber(model.contextWindow)} token context`}`
-            : "Search the live catalog available to this OpenRouter or OpenAI connection."
+            : "Search the live catalog available to this provider connection."
         }
       >
         <Combobox
@@ -644,7 +693,7 @@ function CreateModelPresetDialog({
                   value={reasoningEffort}
                   onChange={(event) =>
                     setReasoningEffort(
-                      event.target.value as ModelGenerationSettings["effort"],
+                      event.target.value as OpenAISettings["effort"],
                     )
                   }
                 >
@@ -663,8 +712,7 @@ function CreateModelPresetDialog({
                   value={verbosity}
                   onChange={(event) =>
                     setVerbosity(
-                      event.target
-                        .value as ModelGenerationSettings["verbosity"],
+                      event.target.value as OpenAISettings["verbosity"],
                     )
                   }
                 >
@@ -678,13 +726,100 @@ function CreateModelPresetDialog({
                   value={reasoningSummary}
                   onChange={(event) =>
                     setReasoningSummary(
-                      event.target.value as ModelGenerationSettings["summary"],
+                      event.target.value as OpenAISettings["summary"],
                     )
                   }
                 >
                   <option value="auto">auto</option>
                   <option value="concise">concise</option>
                   <option value="detailed">detailed</option>
+                </Select>
+              </Field>
+            </FieldRow>
+          </div>
+        </details>
+      ) : null}
+      {provider?.providerType === "anthropic" ? (
+        <details className="policy-details" open>
+          <summary>
+            Claude settings
+            <span className="policy-summary">
+              {anthropicThinking} thinking · {anthropicEffort} effort ·{" "}
+              {formatCompactNumber(anthropicMaxTokens)} max tokens
+            </span>
+          </summary>
+          <div className="policy-body">
+            <FieldRow>
+              <Field
+                label="Thinking"
+                hint="Adaptive lets Claude decide when and how much to think."
+              >
+                <Select
+                  value={anthropicThinking}
+                  onChange={(event) => {
+                    const thinking = event.target
+                      .value as AnthropicSettings["thinking"];
+                    setAnthropicThinking(thinking);
+                    if (
+                      thinking === "disabled" &&
+                      /^claude-opus-5(?:-|$)/u.test(model?.catalogId ?? "") &&
+                      (anthropicEffort === "xhigh" || anthropicEffort === "max")
+                    )
+                      setAnthropicEffort("high");
+                  }}
+                >
+                  {model?.thinkingCanBeDisabled !== false ? (
+                    <option value="disabled">Disabled</option>
+                  ) : null}
+                  {model?.adaptiveThinking ? (
+                    <option value="adaptive">Adaptive</option>
+                  ) : null}
+                </Select>
+              </Field>
+              <Field
+                label="Max tokens"
+                hint="Hard ceiling for thinking plus response text."
+              >
+                <Input
+                  type="number"
+                  min={1}
+                  max={model?.maxOutputTokens ?? 300_000}
+                  step={1}
+                  value={anthropicMaxTokens}
+                  onChange={(event) =>
+                    setAnthropicMaxTokens(Number(event.target.value))
+                  }
+                />
+              </Field>
+              <Field
+                label="Effort"
+                hint="Controls overall response and adaptive-thinking depth."
+              >
+                <Select
+                  value={anthropicEffort}
+                  onChange={(event) =>
+                    setAnthropicEffort(
+                      event.target.value as AnthropicSettings["effort"],
+                    )
+                  }
+                >
+                  {(model?.effortLevels?.length
+                    ? model.effortLevels
+                    : (["high"] as const)
+                  )
+                    .filter(
+                      (effort) =>
+                        anthropicThinking !== "disabled" ||
+                        !/^claude-opus-5(?:-|$)/u.test(
+                          model?.catalogId ?? "",
+                        ) ||
+                        (effort !== "xhigh" && effort !== "max"),
+                    )
+                    .map((effort) => (
+                      <option key={effort} value={effort}>
+                        {effort}
+                      </option>
+                    ))}
                 </Select>
               </Field>
             </FieldRow>
@@ -853,8 +988,8 @@ function CreateModelPresetDialog({
         </details>
       ) : (
         <Alert tone="info" role="status">
-          OpenAI presets use direct provider routing. OpenRouter-specific
-          routing controls do not apply.
+          Direct provider presets use their selected connection.
+          OpenRouter-specific routing controls do not apply.
         </Alert>
       )}
       <ValidationPanel
@@ -935,6 +1070,7 @@ function CreateProviderDialog({
         >
           <option value="openrouter">OpenRouter</option>
           <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
         </Select>
       </Field>
       <Field label="Connection key" hint="For example openrouter-primary.">

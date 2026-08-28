@@ -224,6 +224,45 @@ describe("management console", () => {
     ]);
   });
 
+  it("creates an agent without a Daytona provider when sandboxing is disabled", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    vi.spyOn(api, "listSandboxProviders").mockResolvedValue({
+      data: [],
+      credentialEncryptionConfigured: true,
+    });
+    renderConsole("/agents", api);
+    await user.click(
+      await screen.findByRole("button", { name: "Create agent" }),
+    );
+    const dialog = within(screen.getByRole("dialog", { name: "Create agent" }));
+    await user.type(dialog.getByLabelText("Name"), "Without sandbox");
+
+    const createButton = dialog.getByRole("button", { name: "Create agent" });
+    await waitFor(() => expect(createButton).toBeEnabled());
+    await user.click(dialog.getByRole("checkbox", { name: "Enable sandbox" }));
+    expect(createButton).toBeDisabled();
+    await user.click(dialog.getByRole("checkbox", { name: "Enable sandbox" }));
+    expect(createButton).toBeEnabled();
+    await user.click(createButton);
+
+    expect(
+      await screen.findByRole("heading", { name: "Without sandbox" }),
+    ).toBeInTheDocument();
+    const created = (await api.listAgents({})).data.find(
+      (agent) => agent.name === "Without sandbox",
+    );
+    expect(created).toBeDefined();
+    if (!created) throw new Error("Created agent was not listed");
+    const detail = await api.getAgent(created.id);
+    expect(detail.versions[0]?.config.sandbox).toEqual({
+      enabled: false,
+      provider: "not-configured",
+      network: "none",
+      capabilities: ["filesystem_read", "filesystem_write", "shell"],
+    });
+  });
+
   it("publishes a reusable Skill with nested Markdown resources", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
@@ -1428,7 +1467,9 @@ describe("management console", () => {
     await user.selectOptions(preset.getByLabelText("Verbosity"), "low");
     await user.selectOptions(preset.getByLabelText("Summary"), "detailed");
     expect(
-      preset.getByText(/OpenAI presets use direct provider routing/u),
+      preset.getByText(
+        /Direct provider presets use their selected connection/u,
+      ),
     ).toBeInTheDocument();
     expect(
       preset.queryByText("Routing and data policy"),
@@ -1458,6 +1499,89 @@ describe("management console", () => {
     await user.click(rotate.getByRole("button", { name: "Rotate key" }));
     expect(await screen.findByText(/v2/u)).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("sk-openai-rotated-value");
+  });
+
+  it("adds an Anthropic provider and saves capability-aware Claude settings", async () => {
+    class AnthropicTrackingApi extends DemoConsoleApi {
+      anthropicCatalogLoads = 0;
+      lastPresetInput:
+        Parameters<DemoConsoleApi["createModelPreset"]>[0] | undefined;
+      override async listModelCatalog(providerId: string, search?: string) {
+        const result = await super.listModelCatalog(providerId, search);
+        if (result.providerType === "anthropic")
+          this.anthropicCatalogLoads += 1;
+        return result;
+      }
+      override async createModelPreset(
+        input: Parameters<DemoConsoleApi["createModelPreset"]>[0],
+      ) {
+        this.lastPresetInput = input;
+        return super.createModelPreset(input);
+      }
+    }
+    const user = userEvent.setup();
+    const api = new AnthropicTrackingApi({ eventDelayMs: 60_000 });
+    renderConsole("/models", api);
+    await user.click(
+      await screen.findByRole("button", { name: "Add provider" }),
+    );
+    const create = within(
+      screen.getByRole("dialog", { name: "Add model provider" }),
+    );
+    await user.selectOptions(
+      create.getByLabelText("Provider type"),
+      "anthropic",
+    );
+    await user.type(
+      create.getByLabelText(/^Connection key/u),
+      "anthropic-testing",
+    );
+    await user.type(create.getByLabelText("Display name"), "Anthropic testing");
+    await user.type(create.getByLabelText(/^API key/u), "sk-ant-secret-value");
+    await user.click(create.getByRole("button", { name: "Add provider" }));
+    expect(await screen.findByText("Anthropic testing")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("sk-ant-secret-value");
+
+    await user.click(screen.getByRole("button", { name: "Add model preset" }));
+    const preset = within(
+      screen.getByRole("dialog", { name: "Add model preset" }),
+    );
+    const providerOption = preset.getByRole("option", {
+      name: "Anthropic testing — anthropic",
+    }) as HTMLOptionElement;
+    await user.selectOptions(
+      preset.getByLabelText("Provider connection"),
+      providerOption.value,
+    );
+    await waitFor(() => expect(api.anthropicCatalogLoads).toBeGreaterThan(0));
+    const model = preset.getByRole("combobox", { name: /^Model/u });
+    await user.click(model);
+    await user.type(model, "sonnet");
+    await user.click(
+      await preset.findByRole("option", { name: /Claude Sonnet 5/u }),
+    );
+    expect(
+      preset.getByText(/^anthropic\/claude-sonnet-5/u),
+    ).toBeInTheDocument();
+    expect(preset.getByLabelText("Thinking")).toHaveValue("adaptive");
+    expect(preset.getByLabelText("Max tokens")).toHaveValue(20_000);
+    expect(preset.getByLabelText("Effort")).toHaveValue("high");
+    await user.selectOptions(preset.getByLabelText("Effort"), "xhigh");
+    await user.clear(preset.getByLabelText("Max tokens"));
+    await user.type(preset.getByLabelText("Max tokens"), "128001");
+    expect(
+      await preset.findByText(/cannot exceed 128,000/u),
+    ).toBeInTheDocument();
+    await user.clear(preset.getByLabelText("Max tokens"));
+    await user.type(preset.getByLabelText("Max tokens"), "64000");
+    await user.click(preset.getByRole("button", { name: "Add model preset" }));
+    await waitFor(() =>
+      expect(api.lastPresetInput?.settings).toEqual({
+        thinking: "adaptive",
+        maxTokens: 64_000,
+        effort: "xhigh",
+      }),
+    );
   });
 
   it("creates an API key and shows its secret only in the acknowledgement dialog", async () => {

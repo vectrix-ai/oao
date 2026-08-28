@@ -124,7 +124,7 @@ async function readCatalog(
 async function ensureProvider(
   api: SetupApi,
   projectId: string,
-  providerType: "openrouter" | "openai",
+  providerType: "openrouter" | "openai" | "anthropic",
   io: SetupIo,
   state: SetupState,
 ): Promise<{
@@ -137,11 +137,15 @@ async function ensureProvider(
     (candidate) => candidate.key === providerKey,
   );
   if (!provider) {
+    const providerName =
+      providerType === "openrouter"
+        ? "OpenRouter"
+        : providerType === "openai"
+          ? "OpenAI"
+          : "Anthropic";
     let apiKey: string | undefined;
     do {
-      apiKey = await io.secret(
-        providerType === "openrouter" ? "OpenRouter API key" : "OpenAI API key",
-      );
+      apiKey = await io.secret(`${providerName} API key`);
       if (apiKey.length < 8) {
         apiKey = undefined;
         io.write("Provider API keys must contain at least 8 characters.\n");
@@ -151,8 +155,7 @@ async function ensureProvider(
       projectId,
       {
         key: providerKey,
-        displayName:
-          providerType === "openrouter" ? "OpenRouter setup" : "OpenAI setup",
+        displayName: `${providerName} setup`,
         providerType,
         apiKey,
       },
@@ -202,6 +205,19 @@ async function ensurePreset(
       providerId: provider.id,
       model,
       routing: {},
+      ...(provider.providerType === "anthropic"
+        ? {
+            settings: {
+              thinking: entry.adaptiveThinking
+                ? ("adaptive" as const)
+                : ("disabled" as const),
+              maxTokens: Math.min(20_000, entry.maxOutputTokens ?? 20_000),
+              effort: entry.effortLevels?.includes("high")
+                ? ("high" as const)
+                : (entry.effortLevels?.[0] ?? ("high" as const)),
+            },
+          }
+        : {}),
     },
     { idempotencyKey: idempotencyKey(state, "preset-create") },
   );
@@ -297,7 +313,8 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
       (await io.select("Choose a model provider", [
         { label: "OpenRouter", value: "openrouter" },
         { label: "OpenAI", value: "openai" },
-      ]))) as "openrouter" | "openai";
+        { label: "Anthropic", value: "anthropic" },
+      ]))) as "openrouter" | "openai" | "anthropic";
     state = { ...state, providerType };
     await saveSetupState(repositoryRoot, state);
     const { provider, catalog } = await ensureProvider(
