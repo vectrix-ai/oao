@@ -46,11 +46,21 @@ const catalog: ModelCatalogPort = {
       thinkingCanBeDisabled: true,
       effortLevels: ["low", "medium", "high", "xhigh", "max"],
     },
+    {
+      providerType: "xai",
+      model: "xai/grok-4.6",
+      catalogId: "grok-4.6",
+      name: "Grok 4.6",
+      contextWindow: 500_000,
+      maxOutputTokens: null,
+      reasoning: true,
+    },
   ],
   isApprovedModel: (model) =>
     model === "openrouter/anthropic/claude-sonnet-4.6" ||
     model === "openai/gpt-5.6-terra" ||
-    model === "anthropic/claude-sonnet-5",
+    model === "anthropic/claude-sonnet-5" ||
+    model === "xai/grok-4.6",
 };
 const credentialCipher = new ProviderCredentialCipher(Buffer.alloc(32, 3));
 const organizationId = "00000000-0000-4000-8000-000000000001";
@@ -103,6 +113,21 @@ const anthropicProviderRow = {
   encryption_nonce: encryptedAnthropicProviderKey.nonce,
   encryption_tag: encryptedAnthropicProviderKey.tag,
   encryption_key_version: encryptedAnthropicProviderKey.keyVersion,
+};
+const encryptedXAIProviderKey = credentialCipher.encrypt("xai-api-live", {
+  organizationId,
+  projectId,
+  providerId,
+  providerType: "xai",
+  keyVersion: 1,
+});
+const xaiProviderRow = {
+  id: providerId,
+  provider_type: "xai",
+  encrypted_api_key: encryptedXAIProviderKey.ciphertext,
+  encryption_nonce: encryptedXAIProviderKey.nonce,
+  encryption_tag: encryptedXAIProviderKey.tag,
+  encryption_key_version: encryptedXAIProviderKey.keyVersion,
 };
 
 interface QueryLog {
@@ -359,6 +384,31 @@ test("Anthropic catalog lookup uses the decrypted project provider key", async (
   assert.equal(response.status, 200);
   assert.equal(observedProviderType, "anthropic");
   assert.equal(observedApiKey, "sk-ant-api-live");
+});
+
+test("xAI catalog lookup uses the decrypted project provider key", async () => {
+  let observedApiKey: string | undefined;
+  let observedProviderType: string | undefined;
+  const liveCatalog: ModelCatalogPort = {
+    ...catalog,
+    listCatalog: (input) => {
+      observedApiKey = input?.apiKey;
+      observedProviderType = input?.providerType;
+      return catalog.listCatalog(input);
+    },
+  };
+  const harness = app({
+    catalog: liveCatalog,
+    rows: { "FROM oao.project_model_providers": [xaiProviderRow] },
+  });
+  const { cookie, projectId } = await authenticate(harness.app);
+  const response = await harness.app.request(
+    `/v1/projects/${projectId}/model-catalog?providerId=${providerId}`,
+    { headers: { cookie } },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(observedProviderType, "xai");
+  assert.equal(observedApiKey, "xai-api-live");
 });
 
 test("preset creation validates keys, catalog membership, and routing", async () => {
@@ -632,6 +682,72 @@ test("Anthropic preset creation persists validated Claude settings", async () =>
   assert.match((await excessive.json()).error.message, /exceeds/u);
 });
 
+test("xAI preset creation accepts live Grok models without provider settings", async () => {
+  const input = {
+    key: "grok-4-6-v1",
+    displayName: "Grok 4.6",
+    providerId,
+    model: "xai/grok-4.6",
+    routing: {},
+    settings: null,
+  };
+  const created = {
+    id: "00000000-0000-4000-8000-000000000704",
+    organization_id: organizationId,
+    project_id: projectId,
+    key: input.key,
+    display_name: input.displayName,
+    origin: "project",
+    provider_id: providerId,
+    provider_type: "xai",
+    model: input.model,
+    routing: {},
+    settings: null,
+    hosted: true,
+    available: true,
+    created_by_principal_id: "00000000-0000-4000-8000-000000000003",
+    created_at: new Date("2026-08-28T09:00:00.000Z"),
+  };
+  const harness = app({
+    catalog,
+    rows: {
+      "FROM oao.project_model_providers": [xaiProviderRow],
+      "INSERT INTO oao.project_model_presets": [created],
+    },
+  });
+  const { cookie, projectId: actorProjectId } = await authenticate(harness.app);
+  const response = await harness.app.request(
+    `/v1/projects/${actorProjectId}/model-presets`,
+    createRequest(cookie, input, "xai-grok-model"),
+  );
+  assert.equal(response.status, 201);
+  assert.equal((await response.json()).settings, null);
+
+  const unsupportedSettings = await harness.app.request(
+    `/v1/projects/${actorProjectId}/model-presets`,
+    createRequest(
+      cookie,
+      {
+        ...input,
+        key: "grok-4-6-settings-v2",
+        settings: {
+          textFormat: "text",
+          mode: "standard",
+          effort: "medium",
+          verbosity: "medium",
+          summary: "auto",
+        },
+      },
+      "xai-grok-settings",
+    ),
+  );
+  assert.equal(unsupportedSettings.status, 400);
+  assert.match(
+    (await unsupportedSettings.json()).error.message,
+    /xAI model presets do not support direct generation settings/u,
+  );
+});
+
 test("agent publication rejects a preset the project never approved", async () => {
   const harness = app({ catalog });
   const { cookie, projectId } = await authenticate(harness.app);
@@ -666,5 +782,69 @@ test("agent publication rejects a preset the project never approved", async () =
     harness.queries.some((query) =>
       query.text.includes("FROM oao.project_model_presets"),
     ),
+  );
+});
+
+test("agent publication reports reserved tool schema fields as bad requests", async () => {
+  const harness = app({ catalog });
+  const { cookie, projectId } = await authenticate(harness.app);
+  const response = await harness.app.request(
+    `/v1/projects/${projectId}/agents`,
+    createRequest(
+      cookie,
+      {
+        name: "Sensitive schema agent",
+        config: {
+          systemPrompt: "Call the configured tool.",
+          modelPreset: "local-default",
+          tools: [
+            {
+              schemaVersion: 1,
+              name: "verify_challenge",
+              description: "Verify one challenge value.",
+              owner: "caller",
+              approval: "never",
+              inputSchema: {
+                type: "object",
+                properties: { token: { type: "string" } },
+                required: ["token"],
+                additionalProperties: false,
+              },
+              outputSchema: {
+                type: "object",
+                properties: { accepted: { type: "boolean" } },
+                required: ["accepted"],
+                additionalProperties: false,
+              },
+            },
+          ],
+          sandbox: {
+            enabled: false,
+            provider: "daytona-primary",
+            network: "none",
+            capabilities: [],
+          },
+          limits: { maxTurns: 32, timeoutMs: 60_000 },
+        },
+      },
+      "agent-sensitive-schema",
+    ),
+  );
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    error: {
+      code: "bad_request",
+      message:
+        "Public payload field names must not use reserved sensitive-data names",
+      requestId: response.headers.get("x-request-id"),
+      details: { path: "$.tools[0].inputSchema.properties.token" },
+    },
+  });
+  assert.equal(
+    harness.queries.some((query) =>
+      query.text.includes("INSERT INTO oao.agent_definitions"),
+    ),
+    false,
   );
 });

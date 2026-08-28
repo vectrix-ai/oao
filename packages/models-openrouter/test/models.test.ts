@@ -13,6 +13,7 @@ import {
   listAnthropicModelCatalog,
   listOpenAIModelCatalog,
   listOpenRouterModelCatalog,
+  listXAIModelCatalog,
   loadModelPresetConfiguration,
   parseApprovedModelPresets,
   toOpenRouterRouting,
@@ -246,12 +247,14 @@ test("the pinned catalog is exposed without provider credentials", () => {
   assert.ok(
     catalog.some((model) => model.providerType === "openrouter") &&
       catalog.some((model) => model.providerType === "openai") &&
-      catalog.some((model) => model.providerType === "anthropic"),
+      catalog.some((model) => model.providerType === "anthropic") &&
+      catalog.some((model) => model.providerType === "xai"),
   );
   assert.ok(entry.model.startsWith(`${entry.providerType}/`));
   assert.equal(isApprovedCatalogModel(entry.model), true);
   assert.equal(isApprovedCatalogModel("openrouter/not-a-real/model"), true);
   assert.equal(isApprovedCatalogModel("openrouter/@preset/support"), true);
+  assert.equal(isApprovedCatalogModel("xai/grok-4.6", "xai"), true);
   assert.equal(isApprovedCatalogModel("fake/deterministic"), false);
   assert.ok(
     listApprovedModelCatalog("openai").every(
@@ -261,6 +264,11 @@ test("the pinned catalog is exposed without provider credentials", () => {
   assert.ok(
     listApprovedModelCatalog("anthropic").every(
       (model) => model.providerType === "anthropic",
+    ),
+  );
+  assert.ok(
+    listApprovedModelCatalog("xai").every(
+      (model) => model.providerType === "xai",
     ),
   );
   assert.equal(
@@ -471,6 +479,76 @@ test("Anthropic live catalog paginates account models and exposes capabilities",
   assert.equal(requests[0]?.headers.get("x-api-key"), "sk-ant-test");
   assert.equal(requests[0]?.headers.get("anthropic-version"), "2023-06-01");
   assert.equal(requests[0]?.url.includes("sk-ant-test"), false);
+});
+
+test("xAI live catalog exposes dynamically available Grok language models", async () => {
+  let request: Request | undefined;
+  const fetcher = async (input: string | URL | Request, init?: RequestInit) => {
+    request = new Request(input, init);
+    return new Response(
+      JSON.stringify({
+        models: [
+          {
+            id: "grok-4.6",
+            context_length: 500_000,
+            input_modalities: ["text", "image"],
+            output_modalities: ["text"],
+          },
+          {
+            id: "grok-imagine-image",
+            context_length: 1_024,
+            input_modalities: ["text"],
+            output_modalities: ["image"],
+          },
+          {
+            id: "grok-4.6",
+            context_length: 500_000,
+            output_modalities: ["text"],
+          },
+        ],
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
+  };
+
+  const catalog = await listXAIModelCatalog({
+    apiKey: "xai-test-secret",
+    fetcher: fetcher as typeof fetch,
+  });
+  assert.deepEqual(
+    catalog.map((entry) => entry.model),
+    ["xai/grok-4.6"],
+  );
+  assert.equal(catalog[0]?.contextWindow, 500_000);
+  assert.equal(request?.url, "https://api.x.ai/v1/language-models");
+  assert.equal(request?.headers.get("authorization"), "Bearer xai-test-secret");
+  assert.equal(request?.url.includes("xai-test-secret"), false);
+
+  const filtered = await listXAIModelCatalog({
+    apiKey: "xai-test-secret",
+    search: "not-present",
+    fetcher: fetcher as typeof fetch,
+  });
+  assert.deepEqual(filtered, []);
+});
+
+test("xAI live catalog rejects provider errors and malformed responses", async () => {
+  await assert.rejects(
+    listXAIModelCatalog({
+      apiKey: "xai-test-secret",
+      fetcher: (async () =>
+        new Response(null, { status: 401 })) as typeof fetch,
+    }),
+    /xAI catalog request failed with 401/u,
+  );
+  await assert.rejects(
+    listXAIModelCatalog({
+      apiKey: "xai-test-secret",
+      fetcher: (async () =>
+        new Response(JSON.stringify({ data: [] }))) as typeof fetch,
+    }),
+    /xAI catalog response was not a language-model list/u,
+  );
 });
 
 test("provider-neutral policy maps onto the OpenRouter routing contract", () => {
@@ -712,6 +790,59 @@ test("OpenAI project presets use direct routing and credentials can rotate", asy
   assert.throws(
     () => registry.activate({ ...input, routing: { allowFallbacks: false } }),
     /do not support routing policy/u,
+  );
+});
+
+test("xAI project presets support newly discovered Grok model IDs", async () => {
+  const providers: Provider[] = [];
+  const registry = new ProjectModelPresetRegistry({
+    deployment: new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
+      hostedEnabled: false,
+    }),
+    registerProvider: (provider) => providers.push(provider),
+  });
+  const resolved = registry.activate({
+    ...tenantA,
+    providerType: "xai",
+    apiKey: "xai-runtime-secret",
+    key: "grok-4-6-v1",
+    model: "xai/grok-4.6",
+    routing: {},
+  });
+  assert.equal(resolved.approvedModel, "xai/grok-4.6");
+  assert.equal(resolved.settings, null);
+  const provider = providers[0];
+  const model = provider?.getModels()[0];
+  assert.ok(provider);
+  assert.ok(model);
+  assert.equal(model.id, "grok-4.6");
+  assert.equal(model.provider, provider.id);
+  assert.equal(model.baseUrl, "https://api.x.ai/v1");
+  const auth = await provider.auth.apiKey?.resolve({
+    ctx: {
+      env: async () => undefined,
+      fileExists: async () => false,
+    },
+  });
+  assert.equal(auth?.auth.apiKey, "xai-runtime-secret");
+  assert.throws(
+    () =>
+      registry.activate({
+        ...tenantA,
+        providerType: "xai",
+        apiKey: "xai-runtime-secret",
+        key: "grok-settings-v1",
+        model: "xai/grok-4.6",
+        routing: {},
+        settings: {
+          textFormat: "text",
+          mode: "standard",
+          effort: "medium",
+          verbosity: "medium",
+          summary: "auto",
+        },
+      }),
+    /do not support direct generation settings/u,
   );
 });
 

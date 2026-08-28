@@ -12,7 +12,7 @@ import { dirname, resolve } from "node:path";
 export interface SetupState {
   readonly schemaVersion: 1;
   readonly setupId: string;
-  readonly providerType?: "openrouter" | "openai" | "anthropic";
+  readonly providerType?: "openrouter" | "openai" | "anthropic" | "xai";
   readonly providerId?: string;
   readonly presetId?: string;
   readonly agentId?: string;

@@ -15,6 +15,7 @@ import {
   type RunId,
   type ThreadAdmissionHead,
   type ThreadId,
+  type UnsafePublicPayloadError,
 } from "../src/index.js";
 
 const id = <T extends Brand<string, string>>(suffix: string) =>
@@ -116,8 +117,13 @@ test("redaction is recursive and unsafe payloads are rejected", () => {
     chainOfThought: "[REDACTED]",
   });
   assert.throws(
-    () => assertPublicPayload({ raw_payload: "no" }),
-    /Unsafe public payload key/u,
+    () => assertPublicPayload({ nested: [{ raw_payload: "no" }] }),
+    {
+      name: "UnsafePublicPayloadError",
+      message: "Unsafe public payload key: raw_payload",
+      key: "raw_payload",
+      path: "$.nested[0].raw_payload",
+    } satisfies Partial<UnsafePublicPayloadError>,
   );
 });
 

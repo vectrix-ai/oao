@@ -10,6 +10,7 @@ import {
   listAnthropicModelCatalog,
   listOpenAIModelCatalog,
   listOpenRouterModelCatalog,
+  listXAIModelCatalog,
 } from "@oao/models-openrouter";
 import { McpRemoteClient } from "@oao/mcp-remote";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
@@ -67,6 +68,8 @@ const app = createApiApp({
         return listOpenAIModelCatalog(catalogInput);
       if (input?.providerType === "anthropic")
         return listAnthropicModelCatalog(catalogInput);
+      if (input?.providerType === "xai")
+        return listXAIModelCatalog(catalogInput);
       return listApprovedModelCatalog(input?.providerType);
     },
     isApprovedModel: async (model, providerType, input) => {
@@ -75,14 +78,17 @@ const app = createApiApp({
         apiKey &&
         (providerType === "openrouter" ||
           providerType === "openai" ||
-          providerType === "anthropic")
+          providerType === "anthropic" ||
+          providerType === "xai")
       ) {
         const listCatalog =
           providerType === "openrouter"
             ? listOpenRouterModelCatalog
             : providerType === "openai"
               ? listOpenAIModelCatalog
-              : listAnthropicModelCatalog;
+              : providerType === "anthropic"
+                ? listAnthropicModelCatalog
+                : listXAIModelCatalog;
         const catalog = await listCatalog({
           apiKey,
           search: model,

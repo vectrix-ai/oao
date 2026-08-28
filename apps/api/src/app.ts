@@ -3882,6 +3882,11 @@ function registerModelPresetRoutes(
                 "bad_request",
                 "OpenRouter model presets do not support direct generation settings",
               );
+            if (providerType === "xai" && input.settings !== null)
+              throw new HttpApiError(
+                "bad_request",
+                "xAI model presets do not support direct generation settings",
+              );
             const settings =
               providerType === "openai"
                 ? (input.settings ?? DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS)

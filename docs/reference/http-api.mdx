@@ -99,8 +99,8 @@ The active principal cannot remove itself.
 ## Model providers, presets, and catalog
 
 A published agent version names an immutable model preset. A hosted preset
-references an OpenRouter, OpenAI, or Anthropic provider connection in the same
-project.
+references an OpenRouter, OpenAI, Anthropic, or xAI provider connection in the
+same project.
 
 | Method | Path                                                    | Purpose                                              |
 | ------ | ------------------------------------------------------- | ---------------------------------------------------- |
@@ -115,7 +115,7 @@ Reads require `agent:read`; writes require `project:admin`. Every write requires
 an `Idempotency-Key`.
 
 Create a provider with `{ key, displayName, providerType, apiKey }`, where
-`providerType` is `openrouter`, `openai`, or `anthropic`. Responses contain
+`providerType` is `openrouter`, `openai`, `anthropic`, or `xai`. Responses contain
 `credentialConfigured`, a 12-character `credentialFingerprint`, and an
 incrementing `credentialVersion`; they never contain the API key or encryption
 material. Rotate a key with `{ "apiKey": "..." }`.
@@ -155,6 +155,12 @@ selected key that OAO's native Messages runtime supports. Anthropic presets
 require empty routing and accept the immutable Claude settings below. If an
 older client omits `settings`, the API stores the provider's documented OAO
 defaults.
+
+xAI catalog responses come from the selected key's live
+`GET /v1/language-models` result and include text-output Grok models as
+`xai/<catalog-id>`. xAI presets require empty routing and `settings: null` (or
+an omitted `settings` field). Newly listed language-model IDs do not require a
+hard-coded OAO catalog update.
 
 ### OpenAI model settings
 
@@ -617,6 +623,15 @@ resumes the agent. The raw invalid value is neither persisted nor sent to the
 model. Retryable failures permit two automatic agent retries after the initial
 attempt; further calls receive `tool_retry_exhausted`. Approval and cancellation
 failures are never retried.
+
+Tool input and output schema property names are part of the public caller-tool
+contract because their values can appear in safe arguments, results, events,
+and session diagnostics. Names classified as sensitive, such as `token`,
+`apiKey`, `authorization`, `password`, or `secret`, are therefore rejected when
+the agent is published. Use a domain-specific public name such as
+`challengeCode` or `reference`; keep credentials in provider or MCP credential
+storage. The API returns `400 bad_request` with the exact rejected path in
+`error.details.path`.
 
 ## Pagination
 

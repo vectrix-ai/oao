@@ -3,7 +3,7 @@ title: "Local development"
 description: "Install, start, verify, stop, and troubleshoot the complete OAO development stack."
 ---
 
-OAO's default development profile runs the console, API, runtime worker, and PostgreSQL on your machine. Development authentication is local, but executing an agent requires an OpenRouter, OpenAI, or Anthropic connection.
+OAO's default development profile runs the console, API, runtime worker, and PostgreSQL on your machine. Development authentication is local, but executing an agent requires an OpenRouter, OpenAI, Anthropic, or xAI connection.
 
 <Info>
   PostgreSQL is the only application database in the local profile. Daytona is
@@ -267,7 +267,7 @@ Restart `pnpm dev:local` after editing `.env`. The console uses Vite's strict-po
 Runtime execution requires project-scoped model and Daytona providers. There is
 no credential-free fake execution profile.
 
-### OpenRouter, OpenAI, and Anthropic models
+### OpenRouter, OpenAI, Anthropic, and xAI models
 
 Generate one platform encryption key and set it for both the API and runtime:
 
@@ -279,22 +279,24 @@ openssl rand -base64 32
 OAO_CREDENTIAL_ENCRYPTION_KEY=replace-with-generated-base64-value
 ```
 
-Restart the API and runtime, then add an OpenRouter, OpenAI, or Anthropic provider on the
+Restart the API and runtime, then add an OpenRouter, OpenAI, Anthropic, or xAI provider on the
 console **Models** page. Enter provider API keys there; OAO encrypts them before
 storing them in PostgreSQL for the current organization and project. Add a
 model preset linked to that connection. The model selector loads the live
 catalog available to the selected provider key; for direct providers it offers
-the returned models supported by OAO's pinned native runtimes. No process restart is
-needed for later provider or preset additions. Direct OpenAI presets also pin
+the returned models supported by OAO's runtimes. xAI uses its live
+language-model catalog so newly listed text-output Grok IDs can be selected
+without an OAO catalog update. No process restart is needed for later provider
+or preset additions. Direct OpenAI presets also pin
 plain-text output, reasoning mode and effort, verbosity, and reasoning-summary
 settings. Direct Anthropic presets pin adaptive or disabled thinking, a total
 output-token ceiling, and a supported effort level. The runtime applies these
 settings to every session using that preset.
 
 <Warning>
-  Do not set `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` in
-  `.env`. Provider keys are write-only console/API inputs and are never returned
-  after encryption.
+  Do not set `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
+  `XAI_API_KEY` in `.env`. Provider keys are write-only console/API inputs and
+  are never returned after encryption.
 </Warning>
 
 ### Daytona sandboxes

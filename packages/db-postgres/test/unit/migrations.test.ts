@@ -228,6 +228,17 @@ test("model generation settings migrations are additive and validate safe immuta
   assert.match(anthropicSql, /'disabled', 'adaptive'/u);
   assert.match(anthropicSql, /BETWEEN 1 AND 300000/u);
   assert.doesNotMatch(anthropicSql, /UPDATE |DELETE FROM/u);
+
+  const xaiSql = await readFile(
+    new URL("../../migrations/0031_xai_model_provider.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    xaiSql,
+    /provider_type IN \('openrouter', 'openai', 'anthropic', 'xai'\)/u,
+  );
+  assert.match(xaiSql, /xai\//u);
+  assert.doesNotMatch(xaiSql, /UPDATE |DELETE FROM/u);
 });
 
 test("sandbox provider migration encrypts Daytona credentials and versions capabilities", async () => {

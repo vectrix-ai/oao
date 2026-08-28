@@ -1424,6 +1424,9 @@ describe("management console", () => {
     const create = within(
       screen.getByRole("dialog", { name: "Add model provider" }),
     );
+    expect(
+      create.getByRole("option", { name: "xAI (Grok)" }),
+    ).toBeInTheDocument();
     await user.selectOptions(create.getByLabelText("Provider type"), "openai");
     await user.type(
       create.getByLabelText(/^Connection key/u),

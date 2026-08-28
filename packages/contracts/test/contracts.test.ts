@@ -448,6 +448,15 @@ test("model preset input requires a versioned key and supported routing", () => 
     }).settings,
     { thinking: "adaptive", maxTokens: 20_000, effort: "high" },
   );
+  assert.equal(
+    parseCreateModelPresetInput({
+      key: "grok-4-6-v1",
+      displayName: "Grok 4.6",
+      providerId: "55555555-5555-4555-8555-555555555555",
+      model: "xai/grok-4.6",
+    }).model,
+    "xai/grok-4.6",
+  );
   assert.throws(() =>
     parseCreateModelPresetInput({
       key: "claude-invalid-v1",

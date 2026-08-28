@@ -429,6 +429,16 @@ export type PublicValue =
   | readonly PublicValue[]
   | { readonly [key: string]: PublicValue };
 
+export class UnsafePublicPayloadError extends TypeError {
+  constructor(
+    readonly key: string,
+    readonly path: string,
+  ) {
+    super(`Unsafe public payload key: ${key}`);
+    this.name = "UnsafePublicPayloadError";
+  }
+}
+
 export function redactForPublic(value: unknown): PublicValue {
   if (value === null || typeof value === "boolean" || typeof value === "number")
     return value;
@@ -445,16 +455,28 @@ export function redactForPublic(value: unknown): PublicValue {
   return String(value);
 }
 
-export function assertPublicPayload(value: PublicValue): void {
+function publicPayloadPath(path: string, key: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(key)
+    ? `${path}.${key}`
+    : `${path}[${JSON.stringify(key)}]`;
+}
+
+function assertPublicPayloadAt(value: PublicValue, path: string): void {
   if (Array.isArray(value)) {
-    value.forEach(assertPublicPayload);
+    value.forEach((nested, index) =>
+      assertPublicPayloadAt(nested, `${path}[${index}]`),
+    );
     return;
   }
   if (value !== null && typeof value === "object") {
     for (const [key, nested] of Object.entries(value)) {
       if (isSensitivePublicKey(key))
-        throw new TypeError(`Unsafe public payload key: ${key}`);
-      assertPublicPayload(nested);
+        throw new UnsafePublicPayloadError(key, publicPayloadPath(path, key));
+      assertPublicPayloadAt(nested, publicPayloadPath(path, key));
     }
   }
+}
+
+export function assertPublicPayload(value: PublicValue): void {
+  assertPublicPayloadAt(value, "$");
 }

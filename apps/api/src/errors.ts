@@ -1,5 +1,6 @@
 import type { ApiError } from "@oao/contracts";
 import { AuthenticationError } from "@oao/auth-core";
+import { UnsafePublicPayloadError } from "@oao/domain";
 
 export type ApiErrorCode = ApiError["error"]["code"];
 
@@ -46,6 +47,20 @@ export function errorEnvelope(
           message: error.message,
           requestId,
           ...(error.details ? { details: error.details } : {}),
+        },
+      },
+    };
+  }
+  if (error instanceof UnsafePublicPayloadError) {
+    return {
+      status: STATUS_BY_CODE.bad_request,
+      body: {
+        error: {
+          code: "bad_request",
+          message:
+            "Public payload field names must not use reserved sensitive-data names",
+          requestId,
+          details: { path: error.path },
         },
       },
     };

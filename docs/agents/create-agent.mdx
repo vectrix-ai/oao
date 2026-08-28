@@ -631,7 +631,7 @@ consecutive-failure count.
 ### Model presets
 
 `config.modelPreset` must name a durable project preset linked to an
-OpenRouter, OpenAI, or Anthropic provider in PostgreSQL. Runnable deployments do not expose a
+OpenRouter, OpenAI, Anthropic, or xAI provider in PostgreSQL. Runnable deployments do not expose a
 built-in deterministic preset.
 
 The check runs inside the same tenant transaction as the write, so an unknown
@@ -640,7 +640,7 @@ publication requires a provider connection in the same project and platform
 credential encryption. Provider API keys are write-only and stored as
 tenant-scoped ciphertext, never in the agent config.
 
-Hosted model identifiers start with `openrouter/`, `openai/`, or `anthropic/`
+Hosted model identifiers start with `openrouter/`, `openai/`, `anthropic/`, or `xai/`
 and must exist in the matching provider catalog. OpenRouter saved presets are exposed as
 `openrouter/@preset/<slug>`. See [Adding models](/models/adding-models) for the
 approval workflow and [HTTP API](/reference/http-api) for the preset contract.

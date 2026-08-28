@@ -24,6 +24,7 @@ const toneByStatus: Record<string, ChipTone> = {
   openai: "info",
   anthropic: "info",
   openrouter: "info",
+  xai: "info",
   project: "info",
   queued: "info",
   retry_scheduled: "info",

@@ -1,11 +1,11 @@
 ---
 title: Adding models and providers
-description: Configure project-scoped OpenRouter, OpenAI, or Anthropic credentials and link approved models to agents.
+description: Configure project-scoped OpenRouter, OpenAI, Anthropic, or xAI credentials and link approved models to agents.
 ---
 
 OAO stores hosted model configuration in PostgreSQL per organization and
-project. The MVP supports three provider types: **OpenRouter**, **OpenAI**, and
-**Anthropic**.
+project. The MVP supports four provider types: **OpenRouter**, **OpenAI**,
+**Anthropic**, and **xAI (Grok)**.
 An agent version never contains a raw model identifier or credential. It names
 an immutable model preset, and that preset references a provider connection in
 the same project.
@@ -35,9 +35,9 @@ openssl rand -base64 32
 OAO_CREDENTIAL_ENCRYPTION_KEY=replace-with-the-generated-base64-value
 ```
 
-Do not put `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` in
-`.env`. Those keys are entered through the project UI or API and stored as
-tenant-scoped ciphertext.
+Do not put `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
+`XAI_API_KEY` in `.env`. Those keys are entered through the project UI or API
+and stored as tenant-scoped ciphertext.
 Without `OAO_CREDENTIAL_ENCRYPTION_KEY`, provider creation, preset publication,
 and runtime execution are unavailable. OAO does not fall back to a local fake
 model.
@@ -46,7 +46,7 @@ model.
 
 1. Open **Models**.
 2. Select **Add provider**.
-3. Choose **OpenRouter**, **OpenAI**, or **Anthropic**.
+3. Choose **OpenRouter**, **OpenAI**, **Anthropic**, or **xAI (Grok)**.
 4. Enter a stable project-local key, display name, and API key.
 5. Select **Add provider**.
 
@@ -64,9 +64,10 @@ The runtime replaces its in-memory provider on the next activation.
 1. Select **Add model preset**.
 2. Choose a provider connection.
 3. In **Model**, type to search the live catalog available to that connection
-   and pick a model or OpenRouter saved preset. For direct providers, OAO calls
-   their authenticated `GET /v1/models` endpoint and lists returned models that
-   the corresponding runtime supports. The picker shows the first
+   and pick a model or OpenRouter saved preset. OAO uses each connection's
+   authenticated live catalog. xAI connections use `GET /v1/language-models`
+   so image-generation, video, voice, and embedding-only IDs are not offered.
+   The picker shows the first
    matches with their model identifier, context window, and reasoning support,
    and reports how many further matches the search is hiding.
 4. Check the suggested preset key and display name. Both are derived from the
@@ -85,7 +86,9 @@ The runtime replaces its in-memory provider on the next activation.
    total output ceiling shared by thinking and the visible answer. Effort is
    limited to the levels advertised by the selected model; new adaptive
    presets use 20,000 tokens and high effort when supported.
-8. Select **Add model preset**.
+8. For xAI, no provider-specific settings are stored. OAO uses the selected
+   Grok language model through xAI's OpenAI-compatible API.
+9. Select **Add model preset**.
 
 The dialog lists what is still missing under **Validation** and keeps the
 submit button disabled until nothing is.
@@ -97,7 +100,7 @@ them, create a new preset key and publish a new agent version.
 OpenRouter presets may use live OpenRouter models or saved OpenRouter presets
 (`@preset/<slug>`), plus routing controls including fallbacks, zero-data
 retention, data collection, upstream allow/deny lists, preference order, sort,
-and price caps. OpenAI and Anthropic are direct provider connections, so
+and price caps. OpenAI, Anthropic, and xAI are direct provider connections, so
 OpenRouter routing controls must be empty.
 
 For direct OpenAI presets, OAO maps the stored controls to the Responses API as
@@ -113,6 +116,14 @@ effort values are model capabilities rather than assumptions made by OAO.
 Manual `thinking.type: "enabled"` and `budget_tokens` are not part of this
 preset contract; use adaptive thinking for supported current models or disable
 thinking.
+
+For direct xAI presets, OAO stores the exact `xai/<catalog-id>` returned by the
+live language-model catalog and calls `https://api.x.ai/v1`. Newly available
+text-output Grok IDs can be selected without an OAO catalog release. Known Pi
+models retain their pinned context/output metadata; a newly discovered ID uses
+conservative runtime limits until the pinned Pi catalog adds richer metadata.
+xAI-specific generation settings and xAI server-side tools are not part of this
+preset contract; OAO's normal function tools remain available.
 
 ## Prompt caching
 
@@ -194,8 +205,10 @@ project provider key server-side and fetches OpenRouter's live `/models` catalog
 plus saved `/presets`, exposing saved presets as `openrouter/@preset/<slug>`
 options. For direct OpenAI and Anthropic connections, OAO decrypts the selected
 project key server-side and fetches the provider's live `/v1/models` catalog.
-Each response is intersected with OAO's pinned runtime models so unsupported
-model types are not offered for agent presets. Anthropic entries also expose
+For xAI, OAO fetches `/v1/language-models` and exposes text-output entries as
+`xai/<catalog-id>` without relying on a hard-coded Grok list. OpenAI and
+Anthropic responses are intersected with OAO's pinned runtime models so
+unsupported model types are not offered for agent presets. Anthropic entries also expose
 the model's adaptive-thinking, thinking-disable, and effort capabilities.
 Claude models whose live capabilities do not support effort are not offered,
 because every OAO Anthropic preset pins that setting.
@@ -261,6 +274,21 @@ immutable Claude settings:
 }
 ```
 
+For a direct xAI connection, use an `xai/<catalog-id>` returned by the live
+language-model catalog. Routing must be empty and `settings` must be omitted or
+`null`:
+
+```json
+{
+  "key": "grok-4-6-v1",
+  "displayName": "Grok 4.6",
+  "providerId": "55555555-5555-4555-8555-555555555555",
+  "model": "xai/grok-4.6",
+  "routing": {},
+  "settings": null
+}
+```
+
 ## Tenant and lifecycle guarantees
 
 - Provider and preset primary keys include organization and project identity.
@@ -291,7 +319,7 @@ identity is authenticated, so copied ciphertext intentionally fails.
 ### A model is not in the catalog
 
 Search `/model-catalog` with the intended provider connection. OpenRouter,
-OpenAI, and Anthropic use separate catalogs and prefixes. If an OpenRouter model
+OpenAI, Anthropic, and xAI use separate catalogs and prefixes. If an OpenRouter model
 or saved preset is missing, confirm the provider API key can read the OpenRouter
 catalog. If a direct OpenAI model is missing, confirm the selected key can list
 it through OpenAI's `/v1/models` endpoint. OAO also requires matching
@@ -302,6 +330,11 @@ If a direct Anthropic model is missing, confirm the selected key can list it
 through Anthropic's `/v1/models` endpoint. OAO must also have matching native
 Anthropic runtime metadata. The model catalog controls whether adaptive
 thinking can be enabled or disabled and which effort levels can be saved.
+
+If a Grok model is missing, confirm the selected xAI key can list it through
+xAI's `/v1/language-models` endpoint and that the entry has text output. Image,
+video, voice, and embedding-only models are intentionally excluded from agent
+presets.
 
 ### A preset is unavailable
 

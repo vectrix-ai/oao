@@ -487,7 +487,7 @@ function CreateModelPresetDialog({
   };
 
   const routing: ModelRoutingPolicy = useMemo(() => {
-    if (provider?.providerType === "openai") return {};
+    if (provider?.providerType !== "openrouter") return {};
     const allowlist = providerList(providerAllowlist);
     const denylist = providerList(providerDenylist);
     const order = providerList(providerOrder);
@@ -1071,6 +1071,7 @@ function CreateProviderDialog({
           <option value="openrouter">OpenRouter</option>
           <option value="openai">OpenAI</option>
           <option value="anthropic">Anthropic</option>
+          <option value="xai">xAI (Grok)</option>
         </Select>
       </Field>
       <Field label="Connection key" hint="For example openrouter-primary.">

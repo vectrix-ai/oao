@@ -26,7 +26,7 @@ PostgreSQL <---------------------------- Flue runtime worker
   control + audit + product events        one active owner
   session summaries + wake/lease queue     ManagedAgent + durable tools
   @flue/postgres canonical state                 |
-        |                                         +--> OpenRouter/OpenAI/Anthropic adapters
+        |                                         +--> OpenRouter/OpenAI/Anthropic/xAI adapters
         |                                         +--> Daytona adapter
         +--> S3-compatible artifacts/workspaces   +--> caller tool/approval ledger
 
@@ -91,7 +91,8 @@ OTel SDK -> optional Collector -> configured OTLP backend
 - `@oao/runtime-flue`: generic compiled `ManagedAgent`, pinned `@flue/postgres`, verified PostgreSQL Skill registry, progressive Flue Skill activation, durable child-session coordinator, and history projection.
 - `@oao/queue-postgres`: PostgreSQL wake jobs and platform dispatch leases.
 - `@oao/tool-broker`: caller requests/claims/results and single-approver gates.
-- `@oao/models-openrouter`: live OpenRouter/OpenAI/Anthropic catalog projections constrained by pinned runtime metadata, provider-neutral routing and generation-setting translation, project-scoped preset activation, and provider construction. The package name is retained while the adapter seam expands beyond OpenRouter.
+- `@oao/models-openrouter`: live OpenRouter/OpenAI/Anthropic/xAI catalog projections, provider-neutral routing and generation-setting translation, project-scoped preset activation, and provider construction. OpenAI and Anthropic remain constrained by pinned runtime metadata; xAI dynamically admits text-output language models behind its OpenAI-compatible API. The package name is retained while the adapter seam expands beyond OpenRouter.
+  Its public `src/index.ts` is a thin compatibility barrel: provider-specific catalog, validation, runtime-construction, and payload-mapping code lives under `src/providers/`, while provider-neutral preset orchestration and aggregate catalog behavior live in `src/model-presets.ts` and `src/catalog.ts`.
 - `@oao/provider-credentials`: AES-256-GCM encryption and decryption for tenant-scoped provider credentials. PostgreSQL stores ciphertext; the platform encryption key remains outside the database.
 - `@oao/sandbox-daytona`: committed Flue Daytona blueprint plus thread-workspace lifecycle, project connection resolution, capability-filtered file/shell/browser tools, durable safe tool audit, target diagnostics, and egress-policy manager.
 - `@oao/artifact-s3`: tenant-keyed S3 artifact adapter plus encrypted project storage resolution and latest-thread workspace backup records.
@@ -109,7 +110,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 
 - Skills list/detail, immutable packages and versions, and publication workflow
 - Agents list/detail, immutable versions, prompts, models, exact Skill and delegate bindings, tools, and sandbox policy
-- Project-scoped OpenRouter/OpenAI/Anthropic provider connections, write-only encrypted API keys, and approval of model presets from the matching provider catalog
+- Project-scoped OpenRouter/OpenAI/Anthropic/xAI provider connections, write-only encrypted API keys, and approval of model presets from the matching provider catalog
 - Project-scoped S3-compatible storage connections, automatic latest-thread workspace backup, and safe restore diagnostics
 - Project-scoped remote MCP servers, write-only credentials, exact-origin
   policies, discovery snapshots, restricted toolsets, and agent bindings
