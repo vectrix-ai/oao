@@ -24,6 +24,16 @@ applicable, and through the project mailing list for visibility.
   documented deployment option.
 - **Community support:** GitHub Issues are the best-effort support channel, with
   no guaranteed response time.
+- **Contributing:** Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an
+  issue or pull request.
+
+### Open-source launch checklist
+
+- [ ] After the organization-owned repository is public, enable GitHub Private
+      Vulnerability Reporting for security reports.
+- [ ] After the repository is public, enable GitHub **Moderation options →
+      Reported content** so contributors can privately report conduct incidents to
+      repository administrators.
 
 ## Get started locally
 

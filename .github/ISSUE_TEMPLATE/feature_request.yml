@@ -1,0 +1,83 @@
+name: Feature request
+description: Propose an improvement to OAO
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        OAO is in early beta. Please explain the underlying problem before proposing an implementation so maintainers can evaluate scope and compatibility.
+
+        **Do not include credentials, customer or personal data, private prompts or transcripts, or vulnerability details.** Security vulnerabilities do not belong in public issues.
+
+  - type: checkboxes
+    id: safe_content
+    attributes:
+      label: Sensitive-content check
+      options:
+        - label: I confirm this request contains no credentials, customer or personal data, private prompts or transcripts, or vulnerability details.
+          required: true
+
+  - type: checkboxes
+    id: existing_requests
+    attributes:
+      label: Existing requests
+      options:
+        - label: I searched existing issues and pull requests for this request.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Who is affected, what are they trying to accomplish, and why are current capabilities insufficient?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe the desired behavior and user experience. Implementation ideas are welcome but optional.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - Guided setup or CLI
+        - Console
+        - HTTP API or authentication
+        - Runtime worker or agent execution
+        - Model providers
+        - Sandboxes or tools
+        - Files, artifacts, or workspace backups
+        - Database or queue
+        - SDK
+        - Documentation
+        - Deployment or operations
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe current workarounds or other designs you evaluated.
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and operational impact
+      description: Note any public API, migration, privacy, tenancy, provider, deployment, or rollback considerations.
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I would be willing to help implement this after scope is agreed.

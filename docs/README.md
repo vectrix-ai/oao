@@ -6,7 +6,13 @@ or attachment behavior that the MVP does not implement.
 
 ## Preview
 
-Install the current Mintlify CLI, then run from this directory:
+Install the current [Mintlify CLI](https://www.mintlify.com/docs/cli/install):
+
+```sh
+npm i -g mint
+```
+
+Then run from this directory:
 
 ```sh
 mint dev

@@ -1,0 +1,131 @@
+name: Bug report
+description: Report a reproducible problem in OAO
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve OAO. It is currently early beta, so precise environment and reproduction details are especially useful.
+
+        **Do not include credentials, authorization headers, customer or personal data, private prompts or transcripts, or vulnerability details.** Report security vulnerabilities only through GitHub's private vulnerability reporting flow when it is available for this repository.
+
+  - type: checkboxes
+    id: safe_content
+    attributes:
+      label: Sensitive-content check
+      options:
+        - label: I confirm this report contains no credentials, customer or personal data, private prompts or transcripts, or vulnerability details.
+          required: true
+
+  - type: checkboxes
+    id: existing_issues
+    attributes:
+      label: Existing reports
+      options:
+        - label: I searched existing issues and pull requests for this problem.
+          required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Problem summary
+      description: Describe the problem and its impact in a few sentences.
+      placeholder: What happened, and what were you trying to do?
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: OAO version or commit
+      description: Provide the release, tag, or full commit SHA you tested.
+      placeholder: v0.0.0 or 0123456789abcdef...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Guided setup or CLI
+        - Console
+        - HTTP API or authentication
+        - Runtime worker or agent execution
+        - Model provider connection
+        - Sandbox or tools
+        - Files, artifacts, or workspace backups
+        - PostgreSQL, migrations, or queue
+        - SDK
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation or deployment
+      options:
+        - Guided local setup
+        - Manual local development
+        - Railway
+        - Automated test harness
+        - Other self-hosted deployment
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS and architecture, Node and pnpm versions, browser if relevant, and Docker-compatible runtime. Redact private hostnames and identifiers.
+      placeholder: |
+        OS: macOS 15.6 (arm64)
+        Node: 22.19.0
+        pnpm: 10.27.0
+        Docker runtime: Docker Desktop 4.x
+        Browser: Chrome 140 (if relevant)
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest deterministic sequence that demonstrates the problem.
+      placeholder: |
+        1. Start from ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Add relevant errors, logs, request IDs, or screenshots only after removing sensitive data. Use text instead of screenshots where possible.
+      render: shell
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Include regressions, workarounds, frequency, or anything else that may narrow the cause.
