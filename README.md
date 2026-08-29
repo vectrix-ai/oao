@@ -4,6 +4,27 @@ OAO is an open, self-hostable managed-agent platform built around Flue and Postg
 
 The first implementation target is a fully functional local environment. Runtime execution uses a project-scoped OpenRouter, OpenAI, or Anthropic connection. Daytona is required only for agents that enable a sandbox; deterministic provider doubles are confined to automated tests.
 
+## Project maturity and support
+
+OAO is currently **early beta**. It is suitable for evaluation and local
+development, without production-readiness, long-term-support, or service-level
+guarantees. See the [current MVP limitations](docs/reference/mvp-limitations.mdx)
+for the implemented boundaries.
+
+Breaking changes are not expected as routine behavior, but they remain possible
+before 1.0. The project will minimize them and communicate unavoidable changes
+through GitHub Releases and `CHANGELOG.md`, with migration guidance where
+applicable, and through the project mailing list for visibility.
+
+- **Local environments:** macOS and Linux are the officially tested and
+  supported environments for the initial public release. Windows is currently
+  untested and best-effort; official Windows support may be added later.
+- **Deployment:** [Railway deployment](docs/getting-started/railway.mdx) is
+  currently documented. Google Cloud deployment is planned but is not yet a
+  documented deployment option.
+- **Community support:** GitHub Issues are the best-effort support channel, with
+  no guaranteed response time.
+
 ## Get started locally
 
 The guided setup takes a fresh checkout to a running OAO console, starter agent,
