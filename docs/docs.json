@@ -72,6 +72,7 @@
           "reference/authentication",
           "reference/http-api",
           "reference/events",
+          "reference/releases",
           "reference/mvp-limitations",
           "architecture"
         ]

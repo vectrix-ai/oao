@@ -483,7 +483,7 @@ export class McpRemoteClient implements McpRemotePort {
             onInsufficientScope: "throw",
           });
     const client = new Client(
-      { name: "oao", version: "0.0.0" },
+      { name: "oao", version: "0.0.0" }, // x-release-please-version
       {
         capabilities: {},
         versionNegotiation: { mode: "auto", probe: { maxRetries: 0 } },
