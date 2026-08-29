@@ -605,6 +605,8 @@ export interface ConsoleApi {
     id: string,
     config: AgentVersionConfig,
   ): Promise<AgentDetail>;
+  /** Deletes (archives) an agent; its sessions stay readable. */
+  deleteAgent(id: string): Promise<void>;
   listSkills(filters: ListFilters): Promise<PageResult<SkillSummary>>;
   getSkill(id: string): Promise<SkillDetail>;
   createSkill(input: CreateSkillInput): Promise<SkillDetail>;
@@ -704,6 +706,10 @@ export interface ConsoleApi {
     providerId: string,
     apiKey: string,
   ): Promise<ProjectModelProvider>;
+  /** Wipes the credential and releases the key; refused while live presets use it. */
+  removeModelProvider(providerId: string): Promise<void>;
+  /** Archives a project preset; published agent versions keep resolving it. */
+  archiveModelPreset(presetId: string): Promise<void>;
   listSandboxProviders(): Promise<SandboxProviderList>;
   listSandboxSnapshots(providerId: string): Promise<SandboxSnapshotList>;
   createSandboxProvider(

@@ -152,7 +152,7 @@ const agentsSeed: AgentDetail[] = [
     key: "support-operator",
     description:
       "Resolves customer requests with approval-gated billing actions.",
-    model: "Balanced reasoning v2",
+    model: "claude-sonnet-4-6-zdr-v1",
     status: "published",
     version: 3,
     latestVersionId: "aaaaaaa3-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -191,7 +191,7 @@ const agentsSeed: AgentDetail[] = [
     name: "Document analyst",
     key: "document-analyst",
     description: "Extracts structured facts from uploaded documents.",
-    model: "Long context v1",
+    model: "claude-sonnet-4-6-zdr-v1",
     status: "published",
     version: 5,
     latestVersionId: "bbbbbbb5-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -220,7 +220,7 @@ const agentsSeed: AgentDetail[] = [
     name: "Order triage",
     key: "order-triage",
     description: "Classifies incoming orders and routes exceptions.",
-    model: "Fast routing v1",
+    model: "claude-sonnet-4-6-zdr-v1",
     status: "draft",
     version: 1,
     latestVersionId: "ccccccc1-cccc-4ccc-8ccc-cccccccccccc",
@@ -1237,6 +1237,13 @@ export class DemoConsoleApi implements ConsoleApi {
     return detail;
   }
 
+  async deleteAgent(id: string): Promise<void> {
+    this.#guard();
+    const index = this.#agents.findIndex((agent) => agent.id === id);
+    if (index === -1) throw new Error("Agent not found");
+    this.#agents.splice(index, 1);
+  }
+
   async publishAgentVersion(id: string, config: AgentVersionConfig) {
     const agent = this.#agents.find((item) => item.id === id);
     if (!agent) throw new Error("Agent not found");
@@ -2134,6 +2141,31 @@ export class DemoConsoleApi implements ConsoleApi {
     return structuredClone(created);
   }
 
+  async removeModelProvider(providerId: string): Promise<void> {
+    this.#guard();
+    const index = this.#modelProviders.findIndex(
+      (entry) => entry.id === providerId,
+    );
+    if (index === -1) throw new Error("Model provider not found.");
+    const live = this.#modelPresets.filter(
+      (preset) => preset.providerId === providerId,
+    ).length;
+    if (live > 0)
+      throw new Error(
+        `${live} model ${live === 1 ? "preset still routes" : "presets still route"} through this connection. Archive ${live === 1 ? "it" : "them"} first.`,
+      );
+    this.#modelProviders.splice(index, 1);
+  }
+
+  async archiveModelPreset(presetId: string): Promise<void> {
+    this.#guard();
+    const index = this.#modelPresets.findIndex(
+      (preset) => preset.id === presetId,
+    );
+    if (index === -1) throw new Error("Model preset not found.");
+    this.#modelPresets.splice(index, 1);
+  }
+
   async rotateModelProviderCredential(
     providerId: string,
     apiKey: string,
@@ -2439,8 +2471,9 @@ export class DemoConsoleApi implements ConsoleApi {
         (entry) =>
           entry.providerType === provider.providerType &&
           (!term ||
-            entry.catalogId.toLowerCase().includes(term ?? "") ||
-            entry.name.toLowerCase().includes(term ?? "")),
+            entry.model.toLowerCase().includes(term) ||
+            entry.catalogId.toLowerCase().includes(term) ||
+            entry.name.toLowerCase().includes(term)),
       ),
       providerId,
       providerType: provider.providerType,

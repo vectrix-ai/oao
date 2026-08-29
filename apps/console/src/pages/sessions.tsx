@@ -3,7 +3,9 @@ import {
   Bot,
   BookOpen,
   Bug,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   Clock3,
   Coins,
   Copy,
@@ -34,6 +36,8 @@ import {
   RUN_DOCUMENT_EXTENSIONS,
 } from "@oao/contracts";
 import {
+  useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -1756,16 +1760,42 @@ function SessionMinimap({
   const [tip, setTip] = useState<{
     readonly segment: MinimapSegment;
     readonly left: number;
+    /** Direct minimap hover outranks the echo of a transcript hover. */
+    readonly source: "minimap" | "transcript";
   } | null>(null);
-  const showTip = (segment: MinimapSegment, target: HTMLElement) => {
+  const tipFor = (
+    segment: MinimapSegment,
+    target: HTMLElement,
+    source: "minimap" | "transcript",
+  ) => {
     const width = wrap.current?.clientWidth ?? 0;
     const wrapBounds = wrap.current?.getBoundingClientRect();
     const targetBounds = target.getBoundingClientRect();
     const center = wrapBounds
       ? targetBounds.left - wrapBounds.left + targetBounds.width / 2
       : target.offsetLeft + target.offsetWidth / 2;
-    setTip({ segment, left: clampTip(center, width) });
+    return { segment, left: clampTip(center, width), source };
   };
+  const showTip = (segment: MinimapSegment, target: HTMLElement) =>
+    setTip(tipFor(segment, target, "minimap"));
+  // Hovering a message in the transcript names its block on the timeline too,
+  // so the eye does not have to travel up and hunt for the highlighted cell.
+  useEffect(() => {
+    if (!highlightId) {
+      setTip((current) => (current?.source === "transcript" ? null : current));
+      return;
+    }
+    const segment = segments.find((entry) => entry.id === highlightId);
+    const target = Array.from(
+      wrap.current?.querySelectorAll<HTMLElement>("[data-event-id]") ?? [],
+    ).find((element) => element.dataset.eventId === highlightId);
+    if (!segment || !target) return;
+    setTip((current) =>
+      current?.source === "minimap"
+        ? current
+        : tipFor(segment, target, "transcript"),
+    );
+  }, [highlightId, segments]);
   const tipMeta = (segment: MinimapSegment) =>
     [
       segment.durationMs >= 100
@@ -1829,6 +1859,7 @@ function SessionMinimap({
                   key={segment.key}
                   type="button"
                   className={`minimap-seg minimap-seg--${segment.actor} minimap-seg--parallel-harness${segment.id === highlightId ? " minimap-seg--hot" : ""}`}
+                  data-event-id={segment.id}
                   style={{
                     width: parallelSegmentWidth(segment, item.segments),
                   }}
@@ -1856,6 +1887,7 @@ function SessionMinimap({
               key={item.key}
               type="button"
               className={`minimap-seg minimap-seg--${item.actor}${item.id === highlightId ? " minimap-seg--hot" : ""}`}
+              data-event-id={item.id}
               style={{ flexGrow: item.weight }}
               aria-label={`Jump to ${item.chip}: ${item.snippet}`}
               onMouseEnter={(event) => showTip(item, event.currentTarget)}
@@ -2788,6 +2820,12 @@ function Composer({
   const [encoding, setEncoding] = useState(false);
   const [fileError, setFileError] = useState("");
   const [attached, setAttached] = useState<readonly File[]>([]);
+  // Narrow viewports scroll the document, so a pinned full composer would sit
+  // on top of the transcript; start it minimized there and let people open it.
+  const compact = useCompactViewport();
+  const [collapsed, setCollapsed] = useState(compact);
+  useEffect(() => setCollapsed(compact), [compact]);
+  const bodyId = useId();
   if (!settled)
     return (
       <div className="composer composer--waiting">
@@ -2800,7 +2838,7 @@ function Composer({
     );
   return (
     <form
-      className="composer"
+      className={`composer${collapsed ? " composer--collapsed" : ""}`}
       onSubmit={(event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
         const form = event.currentTarget;
@@ -2825,54 +2863,110 @@ function Composer({
           .finally(() => setEncoding(false));
       }}
     >
-      <Field label="Message" labelHidden>
-        <Textarea
-          name="message"
-          rows={3}
-          placeholder="Send a message to the agent"
-          onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
-            if (
-              event.key !== "Enter" ||
-              !event.metaKey ||
-              event.nativeEvent.isComposing ||
-              pending ||
-              encoding
-            )
-              return;
-            event.preventDefault();
-            event.currentTarget.form?.requestSubmit();
-          }}
-        />
-      </Field>
-      <Field
-        label="Attach files"
-        hint="Stored in the project's default object storage and copied unmodified into the session sandbox. The agent must inspect them with read or shell tools."
-        hintIcon
-      >
-        <FileDropInput
-          files={attached}
-          onChange={setAttached}
-          accept={RUN_FILE_ACCEPT}
-        />
-      </Field>
-      {fileError ? <FormError>{fileError}</FormError> : null}
-      {error ? <FormError>{error.message}</FormError> : null}
-      <div className="composer-actions">
-        <span className="composer-hint">
-          <InfoHint text="A new message starts another durable run on this same thread." />
-          Press ⌘+Enter to send.
-        </span>
-        <Button
-          variant="primary"
-          type="submit"
-          loading={pending || encoding}
-          icon={encoding ? <Paperclip size={14} /> : <Send size={14} />}
+      {collapsed ? (
+        <button
+          type="button"
+          className="composer-expand"
+          aria-expanded={false}
+          aria-controls={bodyId}
+          onClick={() => setCollapsed(false)}
         >
-          {pending || encoding ? "Sending…" : "Send"}
-        </Button>
+          <MessagesSquare size={14} aria-hidden="true" />
+          <span>Send a message to the agent</span>
+          {attached.length > 0 ? (
+            <span className="composer-expand-count">
+              <Paperclip size={12} aria-hidden="true" />
+              {attached.length}
+            </span>
+          ) : null}
+          <ChevronUp size={14} aria-hidden="true" />
+        </button>
+      ) : null}
+      <div id={bodyId} className="composer-body" hidden={collapsed}>
+        <Field label="Message" labelHidden>
+          <Textarea
+            name="message"
+            rows={3}
+            placeholder="Send a message to the agent"
+            onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
+              if (
+                event.key !== "Enter" ||
+                !event.metaKey ||
+                event.nativeEvent.isComposing ||
+                pending ||
+                encoding
+              )
+                return;
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }}
+          />
+        </Field>
+        <Field
+          label="Attach files"
+          hint="Stored in the project's default object storage and copied unmodified into the session sandbox. The agent must inspect them with read or shell tools."
+          hintIcon
+        >
+          <FileDropInput
+            files={attached}
+            onChange={setAttached}
+            accept={RUN_FILE_ACCEPT}
+          />
+        </Field>
+        {fileError ? <FormError>{fileError}</FormError> : null}
+        {error ? <FormError>{error.message}</FormError> : null}
+        <div className="composer-actions">
+          <span className="composer-hint">
+            <InfoHint text="A new message starts another durable run on this same thread." />
+            Press ⌘+Enter to send.
+          </span>
+          <span className="composer-buttons">
+            <IconButton
+              label="Minimize composer"
+              title="Minimize composer"
+              aria-expanded
+              aria-controls={bodyId}
+              onClick={() => setCollapsed(true)}
+            >
+              <ChevronDown size={15} aria-hidden="true" />
+            </IconButton>
+            <Button
+              variant="primary"
+              type="submit"
+              loading={pending || encoding}
+              icon={encoding ? <Paperclip size={14} /> : <Send size={14} />}
+            >
+              {pending || encoding ? "Sending…" : "Send"}
+            </Button>
+          </span>
+        </div>
       </div>
     </form>
   );
+}
+
+// Keep in sync with the `.page--fill` compact rules in app.css. Short
+// viewports matter as much as narrow ones: a 1400×750 laptop window loses the
+// transcript to the header and composer just like a tablet does.
+const compactViewportQuery = "(max-width: 1024px), (max-height: 820px)";
+
+/** True while the viewport is too narrow or too short for the full session chrome. */
+function useCompactViewport(): boolean {
+  const [compact, setCompact] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia(compactViewportQuery).matches,
+  );
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia(compactViewportQuery);
+    const update = () => setCompact(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  return compact;
 }
 
 function DebugTimeline({

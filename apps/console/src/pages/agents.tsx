@@ -12,6 +12,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../api/context";
+import { listAllPages } from "../api/paginate";
 import type {
   AgentSummary,
   AgentVersionConfig,
@@ -29,9 +30,10 @@ import type { ComboboxOption } from "../components/ui";
 import {
   Alert,
   Button,
-  Chip,
   CheckboxRow,
+  Chip,
   Combobox,
+  ConfirmDialog,
   Dialog,
   EmptyState,
   EntityCell,
@@ -39,7 +41,9 @@ import {
   Field,
   FieldRow,
   FilterBar,
+  formatDate,
   FormError,
+  IconButton,
   Input,
   JsonBlock,
   LoadingState,
@@ -53,9 +57,8 @@ import {
   Switch,
   TableCard,
   Textarea,
-  ValidationPanel,
-  formatDate,
   useToast,
+  ValidationPanel,
 } from "../components/ui";
 
 const agentStatuses = ["", "published", "draft", "archived"];
@@ -221,6 +224,145 @@ function delegateSandboxMismatch(
   return undefined;
 }
 
+/**
+ * Searchable roster of every other agent in the project. Only sandbox-
+ * compatible published agents can be picked; the rest stay visible with the
+ * reason, so a missing candidate is explained rather than silently absent.
+ */
+function DelegatePickerDialog({
+  candidates,
+  linkedVersionIds,
+  coordinatorSandbox,
+  onClose,
+  onAdd,
+}: {
+  readonly candidates: readonly AgentSummary[];
+  readonly linkedVersionIds: readonly string[];
+  readonly coordinatorSandbox: AgentVersionConfig["sandbox"];
+  readonly onClose: () => void;
+  readonly onAdd: (picked: readonly AgentSummary[]) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [pickedIds, setPickedIds] = useState<readonly string[]>([]);
+  const unlinked = candidates.filter(
+    (candidate) =>
+      candidate.latestVersionId == null ||
+      !linkedVersionIds.includes(candidate.latestVersionId),
+  );
+  const needle = search.trim().toLowerCase();
+  const matches = needle
+    ? unlinked.filter((candidate) =>
+        `${candidate.name} ${candidate.key} ${candidate.description}`
+          .toLowerCase()
+          .includes(needle),
+      )
+    : unlinked;
+  const picked = unlinked.filter((candidate) =>
+    pickedIds.includes(candidate.id),
+  );
+  return (
+    <Dialog
+      title="Add delegates"
+      description="Pick published agents this coordinator may hand work to. Each pick pins that agent's exact latest version."
+      wide
+      onClose={onClose}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onAdd(picked);
+      }}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button
+            variant="primary"
+            type="submit"
+            disabled={picked.length === 0}
+          >
+            {picked.length > 1
+              ? `Add ${picked.length} delegates`
+              : "Add delegate"}
+          </Button>
+        </>
+      }
+    >
+      <Alert tone="info" role="status">
+        A child can be selected only when its latest version has the same
+        sandbox enabled state, provider, snapshot, and network policy as this
+        coordinator. Tool capabilities may differ.
+      </Alert>
+      <SearchField value={search} onChange={setSearch} label="Search agents" />
+      {unlinked.length === 0 ? (
+        <EmptyState
+          icon="⇢"
+          title="Every available agent is already linked"
+          description="Publish another agent to add it here."
+        />
+      ) : matches.length === 0 ? (
+        <EmptyState
+          icon="⇢"
+          title="No matching agents"
+          description="Try a different name, key, or description."
+        />
+      ) : (
+        <div className="stack delegate-picker-list">
+          {matches.map((candidate) => {
+            const hasPublishedVersion =
+              candidate.status === "published" &&
+              candidate.version != null &&
+              candidate.latestVersionId != null;
+            const mismatch = delegateSandboxMismatch(
+              coordinatorSandbox,
+              candidate.sandbox,
+            );
+            return (
+              <CheckboxRow
+                key={candidate.id}
+                label={`${candidate.name} · ${candidate.version == null ? "draft" : `v${candidate.version}`}`}
+                description={`${candidate.description} ${
+                  mismatch
+                    ? `Unavailable — ${mismatch}. Publish a compatible child version first.`
+                    : "Sandbox-compatible with this coordinator."
+                } ${
+                  candidate.latestVersionId == null
+                    ? "No published version is available."
+                    : `Exact version ${candidate.latestVersionId}.`
+                }`}
+                checked={pickedIds.includes(candidate.id)}
+                disabled={!hasPublishedVersion || mismatch !== undefined}
+                onChange={(event) =>
+                  setPickedIds((current) =>
+                    event.target.checked
+                      ? [...current, candidate.id]
+                      : current.filter((id) => id !== candidate.id),
+                  )
+                }
+              />
+            );
+          })}
+        </div>
+      )}
+    </Dialog>
+  );
+}
+
+/** One line of preset facts under the picker; the name is already in the field. */
+function PresetMeta({ preset }: { readonly preset: ModelPreset }) {
+  return (
+    <p className="preset-meta">
+      <code>{preset.model}</code>
+      <span aria-hidden="true">·</span>
+      <span>
+        {preset.origin === "deployment"
+          ? "Deployment preset"
+          : "Project preset"}
+      </span>
+      <span aria-hidden="true">·</span>
+      <span>{describePresetRouting(preset)}</span>
+      <Link to="/models">Manage models</Link>
+    </p>
+  );
+}
+
 function initialAgentConfig(
   name: string,
   modelPreset: string,
@@ -262,6 +404,7 @@ export function AgentsPage() {
   const [date, setDate] = useState("");
   const [page, setPage] = useState(1);
   const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState<AgentSummary | null>(null);
   const query = useQuery({
     queryKey: ["agents", { search, status, date, page }],
     queryFn: () => api.listAgents({ search, status, date, page }),
@@ -300,6 +443,14 @@ export function AgentsPage() {
       setCreating(false);
       notify("Agent created.");
       navigate(`/agents/${agent.id}`);
+    },
+  });
+  const remove = useMutation({
+    mutationFn: (agent: AgentSummary) => api.deleteAgent(agent.id),
+    onSuccess: async (_result, agent) => {
+      await queryClient.invalidateQueries({ queryKey: ["agents"] });
+      setDeleting(null);
+      notify(`Deleted ${agent.name}.`);
     },
   });
   const filtered = Boolean(search || status || date);
@@ -413,6 +564,9 @@ export function AgentsPage() {
               <th>Version</th>
               <th>Created</th>
               <th>Updated</th>
+              <th className="table-actions-head">
+                <span className="sr-only">Actions</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -436,11 +590,32 @@ export function AgentsPage() {
                 </td>
                 <td>{formatDate(agent.createdAt)}</td>
                 <td>{formatDate(agent.updatedAt)}</td>
+                <td className="table-actions">
+                  <IconButton
+                    label={`Delete agent ${agent.name}`}
+                    title="Delete agent"
+                    onClick={() => setDeleting(agent)}
+                  >
+                    <Trash2 size={14} aria-hidden="true" />
+                  </IconButton>
+                </td>
               </tr>
             ))}
           </tbody>
         </TableCard>
       )}
+      {deleting ? (
+        <DeleteAgentDialog
+          agent={deleting}
+          pending={remove.isPending}
+          error={remove.error}
+          onClose={() => {
+            remove.reset();
+            setDeleting(null);
+          }}
+          onConfirm={() => remove.mutate(deleting)}
+        />
+      ) : null}
       {creating ? (
         <CreateAgentDialog
           pending={create.isPending}
@@ -457,6 +632,33 @@ export function AgentsPage() {
         />
       ) : null}
     </Page>
+  );
+}
+
+/** Confirms deletion; the agent is archived, so past sessions stay readable. */
+function DeleteAgentDialog({
+  agent,
+  pending,
+  error,
+  onClose,
+  onConfirm,
+}: {
+  readonly agent: Pick<AgentSummary, "name" | "key">;
+  readonly pending: boolean;
+  readonly error: Error | null;
+  readonly onClose: () => void;
+  readonly onConfirm: () => void;
+}) {
+  return (
+    <ConfirmDialog
+      title={`Delete “${agent.name}”?`}
+      description={`The agent ${agent.key} disappears from this project: it can no longer start sessions, be published, or be picked as a delegate. Existing sessions keep their transcripts, and the key becomes free for a new agent.`}
+      confirmLabel="Delete agent"
+      pending={pending}
+      error={error?.message ?? null}
+      onClose={onClose}
+      onConfirm={onConfirm}
+    />
   );
 }
 
@@ -636,45 +838,36 @@ function CreateAgentDialog({
           placeholder="Search approved presets…"
         />
       </Field>
-      <Alert
-        tone={modelPresetsError ? "danger" : "info"}
-        role={modelPresetsError ? "alert" : "status"}
-      >
-        {modelPresetsError ? (
-          <>
-            <strong>Model presets could not be loaded.</strong>
-            <span>{modelPresetsError.message}</span>
-          </>
-        ) : modelPresetsPending ? (
-          <>
-            <strong>Loading approved model presets</strong>
-            <span>
-              The agent can be created after the project catalog loads.
-            </span>
-          </>
-        ) : selectedPreset ? (
-          <>
-            <strong>
-              {selectedPreset.displayName} · {selectedPreset.model}
-            </strong>
-            <span>
-              {selectedPreset.origin === "deployment"
-                ? "Deployment preset"
-                : "Project preset"}{" "}
-              · {describePresetRouting(selectedPreset)}{" "}
-              <Link to="/models">Manage models</Link>
-            </span>
-          </>
-        ) : (
-          <>
-            <strong>Select an approved model preset</strong>
-            <span>
-              Add or repair project presets from{" "}
-              <Link to="/models">Models</Link>.
-            </span>
-          </>
-        )}
-      </Alert>
+      {selectedPreset && !modelPresetsError ? (
+        <PresetMeta preset={selectedPreset} />
+      ) : (
+        <Alert
+          tone={modelPresetsError ? "danger" : "info"}
+          role={modelPresetsError ? "alert" : "status"}
+        >
+          {modelPresetsError ? (
+            <>
+              <strong>Model presets could not be loaded.</strong>
+              <span>{modelPresetsError.message}</span>
+            </>
+          ) : modelPresetsPending ? (
+            <>
+              <strong>Loading approved model presets</strong>
+              <span>
+                The agent can be created after the project catalog loads.
+              </span>
+            </>
+          ) : (
+            <>
+              <strong>Select an approved model preset</strong>
+              <span>
+                Add or repair project presets from{" "}
+                <Link to="/models">Models</Link>.
+              </span>
+            </>
+          )}
+        </Alert>
+      )}
       <div className="stack">
         <Switch
           label="Enable sandbox"
@@ -809,6 +1002,7 @@ export function AgentDetailPage() {
   const { agentId = "" } = useParams();
   const api = useApi();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const notify = useToast();
   const query = useQuery({
     queryKey: ["agent", agentId],
@@ -828,7 +1022,7 @@ export function AgentDetailPage() {
   });
   const agents = useQuery({
     queryKey: ["agents", "delegate-roster"],
-    queryFn: () => api.listAgents({}),
+    queryFn: () => listAllPages((page) => api.listAgents({ page })),
   });
   const mcpToolsets = useQuery({
     queryKey: ["mcp-toolsets"],
@@ -845,6 +1039,15 @@ export function AgentDetailPage() {
       await queryClient.invalidateQueries({ queryKey: ["agent", agentId] });
       await queryClient.invalidateQueries({ queryKey: ["agents"] });
       notify("New agent version published.");
+    },
+  });
+  const remove = useMutation({
+    mutationFn: () => api.deleteAgent(agentId),
+    onSuccess: async () => {
+      queryClient.removeQueries({ queryKey: ["agent", agentId] });
+      await queryClient.invalidateQueries({ queryKey: ["agents"] });
+      notify(`Deleted ${query.data?.name ?? "agent"}.`);
+      navigate("/agents");
     },
   });
   if (query.isPending)
@@ -866,13 +1069,17 @@ export function AgentDetailPage() {
       publishing={publish.isPending}
       publishError={publish.error}
       onPublish={(config) => publish.mutate(config)}
+      deleting={remove.isPending}
+      deleteError={remove.error}
+      onDelete={() => remove.mutate()}
+      onDeleteReset={() => remove.reset()}
       modelPresets={modelPresets.data?.data ?? []}
       sandboxProviders={sandboxProviders.data?.data ?? []}
       sandboxProvidersError={sandboxProviders.error}
       skills={skills.data?.data ?? []}
       mcpToolsets={mcpToolsets.data?.data ?? []}
       mcpPolicies={mcpPolicies.data?.data ?? []}
-      availableAgents={(agents.data?.data ?? []).filter(
+      availableAgents={(agents.data ?? []).filter(
         (candidate) => candidate.id !== query.data.id,
       )}
     />
@@ -884,6 +1091,10 @@ function AgentEditor({
   publishing,
   publishError,
   onPublish,
+  deleting,
+  deleteError,
+  onDelete,
+  onDeleteReset,
   modelPresets,
   sandboxProviders,
   sandboxProvidersError,
@@ -896,6 +1107,10 @@ function AgentEditor({
   readonly publishing: boolean;
   readonly publishError: Error | null;
   readonly onPublish: (config: AgentVersionConfig) => void;
+  readonly deleting: boolean;
+  readonly deleteError: Error | null;
+  readonly onDelete: () => void;
+  readonly onDeleteReset: () => void;
   readonly modelPresets: readonly ModelPreset[];
   readonly sandboxProviders: readonly ProjectSandboxProvider[];
   readonly sandboxProvidersError: Error | null;
@@ -905,6 +1120,7 @@ function AgentEditor({
   readonly availableAgents: readonly AgentSummary[];
 }) {
   const api = useApi();
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [selectedVersion, setSelectedVersion] = useState(agent.version);
   const selected =
     agent.versions.find((version) => version.version === selectedVersion) ??
@@ -931,6 +1147,7 @@ function AgentEditor({
   );
   const [mcpBindings, setMcpBindings] = useState(baseConfig.mcpBindings ?? []);
   const [delegates, setDelegates] = useState(baseConfig.delegates ?? []);
+  const [delegatePicker, setDelegatePicker] = useState(false);
   const [tools, setTools] = useState<readonly ToolDefinition[]>(
     baseConfig.tools,
   );
@@ -1124,9 +1341,17 @@ function AgentEditor({
           <>
             <StatusChip value={agent.status} />
             <Button
+              variant="danger"
+              icon={<Trash2 size={15} />}
+              disabled={publishing || deleting}
+              onClick={() => setConfirmDelete(true)}
+            >
+              Delete agent
+            </Button>
+            <Button
               variant="primary"
               icon={<Save size={15} />}
-              disabled={validation.length > 0 || !isLatest}
+              disabled={validation.length > 0 || !isLatest || deleting}
               loading={publishing}
               onClick={() => onPublish(config)}
             >
@@ -1135,6 +1360,18 @@ function AgentEditor({
           </>
         }
       />
+      {confirmDelete ? (
+        <DeleteAgentDialog
+          agent={agent}
+          pending={deleting}
+          error={deleteError}
+          onClose={() => {
+            onDeleteReset();
+            setConfirmDelete(false);
+          }}
+          onConfirm={onDelete}
+        />
+      ) : null}
       <div className="editor-stack">
         <nav className="version-strip" aria-label="Immutable versions">
           <span className="eyebrow">Versions · immutable</span>
@@ -1192,7 +1429,7 @@ function AgentEditor({
           <div className="stack">
             <Field
               label="Approved model preset"
-              hint="Publishing links this immutable version to the selected preset. Provider routing stays behind the model adapter."
+              hint="Pinned into the next immutable version."
             >
               <Combobox
                 label="Approved model preset"
@@ -1204,19 +1441,17 @@ function AgentEditor({
                 placeholder="Search approved presets…"
               />
             </Field>
-            <Alert tone="info" role="status">
-              <strong>
-                {selectedPreset
-                  ? `${selectedPreset.displayName} · ${selectedPreset.model}`
-                  : "Select an approved model preset"}
-              </strong>
-              <span>
-                {selectedPreset
-                  ? `${selectedPreset.origin === "deployment" ? "Deployment preset" : "Project preset"} · ${describePresetRouting(selectedPreset)}`
-                  : "Only presets approved for this project can be published."}{" "}
-                <Link to="/models">Manage models</Link>
-              </span>
-            </Alert>
+            {selectedPreset ? (
+              <PresetMeta preset={selectedPreset} />
+            ) : (
+              <Alert tone="info" role="status">
+                <strong>Select an approved model preset</strong>
+                <span>
+                  Only presets approved for this project can be published.{" "}
+                  <Link to="/models">Manage models</Link>
+                </span>
+              </Alert>
+            )}
             <Field
               label="System instructions"
               hint="Provider reasoning is shown only in the authorized session transcript; credentials and authorization headers remain excluded."
@@ -1286,6 +1521,8 @@ function AgentEditor({
         </Panel>
         <Panel
           title="Harness Operations"
+          collapsible
+          defaultCollapsed
           description={
             harnessOperations.length === 0
               ? "No focused scratch operations are exposed to this Agent."
@@ -1334,7 +1571,13 @@ function AgentEditor({
         </Panel>
         <Panel
           title="Skills"
-          description="Catalog metadata stays small; instructions and resources load only after activation."
+          collapsible
+          defaultCollapsed
+          description={
+            skillVersionIds.length === 0
+              ? "No Skills are bound. Instructions and resources load only after activation."
+              : `${skillVersionIds.length} ${skillVersionIds.length === 1 ? "Skill version is" : "Skill versions are"} bound to this version.`
+          }
           actions={<Link to="/skills">Manage Skills</Link>}
         >
           {skills.length === 0 ? (
@@ -1381,7 +1624,13 @@ function AgentEditor({
         </Panel>
         <Panel
           title="MCP toolsets"
-          description="Pin an immutable restricted toolset and an exact-origin credential policy into this agent version."
+          collapsible
+          defaultCollapsed
+          description={
+            mcpBindings.length === 0
+              ? "No MCP toolsets are bound. Each binding pins a restricted toolset and an exact-origin credential policy."
+              : `${mcpBindings.length} restricted ${mcpBindings.length === 1 ? "toolset is" : "toolsets are"} bound with exact-origin credential policies.`
+          }
           actions={<Link to="/mcp">Manage MCP connections</Link>}
         >
           {mcpToolsets.length === 0 ? (
@@ -1471,7 +1720,27 @@ function AgentEditor({
         </Panel>
         <Panel
           title="Delegates"
-          description="Each coordinator version pins exact child-agent versions. Child sessions keep isolated history while sharing the coordinator workspace."
+          collapsible
+          defaultCollapsed
+          description={
+            delegates.length === 0
+              ? "No delegates are linked. A coordinator pins exact child-agent versions that share its workspace."
+              : `${delegates.length} child ${delegates.length === 1 ? "agent version is" : "agent versions are"} pinned${
+                  incompatibleSelectedDelegates.length > 0
+                    ? ` · ${incompatibleSelectedDelegates.length} incompatible with the draft sandbox`
+                    : ""
+                }.`
+          }
+          actions={
+            <Button
+              size="sm"
+              icon={<Plus size={14} />}
+              disabled={!isLatest || availableAgents.length === 0}
+              onClick={() => setDelegatePicker(true)}
+            >
+              Add delegate
+            </Button>
+          }
         >
           {availableAgents.length === 0 ? (
             <EmptyState
@@ -1481,11 +1750,6 @@ function AgentEditor({
             />
           ) : (
             <div className="stack">
-              <Alert tone="info" role="status">
-                A child can be selected only when its latest version has the
-                same sandbox enabled state, provider, snapshot, and network
-                policy as this coordinator. Tool capabilities may differ.
-              </Alert>
               {incompatibleSelectedDelegates.length > 0 ? (
                 <Alert
                   tone="warning"
@@ -1518,68 +1782,129 @@ function AgentEditor({
                   </Button>
                 </Alert>
               ) : null}
-              {availableAgents.map((candidate) => {
-                const hasPublishedVersion =
-                  candidate.status === "published" &&
-                  candidate.version != null &&
-                  candidate.latestVersionId != null;
-                const checked = delegates.some(
-                  (delegate) =>
-                    delegate.agentVersionId === candidate.latestVersionId,
-                );
-                const mismatch = delegateSandboxMismatch(
-                  config.sandbox,
-                  candidate.sandbox,
-                );
-                return (
-                  <CheckboxRow
-                    key={candidate.id}
-                    label={`${candidate.name} · ${candidate.version == null ? "draft" : `v${candidate.version}`}`}
-                    description={`${candidate.description} ${
-                      mismatch
-                        ? `Unavailable — ${mismatch}. Publish a compatible child version first.`
-                        : "Sandbox-compatible with this coordinator."
-                    } ${
-                      candidate.latestVersionId == null
-                        ? "No published version is available."
-                        : `Exact version ${candidate.latestVersionId}.`
-                    }`}
-                    checked={checked}
-                    disabled={
-                      !isLatest ||
-                      !hasPublishedVersion ||
-                      (!checked && mismatch !== undefined)
-                    }
-                    onChange={(event) => {
-                      if (!candidate.latestVersionId) return;
-                      const candidateVersionId = candidate.latestVersionId;
-                      setDelegates((current) =>
-                        event.target.checked
-                          ? [
-                              ...current,
-                              {
-                                key: candidate.key,
-                                description:
-                                  candidate.description || candidate.name,
-                                agentVersionId: candidateVersionId,
-                                maxParallel: 1,
-                              },
-                            ]
-                          : current.filter(
-                              (delegate) =>
-                                delegate.agentVersionId !== candidateVersionId,
-                            ),
-                      );
-                    }}
-                  />
-                );
-              })}
+              {delegates.length === 0 ? (
+                <EmptyState
+                  icon="⇢"
+                  title="No delegates linked"
+                  description={
+                    isLatest
+                      ? "Add a delegate to let this coordinator hand work to a published child agent."
+                      : "This version delegates to no child agents."
+                  }
+                />
+              ) : (
+                <ul className="delegate-list" aria-label="Linked delegates">
+                  {delegates.map((delegate) => {
+                    const candidate =
+                      availableAgents.find(
+                        (item) =>
+                          item.latestVersionId === delegate.agentVersionId,
+                      ) ??
+                      availableAgents.find((item) => item.key === delegate.key);
+                    const pinnedLatest =
+                      candidate?.latestVersionId === delegate.agentVersionId;
+                    const mismatch = candidate
+                      ? delegateSandboxMismatch(
+                          config.sandbox,
+                          candidate.sandbox,
+                        )
+                      : undefined;
+                    return (
+                      <li
+                        className="delegate-row"
+                        key={delegate.agentVersionId}
+                      >
+                        <div className="delegate-row-main">
+                          <strong>
+                            {candidate?.name ?? delegate.key}
+                            {candidate && candidate.version != null ? (
+                              <span className="delegate-row-version">
+                                {pinnedLatest
+                                  ? ` · v${candidate.version}`
+                                  : " · older pinned version"}
+                              </span>
+                            ) : null}
+                          </strong>
+                          <span className="delegate-row-sub">
+                            <code>{delegate.key}</code>
+                            {" · "}
+                            {delegate.description}
+                          </span>
+                          <span
+                            className={`delegate-row-sub${mismatch ? " delegate-row-sub--warn" : ""}`}
+                          >
+                            {mismatch
+                              ? `Incompatible — ${mismatch}.`
+                              : "Sandbox-compatible with this coordinator."}{" "}
+                            <span className="mono">
+                              {delegate.agentVersionId}
+                            </span>
+                          </span>
+                        </div>
+                        <IconButton
+                          label={`Remove delegate ${candidate?.name ?? delegate.key}`}
+                          title="Remove delegate"
+                          disabled={!isLatest}
+                          onClick={() =>
+                            setDelegates((current) =>
+                              current.filter(
+                                (item) =>
+                                  item.agentVersionId !==
+                                  delegate.agentVersionId,
+                              ),
+                            )
+                          }
+                        >
+                          <Trash2 size={14} aria-hidden="true" />
+                        </IconButton>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </div>
           )}
         </Panel>
+        {delegatePicker ? (
+          <DelegatePickerDialog
+            candidates={availableAgents}
+            linkedVersionIds={delegates.map(
+              (delegate) => delegate.agentVersionId,
+            )}
+            coordinatorSandbox={config.sandbox}
+            onClose={() => setDelegatePicker(false)}
+            onAdd={(picked) => {
+              setDelegates((current) => [
+                ...current,
+                ...picked
+                  .filter(
+                    (candidate) =>
+                      candidate.latestVersionId != null &&
+                      !current.some(
+                        (item) =>
+                          item.agentVersionId === candidate.latestVersionId,
+                      ),
+                  )
+                  .map((candidate) => ({
+                    key: candidate.key,
+                    description: candidate.description || candidate.name,
+                    agentVersionId: candidate.latestVersionId!,
+                    maxParallel: 1,
+                  })),
+              ]);
+              setDelegatePicker(false);
+            }}
+          />
+        ) : null}
         <Panel
           title="Sandbox policy"
-          description="Execution settings are adapter-neutral and versioned."
+          collapsible
+          defaultCollapsed
+          description={
+            sandboxEnabled
+              ? `${(selectedSandboxProvider?.displayName ?? sandboxProvider) || "No provider"} · ${network === "none" ? "no network" : "restricted network"} · ${sandboxCapabilities.length} ${sandboxCapabilities.length === 1 ? "capability" : "capabilities"} · ${Math.round(timeout / 1000)}s timeout`
+              : "Sandbox disabled. Runs execute without a workspace or sandbox tools."
+          }
           actions={
             <Switch
               label="Sandbox enabled"
@@ -2214,7 +2539,13 @@ function RecentAgentSessions({ agentId }: { readonly agentId: string }) {
   return (
     <Panel
       title="Recent sessions"
-      description="Runs pinned to immutable agent versions."
+      collapsible
+      defaultCollapsed
+      description={
+        sessions.length === 0
+          ? "No sessions yet."
+          : `${sessions.length} most recent, pinned to immutable versions.`
+      }
       actions={<Link to={`/sessions?agent=${agentId}`}>View all</Link>}
       flush
     >

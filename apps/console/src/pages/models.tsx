@@ -1,12 +1,24 @@
-import { Cpu, KeyRound, Plus, RefreshCw } from "lucide-react";
+import {
+  Archive,
+  Copy,
+  Cpu,
+  KeyRound,
+  Plus,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { Link } from "react-router";
 import { useApi } from "../api/context";
+import { listAllPages } from "../api/paginate";
 import type {
+  AgentSummary,
   CreateModelPresetInput,
   CreateModelProviderInput,
   ModelCatalogEntry,
   ModelGenerationSettings,
+  ModelPreset,
   ModelRoutingPolicy,
   ProjectModelProvider,
 } from "../api/types";
@@ -22,6 +34,7 @@ import {
   Button,
   ButtonGroup,
   Combobox,
+  ConfirmDialog,
   Dialog,
   EmptyState,
   EntityCell,
@@ -30,7 +43,9 @@ import {
   FieldRow,
   FormError,
   Input,
+  JsonBlock,
   LoadingState,
+  MetaGrid,
   Page,
   PageHeader,
   SearchField,
@@ -91,6 +106,17 @@ export function ModelsPage() {
   const [creatingProvider, setCreatingProvider] = useState(false);
   const [rotatingProvider, setRotatingProvider] =
     useState<ProjectModelProvider | null>(null);
+  const [removingProvider, setRemovingProvider] =
+    useState<ProjectModelProvider | null>(null);
+  const [openPreset, setOpenPreset] = useState<ModelPreset | null>(null);
+  const [archivingPreset, setArchivingPreset] = useState<ModelPreset | null>(
+    null,
+  );
+  const [duplicateFrom, setDuplicateFrom] = useState<ModelPreset | null>(null);
+  const agents = useQuery({
+    queryKey: ["agents", "preset-usage"],
+    queryFn: () => listAllPages((page) => api.listAgents({ page })),
+  });
   const providers = useQuery({
     queryKey: ["model-providers"],
     queryFn: () => api.listModelProviders(),
@@ -128,6 +154,36 @@ export function ModelsPage() {
       notify("Provider credential rotated.");
     },
   });
+  const removeProvider = useMutation({
+    mutationFn: (provider: ProjectModelProvider) =>
+      api.removeModelProvider(provider.id),
+    onSuccess: async (_result, provider) => {
+      await queryClient.invalidateQueries({ queryKey: ["model-providers"] });
+      await queryClient.invalidateQueries({ queryKey: ["model-presets"] });
+      setRemovingProvider(null);
+      notify(`Removed ${provider.displayName}.`);
+    },
+  });
+  const archivePreset = useMutation({
+    mutationFn: (preset: ModelPreset) => {
+      if (!preset.id) throw new Error("Deployment presets cannot be archived.");
+      return api.archiveModelPreset(preset.id);
+    },
+    onSuccess: async (_result, preset) => {
+      await queryClient.invalidateQueries({ queryKey: ["model-presets"] });
+      await queryClient.invalidateQueries({ queryKey: ["context"] });
+      setArchivingPreset(null);
+      setOpenPreset(null);
+      notify(`Archived ${preset.displayName}.`);
+    },
+  });
+  const usageByPreset = useMemo(() => {
+    const map = new Map<string, AgentSummary[]>();
+    for (const agent of agents.data ?? [])
+      if (agent.model)
+        map.set(agent.model, [...(map.get(agent.model) ?? []), agent]);
+    return map;
+  }, [agents.data]);
   const term = search.trim().toLowerCase();
   const visible = (presets.data?.data ?? []).filter(
     (preset) =>
@@ -247,13 +303,26 @@ export function ModelsPage() {
                   </td>
                   <td>{formatDate(provider.updatedAt)}</td>
                   <td className="actions">
-                    <Button
-                      size="sm"
-                      icon={<RefreshCw size={13} />}
-                      onClick={() => setRotatingProvider(provider)}
-                    >
-                      Rotate key
-                    </Button>
+                    <ButtonGroup>
+                      <Button
+                        size="sm"
+                        icon={<RefreshCw size={13} />}
+                        onClick={() => setRotatingProvider(provider)}
+                      >
+                        Rotate key
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        icon={<Trash2 size={13} />}
+                        onClick={() => {
+                          removeProvider.reset();
+                          setRemovingProvider(provider);
+                        }}
+                      >
+                        Remove
+                      </Button>
+                    </ButtonGroup>
                   </td>
                 </tr>
               ))}
@@ -266,7 +335,7 @@ export function ModelsPage() {
         <SectionHeading
           eyebrow="Approved models"
           title="Model presets"
-          description="A preset is append-only: publish a new key rather than editing one already in use."
+          description="A preset is append-only: open one to inspect it, duplicate it into a new key, or archive it."
           actions={
             <SearchField
               value={search}
@@ -303,6 +372,7 @@ export function ModelsPage() {
                 <th>Model</th>
                 <th>Source</th>
                 <th>Policy / settings</th>
+                <th>Used by</th>
                 <th>Created</th>
               </tr>
             </thead>
@@ -310,11 +380,17 @@ export function ModelsPage() {
               {visible.map((preset) => (
                 <tr key={preset.key}>
                   <td>
-                    <EntityCell
-                      icon={<Cpu size={15} />}
-                      name={preset.displayName}
-                      meta={preset.key}
-                    />
+                    <button
+                      type="button"
+                      className="row-link"
+                      onClick={() => setOpenPreset(preset)}
+                    >
+                      <EntityCell
+                        icon={<Cpu size={15} />}
+                        name={preset.displayName}
+                        meta={preset.key}
+                      />
+                    </button>
                   </td>
                   <td>
                     <code>{preset.model}</code>
@@ -330,6 +406,15 @@ export function ModelsPage() {
                   </td>
                   <td>{describePresetRouting(preset)}</td>
                   <td>
+                    {agents.isPending
+                      ? "…"
+                      : `${usageByPreset.get(preset.key)?.length ?? 0} ${
+                          (usageByPreset.get(preset.key)?.length ?? 0) === 1
+                            ? "agent"
+                            : "agents"
+                        }`}
+                  </td>
+                  <td>
                     {preset.createdAt
                       ? formatDate(preset.createdAt)
                       : "Deployment configuration"}
@@ -341,14 +426,65 @@ export function ModelsPage() {
         )}
       </section>
 
-      {creating ? (
+      {creating || duplicateFrom ? (
         <CreateModelPresetDialog
           existingKeys={(presets.data?.data ?? []).map((preset) => preset.key)}
           providers={providers.data ?? []}
+          {...(duplicateFrom ? { initial: duplicateFrom } : {})}
           pending={create.isPending}
           error={create.error}
-          onClose={() => setCreating(false)}
+          onClose={() => {
+            setCreating(false);
+            setDuplicateFrom(null);
+          }}
           onSubmit={(input) => create.mutate(input)}
+        />
+      ) : null}
+      {openPreset ? (
+        <PresetDetailDialog
+          preset={openPreset}
+          provider={
+            (providers.data ?? []).find(
+              (entry) => entry.id === openPreset.providerId,
+            ) ?? null
+          }
+          usedBy={usageByPreset.get(openPreset.key) ?? []}
+          usageLoading={agents.isPending}
+          onClose={() => setOpenPreset(null)}
+          onDuplicate={() => {
+            setDuplicateFrom(openPreset);
+            setOpenPreset(null);
+          }}
+          onArchive={() => {
+            archivePreset.reset();
+            setArchivingPreset(openPreset);
+          }}
+        />
+      ) : null}
+      {archivingPreset ? (
+        <ConfirmDialog
+          title={`Archive “${archivingPreset.displayName}”?`}
+          description={`${archivingPreset.key} stops being offered to new agent versions. ${
+            (usageByPreset.get(archivingPreset.key)?.length ?? 0) > 0
+              ? `${usageByPreset.get(archivingPreset.key)!.length} agent${usageByPreset.get(archivingPreset.key)!.length === 1 ? "" : "s"} currently pin this key; their published versions keep running on it, but they must move to another preset before publishing again.`
+              : "No agent currently pins this key."
+          } Archiving cannot be undone.`}
+          confirmLabel="Archive preset"
+          pending={archivePreset.isPending}
+          error={archivePreset.error?.message ?? null}
+          onClose={() => setArchivingPreset(null)}
+          onConfirm={() => archivePreset.mutate(archivingPreset)}
+        />
+      ) : null}
+      {removingProvider ? (
+        <ConfirmDialog
+          title={`Remove “${removingProvider.displayName}”?`}
+          description={`The ${removingProvider.providerType} API key behind ${removingProvider.key} is wiped and the key becomes free for a new connection. Removal is refused while any model preset still routes through it; archive those presets first. Sessions of agents pinned to already archived presets on this connection will fail to run.`}
+          confirmLabel="Remove connection"
+          pending={removeProvider.isPending}
+          error={removeProvider.error?.message ?? null}
+          onClose={() => setRemovingProvider(null)}
+          onConfirm={() => removeProvider.mutate(removingProvider)}
         />
       ) : null}
       {creatingProvider ? (
@@ -378,6 +514,7 @@ export function ModelsPage() {
 function CreateModelPresetDialog({
   existingKeys,
   providers,
+  initial,
   pending,
   error,
   onClose,
@@ -385,15 +522,22 @@ function CreateModelPresetDialog({
 }: {
   readonly existingKeys: readonly string[];
   readonly providers: readonly ProjectModelProvider[];
+  /** Duplicating: start from this preset's provider, model, policy, and settings. */
+  readonly initial?: ModelPreset;
   readonly pending: boolean;
   readonly error: Error | null;
   readonly onClose: () => void;
   readonly onSubmit: (input: CreateModelPresetInput) => void;
 }) {
   const api = useApi();
-  const [providerId, setProviderId] = useState(providers[0]?.id ?? "");
+  const initialProviderId =
+    initial?.providerId &&
+    providers.some((entry) => entry.id === initial.providerId)
+      ? initial.providerId
+      : (providers[0]?.id ?? "");
+  const [providerId, setProviderId] = useState(initialProviderId);
   const provider = providers.find((entry) => entry.id === providerId);
-  const [catalogSearch, setCatalogSearch] = useState("");
+  const [catalogSearch, setCatalogSearch] = useState(initial?.model ?? "");
   const catalogQuery = useQuery({
     queryKey: ["model-catalog", providerId, catalogSearch],
     queryFn: () => api.listModelCatalog(providerId, catalogSearch),
@@ -406,37 +550,94 @@ function CreateModelPresetDialog({
   // The chosen entry is held rather than looked up, because a later search
   // narrows the catalog and must not silently invalidate the selection.
   const [model, setModel] = useState<ModelCatalogEntry | null>(null);
-  const [key, setKey] = useState("");
-  const [keyEdited, setKeyEdited] = useState(false);
-  const [displayName, setDisplayName] = useState("");
-  const [displayNameEdited, setDisplayNameEdited] = useState(false);
+  // A duplicate keeps the source name and gets the next free key; the operator
+  // edits either, and the model pick no longer overrides them.
+  const [key, setKey] = useState(
+    initial ? suggestPresetKey(initial.displayName, existingKeys) : "",
+  );
+  const [keyEdited, setKeyEdited] = useState(initial !== undefined);
+  const [displayName, setDisplayName] = useState(initial?.displayName ?? "");
+  const [displayNameEdited, setDisplayNameEdited] = useState(
+    initial !== undefined,
+  );
+  const initialRouting = initial?.routing ?? {};
+  const tristateOf = (value: boolean | undefined): Tristate =>
+    value === undefined ? "" : value ? "yes" : "no";
   const [dataCollection, setDataCollection] = useState<"" | "deny" | "allow">(
-    "",
+    initialRouting.dataCollection ?? "",
   );
-  const [zeroDataRetention, setZeroDataRetention] = useState<Tristate>("");
-  const [allowFallbacks, setAllowFallbacks] = useState<Tristate>("");
-  const [requireParameters, setRequireParameters] = useState<Tristate>("");
-  const [providerAllowlist, setProviderAllowlist] = useState("");
-  const [providerDenylist, setProviderDenylist] = useState("");
-  const [providerOrder, setProviderOrder] = useState("");
-  const [sort, setSort] = useState<"" | "price" | "throughput" | "latency">("");
-  const [maxPrompt, setMaxPrompt] = useState("");
-  const [maxCompletion, setMaxCompletion] = useState("");
+  const [zeroDataRetention, setZeroDataRetention] = useState<Tristate>(
+    tristateOf(initialRouting.zeroDataRetention),
+  );
+  const [allowFallbacks, setAllowFallbacks] = useState<Tristate>(
+    tristateOf(initialRouting.allowFallbacks),
+  );
+  const [requireParameters, setRequireParameters] = useState<Tristate>(
+    tristateOf(initialRouting.requireParameters),
+  );
+  const [providerAllowlist, setProviderAllowlist] = useState(
+    initialRouting.providerAllowlist?.join(", ") ?? "",
+  );
+  const [providerDenylist, setProviderDenylist] = useState(
+    initialRouting.providerDenylist?.join(", ") ?? "",
+  );
+  const [providerOrder, setProviderOrder] = useState(
+    initialRouting.providerOrder?.join(", ") ?? "",
+  );
+  const [sort, setSort] = useState<"" | "price" | "throughput" | "latency">(
+    initialRouting.sort ?? "",
+  );
+  const [maxPrompt, setMaxPrompt] = useState(
+    initialRouting.maxPromptPriceUsdPerMillion === undefined
+      ? ""
+      : String(initialRouting.maxPromptPriceUsdPerMillion),
+  );
+  const [maxCompletion, setMaxCompletion] = useState(
+    initialRouting.maxCompletionPriceUsdPerMillion === undefined
+      ? ""
+      : String(initialRouting.maxCompletionPriceUsdPerMillion),
+  );
+  const initialSettings = initial?.settings ?? null;
+  const openaiInitial =
+    initialSettings && "mode" in initialSettings ? initialSettings : null;
+  const anthropicInitial =
+    initialSettings && "thinking" in initialSettings ? initialSettings : null;
+  const xaiInitial =
+    initialSettings && !openaiInitial && !anthropicInitial
+      ? initialSettings
+      : null;
   const [reasoningMode, setReasoningMode] = useState<"standard" | "pro">(
-    "standard",
+    openaiInitial?.mode ?? "standard",
   );
-  const [reasoningEffort, setReasoningEffort] =
-    useState<OpenAISettings["effort"]>("medium");
-  const [verbosity, setVerbosity] =
-    useState<OpenAISettings["verbosity"]>("medium");
-  const [reasoningSummary, setReasoningSummary] =
-    useState<OpenAISettings["summary"]>("auto");
-  const [anthropicThinking, setAnthropicThinking] =
-    useState<AnthropicSettings["thinking"]>("adaptive");
-  const [anthropicMaxTokens, setAnthropicMaxTokens] = useState(20_000);
-  const [anthropicEffort, setAnthropicEffort] =
-    useState<AnthropicSettings["effort"]>("high");
-  const [xaiEffort, setXAIEffort] = useState<XAISettings["effort"]>("high");
+  const [reasoningEffort, setReasoningEffort] = useState<
+    OpenAISettings["effort"]
+  >(openaiInitial?.effort ?? "medium");
+  const [verbosity, setVerbosity] = useState<OpenAISettings["verbosity"]>(
+    openaiInitial?.verbosity ?? "medium",
+  );
+  const [reasoningSummary, setReasoningSummary] = useState<
+    OpenAISettings["summary"]
+  >(openaiInitial?.summary ?? "auto");
+  const [anthropicThinking, setAnthropicThinking] = useState<
+    AnthropicSettings["thinking"]
+  >(anthropicInitial?.thinking ?? "adaptive");
+  const [anthropicMaxTokens, setAnthropicMaxTokens] = useState(
+    anthropicInitial?.maxTokens ?? 20_000,
+  );
+  const [anthropicEffort, setAnthropicEffort] = useState<
+    AnthropicSettings["effort"]
+  >(anthropicInitial?.effort ?? "high");
+  const [xaiEffort, setXAIEffort] = useState<XAISettings["effort"]>(
+    (xaiInitial?.effort as XAISettings["effort"] | undefined) ?? "high",
+  );
+  // Once the catalog answers the prefilled search, pin the source model.
+  useEffect(() => {
+    if (!initial || model || catalogQuery.data === undefined) return;
+    const entry = catalogQuery.data.data.find(
+      (candidate) => candidate.model === initial.model,
+    );
+    if (entry) setModel(entry);
+  }, [initial, model, catalogQuery.data]);
 
   const settings: ModelGenerationSettings | null =
     provider?.providerType === "openai"
@@ -592,8 +793,14 @@ function CreateModelPresetDialog({
   return (
     <Dialog
       wide
-      title="Add model preset"
-      description="A preset is append-only. Publish a new preset key instead of changing an existing one, so already published agent versions keep the model they were reviewed with."
+      title={
+        initial ? `Duplicate “${initial.displayName}”` : "Add model preset"
+      }
+      description={
+        initial
+          ? "Adjust anything below and publish it under a new key. The original preset stays exactly as agent versions reviewed it."
+          : "A preset is append-only. Publish a new preset key instead of changing an existing one, so already published agent versions keep the model they were reviewed with."
+      }
       onClose={onClose}
       onSubmit={(event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
@@ -1065,6 +1272,121 @@ function CreateModelPresetDialog({
 }
 
 const PROVIDER_KEY_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u;
+
+/** Read-only view of one preset; changing it means duplicating into a new key. */
+function PresetDetailDialog({
+  preset,
+  provider,
+  usedBy,
+  usageLoading,
+  onClose,
+  onDuplicate,
+  onArchive,
+}: {
+  readonly preset: ModelPreset;
+  readonly provider: ProjectModelProvider | null;
+  readonly usedBy: readonly AgentSummary[];
+  readonly usageLoading: boolean;
+  readonly onClose: () => void;
+  readonly onDuplicate: () => void;
+  readonly onArchive: () => void;
+}) {
+  const isProject = preset.origin === "project" && preset.id !== null;
+  return (
+    <Dialog
+      wide
+      title={preset.displayName}
+      description="Presets are immutable so every published agent version keeps the exact model it was reviewed with. To change one, duplicate it into a new key."
+      onClose={onClose}
+      footer={
+        <>
+          {isProject ? (
+            <Button
+              variant="danger"
+              icon={<Archive size={14} />}
+              onClick={onArchive}
+            >
+              Archive preset
+            </Button>
+          ) : null}
+          <Button onClick={onClose}>Close</Button>
+          {isProject ? (
+            <Button
+              variant="primary"
+              icon={<Copy size={14} />}
+              onClick={onDuplicate}
+              disabled={!preset.available}
+            >
+              Duplicate as new preset
+            </Button>
+          ) : null}
+        </>
+      }
+    >
+      <MetaGrid
+        columns={2}
+        items={[
+          { label: "Key", value: <code>{preset.key}</code> },
+          { label: "Model", value: <code>{preset.model}</code> },
+          {
+            label: "Provider connection",
+            value: provider
+              ? `${provider.displayName} · ${provider.providerType}`
+              : preset.origin === "deployment"
+                ? "Deployment configuration"
+                : "Removed connection",
+          },
+          {
+            label: "Source",
+            value: preset.origin === "deployment" ? "Deployment" : "Project",
+          },
+          {
+            label: "Availability",
+            value: preset.available
+              ? "Available to new agent versions"
+              : "Unavailable",
+          },
+          {
+            label: "Created",
+            value: preset.createdAt
+              ? formatDate(preset.createdAt)
+              : "Deployment configuration",
+          },
+        ]}
+      />
+      <section className="stack">
+        <h3>{preset.settings ? "Generation settings" : "Routing policy"}</h3>
+        <p className="muted">{describePresetRouting(preset)}</p>
+        {preset.origin === "project" ? (
+          <JsonBlock
+            label={preset.settings ? "Generation settings" : "Routing policy"}
+            value={preset.settings ?? preset.routing}
+          />
+        ) : null}
+      </section>
+      <section className="stack">
+        <h3>Used by</h3>
+        {usageLoading ? (
+          <p className="muted">Loading agents…</p>
+        ) : usedBy.length === 0 ? (
+          <p className="muted">No agent pins this preset.</p>
+        ) : (
+          <ul className="preset-usage">
+            {usedBy.map((agent) => (
+              <li key={agent.id}>
+                <Link to={`/agents/${agent.id}`}>{agent.name}</Link>
+                <span className="muted">
+                  {" "}
+                  · {agent.version == null ? "draft" : `v${agent.version}`}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </Dialog>
+  );
+}
 
 function CreateProviderDialog({
   existingKeys,

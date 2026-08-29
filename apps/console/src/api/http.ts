@@ -1657,6 +1657,12 @@ export class HttpConsoleApi implements ConsoleApi {
     return this.getAgent(id);
   };
 
+  deleteAgent = async (id: string): Promise<void> => {
+    await this.#projectRequest(`/agents/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  };
+
   listSkills = async (filters: ListFilters) => {
     const response =
       await this.#projectRequest<CursorPage<SkillSummary>>("/skills?limit=100");
@@ -2058,6 +2064,20 @@ export class HttpConsoleApi implements ConsoleApi {
       `/model-providers/${encodeURIComponent(providerId)}/credential`,
       { method: "PUT", body: JSON.stringify({ apiKey }) },
     );
+
+  removeModelProvider = async (providerId: string): Promise<void> => {
+    await this.#projectRequest(
+      `/model-providers/${encodeURIComponent(providerId)}`,
+      { method: "DELETE" },
+    );
+  };
+
+  archiveModelPreset = async (presetId: string): Promise<void> => {
+    await this.#projectRequest(
+      `/model-presets/${encodeURIComponent(presetId)}`,
+      { method: "DELETE" },
+    );
+  };
 
   listSandboxProviders = async (): Promise<SandboxProviderList> => {
     const response = await this.#projectRequest<

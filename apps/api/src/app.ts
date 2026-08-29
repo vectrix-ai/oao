@@ -1277,6 +1277,7 @@ async function assertAgentDelegatesCompatible(
         AND definition.project_id=version.project_id
         AND definition.id=version.agent_definition_id
       WHERE version.organization_id=$1 AND version.project_id=$2
+        AND definition.archived_at IS NULL
         AND version.id=ANY($3::uuid[])`,
     [actor.organizationId, actor.projectId, versionIds],
   );
@@ -1344,7 +1345,8 @@ async function assertModelPresetApproved(
        ON c.organization_id=p.organization_id
       AND c.project_id=p.project_id
       AND c.id=p.provider_id
-     WHERE p.organization_id=$1 AND p.project_id=$2 AND p.preset_key=$3`,
+     WHERE p.organization_id=$1 AND p.project_id=$2 AND p.preset_key=$3
+       AND p.archived_at IS NULL AND c.archived_at IS NULL`,
     [actor.organizationId, actor.projectId, presetKey],
   );
   if (!result.rowCount)
@@ -1369,7 +1371,9 @@ async function listProjectModelPresetKeys(
        ON c.organization_id=p.organization_id
       AND c.project_id=p.project_id
       AND c.id=p.provider_id
-     WHERE p.organization_id=$1 AND p.project_id=$2 ORDER BY p.preset_key`,
+     WHERE p.organization_id=$1 AND p.project_id=$2
+       AND p.archived_at IS NULL AND c.archived_at IS NULL
+     ORDER BY p.preset_key`,
     [actor.organizationId, actor.projectId],
   );
   return result.rows.map((row) => row.preset_key);
@@ -3534,7 +3538,7 @@ function registerModelPresetRoutes(
       const result = await tx.query(
         `SELECT ${providerViewSql}
          FROM oao.project_model_providers
-         WHERE organization_id=$1 AND project_id=$2${condition.sql}
+         WHERE organization_id=$1 AND project_id=$2 AND archived_at IS NULL${condition.sql}
          ORDER BY created_at DESC,id DESC LIMIT $${3 + condition.values.length}`,
         [actor.organizationId, actor.projectId, ...condition.values, limit + 1],
       );
@@ -3658,6 +3662,7 @@ function registerModelPresetRoutes(
                 `SELECT provider_type,encryption_key_version
                  FROM oao.project_model_providers
                  WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                   AND archived_at IS NULL
                  FOR UPDATE`,
                 [
                   actor.organizationId,
@@ -3714,6 +3719,121 @@ function registerModelPresetRoutes(
     },
   );
 
+  app.delete(
+    "/v1/projects/:projectId/model-providers/:providerId",
+    async (c) => {
+      const actor = assertProject(c);
+      const providerId = c.req.param("providerId");
+      const idem = idempotencyKey(c.req.raw);
+      return dependencies.store.transaction(
+        actor,
+        "project:admin",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `DELETE:/model-providers/${providerId}`,
+            method: "DELETE",
+            key: idem,
+            hash: requestHash({ providerId }),
+            status: 200,
+            execute: async () => {
+              const current = await tx.query<{
+                provider_type: ModelProviderType;
+                encryption_key_version: number;
+                live_presets: number;
+              }>(
+                `SELECT c.provider_type,c.encryption_key_version,
+                      (SELECT count(*)::int FROM oao.project_model_presets p
+                        WHERE p.organization_id=c.organization_id AND p.project_id=c.project_id
+                          AND p.provider_id=c.id AND p.archived_at IS NULL) AS live_presets
+               FROM oao.project_model_providers c
+               WHERE c.organization_id=$1 AND c.project_id=$2 AND c.id=$3
+                 AND c.archived_at IS NULL
+               FOR UPDATE`,
+                [actor.organizationId, actor.projectId, providerId],
+              );
+              const provider = current.rows[0];
+              if (!provider)
+                throw new HttpApiError("not_found", "Model provider not found");
+              if (provider.live_presets > 0)
+                throw new HttpApiError(
+                  "conflict",
+                  `${provider.live_presets} model ${provider.live_presets === 1 ? "preset still routes" : "presets still route"} through this connection. Archive ${provider.live_presets === 1 ? "it" : "them"} first.`,
+                );
+              // The row keeps its identity for archived presets that pinned it,
+              // but the credential is wiped so the key can never be used again.
+              await tx.query(
+                `UPDATE oao.project_model_providers
+               SET archived_at=clock_timestamp(),
+                   encrypted_api_key=decode('00','hex'),
+                   encryption_nonce=decode(repeat('00',12),'hex'),
+                   encryption_tag=decode(repeat('00',16),'hex'),
+                   encryption_key_version=$4,
+                   credential_fingerprint=repeat('0',64)
+               WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  providerId,
+                  provider.encryption_key_version + 1,
+                ],
+              );
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "model_provider.removed",
+                resourceType: "model_provider",
+                resourceId: providerId,
+                detail: { providerType: provider.provider_type },
+              });
+              return { id: providerId, removed: true };
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body);
+        },
+      );
+    },
+  );
+
+  app.delete("/v1/projects/:projectId/model-presets/:presetId", async (c) => {
+    const actor = assertProject(c);
+    const presetId = c.req.param("presetId");
+    const idem = idempotencyKey(c.req.raw);
+    return dependencies.store.transaction(
+      actor,
+      "project:admin",
+      async (tx) => {
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: `DELETE:/model-presets/${presetId}`,
+          method: "DELETE",
+          key: idem,
+          hash: requestHash({ presetId }),
+          status: 200,
+          execute: async () => {
+            // Archiving only: agent versions pin the key, so the row and its
+            // meaning survive for sessions that already run on it.
+            const result = await tx.query<{ preset_key: string }>(
+              `UPDATE oao.project_model_presets SET archived_at=clock_timestamp()
+               WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND archived_at IS NULL
+               RETURNING preset_key`,
+              [actor.organizationId, actor.projectId, presetId],
+            );
+            const preset = result.rows[0];
+            if (!preset)
+              throw new HttpApiError("not_found", "Model preset not found");
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "model_preset.archived",
+              resourceType: "model_preset",
+              resourceId: presetId,
+              detail: { key: preset.preset_key },
+            });
+            return { id: presetId, key: preset.preset_key, archived: true };
+          },
+        });
+        c.header("idempotency-replayed", String(response.replayed));
+        return c.json(response.body);
+      },
+    );
+  });
+
   app.get("/v1/projects/:projectId/model-catalog", async (c) => {
     const actor = assertProject(c);
     const limit = parseLimit(c.req.query("limit"));
@@ -3724,7 +3844,8 @@ function registerModelPresetRoutes(
         `SELECT id,provider_type,encrypted_api_key,encryption_nonce,
                 encryption_tag,encryption_key_version
          FROM oao.project_model_providers
-         WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+         WHERE organization_id=$1 AND project_id=$2 AND id=$3
+           AND archived_at IS NULL`,
         [actor.organizationId, actor.projectId, providerId],
       );
       const provider = providerResult.rows[0];
@@ -3767,14 +3888,15 @@ function registerModelPresetRoutes(
       const result = await tx.query(
         `SELECT p.id,p.organization_id,p.project_id,p.preset_key AS key,p.display_name,
                 'project'::text AS origin,p.provider_id,c.provider_type,p.model,p.routing,p.settings,
-                true AS hosted,(c.id IS NOT NULL AND $3::boolean) AS available,
+                true AS hosted,
+                (c.id IS NOT NULL AND c.archived_at IS NULL AND $3::boolean) AS available,
                 p.created_by_principal_id,p.created_at
          FROM oao.project_model_presets p
          LEFT JOIN oao.project_model_providers c
            ON c.organization_id=p.organization_id
           AND c.project_id=p.project_id
           AND c.id=p.provider_id
-         WHERE p.organization_id=$1 AND p.project_id=$2${condition.sql}
+         WHERE p.organization_id=$1 AND p.project_id=$2 AND p.archived_at IS NULL${condition.sql}
          ORDER BY p.created_at DESC,p.id DESC LIMIT $${4 + condition.values.length}`,
         [
           actor.organizationId,
@@ -3841,7 +3963,9 @@ function registerModelPresetRoutes(
               `SELECT id,provider_type,encrypted_api_key,encryption_nonce,
                       encryption_tag,encryption_key_version
                FROM oao.project_model_providers
-               WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+               WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                 AND archived_at IS NULL
+               FOR SHARE`,
               [actor.organizationId, actor.projectId, input.providerId],
             );
             const provider = providerResult.rows[0];
@@ -5070,7 +5194,7 @@ function registerAgentRoutes(
          FROM oao.agent_definitions d
          LEFT JOIN oao.agent_versions v ON v.organization_id=d.organization_id
            AND v.project_id=d.project_id AND v.id=d.latest_version_id
-         WHERE d.organization_id=$1 AND d.project_id=$2${condition.sql}
+         WHERE d.organization_id=$1 AND d.project_id=$2 AND d.archived_at IS NULL${condition.sql}
          ORDER BY d.created_at DESC,d.id DESC LIMIT $${3 + condition.values.length}`,
         [actor.organizationId, actor.projectId, ...condition.values, limit + 1],
       );
@@ -5198,7 +5322,7 @@ function registerAgentRoutes(
          FROM oao.agent_definitions d
          LEFT JOIN oao.agent_versions v ON v.organization_id=d.organization_id
            AND v.project_id=d.project_id AND v.id=d.latest_version_id
-         WHERE d.organization_id=$1 AND d.project_id=$2 AND d.id=$3`,
+         WHERE d.organization_id=$1 AND d.project_id=$2 AND d.id=$3 AND d.archived_at IS NULL`,
         [actor.organizationId, actor.projectId, c.req.param("agentId")],
       );
       const agent = publicValue(result.rows[0]) as
@@ -5212,6 +5336,42 @@ function registerAgentRoutes(
         [actor.organizationId, actor.projectId, c.req.param("agentId")],
       );
       return c.json({ ...agent, versions: rows(versions) });
+    });
+  });
+
+  app.delete("/v1/projects/:projectId/agents/:agentId", async (c) => {
+    const actor = assertProject(c);
+    const agentId = c.req.param("agentId");
+    const idem = idempotencyKey(c.req.raw);
+    return dependencies.store.transaction(actor, "agent:write", async (tx) => {
+      const response = await dependencies.store.idempotent(tx, actor, {
+        scope: `DELETE:/agents/${agentId}`,
+        method: "DELETE",
+        key: idem,
+        hash: requestHash({ agentId }),
+        status: 200,
+        execute: async () => {
+          // Sessions, runs, and delegate bindings keep foreign keys to the
+          // immutable versions, so deletion archives the definition: it leaves
+          // every list and lookup while existing history stays readable.
+          const result = await tx.query(
+            `UPDATE oao.agent_definitions SET archived_at=clock_timestamp()
+             WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND archived_at IS NULL
+             RETURNING id`,
+            [actor.organizationId, actor.projectId, agentId],
+          );
+          if (!result.rowCount)
+            throw new HttpApiError("not_found", "Agent not found");
+          await dependencies.store.appendAudit(tx, actor, {
+            action: "agent.deleted",
+            resourceType: "agent",
+            resourceId: agentId,
+          });
+          return { id: agentId, deleted: true };
+        },
+      });
+      c.header("idempotency-replayed", String(response.replayed));
+      return c.json(response.body);
     });
   });
 
@@ -5302,6 +5462,16 @@ function registerAgentRoutes(
           c.req.param("agentId"),
           config,
         );
+        // Locked: a concurrent delete waits here and, once this publish
+        // commits, archives the definition together with the new version.
+        const live = await tx.query(
+          `SELECT 1 FROM oao.agent_definitions
+           WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND archived_at IS NULL
+           FOR UPDATE`,
+          [actor.organizationId, actor.projectId, c.req.param("agentId")],
+        );
+        if (!live.rowCount)
+          throw new HttpApiError("not_found", "Agent not found");
         const response = await dependencies.store.idempotent(tx, actor, {
           scope: `POST:/agents/${c.req.param("agentId")}/versions`,
           key: idem,
@@ -5456,9 +5626,12 @@ function registerRunRoutes(
                   latest_version_id: string | null;
                 }>(
                   `SELECT latest_version_id FROM oao.agent_definitions
-                 WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
+                 WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                   AND archived_at IS NULL FOR UPDATE`,
                   [actor.organizationId, actor.projectId, submittedAgentId],
                 );
+                if (definition.rows.length === 0)
+                  throw new HttpApiError("not_found", "Agent not found");
                 const latestVersionId = definition.rows[0]?.latest_version_id;
                 if (!latestVersionId)
                   throw new HttpApiError(
@@ -5477,6 +5650,17 @@ function registerRunRoutes(
                   "conflict",
                   "Agent does not have a published version",
                 );
+              const owner = await tx.query(
+                `SELECT 1 FROM oao.agent_versions v
+                 JOIN oao.agent_definitions d ON d.organization_id=v.organization_id
+                   AND d.project_id=v.project_id AND d.id=v.agent_definition_id
+                 WHERE v.organization_id=$1 AND v.project_id=$2 AND v.id=$3
+                   AND d.archived_at IS NULL
+                 FOR SHARE OF d`,
+                [actor.organizationId, actor.projectId, agentVersionId],
+              );
+              if (!owner.rowCount)
+                throw new HttpApiError("not_found", "Agent version not found");
               await assertAgentCanInspectRunFiles(
                 tx,
                 actor,

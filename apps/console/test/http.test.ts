@@ -177,6 +177,46 @@ describe("HTTP console adapter", () => {
     ).toBe("DELETE");
   });
 
+  it("archives model presets and removes provider connections with DELETE requests", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValue(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+
+    await api.archiveModelPreset("preset/one");
+    await api.removeModelProvider("provider/one");
+
+    expect(fetchMock.mock.calls.slice(1).map(([url]) => url)).toEqual([
+      `/v1/projects/${PROJECT_ID}/model-presets/preset%2Fone`,
+      `/v1/projects/${PROJECT_ID}/model-providers/provider%2Fone`,
+    ]);
+    for (const call of fetchMock.mock.calls.slice(1)) {
+      const init = call[1] as RequestInit;
+      expect(init.method).toBe("DELETE");
+      expect(new Headers(init.headers).get("idempotency-key")).toBeTruthy();
+    }
+  });
+
+  it("deletes an agent with an idempotent DELETE request", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValue(jsonResponse({ id: "agent/one", deleted: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+
+    await api.deleteAgent("agent/one");
+
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      `/v1/projects/${PROJECT_ID}/agents/agent%2Fone`,
+    );
+    const init = fetchMock.mock.calls[1]?.[1] as RequestInit | undefined;
+    expect(init?.method).toBe("DELETE");
+    expect(new Headers(init?.headers).get("idempotency-key")).toBeTruthy();
+  });
+
   it("bootstraps a development session once after an unauthenticated context", async () => {
     const fetchMock = vi
       .fn()

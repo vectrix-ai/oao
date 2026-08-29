@@ -102,14 +102,16 @@ A published agent version names an immutable model preset. A hosted preset
 references an OpenRouter, OpenAI, Anthropic, or xAI provider connection in the
 same project.
 
-| Method | Path                                                    | Purpose                                              |
-| ------ | ------------------------------------------------------- | ---------------------------------------------------- |
-| `GET`  | `/projects/{projectId}/model-providers`                 | List safe provider and credential metadata.          |
-| `POST` | `/projects/{projectId}/model-providers`                 | Add a provider and encrypted API key.                |
-| `PUT`  | `/projects/{projectId}/model-providers/{id}/credential` | Rotate the write-only API key.                       |
-| `GET`  | `/projects/{projectId}/model-catalog?providerId={id}`   | List the matching live provider catalog.             |
-| `GET`  | `/projects/{projectId}/model-presets`                   | List local, project, and unavailable legacy presets. |
-| `POST` | `/projects/{projectId}/model-presets`                   | Add an immutable preset linked to a provider.        |
+| Method   | Path                                                    | Purpose                                              |
+| -------- | ------------------------------------------------------- | ---------------------------------------------------- |
+| `GET`    | `/projects/{projectId}/model-providers`                 | List safe provider and credential metadata.          |
+| `POST`   | `/projects/{projectId}/model-providers`                 | Add a provider and encrypted API key.                |
+| `PUT`    | `/projects/{projectId}/model-providers/{id}/credential` | Rotate the write-only API key.                       |
+| `DELETE` | `/projects/{projectId}/model-providers/{id}`            | Remove a connection (wipes the key).                 |
+| `GET`    | `/projects/{projectId}/model-catalog?providerId={id}`   | List the matching live provider catalog.             |
+| `GET`    | `/projects/{projectId}/model-presets`                   | List local, project, and unavailable legacy presets. |
+| `POST`   | `/projects/{projectId}/model-presets`                   | Add an immutable preset linked to a provider.        |
+| `DELETE` | `/projects/{projectId}/model-presets/{id}`              | Archive a project preset.                            |
 
 Reads require `agent:read`; writes require `project:admin`. Every write requires
 an `Idempotency-Key`.
@@ -119,6 +121,22 @@ Create a provider with `{ key, displayName, providerType, apiKey }`, where
 `credentialConfigured`, a 12-character `credentialFingerprint`, and an
 incrementing `credentialVersion`; they never contain the API key or encryption
 material. Rotate a key with `{ "apiKey": "..." }`.
+
+`DELETE /model-presets/{id}` archives a project preset and returns
+`{ "id", "key", "archived": true }`. Presets stay append-only: the row, key,
+model, routing, and settings are never changed or deleted, because published
+agent versions pin the key. An archived preset leaves the list, can no longer
+be named by a new agent version (`400`), and its key stays reserved (`409` on
+reuse). Sessions of already published versions keep resolving it. Deployment
+presets cannot be archived. The audit log records `model_preset.archived`.
+
+`DELETE /model-providers/{id}` removes a connection. It is refused with `409`
+while any live preset still routes through it; archive those presets first.
+Removal wipes the encrypted key, leaves the list, releases the provider key for
+a new connection, and returns `{ "id", "removed": true }`. Rotating or building
+presets on a removed connection returns `404`, and runs of agents pinned to its
+archived presets fail with a clear provider-removed error. The audit log records
+`model_provider.removed`.
 
 `GET /model-catalog` requires `providerId`, accepts `search` and `limit`, and
 returns `providerId`, `providerType`, and safe catalog entries. Each entry
@@ -425,19 +443,31 @@ update or delete endpoint.
 
 ## Agents and versions
 
-| Method | Path                                              | Purpose                                |
-| ------ | ------------------------------------------------- | -------------------------------------- |
-| `GET`  | `/projects/{projectId}/agents`                    | List agent definitions.                |
-| `POST` | `/projects/{projectId}/agents`                    | Create an agent and publish version 1. |
-| `GET`  | `/projects/{projectId}/agents/{agentId}`          | Read the definition and all versions.  |
-| `GET`  | `/projects/{projectId}/agents/{agentId}/versions` | List immutable versions.               |
-| `POST` | `/projects/{projectId}/agents/{agentId}/versions` | Publish the next version.              |
+| Method   | Path                                              | Purpose                                |
+| -------- | ------------------------------------------------- | -------------------------------------- |
+| `GET`    | `/projects/{projectId}/agents`                    | List agent definitions.                |
+| `POST`   | `/projects/{projectId}/agents`                    | Create an agent and publish version 1. |
+| `GET`    | `/projects/{projectId}/agents/{agentId}`          | Read the definition and all versions.  |
+| `DELETE` | `/projects/{projectId}/agents/{agentId}`          | Delete (archive) an agent.             |
+| `GET`    | `/projects/{projectId}/agents/{agentId}/versions` | List immutable versions.               |
+| `POST`   | `/projects/{projectId}/agents/{agentId}/versions` | Publish the next version.              |
 
 Creating an agent accepts `name`, optional `key` and `description`, and requires
 `initialConfig` (or its `config` alias).
 Agent list and detail responses include the latest immutable `sandbox` policy
 so operators can determine delegate compatibility before publication.
 See [Create an agent](/agents/create-agent) for the exact configuration shape.
+
+`DELETE /agents/{agentId}` requires `agent:write` and an `Idempotency-Key`. It
+returns `{ "id": "...", "deleted": true }` and archives the agent rather than
+removing rows: sessions, runs, and delegate bindings keep their references to
+the immutable versions, and existing session history stays readable. After
+deletion the agent returns `404` from reads, disappears from the list, cannot
+publish new versions, cannot start sessions (by `agentId` or by
+`agentVersionId`), and cannot be picked as a new delegate. Its `key` becomes
+free for a new agent. Coordinators that already pin one of its versions keep
+working. The audit log records `agent.deleted`. Deleting an already deleted
+agent returns `404`.
 Set `initialConfig.sandbox.enabled`, `provider`, `snapshotId`, `network`, and
 `capabilities`
 to make the same sandbox selection available in API-driven creation as in the

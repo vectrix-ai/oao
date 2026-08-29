@@ -173,9 +173,13 @@ cookies.
     selection. See [Harness Operations](/concepts/harness-operations).
 
     Delegate selection works the same way: the editor records the selected
-    agent's exact latest version. A coordinator can delegate only to that
-    published roster, and each child keeps its own persistent session while
-    sharing the coordinator workspace. See
+    agent's exact latest version. The **Delegates** section lists only the
+    agents linked to this version; **Add delegate** opens a dialog where you
+    can search every other agent in the project by name, key, or description
+    and pick one or more published, sandbox-compatible agents. Unavailable
+    candidates stay visible with the reason. A coordinator can delegate only
+    to that published roster, and each child keeps its own persistent session
+    while sharing the coordinator workspace. See
     [Multi-agent orchestration](/concepts/multi-agent-orchestration).
 
     Console validation requires:
@@ -590,8 +594,16 @@ model invocation fails visibly and no tool executes. Local argument and result
 validation remains authoritative even when a provider uses the schema only as
 generation guidance.
 
-The console's agent-version editor lists tools as collapsible rows inside a
-**Tools** panel that starts collapsed. Each row opens to a syntax-highlighted
+In the console's agent-version editor only the **Agent definition** section
+(model preset and system instructions) starts open. Every other section —
+**Tools**, **Harness Operations**, **Skills**, **MCP toolsets**, **Delegates**,
+**Sandbox policy**, and **Recent sessions** — starts collapsed and summarizes
+what the version binds in its heading (counts, or the sandbox provider,
+network policy, capabilities, and timeout); select the heading to open it.
+The model preset picker shows the selected preset's name, and one line below
+it lists the model identifier, origin, and routing settings with a link to
+**Models**. The editor lists tools as collapsible rows inside the
+**Tools** panel. Each row opens to a syntax-highlighted
 preview of the input and output schema. **Add tool** and **Edit definition**
 open a modal editor for one tool definition as JSON, and **Edit JSON** opens
 the complete tool list for authoring or pasting in bulk; both validate the JSON
@@ -856,11 +868,21 @@ Open a session and use:
   is ready for the session and is not shown as pending work.
 - The message composer for another durable run after the latest run settles.
   Select **Send** or press <kbd>Command</kbd>+<kbd>Enter</kbd>; Enter by itself
-  adds a new line.
+  adds a new line. On viewports 1024px wide or narrower, or 820px tall or
+  shorter, the composer starts
+  minimized as a single **Send a message to the agent** bar so it does not
+  cover the transcript; select it to open the form, and use **Minimize
+  composer** to fold it away again. A draft and any attached files survive
+  minimizing. The session header is also more compact there: the ID eyebrow is
+  hidden and the fact strip scrolls horizontally in one row.
 - **Debug** for a chronological waterfall assembled from timeline entries,
   public product events, model invocations, caller tool calls, sandbox commands,
   approvals, and sandboxes. Sandbox activity includes its model-facing
   arguments, result, state, and timing.
+- The timeline strip above the transcript. Hovering a block shows its actor,
+  a snippet, duration, and offset; hovering a message or row in the
+  transcript highlights its block and shows the same tooltip there. Clicking
+  a block jumps the transcript to that event.
 - Reasoning and sandbox commands are expandable rows in **Transcript**. Each
   reasoning row shows the provider thinking text when supplied and the full
   model invocation duration. Each sandbox row shows its recorded input/output.
@@ -1009,18 +1031,38 @@ The `202 Accepted` response reports the current run. Continue reading the run
 or event stream until it settles; acceptance is a cancellation request, not
 proof that active model or tool work has already stopped.
 
+## Delete an agent
+
+Delete an agent from the console with the trash icon at the end of its row on
+the **Agents** page, or with **Delete agent** in the header of its detail page.
+Both ask for confirmation first. Through the API, send
+`DELETE /v1/projects/{projectId}/agents/{agentId}` with an `Idempotency-Key`.
+
+Deletion archives the agent instead of removing rows, because sessions, runs,
+and delegate bindings reference its immutable versions:
+
+- The agent leaves the agents list, the delegate picker, and every lookup;
+  reading it returns `404`.
+- It can no longer publish versions or start sessions, whether addressed by
+  `agentId` or by one of its `agentVersionId`s.
+- Existing sessions keep their full transcripts and still show the agent's
+  name. Coordinators that already pin one of its versions keep delegating to it.
+- Its key is released, so a new agent can reuse it.
+- The audit log records `agent.deleted`. There is no restore.
+
 ## Current MVP limitations
 
-- Agent creation always publishes version 1. There are no draft, rename,
-  description-edit, archive, or delete routes.
+- Agent creation always publishes version 1. There are no draft, rename, or
+  description-edit routes. Deletion archives the agent (see
+  [Delete an agent](#delete-an-agent)); there is no restore route.
 - Versions are append-only and content-addressed. Identical content cannot be
   published twice for one agent.
 - The console can edit instructions, model preset, sandbox provider, sandbox
   capabilities, network policy, and timeout while creating an agent and on its
   latest version. Caller/platform tools are authored as JSON in the **Tools**
   panel; there is no form-based schema builder.
-- Model presets can be added and linked, but not deprecated or deleted. Preset
-  rows are append-only by design.
+- Model presets can be added, duplicated into a new key, and archived, but never
+  edited in place. Preset rows are append-only by design.
 - Sessions never float to a newer version, and only one unsettled run is
   allowed per session.
 - The console exposes cancellation but not API run resume or branch replay.

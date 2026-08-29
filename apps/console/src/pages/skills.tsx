@@ -1,6 +1,7 @@
 import {
   ArrowLeft,
   ChevronRight,
+  Download,
   FilePlus2,
   FileText,
   Folder,
@@ -12,10 +13,16 @@ import {
   X,
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../api/context";
-import type { SkillDetail, SkillDraft, SkillDraftEntry } from "../api/types";
+import type {
+  ConsoleApi,
+  SkillDetail,
+  SkillDraft,
+  SkillDraftEntry,
+  SkillFileInput,
+} from "../api/types";
 import {
   Button,
   Dialog,
@@ -99,7 +106,8 @@ function entriesWithInferredDirectories(
   return [...byPath.values()];
 }
 
-function readMarkdownUpload(file: File): Promise<string> {
+/** FileReader rather than Blob.text(): the latter is missing in some engines. */
+function readUploadText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.addEventListener("load", () => resolve(String(reader.result ?? "")));
@@ -108,6 +116,173 @@ function readMarkdownUpload(file: File): Promise<string> {
     );
     reader.readAsText(file, "utf-8");
   });
+}
+
+/**
+ * Portable Skill bundle: one JSON file holding the discovery metadata, the
+ * instructions, and every packaged resource. Download produces it from an
+ * immutable version; Upload turns it back into a draft to review and publish.
+ */
+interface SkillBundle {
+  readonly schemaVersion: 1;
+  readonly kind: "oao.skill";
+  readonly skill: {
+    readonly key: string;
+    readonly displayName: string;
+    readonly name: string;
+    readonly description: string;
+    readonly instructions: string;
+  };
+  readonly files: readonly SkillFileInput[];
+}
+
+function bundleFileName(key: string, version: number): string {
+  return `${slugify(key) || "skill"}-v${version}.skill.json`;
+}
+
+function parseSkillBundle(text: string): SkillBundle {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("The file is not valid JSON.");
+  }
+  const value = parsed as Partial<SkillBundle> | null;
+  if (
+    !value ||
+    typeof value !== "object" ||
+    value.kind !== "oao.skill" ||
+    value.schemaVersion !== 1 ||
+    !value.skill ||
+    typeof value.skill !== "object"
+  )
+    throw new Error(
+      "The file is not an OAO Skill bundle. Download one from a Skill version first.",
+    );
+  const skill = value.skill as Partial<SkillBundle["skill"]>;
+  for (const field of ["displayName", "name", "description", "instructions"])
+    if (typeof skill[field as keyof typeof skill] !== "string")
+      throw new Error(`The bundle is missing the ${field} field.`);
+  const files = Array.isArray(value.files) ? value.files : [];
+  for (const file of files as readonly Partial<SkillFileInput>[]) {
+    if (
+      typeof file?.path !== "string" ||
+      typeof file.contentType !== "string" ||
+      typeof file.dataBase64 !== "string"
+    )
+      throw new Error("A bundled resource is missing its path or content.");
+    if (!file.path.toLocaleLowerCase("en-US").endsWith(".md"))
+      throw new Error(
+        `${file.path} is not a Markdown file. Only .md resources can be uploaded.`,
+      );
+  }
+  return {
+    schemaVersion: 1,
+    kind: "oao.skill",
+    skill: {
+      key: typeof skill.key === "string" ? skill.key : slugify(skill.name!),
+      displayName: skill.displayName!,
+      name: skill.name!,
+      description: skill.description!,
+      instructions: skill.instructions!,
+    },
+    files: files as readonly SkillFileInput[],
+  };
+}
+
+/** Fills a draft from a bundle: metadata first, then every packaged resource. */
+async function applySkillBundle(
+  api: ConsoleApi,
+  draft: SkillDraft,
+  bundle: SkillBundle,
+  { replaceResources }: { readonly replaceResources: boolean },
+): Promise<SkillDraft> {
+  let current = await api.updateSkillDraft(draft.id, {
+    key: draft.skillId ? draft.key : bundle.skill.key,
+    displayName: bundle.skill.displayName,
+    name: draft.skillId ? draft.name : bundle.skill.name,
+    description: bundle.skill.description,
+    instructions: bundle.skill.instructions,
+  });
+  if (replaceResources) {
+    // Files first, then directories deepest-first: a sourced draft may list
+    // nested files without their parent directories, so every entry is
+    // removed individually rather than trusting top-level recursion.
+    const entries = [...current.entries].sort(
+      (left, right) =>
+        Number(left.kind === "directory") -
+          Number(right.kind === "directory") ||
+        right.path.split("/").length - left.path.split("/").length,
+    );
+    for (const entry of entries) {
+      if (
+        !current.entries.some(
+          (item) => item.path === entry.path && item.kind === entry.kind,
+        )
+      )
+        continue;
+      current = await api.removeSkillDraftEntry(
+        current.id,
+        entry.path,
+        entry.kind === "directory",
+      );
+    }
+  }
+  for (const file of bundle.files)
+    current = await api.putSkillDraftFile(current.id, {
+      path: file.path,
+      contentType: "text/markdown",
+      dataBase64: file.dataBase64,
+    });
+  return current;
+}
+
+function downloadBundle(bundle: SkillBundle, fileName: string): void {
+  const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+    type: "application/json;charset=utf-8",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Hidden file input behind an "Upload" button; accepts one Skill bundle. */
+function SkillBundleUpload({
+  label,
+  pending,
+  onFile,
+}: {
+  readonly label: string;
+  readonly pending: boolean;
+  readonly onFile: (file: File) => void;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <input
+        ref={input}
+        type="file"
+        accept=".json,application/json"
+        aria-label={`${label} file`}
+        hidden
+        onChange={(event: ChangeEvent<HTMLInputElement>) => {
+          const file = event.target.files?.[0];
+          event.target.value = "";
+          if (file) onFile(file);
+        }}
+      />
+      <Button
+        icon={<Upload size={15} />}
+        loading={pending}
+        onClick={() => input.current?.click()}
+      >
+        {label}
+      </Button>
+    </>
+  );
 }
 
 export function SkillsPage() {
@@ -124,6 +299,22 @@ export function SkillsPage() {
     mutationFn: () => api.createSkillDraft(),
     onSuccess: setDraft,
   });
+  const importBundle = useMutation({
+    mutationFn: async (file: File) => {
+      const bundle = parseSkillBundle(await readUploadText(file));
+      const created = await api.createSkillDraft();
+      try {
+        return await applySkillBundle(api, created, bundle, {
+          replaceResources: false,
+        });
+      } catch (error) {
+        await api.discardSkillDraft(created.id).catch(() => undefined);
+        throw error;
+      }
+    },
+    onSuccess: setDraft,
+    onError: (error) => notify(error.message),
+  });
   return (
     <Page>
       <PageHeader
@@ -131,19 +322,69 @@ export function SkillsPage() {
         title="Skills"
         description="Versioned procedural knowledge loaded progressively by managed agents."
         actions={
-          <Button
-            variant="primary"
-            icon={<Plus size={15} />}
-            loading={createDraft.isPending}
-            onClick={() => createDraft.mutate()}
-          >
-            Create Skill
-          </Button>
+          <>
+            <SkillBundleUpload
+              label="Upload Skill"
+              pending={importBundle.isPending}
+              onFile={(file) => importBundle.mutate(file)}
+            />
+            <Button
+              variant="primary"
+              icon={<Plus size={15} />}
+              loading={createDraft.isPending}
+              onClick={() => createDraft.mutate()}
+            >
+              Create Skill
+            </Button>
+          </>
         }
       />
+      {query.isPending ? (
+        <LoadingState label="Loading Skills" rows={5} />
+      ) : query.isError ? (
+        <ErrorState error={query.error} retry={() => void query.refetch()} />
+      ) : query.data.data.length === 0 ? (
+        <EmptyState
+          icon="◇"
+          title="No Skills published"
+          description="Publish reusable instructions and references, then attach their exact versions to an agent version."
+          action={
+            <Button
+              loading={createDraft.isPending}
+              onClick={() => createDraft.mutate()}
+            >
+              Create Skill
+            </Button>
+          }
+        />
+      ) : (
+        <Panel
+          title="Published Skills"
+          description="Latest versions are offered when publishing an agent; existing bindings never float."
+          flush
+        >
+          <div className="compact-list">
+            {query.data.data.map((skill) => (
+              <Link key={skill.id} to={`/skills/${skill.id}`}>
+                <span className="who">
+                  <strong>{skill.displayName}</strong>
+                  <small>
+                    {skill.name} · v{skill.version} · {skill.fileCount}{" "}
+                    resources
+                  </small>
+                  <small>{skill.description}</small>
+                </span>
+                <StatusChip value={skill.status} />
+              </Link>
+            ))}
+          </div>
+        </Panel>
+      )}
       <Panel
         title="How Skills work"
-        description="Skills are immutable, reusable instruction packages that agents load only when needed."
+        collapsible
+        defaultCollapsed
+        description="Immutable, reusable instruction packages that agents load only when needed. Open for the publish, bind, and activation model."
       >
         <div className="skill-explainer">
           <article>
@@ -187,47 +428,6 @@ export function SkillsPage() {
           </article>
         </div>
       </Panel>
-      {query.isPending ? (
-        <LoadingState label="Loading Skills" rows={5} />
-      ) : query.isError ? (
-        <ErrorState error={query.error} retry={() => void query.refetch()} />
-      ) : query.data.data.length === 0 ? (
-        <EmptyState
-          icon="◇"
-          title="No Skills published"
-          description="Publish reusable instructions and references, then attach their exact versions to an agent version."
-          action={
-            <Button
-              loading={createDraft.isPending}
-              onClick={() => createDraft.mutate()}
-            >
-              Create Skill
-            </Button>
-          }
-        />
-      ) : (
-        <Panel
-          title="Published Skills"
-          description="Latest versions are offered when publishing an agent; existing bindings never float."
-          flush
-        >
-          <div className="compact-list">
-            {query.data.data.map((skill) => (
-              <Link key={skill.id} to={`/skills/${skill.id}`}>
-                <span className="who">
-                  <strong>{skill.displayName}</strong>
-                  <small>
-                    {skill.name} · v{skill.version} · {skill.fileCount}{" "}
-                    resources
-                  </small>
-                  <small>{skill.description}</small>
-                </span>
-                <StatusChip value={skill.status} />
-              </Link>
-            ))}
-          </div>
-        </Panel>
-      )}
       {draft ? (
         <SkillDialog
           draft={draft}
@@ -417,7 +617,7 @@ function SkillDialog({
         current = await api.putSkillDraftFile(current.id, {
           path: packagePath(directory, file.name),
           contentType: "text/markdown",
-          dataBase64: utf8Base64(await readMarkdownUpload(file)),
+          dataBase64: utf8Base64(await readUploadText(file)),
         });
       }
     } catch (error) {
@@ -955,6 +1155,48 @@ export function SkillDetailPage() {
       api.createSkillDraft({ skillId, sourceSkillVersionId }),
     onSuccess: setDraft,
   });
+  const exportVersion = useMutation({
+    mutationFn: async (versionId: string) => {
+      const skill = query.data;
+      const version = skill?.versions.find((item) => item.id === versionId);
+      if (!skill || !version) throw new Error("Skill version not found");
+      const exported = await api.exportSkillVersion(skillId, versionId);
+      downloadBundle(
+        {
+          schemaVersion: 1,
+          kind: "oao.skill",
+          skill: {
+            key: skill.key,
+            displayName: skill.displayName,
+            name: version.name,
+            description: version.description,
+            instructions: version.instructions,
+          },
+          files: exported.files,
+        },
+        bundleFileName(skill.key, version.version),
+      );
+      return version.version;
+    },
+    onSuccess: (version) => notify(`Downloaded Skill version ${version}.`),
+    onError: (error) => notify(error.message),
+  });
+  const importVersion = useMutation({
+    mutationFn: async (file: File) => {
+      const bundle = parseSkillBundle(await readUploadText(file));
+      const created = await api.createSkillDraft({ skillId });
+      try {
+        return await applySkillBundle(api, created, bundle, {
+          replaceResources: true,
+        });
+      } catch (error) {
+        await api.discardSkillDraft(created.id).catch(() => undefined);
+        throw error;
+      }
+    },
+    onSuccess: setDraft,
+    onError: (error) => notify(error.message),
+  });
   const lifecycle = useMutation({
     mutationFn: (input: {
       readonly versionId: string;
@@ -991,17 +1233,24 @@ export function SkillDetailPage() {
         title={query.data.displayName}
         description={query.data.description}
         actions={
-          <Button
-            variant="primary"
-            icon={<Save size={15} />}
-            loading={createDraft.isPending}
-            disabled={!latest}
-            onClick={() => {
-              if (latest) createDraft.mutate(latest.id);
-            }}
-          >
-            Publish new version
-          </Button>
+          <>
+            <SkillBundleUpload
+              label="Upload version"
+              pending={importVersion.isPending}
+              onFile={(file) => importVersion.mutate(file)}
+            />
+            <Button
+              variant="primary"
+              icon={<Save size={15} />}
+              loading={createDraft.isPending}
+              disabled={!latest}
+              onClick={() => {
+                if (latest) createDraft.mutate(latest.id);
+              }}
+            >
+              Publish new version
+            </Button>
+          </>
         }
       />
       <Panel
@@ -1016,6 +1265,18 @@ export function SkillDetailPage() {
                 <strong>Version {version.version}</strong>
                 <div className="btn-group">
                   <StatusChip value={version.status} />
+                  <Button
+                    size="sm"
+                    icon={<Download size={14} />}
+                    loading={
+                      exportVersion.isPending &&
+                      exportVersion.variables === version.id
+                    }
+                    disabled={exportVersion.isPending}
+                    onClick={() => exportVersion.mutate(version.id)}
+                  >
+                    Download
+                  </Button>
                   {version.status === "active" ? (
                     <Button
                       size="sm"
