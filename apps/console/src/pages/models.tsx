@@ -11,6 +11,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link } from "react-router";
 import { useApi } from "../api/context";
+import { listAllPages } from "../api/paginate";
 import type {
   AgentSummary,
   CreateModelPresetInput,
@@ -114,7 +115,7 @@ export function ModelsPage() {
   const [duplicateFrom, setDuplicateFrom] = useState<ModelPreset | null>(null);
   const agents = useQuery({
     queryKey: ["agents", "preset-usage"],
-    queryFn: () => api.listAgents({}),
+    queryFn: () => listAllPages((page) => api.listAgents({ page })),
   });
   const providers = useQuery({
     queryKey: ["model-providers"],
@@ -178,7 +179,7 @@ export function ModelsPage() {
   });
   const usageByPreset = useMemo(() => {
     const map = new Map<string, AgentSummary[]>();
-    for (const agent of agents.data?.data ?? [])
+    for (const agent of agents.data ?? [])
       if (agent.model)
         map.set(agent.model, [...(map.get(agent.model) ?? []), agent]);
     return map;

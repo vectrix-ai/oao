@@ -3964,7 +3964,8 @@ function registerModelPresetRoutes(
                       encryption_tag,encryption_key_version
                FROM oao.project_model_providers
                WHERE organization_id=$1 AND project_id=$2 AND id=$3
-                 AND archived_at IS NULL`,
+                 AND archived_at IS NULL
+               FOR SHARE`,
               [actor.organizationId, actor.projectId, input.providerId],
             );
             const provider = providerResult.rows[0];
@@ -5461,9 +5462,12 @@ function registerAgentRoutes(
           c.req.param("agentId"),
           config,
         );
+        // Locked: a concurrent delete waits here and, once this publish
+        // commits, archives the definition together with the new version.
         const live = await tx.query(
           `SELECT 1 FROM oao.agent_definitions
-           WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND archived_at IS NULL`,
+           WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND archived_at IS NULL
+           FOR UPDATE`,
           [actor.organizationId, actor.projectId, c.req.param("agentId")],
         );
         if (!live.rowCount)
@@ -5651,7 +5655,8 @@ function registerRunRoutes(
                  JOIN oao.agent_definitions d ON d.organization_id=v.organization_id
                    AND d.project_id=v.project_id AND d.id=v.agent_definition_id
                  WHERE v.organization_id=$1 AND v.project_id=$2 AND v.id=$3
-                   AND d.archived_at IS NULL`,
+                   AND d.archived_at IS NULL
+                 FOR SHARE OF d`,
                 [actor.organizationId, actor.projectId, agentVersionId],
               );
               if (!owner.rowCount)

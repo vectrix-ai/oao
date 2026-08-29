@@ -204,15 +204,30 @@ async function applySkillBundle(
     description: bundle.skill.description,
     instructions: bundle.skill.instructions,
   });
-  if (replaceResources)
-    for (const entry of current.entries.filter(
-      (item) => !item.path.includes("/"),
-    ))
+  if (replaceResources) {
+    // Files first, then directories deepest-first: a sourced draft may list
+    // nested files without their parent directories, so every entry is
+    // removed individually rather than trusting top-level recursion.
+    const entries = [...current.entries].sort(
+      (left, right) =>
+        Number(left.kind === "directory") -
+          Number(right.kind === "directory") ||
+        right.path.split("/").length - left.path.split("/").length,
+    );
+    for (const entry of entries) {
+      if (
+        !current.entries.some(
+          (item) => item.path === entry.path && item.kind === entry.kind,
+        )
+      )
+        continue;
       current = await api.removeSkillDraftEntry(
         current.id,
         entry.path,
         entry.kind === "directory",
       );
+    }
+  }
   for (const file of bundle.files)
     current = await api.putSkillDraftFile(current.id, {
       path: file.path,

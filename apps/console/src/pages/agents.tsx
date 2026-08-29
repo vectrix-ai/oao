@@ -12,6 +12,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../api/context";
+import { listAllPages } from "../api/paginate";
 import type {
   AgentSummary,
   AgentVersionConfig,
@@ -1021,7 +1022,7 @@ export function AgentDetailPage() {
   });
   const agents = useQuery({
     queryKey: ["agents", "delegate-roster"],
-    queryFn: () => api.listAgents({}),
+    queryFn: () => listAllPages((page) => api.listAgents({ page })),
   });
   const mcpToolsets = useQuery({
     queryKey: ["mcp-toolsets"],
@@ -1078,7 +1079,7 @@ export function AgentDetailPage() {
       skills={skills.data?.data ?? []}
       mcpToolsets={mcpToolsets.data?.data ?? []}
       mcpPolicies={mcpPolicies.data?.data ?? []}
-      availableAgents={(agents.data?.data ?? []).filter(
+      availableAgents={(agents.data ?? []).filter(
         (candidate) => candidate.id !== query.data.id,
       )}
     />

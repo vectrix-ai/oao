@@ -8,6 +8,7 @@ import { toJsonSchema } from "@valibot/to-json-schema";
 import * as v from "valibot";
 import {
   FLUE_PACKAGE_VERSIONS,
+  ModelPresetUnavailableError,
   PostgresSkillRegistry,
   createManagedHarnessOperationTool,
   createManagedRunDeliveredMessage,
@@ -727,7 +728,39 @@ test("an unknown or malformed preset never reaches the provider", async () => {
   });
   await assert.rejects(
     missing.activate(tenant, "never-approved-v1"),
-    /not approved/u,
+    (error: unknown) =>
+      error instanceof ModelPresetUnavailableError &&
+      error.code === "model_preset_unavailable" &&
+      /not approved/u.test(error.message),
+  );
+
+  // A removed provider connection is terminal too: admission must fail the
+  // run instead of retrying the wake.
+  const removed = createProjectModelPresetActivator({
+    pool: presetPool([
+      {
+        ...presetRow({
+          preset_key: "orphaned-v1",
+          model: "openrouter/anthropic/claude-sonnet-4.6",
+          routing: {},
+        }),
+        provider_removed: true,
+      },
+    ]).pool,
+    credentialCipher,
+    registry: {
+      activate: () => {
+        throw new Error("must not activate");
+      },
+    },
+    deploymentPresetKeys: new Set(["local-default"]),
+  });
+  await assert.rejects(
+    removed.activate(tenant, "orphaned-v1"),
+    (error: unknown) =>
+      error instanceof ModelPresetUnavailableError &&
+      error.code === "model_provider_removed" &&
+      /was removed/u.test(error.message),
   );
 
   const malformed = createProjectModelPresetActivator({

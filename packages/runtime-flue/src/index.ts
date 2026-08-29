@@ -1289,6 +1289,21 @@ interface ThreadInstanceRow {
 
 class FlueIncarnationCorruptionError extends Error {}
 
+/**
+ * The run can never start: its preset was never approved for the project or
+ * the provider connection behind it was removed. Retrying the wake cannot
+ * help, so admission fails the run visibly instead of exhausting attempts.
+ */
+export class ModelPresetUnavailableError extends Error {
+  constructor(
+    readonly code: "model_preset_unavailable" | "model_provider_removed",
+    message: string,
+  ) {
+    super(message);
+    this.name = "ModelPresetUnavailableError";
+  }
+}
+
 function threadInstanceId(
   input: TenantContext & { readonly threadId: ThreadId },
 ): string {
@@ -2163,7 +2178,13 @@ export class ManagedRuntimeOrchestrator {
     const run = await this.loadRun(job);
     // Flue resolves `useModel` synchronously during the agent render, so a
     // durable project preset must be loaded and registered before dispatch.
-    await this.modelPresets?.activate(run, run.snapshot.modelPreset);
+    try {
+      await this.modelPresets?.activate(run, run.snapshot.modelPreset);
+    } catch (error) {
+      if (!(error instanceof ModelPresetUnavailableError)) throw error;
+      await this.failBeforeDispatch(run, error);
+      return;
+    }
     await this.skills?.activate(run, run.snapshot.skills);
     const admissionKey = `run:${run.runId}`;
     const snapshotHash = digestJson(run.snapshot);
@@ -2655,6 +2676,87 @@ export class ManagedRuntimeOrchestrator {
         kind: "runtime.recovery_completed",
         payload: { outcome: "failed", code: safeError.code },
       });
+    });
+  }
+
+  /**
+   * Settles a run that cannot be admitted at all. Mirrors `settle` for a run
+   * that never reached Flue: no dispatch or thread instance exists yet, so the
+   * run, its timeline head, obligations, and session summary are closed here
+   * and the thread's next queued run is woken.
+   */
+  private async failBeforeDispatch(
+    run: RunContext,
+    error: ModelPresetUnavailableError,
+  ): Promise<void> {
+    await withTenantTransaction(this.pool, run, async (transaction) => {
+      const updated = await transaction.query(
+        `UPDATE oao.runs SET state='failed',settled_at=COALESCE(settled_at,clock_timestamp()),
+           updated_at=clock_timestamp()
+         WHERE organization_id=$1 AND project_id=$2 AND id=$3
+           AND state NOT IN ('completed','failed','cancelled','timed_out')`,
+        [run.organizationId, run.projectId, run.runId],
+      );
+      if (!updated.rowCount) return;
+      await transaction.query(
+        `UPDATE oao.timeline_entries SET completed_at=clock_timestamp(),safe_detail=$4
+         WHERE organization_id=$1 AND project_id=$2 AND run_id=$3 AND entry_sequence=1`,
+        [
+          run.organizationId,
+          run.projectId,
+          run.runId,
+          { status: "failed", code: error.code, message: error.message },
+        ],
+      );
+      await transaction.query(
+        `INSERT INTO oao.session_summaries (
+          organization_id,project_id,session_id,run_count
+        ) VALUES ($1,$2,$3,1)
+        ON CONFLICT (organization_id,project_id,session_id) DO UPDATE SET
+          summary_version=oao.session_summaries.summary_version+1,
+          run_count=oao.session_summaries.run_count+1,updated_at=clock_timestamp()`,
+        [run.organizationId, run.projectId, run.sessionId],
+      );
+      await appendEventOnce(transaction, {
+        organizationId: run.organizationId,
+        projectId: run.projectId,
+        id: eventUuid(`event:${run.runId}:run-settled`),
+        aggregateType: "run",
+        aggregateId: run.runId,
+        kind: "run.state_changed",
+        payload: { state: "failed", code: error.code },
+      });
+      await appendEventOnce(transaction, {
+        organizationId: run.organizationId,
+        projectId: run.projectId,
+        id: eventUuid(`event:${run.runId}:session-summary`),
+        aggregateType: "session",
+        aggregateId: run.sessionId,
+        kind: "session.summary_changed",
+        payload: { runId: run.runId, state: "failed" },
+      });
+      await closeRunObligations(transaction, run, "failed");
+      await transaction.query(
+        "DELETE FROM oao.thread_admission_heads WHERE organization_id=$1 AND project_id=$2 AND run_id=$3",
+        [run.organizationId, run.projectId, run.runId],
+      );
+      const successor = await transaction.query<{ id: RunId }>(
+        `SELECT id FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3
+          AND state IN ('queued','retry_scheduled') AND cancellation_requested_at IS NULL
+          ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`,
+        [run.organizationId, run.projectId, run.threadId],
+      );
+      const next = successor.rows[0];
+      if (next)
+        await this.queue.enqueue(transaction, {
+          organizationId: run.organizationId,
+          projectId: run.projectId,
+          id: eventUuid(`wake:admit:${next.id}`),
+          runId: next.id,
+          dispatchKey: `admit:${next.id}`,
+          kind: "admit",
+          payload: {},
+        });
     });
   }
 
@@ -4275,9 +4377,14 @@ export function createProjectModelPresetActivator(input: {
       );
       const row = result.rows[0];
       if (!row && input.deploymentPresetKeys.has(presetKey)) return undefined;
-      if (!row) throw new Error(`Model preset is not approved: ${presetKey}`);
+      if (!row)
+        throw new ModelPresetUnavailableError(
+          "model_preset_unavailable",
+          `Model preset is not approved: ${presetKey}`,
+        );
       if (row.provider_removed)
-        throw new Error(
+        throw new ModelPresetUnavailableError(
+          "model_provider_removed",
           `The provider connection behind model preset ${presetKey} was removed`,
         );
       if (!input.credentialCipher)
