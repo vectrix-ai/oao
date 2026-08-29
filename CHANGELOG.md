@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/vectrix-ai/oao/compare/v0.2.0...v0.3.0) (2026-08-29)
+
+
+### Features
+
+* console UX, delegate picker, and lifecycle management for agents, presets, and providers ([#5](https://github.com/vectrix-ai/oao/issues/5)) ([4390dc8](https://github.com/vectrix-ai/oao/commit/4390dc85f26ece1ee93339829fc47fb5e57b0b6c))
+
 ## [0.2.0](https://github.com/vectrix-ai/oao/compare/v0.1.0...v0.2.0) (2026-08-29)
 
 
