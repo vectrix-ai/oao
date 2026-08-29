@@ -1,0 +1,40 @@
+---
+title: Releases
+description: How OAO versions and releases the platform from main.
+---
+
+OAO uses Release Please to maintain one platform version across the monorepo.
+Every push to `main` runs the release workflow. Release Please reads the
+Conventional Commits merged since the last release and creates or updates one
+release pull request.
+
+## Version changes
+
+Use a Conventional Commit title on each pull request so the merge commit has a
+predictable release effect:
+
+| Prefix                                  | Version effect | Example                                     |
+| --------------------------------------- | -------------- | ------------------------------------------- |
+| `fix:` or `perf:`                       | Patch          | `fix: renew leases before they expire`      |
+| `feat:`                                 | Minor          | `feat: add project-scoped model presets`    |
+| `feat!:` or a `BREAKING CHANGE:` footer | Major          | `feat!: replace the session event envelope` |
+
+Documentation, test, build, and chore-only commits do not cause a version bump
+on their own. They can still be included in the next release pull request when
+Release Please associates them with a releasable change.
+
+The repository starts from `0.0.0`. The first releasable change creates the
+first release proposal. Release Please updates the root `package.json`, every
+workspace package version, the MCP server's advertised version, the version
+manifest, and `CHANGELOG.md` together.
+
+## Publishing a release
+
+Review and merge the `chore: release x.y.z` pull request when the accumulated
+changes are ready to publish. The next workflow run creates the `vx.y.z` tag
+and matching GitHub release. Until that pull request is merged, later changes
+to `main` update the same release proposal.
+
+`main` is protected by a repository ruleset: changes must arrive through a pull
+request, force pushes are blocked, and the branch cannot be deleted. The release
+workflow writes only to its release branch and never bypasses this protection.

@@ -236,6 +236,25 @@ See [apps/api/README.md](apps/api/README.md) for the runnable API commands,
 development/Vite proxy setup, exact authentication environment contract, WorkOS
 callback/webhook URLs, and operator identity provisioning.
 
+## Releases
+
+`main` accepts changes only through pull requests. Every merge to `main` runs
+Release Please, which creates or updates one rolling release pull request from
+the Conventional Commits merged since the previous release.
+
+Use a Conventional Commit pull request title so the release effect is clear:
+
+- `fix:` and `perf:` create a patch increment.
+- `feat:` creates a minor increment.
+- `feat!:` or a `BREAKING CHANGE:` footer creates a major increment.
+- Documentation, test, build, and chore-only changes do not increment the
+  version by themselves.
+
+Merging the `chore: release x.y.z` pull request synchronizes the root and
+workspace package versions, updates `CHANGELOG.md`, and publishes the matching
+`vx.y.z` tag and GitHub release. See the
+[release guide](docs/reference/releases.mdx) for the complete workflow.
+
 ## Railway deployment
 
 The minimal hosted topology is one public service that serves the compiled
