@@ -4222,6 +4222,7 @@ interface ProjectModelPresetRow {
   encryption_nonce: Buffer;
   encryption_tag: Buffer;
   encryption_key_version: number;
+  provider_removed: boolean;
 }
 
 /**
@@ -4261,7 +4262,8 @@ export function createProjectModelPresetActivator(input: {
           transaction.query<ProjectModelPresetRow>(
             `SELECT p.preset_key,p.model,p.routing,p.settings,p.provider_id,
                     c.provider_type,c.encrypted_api_key,c.encryption_nonce,
-                    c.encryption_tag,c.encryption_key_version
+                    c.encryption_tag,c.encryption_key_version,
+                    (c.archived_at IS NOT NULL) AS provider_removed
              FROM oao.project_model_presets p
              JOIN oao.project_model_providers c
                ON c.organization_id=p.organization_id
@@ -4274,6 +4276,10 @@ export function createProjectModelPresetActivator(input: {
       const row = result.rows[0];
       if (!row && input.deploymentPresetKeys.has(presetKey)) return undefined;
       if (!row) throw new Error(`Model preset is not approved: ${presetKey}`);
+      if (row.provider_removed)
+        throw new Error(
+          `The provider connection behind model preset ${presetKey} was removed`,
+        );
       if (!input.credentialCipher)
         throw new Error("Provider credential decryption is not configured");
       const apiKey = input.credentialCipher.decrypt(

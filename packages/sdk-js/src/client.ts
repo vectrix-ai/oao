@@ -365,6 +365,44 @@ export class OaoClient {
     );
   }
 
+  /**
+   * Removes a provider connection: the credential is wiped and the key is
+   * released. Refused with 409 while any live preset still routes through it.
+   */
+  removeModelProvider(
+    projectId: string,
+    providerId: string,
+    options: WriteOptions,
+  ): Promise<{ readonly id: string; readonly removed: true }> {
+    return this.#write(
+      this.routes.modelProvider(projectId, providerId),
+      "DELETE",
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Archives a project preset so new agent versions can no longer pin it.
+   * Sessions of already published versions keep resolving it.
+   */
+  archiveModelPreset(
+    projectId: string,
+    presetId: string,
+    options: WriteOptions,
+  ): Promise<{
+    readonly id: string;
+    readonly key: string;
+    readonly archived: true;
+  }> {
+    return this.#write(
+      this.routes.modelPreset(projectId, presetId),
+      "DELETE",
+      undefined,
+      options,
+    );
+  }
+
   listSandboxProviders(
     projectId: string,
     pagination: PaginationOptions = {},
@@ -858,6 +896,20 @@ export class OaoClient {
     options?: RequestOptions,
   ): Promise<AgentDefinition> {
     return this.#request(this.routes.agent(projectId, agentId), options);
+  }
+
+  /** Deletes (archives) an agent. Existing sessions keep their history. */
+  deleteAgent(
+    projectId: string,
+    agentId: string,
+    options: WriteOptions,
+  ): Promise<{ readonly id: string; readonly deleted: true }> {
+    return this.#write(
+      this.routes.agent(projectId, agentId),
+      "DELETE",
+      undefined,
+      options,
+    );
   }
 
   publishAgentVersion(

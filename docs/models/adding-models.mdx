@@ -59,6 +59,12 @@ new nonce, authentication tag, ciphertext, fingerprint, and incremented
 credential version. Existing presets continue to reference the same provider.
 The runtime replaces its in-memory provider on the next activation.
 
+To remove a connection, select **Remove** next to the provider and confirm.
+Removal is refused while any model preset still routes through the connection;
+archive those presets first. Removing wipes the encrypted key, releases the
+provider key for a new connection, and makes runs of agents pinned to its
+archived presets fail with a provider-removed error.
+
 ## Add a model preset
 
 1. Select **Add model preset**.
@@ -132,6 +138,20 @@ from Grok 4.6 onward. Reasoning cannot be disabled on these models. Structured
 JSON schemas are operation-specific rather than a fixed model default. xAI
 server-side tools are not part of this preset contract; OAO's versioned agent
 tools remain available.
+
+### Inspect, duplicate, or archive a preset
+
+Select a preset in the **Model presets** table to open it. The dialog shows the
+key, model, provider connection, routing policy or generation settings as JSON,
+and the agents that currently pin the key.
+
+- **Duplicate as new preset** opens the add dialog prefilled with the same
+  provider, model, policy, and settings under the next free key. This is how
+  you "change" a preset: the original stays exactly as published agent versions
+  reviewed it.
+- **Archive preset** removes it from the table and from the agent editor's
+  preset picker. Agents that pin the key keep running on it, but must move to
+  another preset before they can publish a new version. The key stays reserved.
 
 ## Prompt caching
 

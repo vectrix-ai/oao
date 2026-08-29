@@ -974,6 +974,104 @@
   color: var(--text-3);
 }
 
+/* Row-level actions sit in a narrow trailing column, right-aligned. */
+.table-actions-head,
+.table-actions {
+  width: 1%;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Preset facts under the picker: model id, origin, routing, one link. */
+.preset-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin: calc(-1 * var(--sp-2)) 0 0;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.preset-meta code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+}
+.preset-meta > span[aria-hidden] {
+  color: var(--text-3);
+}
+.preset-meta a {
+  margin-left: auto;
+}
+
+/* A table cell whose entity opens a dialog instead of navigating. */
+.row-link {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.row-link:hover strong,
+.row-link:focus-visible strong {
+  text-decoration: underline;
+}
+.row-link:focus-visible {
+  outline: var(--bw-control) solid var(--accent);
+  outline-offset: 2px;
+}
+.preset-usage {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+/* ---------- Delegate roster ---------- */
+.delegate-list {
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.delegate-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border: var(--bw-control) solid var(--line);
+  background: var(--surface);
+}
+.delegate-row-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  font-size: 13px;
+}
+.delegate-row-version {
+  font-weight: 400;
+  color: var(--text-2);
+}
+.delegate-row-sub {
+  color: var(--text-2);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.delegate-row-sub--warn {
+  color: var(--warning-fg);
+}
+.delegate-picker-list {
+  max-height: 50vh;
+  overflow-y: auto;
+  padding-right: var(--sp-1);
+}
+
 /* ---------- Session detail ---------- */
 
 /* One dense strip of facts under the title, so the conversation starts high. */
@@ -1792,6 +1890,63 @@
   font-size: 12px;
   color: var(--text-3);
 }
+.composer-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.composer-body {
+  display: grid;
+  gap: var(--sp-2);
+}
+.composer-body[hidden] {
+  display: none;
+}
+/* Minimized: one thin bar that reopens the form; the draft stays mounted. */
+.composer--collapsed {
+  padding: 0;
+}
+.composer-expand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  background: var(--surface);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.composer-expand:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.composer-expand:focus-visible {
+  outline: var(--bw-control) solid var(--accent);
+  outline-offset: -2px;
+}
+.composer-expand > span:first-of-type {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-expand > svg {
+  flex: none;
+  color: var(--text-3);
+}
+.composer-expand-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
 .composer--waiting {
   display: flex;
   align-items: center;
@@ -2543,6 +2698,48 @@
   }
   .version-list {
     grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  }
+}
+
+/* Compact session header: the transcript is what people came to read, so on
+   narrow OR short viewports the title, facts, and controls give up vertical
+   space before it does. Keep the query in sync with `compactViewportQuery`
+   in pages/sessions.tsx, which minimizes the composer under the same rule. */
+@media (max-width: 1024px), (max-height: 820px) {
+  .page--fill {
+    gap: var(--sp-3);
+    padding-top: var(--sp-3);
+    padding-bottom: var(--sp-3);
+  }
+  .page--fill .crumbs {
+    margin-bottom: var(--sp-1);
+  }
+  .page--fill .page-header .eyebrow {
+    display: none;
+  }
+  .page--fill .page-header h1 {
+    font-size: 18px;
+  }
+  /* One scrollable row instead of wrapping onto two or three. */
+  .session-facts {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+  }
+  .session-facts .fact {
+    flex: none;
+  }
+  .session-controls {
+    gap: var(--sp-2) var(--sp-3);
+  }
+  .minimap-axis {
+    height: 16px;
+  }
+}
+@media (max-width: 1024px) {
+  .page--fill {
+    padding: var(--sp-4);
   }
 }
 

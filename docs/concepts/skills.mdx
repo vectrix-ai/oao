@@ -165,6 +165,41 @@ tenant identity. Export returns the exact version and resources needed for a
 portable backup or import into another project. OAO does not extract archives,
 follow symlinks, or fetch remote package content.
 
+### Download and upload bundles
+
+The console wraps export in a portable bundle file, `<key>-v<version>.skill.json`:
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "oao.skill",
+  "skill": {
+    "key": "shipment-intake",
+    "displayName": "Shipment Intake",
+    "name": "shipment-intake",
+    "description": "…",
+    "instructions": "# Markdown instructions…"
+  },
+  "files": [
+    {
+      "path": "references/checklist.md",
+      "contentType": "text/markdown",
+      "dataBase64": "…"
+    }
+  ]
+}
+```
+
+- **Download** on any version of a Skill produces this file from the export
+  route.
+- **Upload Skill** on the Skills page turns a bundle into a new draft; **Upload
+  version** on a Skill page turns it into a draft of the next version of that
+  Skill, replacing the packaged resources with the bundle's. Both open the
+  usual review dialog, so nothing is published until you confirm.
+- Uploads accept only Markdown resources (`.md`, `text/markdown`); a bundle
+  with other file types, or a file that is not a bundle, is rejected with the
+  reason and no draft is left behind.
+
 ## Progressive disclosure
 
 OAO uses the Skill primitives in the pinned Flue `2.0.3` runtime:
@@ -206,7 +241,8 @@ visible to shell commands.
 
 ## Console workflow
 
-1. Open **Skills** and choose **Create Skill**.
+1. Open **Skills** and choose **Create Skill**, or **Upload Skill** to start
+   from a downloaded bundle.
 2. Enter a routing-friendly name and description. The description should say
    what the Skill does and when the model should activate it.
 3. Write the Markdown instructions.

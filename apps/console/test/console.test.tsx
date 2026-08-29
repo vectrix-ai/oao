@@ -12,6 +12,15 @@ import { describe, expect, it, vi } from "vitest";
 import { ConsoleApp } from "../src/app";
 import { DemoConsoleApi } from "../src/api/context";
 
+/** Editor sections other than the definition start collapsed; open one by its heading. */
+async function openSection(
+  user: ReturnType<typeof userEvent.setup>,
+  name: string,
+): Promise<void> {
+  const toggle = await screen.findByRole("button", { name });
+  if (toggle.getAttribute("aria-expanded") !== "true") await user.click(toggle);
+}
+
 function renderConsole(
   path: string,
   api = new DemoConsoleApi({ eventDelayMs: 60_000 }),
@@ -152,6 +161,55 @@ describe("management console", () => {
     ).toBeInTheDocument();
   });
 
+  it("deletes an agent from the list after confirmation", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/agents", api);
+    expect(await screen.findByText("Order triage")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Delete agent Order triage" }),
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: "Delete “Order triage”?",
+    });
+    expect(
+      within(dialog).getByText(/Existing sessions keep their transcripts/u),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("button", { name: "Delete agent" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("Order triage")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("Support operator")).toBeInTheDocument();
+    await expect(
+      api.getAgent("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+    ).rejects.toThrow("Agent not found");
+  });
+
+  it("deletes an agent from its detail page and returns to the list", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/agents/cccccccc-cccc-4ccc-8ccc-cccccccccccc", api);
+    await screen.findByRole("heading", { name: "Order triage" });
+    // Cancelling leaves the agent untouched.
+    await user.click(screen.getByRole("button", { name: "Delete agent" }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.queryByRole("dialog", { name: "Delete “Order triage”?" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete agent" }));
+    await user.click(
+      within(
+        screen.getByRole("dialog", { name: "Delete “Order triage”?" }),
+      ).getByRole("button", { name: "Delete agent" }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Agents" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Order triage")).not.toBeInTheDocument();
+  });
+
   it("creates the first agent version with the selected model preset", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
@@ -179,9 +237,7 @@ describe("management console", () => {
       }),
     );
     expect(
-      await dialog.findByText(
-        /Claude Sonnet 4\.6 \(zero retention\) · openrouter\/anthropic\/claude-sonnet-4\.6/u,
-      ),
+      await dialog.findByText("openrouter/anthropic/claude-sonnet-4.6"),
     ).toBeInTheDocument();
     await user.click(dialog.getByRole("checkbox", { name: "Enable sandbox" }));
     await user.selectOptions(
@@ -202,9 +258,7 @@ describe("management console", () => {
       await screen.findByRole("heading", { name: "Hosted reviewer" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(
-        /Claude Sonnet 4\.6 \(zero retention\) · openrouter\/anthropic\/claude-sonnet-4\.6/u,
-      ),
+      screen.getByText("openrouter/anthropic/claude-sonnet-4.6"),
     ).toBeInTheDocument();
     const created = (await api.listAgents({})).data.find(
       (agent) => agent.name === "Hosted reviewer",
@@ -263,6 +317,120 @@ describe("management console", () => {
     });
   });
 
+  it("downloads a Skill version as a portable bundle", async () => {
+    const user = userEvent.setup();
+    const blobs: Blob[] = [];
+    const clicks: string[] = [];
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    const originalClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = (blob: Blob) => {
+      blobs.push(blob);
+      return "blob:skill-bundle";
+    };
+    URL.revokeObjectURL = () => undefined;
+    HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+      clicks.push(this.download);
+    };
+    try {
+      renderConsole("/skills/44444444-4444-4444-8444-444444444444");
+      await screen.findByRole("heading", { name: "Shipment Intake" });
+      await user.click(screen.getAllByRole("button", { name: "Download" })[0]!);
+      await waitFor(() => expect(clicks).toHaveLength(1));
+      expect(clicks[0]).toMatch(/^shipment-intake-v\d+\.skill\.json$/u);
+      const text = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.addEventListener("load", () =>
+          resolve(String(reader.result ?? "")),
+        );
+        reader.addEventListener("error", () => reject(reader.error));
+        reader.readAsText(blobs[0]!);
+      });
+      const bundle = JSON.parse(text) as {
+        kind: string;
+        schemaVersion: number;
+        skill: { displayName: string; instructions: string };
+        files: readonly { path: string }[];
+      };
+      expect(bundle.kind).toBe("oao.skill");
+      expect(bundle.schemaVersion).toBe(1);
+      expect(bundle.skill.displayName).toBe("Shipment Intake");
+      expect(bundle.skill.instructions.length).toBeGreaterThan(0);
+      expect(Array.isArray(bundle.files)).toBe(true);
+    } finally {
+      URL.createObjectURL = originalCreate;
+      URL.revokeObjectURL = originalRevoke;
+      HTMLAnchorElement.prototype.click = originalClick;
+    }
+  });
+
+  it("uploads a Skill bundle into a reviewable draft", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/skills", api);
+    await screen.findByRole("heading", { name: "Skills" });
+    const bundle = {
+      schemaVersion: 1,
+      kind: "oao.skill",
+      skill: {
+        key: "imported-intake",
+        displayName: "Imported Intake",
+        name: "imported-intake",
+        description: "Imported from another project.",
+        instructions: "# Imported\n\nFollow the imported steps.",
+      },
+      files: [
+        {
+          path: "references/checklist.md",
+          contentType: "text/markdown",
+          dataBase64: btoa("# Checklist\n\n- one"),
+        },
+      ],
+    };
+    await user.upload(
+      screen.getByLabelText("Upload Skill file"),
+      new File([JSON.stringify(bundle)], "imported-intake-v1.skill.json", {
+        type: "application/json",
+      }),
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "Create Skill" }),
+    );
+    expect(dialog.getByDisplayValue("Imported Intake")).toBeInTheDocument();
+    expect(
+      dialog.getByDisplayValue("Imported from another project."),
+    ).toBeInTheDocument();
+    expect(
+      dialog.getByRole("button", { name: "Files (1)" }),
+    ).toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    await user.click(dialog.getByRole("button", { name: "Publish Skill" }));
+    expect(
+      await screen.findByRole("heading", { name: "Imported Intake" }),
+    ).toBeInTheDocument();
+    const created = (await api.listSkills({})).data.find(
+      (skill) => skill.name === "imported-intake",
+    );
+    expect(created?.fileCount).toBe(1);
+  });
+
+  it("rejects a file that is not a Skill bundle", async () => {
+    const user = userEvent.setup();
+    renderConsole("/skills");
+    await screen.findByRole("heading", { name: "Skills" });
+    await user.upload(
+      screen.getByLabelText("Upload Skill file"),
+      new File(["{}"], "notes.json", { type: "application/json" }),
+    );
+    expect(
+      await screen.findByText(/not an OAO Skill bundle/u),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "Create Skill" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("publishes a reusable Skill with nested Markdown resources", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
@@ -270,13 +438,18 @@ describe("management console", () => {
     expect(
       await screen.findByRole("heading", { name: "Skills" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { name: "How Skills work" }),
-    ).toBeInTheDocument();
+    // The explainer is a collapsed disclosure below the list.
+    const explainer = screen.getByRole("button", { name: "How Skills work" });
+    expect(explainer).toHaveAttribute("aria-expanded", "false");
     expect(
       screen.getByText(/sessions inherit those bindings automatically/u),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/\.flue\/packaged-skills\//u)).toBeInTheDocument();
+    ).not.toBeVisible();
+    await user.click(explainer);
+    expect(
+      screen.getByText(/sessions inherit those bindings automatically/u),
+    ).toBeVisible();
+    expect(screen.getByText(/\.flue\/packaged-skills\//u)).toBeVisible();
+    await user.click(explainer);
     expect(await screen.findByText("Shipment Intake")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Create Skill" }));
     const dialog = within(
@@ -1073,10 +1246,15 @@ describe("management console", () => {
       screen.getByText(/Customer Northwind #4831 says the expedited/u),
     );
     expect(userSeg.className).toContain("minimap-seg--hot");
+    // The timeline tooltip names the hovered block as if it were hovered directly.
+    expect(document.querySelector(".minimap-tip")?.textContent).toContain(
+      "Customer Northwind #4831",
+    );
     await user.unhover(
       screen.getByText(/Customer Northwind #4831 says the expedited/u),
     );
     expect(userSeg.className).not.toContain("minimap-seg--hot");
+    expect(document.querySelector(".minimap-tip")).toBeNull();
   });
 
   it("shows the session panel with details, cost chart, and usage", async () => {
@@ -1350,6 +1528,51 @@ describe("management console", () => {
     expect(screen.queryByLabelText("Message")).not.toBeInTheDocument();
   });
 
+  it("minimizes the composer on narrow viewports and reopens it on demand", async () => {
+    const user = userEvent.setup();
+    const originalMatchMedia = window.matchMedia;
+    const listeners = new Set<(event: { matches: boolean }) => void>();
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: (query: string) => ({
+        matches: query === "(max-width: 1024px), (max-height: 820px)",
+        media: query,
+        addEventListener: (
+          _type: string,
+          listener: (event: { matches: boolean }) => void,
+        ) => listeners.add(listener),
+        removeEventListener: (
+          _type: string,
+          listener: (event: { matches: boolean }) => void,
+        ) => listeners.delete(listener),
+      }),
+    });
+    try {
+      renderConsole("/sessions/session_01J5PDRS7WZTP4H3F6M2A9B8CX");
+      const open = await screen.findByRole("button", {
+        name: "Send a message to the agent",
+      });
+      expect(open).toHaveAttribute("aria-expanded", "false");
+      // The form stays mounted so a draft survives minimizing, but is hidden.
+      expect(screen.getByLabelText("Message")).not.toBeVisible();
+      await user.click(open);
+      expect(screen.getByLabelText("Message")).toBeVisible();
+      await user.type(screen.getByLabelText("Message"), "Keep this draft");
+      await user.click(
+        screen.getByRole("button", { name: "Minimize composer" }),
+      );
+      expect(screen.getByLabelText("Message")).not.toBeVisible();
+      expect(screen.getByLabelText("Message")).toHaveValue("Keep this draft");
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        writable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
   it("claims caller work and resolves approvals", async () => {
     const user = userEvent.setup();
     renderConsole("/pending-work");
@@ -1396,6 +1619,126 @@ describe("management console", () => {
     expect(screen.getByText(/zero data retention/u)).toBeInTheDocument();
     // Provider secrets are write-only and never rendered.
     expect(document.body.textContent).not.toMatch(/OPENROUTER_API_KEY|apiKey/u);
+  });
+
+  it("opens a model preset, duplicates it into a prefilled new preset, and archives it", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/models", api);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Claude Sonnet 4\.6 \(zero retention\)/u,
+      }),
+    );
+    const detail = within(
+      screen.getByRole("dialog", {
+        name: "Claude Sonnet 4.6 (zero retention)",
+      }),
+    );
+    expect(detail.getByText("claude-sonnet-4-6-zdr-v1")).toBeInTheDocument();
+    expect(
+      detail.getByText("OpenRouter primary · openrouter"),
+    ).toBeInTheDocument();
+    // Usage comes from the agents that pin the key.
+    expect(
+      detail.getByRole("link", { name: "Support operator" }),
+    ).toBeInTheDocument();
+
+    await user.click(
+      detail.getByRole("button", { name: "Duplicate as new preset" }),
+    );
+    const duplicate = within(
+      await screen.findByRole("dialog", {
+        name: "Duplicate “Claude Sonnet 4.6 (zero retention)”",
+      }),
+    );
+    expect(
+      duplicate.getByDisplayValue("Claude Sonnet 4.6 (zero retention)"),
+    ).toBeInTheDocument();
+    expect(
+      duplicate.getByDisplayValue("claude-sonnet-4-6-zero-retention-v1"),
+    ).toBeInTheDocument();
+    // The catalog answers the prefilled search and the source model is pinned.
+    await waitFor(() =>
+      expect(
+        duplicate.getByRole("button", { name: "Add model preset" }),
+      ).toBeEnabled(),
+    );
+    await user.click(
+      duplicate.getByRole("button", { name: "Add model preset" }),
+    );
+    expect(
+      await screen.findByText("claude-sonnet-4-6-zero-retention-v1"),
+    ).toBeInTheDocument();
+    const created = (await api.listModelPresets()).data.find(
+      (preset) => preset.key === "claude-sonnet-4-6-zero-retention-v1",
+    );
+    expect(created?.routing).toEqual({
+      zeroDataRetention: true,
+      dataCollection: "deny",
+      allowFallbacks: false,
+      providerAllowlist: ["anthropic"],
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: /claude-sonnet-4-6-zdr-v1/u }),
+    );
+    await user.click(screen.getByRole("button", { name: "Archive preset" }));
+    const confirm = within(
+      screen.getByRole("dialog", {
+        name: "Archive “Claude Sonnet 4.6 (zero retention)”?",
+      }),
+    );
+    expect(confirm.getByText(/3 agents currently pin/u)).toBeInTheDocument();
+    await user.click(confirm.getByRole("button", { name: "Archive preset" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /claude-sonnet-4-6-zdr-v1/u }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      (await api.listModelPresets()).data.map((preset) => preset.key),
+    ).toEqual(["claude-sonnet-4-6-zero-retention-v1"]);
+  });
+
+  it("refuses to remove a provider connection while presets use it, then removes it", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/models", api);
+    await screen.findByText("OpenRouter primary");
+    const providerRow = screen.getByText("OpenRouter primary").closest("tr")!;
+    await user.click(
+      within(providerRow).getByRole("button", { name: "Remove" }),
+    );
+    let confirm = within(
+      screen.getByRole("dialog", { name: "Remove “OpenRouter primary”?" }),
+    );
+    await user.click(
+      confirm.getByRole("button", { name: "Remove connection" }),
+    );
+    expect(
+      await confirm.findByText(
+        /1 model preset still routes through this connection/u,
+      ),
+    ).toBeInTheDocument();
+    await user.click(confirm.getByRole("button", { name: "Cancel" }));
+
+    await api.archiveModelPreset("44444444-4444-4444-8444-444444444444");
+    await user.click(
+      within(providerRow).getByRole("button", { name: "Remove" }),
+    );
+    confirm = within(
+      screen.getByRole("dialog", { name: "Remove “OpenRouter primary”?" }),
+    );
+    await user.click(
+      confirm.getByRole("button", { name: "Remove connection" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("OpenRouter primary")).not.toBeInTheDocument(),
+    );
+    expect(
+      (await api.listModelProviders()).map((provider) => provider.key),
+    ).toEqual(["anthropic-primary", "xai-primary"]);
   });
 
   it("adds and rotates a project-scoped OpenAI provider without rendering its key", async () => {
@@ -1806,6 +2149,7 @@ describe("management console", () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     renderConsole("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", api);
+    await openSection(user, "Sandbox policy");
     const provider = await screen.findByLabelText("Sandbox provider");
     expect(provider).toHaveValue("daytona-primary");
     const snapshot = await screen.findByLabelText("Daytona snapshot");
@@ -1831,6 +2175,7 @@ describe("management console", () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     renderConsole("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", api);
+    await openSection(user, "Sandbox policy");
     await screen.findByRole("option", { name: /daytona-small/u });
     await user.selectOptions(
       await screen.findByLabelText("Daytona snapshot"),
@@ -1989,6 +2334,7 @@ describe("management console", () => {
       },
     });
     await user.click(dialog.getByRole("button", { name: "Add operation" }));
+    await openSection(user, "Harness Operations");
     const operation = screen.getByRole("button", { name: /^verify_order/u });
     await user.click(operation);
     expect(
@@ -2202,6 +2548,7 @@ describe("management console", () => {
     const user = userEvent.setup();
     const api = new CoordinatorApi({ eventDelayMs: 60_000 });
     renderConsole("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", api);
+    await openSection(user, "Sandbox policy");
     await screen.findByRole("option", { name: /daytona-small/u });
     await user.selectOptions(
       await screen.findByLabelText("Daytona snapshot"),
@@ -2213,6 +2560,7 @@ describe("management console", () => {
     expect(
       screen.getByRole("button", { name: "Publish new version" }),
     ).toBeDisabled();
+    await openSection(user, "Delegates");
     await user.click(
       screen.getByRole("button", { name: "Remove incompatible delegate" }),
     );
@@ -2250,16 +2598,21 @@ describe("management console", () => {
         };
       }
     }
+    const user = userEvent.setup();
     renderConsole(
       "/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       new IncompatibleDelegateApi({ eventDelayMs: 60_000 }),
     );
-    const delegate = await screen.findByRole("checkbox", {
+    await user.click(
+      await screen.findByRole("button", { name: "Add delegate" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "Add delegates" });
+    const delegate = within(dialog).getByRole("checkbox", {
       name: /Document analyst · v5/u,
     });
     expect(delegate).toBeDisabled();
     expect(
-      screen.getByText(
+      within(dialog).getByText(
         /Unavailable — sandbox is disabled for this child, so it cannot share the coordinator workspace/u,
       ),
     ).toBeInTheDocument();
@@ -2287,22 +2640,84 @@ describe("management console", () => {
         };
       }
     }
+    const user = userEvent.setup();
     renderConsole(
       "/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       new DraftDelegateApi({ eventDelayMs: 60_000 }),
     );
-    const delegate = await screen.findByRole("checkbox", {
+    await user.click(
+      await screen.findByRole("button", { name: "Add delegate" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "Add delegates" });
+    const delegate = within(dialog).getByRole("checkbox", {
       name: /Document analyst · draft/u,
     });
     expect(delegate).toBeDisabled();
     expect(
-      screen.getByText(
+      within(dialog).getByText(
         /Unavailable — this child does not have a published sandbox policy/u,
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/No published version is available/u),
+      within(dialog).getByText(/No published version is available/u),
     ).toBeInTheDocument();
+  });
+
+  it("lists only linked delegates and adds more through a searchable dialog", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", api);
+    await screen.findByRole("button", { name: "Add delegate" });
+    // The panel no longer enumerates every candidate as a checkbox.
+    expect(
+      screen.queryByRole("checkbox", { name: /Document analyst · v5/u }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("No delegates linked")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Add delegate" }));
+    const dialog = screen.getByRole("dialog", { name: "Add delegates" });
+    expect(
+      within(dialog).getByRole("button", { name: "Add delegate" }),
+    ).toBeDisabled();
+    await user.type(
+      within(dialog).getByLabelText("Search agents"),
+      "zzz-no-such-agent",
+    );
+    expect(within(dialog).getByText("No matching agents")).toBeInTheDocument();
+    await user.clear(within(dialog).getByLabelText("Search agents"));
+    await user.type(within(dialog).getByLabelText("Search agents"), "analyst");
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: /Document analyst · v5/u }),
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "Add delegate" }),
+    );
+    expect(
+      screen.queryByRole("dialog", { name: "Add delegates" }),
+    ).not.toBeInTheDocument();
+
+    await openSection(user, "Delegates");
+    const linked = screen.getByRole("list", { name: "Linked delegates" });
+    expect(within(linked).getByText("Document analyst")).toBeInTheDocument();
+    expect(
+      within(linked).getByText(/Sandbox-compatible with this coordinator/u),
+    ).toBeInTheDocument();
+    // Already-linked agents are not offered again.
+    await user.click(screen.getByRole("button", { name: "Add delegate" }));
+    expect(
+      within(screen.getByRole("dialog", { name: "Add delegates" })).queryByRole(
+        "checkbox",
+        { name: /Document analyst · v5/u },
+      ),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close dialog" }));
+
+    await user.click(
+      within(linked).getByRole("button", {
+        name: "Remove delegate Document analyst",
+      }),
+    );
+    expect(screen.getByText("No delegates linked")).toBeInTheDocument();
   });
 
   it("creates a model preset from the provider catalog and links it to a new agent version", async () => {
@@ -2357,7 +2772,7 @@ describe("management console", () => {
       await screen.findByRole("option", { name: /GPT-5\.1 fast/u }),
     );
     expect(
-      await screen.findByText(/GPT-5.1 fast · openrouter\/openai\/gpt-5.1/u),
+      await screen.findByText("openrouter/openai/gpt-5.1"),
     ).toBeInTheDocument();
     await user.click(
       screen.getByRole("button", { name: "Publish new version" }),

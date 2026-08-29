@@ -969,6 +969,156 @@ test(
     });
 
     await t.test(
+      "deleting an agent archives it and frees its key",
+      async () => {
+        const config = {
+          systemPrompt: "Answer with safe public output.",
+          modelPreset: baseModelPresetKey,
+          tools: [],
+          sandbox: disabledSandbox,
+          limits: { maxTurns: 32, timeoutMs: 60_000 },
+        };
+        const created = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            { key: "deletable-agent", name: "Deletable agent", config },
+            "delete-agent-create-1",
+          ),
+        );
+        assert.equal(created.status, 201, await created.clone().text());
+        const createdBody = (await created.json()) as {
+          id: string;
+          latestVersionId: string;
+        };
+        const session = await app.request(
+          `${projectPath}/sessions`,
+          jsonRequest(
+            {
+              agentId: createdBody.id,
+              title: "Before deletion",
+              initialMessage: "Hello before deletion.",
+            },
+            "delete-agent-session-1",
+          ),
+        );
+        assert.equal(session.status, 201, await session.clone().text());
+        const sessionId = ((await session.json()) as { id: string }).id;
+
+        const deleteInit: RequestInit = {
+          method: "DELETE",
+          headers: { "idempotency-key": "delete-agent-1" },
+        };
+        const deleted = await app.request(
+          `${projectPath}/agents/${createdBody.id}`,
+          deleteInit,
+        );
+        assert.equal(deleted.status, 200, await deleted.clone().text());
+        assert.deepEqual(await deleted.json(), {
+          id: createdBody.id,
+          deleted: true,
+        });
+        const replay = await app.request(
+          `${projectPath}/agents/${createdBody.id}`,
+          deleteInit,
+        );
+        assert.equal(replay.status, 200);
+        assert.equal(replay.headers.get("idempotency-replayed"), "true");
+        const again = await app.request(
+          `${projectPath}/agents/${createdBody.id}`,
+          {
+            method: "DELETE",
+            headers: { "idempotency-key": "delete-agent-2" },
+          },
+        );
+        assert.equal(again.status, 404);
+
+        // Gone from reads, lists, publication, and session creation.
+        assert.equal(
+          (await app.request(`${projectPath}/agents/${createdBody.id}`)).status,
+          404,
+        );
+        const listed = (await (
+          await app.request(`${projectPath}/agents?limit=100`)
+        ).json()) as { data: readonly { id: string }[] };
+        assert.ok(!listed.data.some((agent) => agent.id === createdBody.id));
+        const publishAfter = await app.request(
+          `${projectPath}/agents/${createdBody.id}/versions`,
+          jsonRequest(
+            { config: { ...config, systemPrompt: "Changed." } },
+            "delete-agent-publish-1",
+          ),
+        );
+        assert.equal(publishAfter.status, 404);
+        const sessionAfter = await app.request(
+          `${projectPath}/sessions`,
+          jsonRequest(
+            {
+              agentId: createdBody.id,
+              title: "After deletion",
+              initialMessage: "Hello after deletion.",
+            },
+            "delete-agent-session-2",
+          ),
+        );
+        assert.equal(sessionAfter.status, 404);
+        const versionSession = await app.request(
+          `${projectPath}/sessions`,
+          jsonRequest(
+            {
+              agentVersionId: createdBody.latestVersionId,
+              title: "By version",
+              initialMessage: "Hello by version.",
+            },
+            "delete-agent-session-3",
+          ),
+        );
+        assert.equal(
+          versionSession.status,
+          404,
+          await versionSession.clone().text(),
+        );
+
+        // Existing session history stays readable and still names the agent.
+        const existing = await app.request(
+          `${projectPath}/sessions/${sessionId}`,
+        );
+        assert.equal(existing.status, 200);
+        assert.equal(
+          ((await existing.json()) as { agentName: string }).agentName,
+          "Deletable agent",
+        );
+
+        // The key is free for a new agent.
+        const recreated = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            { key: "deletable-agent", name: "Deletable agent again", config },
+            "delete-agent-create-2",
+          ),
+        );
+        assert.equal(recreated.status, 201, await recreated.clone().text());
+        assert.notEqual(
+          ((await recreated.json()) as { id: string }).id,
+          createdBody.id,
+        );
+
+        const audit = await pool.query<{ action: string }>(
+          `SELECT action FROM oao.audit_entries
+         WHERE organization_id=$1 AND project_id=$2 AND resource_id=$3 AND action='agent.deleted'`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            createdBody.id,
+          ],
+        );
+        assert.equal(audit.rowCount, 1);
+        // The session above enqueued an admit command; later tests count that
+        // table globally, so leave it as empty as this test found it.
+        await pool.query("TRUNCATE public.api_test_runtime_commands");
+      },
+    );
+
+    await t.test(
       "Harness Operations publish as immutable Agent-version configuration with namespace validation",
       async () => {
         const operation = {
@@ -2805,7 +2955,6 @@ test(
           listedBody.data.map((entry) => `${entry.origin}:${entry.key}`),
           ["project:integration-preset-v1", `project:${baseModelPresetKey}`],
         );
-
         const context = await hosted.request("/v1/context");
         assert.deepEqual(
           ((await context.json()) as { activeModelPresets: string[] })
@@ -2898,6 +3047,199 @@ test(
           auditText,
           /OPENROUTER_API_KEY|daytona-integration|apiKey|authorization/iu,
         );
+
+        // A dedicated connection and preset, so removal cannot disturb the
+        // agents and sessions later tests run on integration-preset-v1.
+        const removablePresetKey = "removable-v1";
+        const removableProviderCreated = await hosted.request(
+          `${projectPath}/model-providers`,
+          jsonRequest(
+            {
+              key: "integration-removable",
+              displayName: "Integration removable",
+              providerType: "openrouter",
+              apiKey: "sk-integration-removable-secret",
+            },
+            "model-provider-removable-1",
+          ),
+        );
+        assert.equal(removableProviderCreated.status, 201);
+        const removable = (await removableProviderCreated.json()) as {
+          id: string;
+        };
+        const removablePresetCreated = await hosted.request(
+          `${projectPath}/model-presets`,
+          jsonRequest(
+            {
+              key: removablePresetKey,
+              displayName: "Integration removable preset",
+              providerId: removable.id,
+              model,
+            },
+            "model-preset-removable-1",
+          ),
+        );
+        assert.equal(removablePresetCreated.status, 201);
+        const removablePreset = (await removablePresetCreated.json()) as {
+          id: string;
+        };
+        // Removing the connection is refused while a live preset routes through it.
+        const removeInit = (key: string): RequestInit => ({
+          method: "DELETE",
+          headers: { "idempotency-key": key },
+        });
+        const removeBlocked = await hosted.request(
+          `${projectPath}/model-providers/${removable.id}`,
+          removeInit("model-provider-remove-1"),
+        );
+        assert.equal(
+          removeBlocked.status,
+          409,
+          await removeBlocked.clone().text(),
+        );
+        assert.match(
+          await removeBlocked.text(),
+          /1 model preset still routes/u,
+        );
+
+        // Archiving the preset hides it from lists and from agent publication.
+        const archived = await hosted.request(
+          `${projectPath}/model-presets/${removablePreset.id}`,
+          removeInit("model-preset-archive-1"),
+        );
+        assert.equal(archived.status, 200, await archived.clone().text());
+        assert.deepEqual(await archived.json(), {
+          id: removablePreset.id,
+          key: removablePresetKey,
+          archived: true,
+        });
+        const archivedReplay = await hosted.request(
+          `${projectPath}/model-presets/${removablePreset.id}`,
+          removeInit("model-preset-archive-1"),
+        );
+        assert.equal(
+          archivedReplay.headers.get("idempotency-replayed"),
+          "true",
+        );
+        assert.equal(
+          (
+            await hosted.request(
+              `${projectPath}/model-presets/${removablePreset.id}`,
+              removeInit("model-preset-archive-2"),
+            )
+          ).status,
+          404,
+        );
+        const afterArchive = (await (
+          await hosted.request(`${projectPath}/model-presets`)
+        ).json()) as { data: { key: string }[] };
+        assert.ok(
+          !afterArchive.data.some((entry) => entry.key === removablePresetKey),
+        );
+        const publishArchived = await hosted.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "archived-preset-agent",
+              name: "Archived preset agent",
+              config: {
+                systemPrompt: "Answer questions.",
+                modelPreset: removablePresetKey,
+                tools: [],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "archived-preset-agent-1",
+          ),
+        );
+        assert.equal(publishArchived.status, 400);
+        // The key stays reserved: agent versions pin it by name.
+        const reuseKey = await hosted.request(
+          `${projectPath}/model-presets`,
+          jsonRequest(
+            {
+              key: removablePresetKey,
+              displayName: "Reused key",
+              providerId: removable.id,
+              model,
+            },
+            "model-preset-reuse-key",
+          ),
+        );
+        assert.equal(reuseKey.status, 409);
+
+        // With no live presets left, the connection can be removed.
+        const removed = await hosted.request(
+          `${projectPath}/model-providers/${removable.id}`,
+          removeInit("model-provider-remove-2"),
+        );
+        assert.equal(removed.status, 200, await removed.clone().text());
+        assert.deepEqual(await removed.json(), {
+          id: removable.id,
+          removed: true,
+        });
+        assert.equal(
+          (
+            await hosted.request(
+              `${projectPath}/model-providers/${removable.id}`,
+              removeInit("model-provider-remove-3"),
+            )
+          ).status,
+          404,
+        );
+        const providersAfter = (await (
+          await hosted.request(`${projectPath}/model-providers`)
+        ).json()) as { data: { id: string }[] };
+        assert.ok(
+          !providersAfter.data.some((entry) => entry.id === removable.id),
+        );
+        const rotateRemoved = await hosted.request(
+          `${projectPath}/model-providers/${removable.id}/credential`,
+          {
+            ...jsonRequest({ apiKey: "sk-after-removal" }, "rotate-removed-1"),
+            method: "PUT",
+          },
+        );
+        assert.equal(rotateRemoved.status, 404);
+        const presetOnRemoved = await hosted.request(
+          `${projectPath}/model-presets`,
+          jsonRequest(
+            {
+              key: "on-removed-provider-v1",
+              displayName: "On removed provider",
+              providerId: removable.id,
+              model,
+            },
+            "model-preset-on-removed-1",
+          ),
+        );
+        assert.equal(presetOnRemoved.status, 404);
+        // The credential is wiped, not merely hidden.
+        const wiped = await pool.query<{
+          fingerprint: string;
+          archived: boolean;
+        }>(
+          `SELECT credential_fingerprint AS fingerprint,(archived_at IS NOT NULL) AS archived
+           FROM oao.project_model_providers WHERE id=$1`,
+          [removable.id],
+        );
+        assert.equal(wiped.rows[0]?.archived, true);
+        assert.equal(wiped.rows[0]?.fingerprint, "0".repeat(64));
+        // The provider key is free again.
+        const recreated = await hosted.request(
+          `${projectPath}/model-providers`,
+          jsonRequest(
+            {
+              key: "integration-removable",
+              displayName: "Integration removable again",
+              providerType: "openrouter",
+              apiKey: "sk-integration-provider-secret-2",
+            },
+            "model-provider-recreate-1",
+          ),
+        );
+        assert.equal(recreated.status, 201, await recreated.clone().text());
       },
     );
   },

@@ -60,13 +60,15 @@ and should shape integrations:
   executable agent version. Daytona is required only for sandbox-enabled
   versions, and S3-compatible storage is required only for run files and
   workspace backups. Test doubles are not selectable in the API or console.
-- **Model presets are add-and-link only.** A `project:admin` principal can
-  approve a new project preset from the provider catalog and link it to a new
-  immutable agent version. Preset rows are append-only: there is no rename,
-  repoint, deprecate, or delete route, and no reviewer approval workflow.
+- **Model presets are append-only.** A `project:admin` principal can approve a
+  new project preset from the provider catalog, duplicate an existing one into
+  a new key, and archive one so new agent versions stop seeing it. There is no
+  rename or repoint route and no reviewer approval workflow; archived presets
+  keep resolving for already published agent versions.
 - **Provider credentials are project-scoped encrypted records.** The console can
-  create connections and rotate write-only keys. The API never returns a key,
-  and encryption-key-ring rotation is not included in this MVP.
+  create connections, rotate write-only keys, and remove a connection once no
+  live preset routes through it (the key is wiped). The API never returns a
+  key, and encryption-key-ring rotation is not included in this MVP.
 - **Remote MCP is HTTPS and static-credential only.** OAO supports Streamable
   HTTP and legacy SSE with static bearer or safe API-key headers, immutable
   discovery snapshots, restricted toolsets, and exact-origin credential

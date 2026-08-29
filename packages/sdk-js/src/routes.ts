@@ -45,8 +45,12 @@ export function createRoutes(apiPrefix = "/v1") {
     apiKey: (projectId: string, apiKeyId: string) =>
       `${project(projectId)}/api-keys/${segment(apiKeyId)}`,
     modelPresets: (projectId: string) => `${project(projectId)}/model-presets`,
+    modelPreset: (projectId: string, presetId: string) =>
+      `${project(projectId)}/model-presets/${segment(presetId)}`,
     modelProviders: (projectId: string) =>
       `${project(projectId)}/model-providers`,
+    modelProvider: (projectId: string, providerId: string) =>
+      `${project(projectId)}/model-providers/${segment(providerId)}`,
     modelProviderCredential: (projectId: string, providerId: string) =>
       `${project(projectId)}/model-providers/${segment(providerId)}/credential`,
     sandboxProviders: (projectId: string) =>
