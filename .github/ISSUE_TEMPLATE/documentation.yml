@@ -1,0 +1,72 @@
+name: Documentation issue
+description: Report missing, incorrect, or unclear OAO documentation
+title: "docs: "
+labels:
+  - documentation
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping keep OAO's Mintlify documentation accurate during early beta.
+
+        **Do not include credentials, customer or personal data, private prompts or transcripts, or vulnerability details.** Security vulnerabilities do not belong in public issues.
+
+  - type: checkboxes
+    id: safe_content
+    attributes:
+      label: Sensitive-content check
+      options:
+        - label: I confirm this report contains no credentials, customer or personal data, private prompts or transcripts, or vulnerability details.
+          required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location
+      description: Link the page or give its repository path. Use "Not yet documented" if no page exists.
+      placeholder: docs/getting-started/quickstart.mdx or https://...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: problem_type
+    attributes:
+      label: Type of problem
+      options:
+        - Incorrect or outdated information
+        - Missing documentation
+        - Unclear instructions or example
+        - Broken link or navigation
+        - Accessibility or formatting
+        - Typo or wording
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or missing?
+      description: Explain what a reader currently sees and why it prevents or complicates the task.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Suggested correction
+      description: Describe the accurate outcome or content. A draft is welcome but not required.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: OAO version or commit
+      description: If the issue depends on a specific version, provide its release, tag, or commit SHA.
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Add sanitized screenshots, related pages, or prerequisites that help explain the issue.
