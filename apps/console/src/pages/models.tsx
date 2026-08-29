@@ -49,12 +49,16 @@ import {
 type Tristate = "" | "yes" | "no";
 type OpenAISettings = Extract<
   ModelGenerationSettings,
-  { readonly textFormat: "text" }
+  { readonly mode: "standard" | "pro" }
 >;
 type AnthropicSettings = Extract<
   ModelGenerationSettings,
   { readonly thinking: "disabled" | "adaptive" }
 >;
+type XAISettings = {
+  readonly textFormat: "text";
+  readonly effort: "low" | "medium" | "high" | "xhigh";
+};
 
 function tristate(value: Tristate): boolean | undefined {
   return value === "" ? undefined : value === "yes";
@@ -432,6 +436,7 @@ function CreateModelPresetDialog({
   const [anthropicMaxTokens, setAnthropicMaxTokens] = useState(20_000);
   const [anthropicEffort, setAnthropicEffort] =
     useState<AnthropicSettings["effort"]>("high");
+  const [xaiEffort, setXAIEffort] = useState<XAISettings["effort"]>("high");
 
   const settings: ModelGenerationSettings | null =
     provider?.providerType === "openai"
@@ -448,7 +453,10 @@ function CreateModelPresetDialog({
             maxTokens: anthropicMaxTokens,
             effort: anthropicEffort,
           }
-        : null;
+        : provider?.providerType === "xai" &&
+            (model?.effortLevels?.length ?? 0) > 0
+          ? { textFormat: "text", effort: xaiEffort }
+          : null;
 
   const catalogOptions = useMemo<readonly ComboboxOption[]>(
     () =>
@@ -481,6 +489,12 @@ function CreateModelPresetDialog({
       setAnthropicEffort(
         efforts.includes("high") ? "high" : (efforts[0] ?? "high"),
       );
+    }
+    if (entry.providerType === "xai" && entry.effortLevels?.length) {
+      const efforts = entry.effortLevels.filter(
+        (effort): effort is XAISettings["effort"] => effort !== "max",
+      );
+      setXAIEffort(efforts.includes("high") ? "high" : (efforts[0] ?? "high"));
     }
     if (!keyEdited) setKey(suggestPresetKey(entry.name, existingKeys));
     if (!displayNameEdited) setDisplayName(entry.name);
@@ -823,6 +837,55 @@ function CreateModelPresetDialog({
                 </Select>
               </Field>
             </FieldRow>
+          </div>
+        </details>
+      ) : null}
+      {provider?.providerType === "xai" &&
+      (model?.effortLevels?.length ?? 0) > 0 ? (
+        <details className="policy-details" open>
+          <summary>
+            Grok settings
+            <span className="policy-summary">
+              {xaiEffort} reasoning · text response
+            </span>
+          </summary>
+          <div className="policy-body">
+            <FieldRow>
+              <Field
+                label="Response format"
+                hint="Agent sessions currently use free-form text or tool calls."
+              >
+                <Select value="text" disabled>
+                  <option value="text">text</option>
+                </Select>
+              </Field>
+              <Field
+                label="Reasoning effort"
+                hint="Controls Grok reasoning depth. Reasoning cannot be disabled on supported models."
+              >
+                <Select
+                  value={xaiEffort}
+                  onChange={(event) =>
+                    setXAIEffort(event.target.value as XAISettings["effort"])
+                  }
+                >
+                  {(model?.effortLevels ?? [])
+                    .filter(
+                      (effort): effort is XAISettings["effort"] =>
+                        effort !== "max",
+                    )
+                    .map((effort) => (
+                      <option key={effort} value={effort}>
+                        {effort}
+                      </option>
+                    ))}
+                </Select>
+              </Field>
+            </FieldRow>
+            <small>
+              Tools and the system prompt are configured on the immutable agent
+              version that uses this preset.
+            </small>
           </div>
         </details>
       ) : null}

@@ -24,7 +24,7 @@ const OPENAI_CATALOG_URL = "https://api.openai.com/v1";
 
 type OpenAIModelSettings = Extract<
   ModelGenerationSettings,
-  { readonly textFormat: "text" }
+  { readonly mode: "standard" | "pro" }
 >;
 
 const OPENAI_MODEL_IDS = new Set(
@@ -193,7 +193,7 @@ export function createOpenAIProjectProvider(
     models: [model],
     api: openAIResponsesApi(),
   });
-  if (!input.settings || "thinking" in input.settings)
+  if (!input.settings || !("mode" in input.settings))
     throw new TypeError("OpenAI model presets require OpenAI settings");
   return withOpenAIModelGenerationSettings(provider, input.settings);
 }

@@ -86,8 +86,11 @@ The runtime replaces its in-memory provider on the next activation.
    total output ceiling shared by thinking and the visible answer. Effort is
    limited to the levels advertised by the selected model; new adaptive
    presets use 20,000 tokens and high effort when supported.
-8. For xAI, no provider-specific settings are stored. OAO uses the selected
-   Grok language model through xAI's OpenAI-compatible API.
+8. For a supported xAI reasoning model, review **Grok settings**. The response
+   format is text and reasoning effort defaults to high. Grok 4.6 offers low,
+   medium, high, and xhigh; the picker only offers levels OAO has verified for
+   the selected model. Tools and the system prompt stay on the agent version,
+   where their schemas and instructions are immutable together.
 9. Select **Add model preset**.
 
 The dialog lists what is still missing under **Validation** and keeps the
@@ -122,8 +125,13 @@ live language-model catalog and calls `https://api.x.ai/v1`. Newly available
 text-output Grok IDs can be selected without an OAO catalog release. Known Pi
 models retain their pinned context/output metadata; a newly discovered ID uses
 conservative runtime limits until the pinned Pi catalog adds richer metadata.
-xAI-specific generation settings and xAI server-side tools are not part of this
-preset contract; OAO's normal function tools remain available.
+For documented xAI reasoning models, OAO stores `textFormat` and `effort`, then
+maps them to `text.format` and `reasoning.effort` on the Responses API. xAI
+documents high as the default, with low, medium, and high on Grok 4.5 and xhigh
+from Grok 4.6 onward. Reasoning cannot be disabled on these models. Structured
+JSON schemas are operation-specific rather than a fixed model default. xAI
+server-side tools are not part of this preset contract; OAO's versioned agent
+tools remain available.
 
 ## Prompt caching
 
@@ -275,8 +283,8 @@ immutable Claude settings:
 ```
 
 For a direct xAI connection, use an `xai/<catalog-id>` returned by the live
-language-model catalog. Routing must be empty and `settings` must be omitted or
-`null`:
+language-model catalog. Routing must be empty. Supported reasoning models
+accept immutable text-format and effort settings:
 
 ```json
 {
@@ -285,7 +293,10 @@ language-model catalog. Routing must be empty and `settings` must be omitted or
   "providerId": "55555555-5555-4555-8555-555555555555",
   "model": "xai/grok-4.6",
   "routing": {},
-  "settings": null
+  "settings": {
+    "textFormat": "text",
+    "effort": "low"
+  }
 }
 ```
 

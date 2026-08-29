@@ -54,6 +54,9 @@ const catalog: ModelCatalogPort = {
       contextWindow: 500_000,
       maxOutputTokens: null,
       reasoning: true,
+      adaptiveThinking: false,
+      thinkingCanBeDisabled: false,
+      effortLevels: ["low", "medium", "high", "xhigh"],
     },
   ],
   isApprovedModel: (model) =>
@@ -682,14 +685,14 @@ test("Anthropic preset creation persists validated Claude settings", async () =>
   assert.match((await excessive.json()).error.message, /exceeds/u);
 });
 
-test("xAI preset creation accepts live Grok models without provider settings", async () => {
+test("xAI preset creation persists supported Grok generation settings", async () => {
   const input = {
     key: "grok-4-6-v1",
     displayName: "Grok 4.6",
     providerId,
     model: "xai/grok-4.6",
     routing: {},
-    settings: null,
+    settings: { textFormat: "text", effort: "low" },
   };
   const created = {
     id: "00000000-0000-4000-8000-000000000704",
@@ -702,7 +705,7 @@ test("xAI preset creation accepts live Grok models without provider settings", a
     provider_type: "xai",
     model: input.model,
     routing: {},
-    settings: null,
+    settings: input.settings,
     hosted: true,
     available: true,
     created_by_principal_id: "00000000-0000-4000-8000-000000000003",
@@ -721,7 +724,7 @@ test("xAI preset creation accepts live Grok models without provider settings", a
     createRequest(cookie, input, "xai-grok-model"),
   );
   assert.equal(response.status, 201);
-  assert.equal((await response.json()).settings, null);
+  assert.deepEqual((await response.json()).settings, input.settings);
 
   const unsupportedSettings = await harness.app.request(
     `/v1/projects/${actorProjectId}/model-presets`,
@@ -744,7 +747,7 @@ test("xAI preset creation accepts live Grok models without provider settings", a
   assert.equal(unsupportedSettings.status, 400);
   assert.match(
     (await unsupportedSettings.json()).error.message,
-    /xAI model presets do not support direct generation settings/u,
+    /xAI model presets require xAI generation settings/u,
   );
 });
 

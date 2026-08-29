@@ -219,7 +219,15 @@ async function ensurePreset(
                 : (entry.effortLevels?.[0] ?? ("high" as const)),
             },
           }
-        : {}),
+        : provider.providerType === "xai" &&
+            entry.effortLevels?.includes("high")
+          ? {
+              settings: {
+                textFormat: "text" as const,
+                effort: "high" as const,
+              },
+            }
+          : {}),
     },
     { idempotencyKey: idempotencyKey(state, "preset-create") },
   );

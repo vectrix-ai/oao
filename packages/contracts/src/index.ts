@@ -1713,9 +1713,15 @@ export const AnthropicModelGenerationSettingsSchema = v.strictObject({
   effort: v.picklist(["low", "medium", "high", "xhigh", "max"]),
 });
 
+export const XAIModelGenerationSettingsSchema = v.strictObject({
+  textFormat: v.literal("text"),
+  effort: v.picklist(["low", "medium", "high", "xhigh"]),
+});
+
 export const ModelGenerationSettingsSchema = v.union([
   OpenAIModelGenerationSettingsSchema,
   AnthropicModelGenerationSettingsSchema,
+  XAIModelGenerationSettingsSchema,
 ]);
 
 export const DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS = Object.freeze({
@@ -1729,6 +1735,11 @@ export const DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS = Object.freeze({
 export const DEFAULT_ANTHROPIC_MODEL_GENERATION_SETTINGS = Object.freeze({
   thinking: "adaptive",
   maxTokens: 20_000,
+  effort: "high",
+} as const);
+
+export const DEFAULT_XAI_MODEL_GENERATION_SETTINGS = Object.freeze({
+  textFormat: "text",
   effort: "high",
 } as const);
 

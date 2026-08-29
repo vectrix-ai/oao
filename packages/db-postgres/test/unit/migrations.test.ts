@@ -239,6 +239,19 @@ test("model generation settings migrations are additive and validate safe immuta
   );
   assert.match(xaiSql, /xai\//u);
   assert.doesNotMatch(xaiSql, /UPDATE |DELETE FROM/u);
+
+  const xaiSettingsSql = await readFile(
+    new URL(
+      "../../migrations/0033_xai_model_generation_settings.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(xaiSettingsSql, /CREATE OR REPLACE FUNCTION/u);
+  assert.match(xaiSettingsSql, /ARRAY\['effort','textFormat'\]/u);
+  assert.match(xaiSettingsSql, /'low', 'medium', 'high', 'xhigh'/u);
+  assert.match(xaiSettingsSql, /jsonb_has_forbidden_public_key/u);
+  assert.doesNotMatch(xaiSettingsSql, /UPDATE |DELETE FROM/u);
 });
 
 test("sandbox provider migration encrypts Daytona credentials and versions capabilities", async () => {

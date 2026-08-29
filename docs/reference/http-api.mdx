@@ -123,9 +123,9 @@ material. Rotate a key with `{ "apiKey": "..." }`.
 `GET /model-catalog` requires `providerId`, accepts `search` and `limit`, and
 returns `providerId`, `providerType`, and safe catalog entries. Each entry
 includes `providerType`, prefixed `model`, `catalogId`, display name, context
-window, output limit, and reasoning support. Anthropic entries may additionally
-include `adaptiveThinking`, `thinkingCanBeDisabled`, and `effortLevels` from
-the live model capabilities.
+window, output limit, and reasoning support. Anthropic and supported xAI
+reasoning entries may additionally include `adaptiveThinking`,
+`thinkingCanBeDisabled`, and `effortLevels`.
 
 Create a preset with:
 
@@ -158,9 +158,11 @@ defaults.
 
 xAI catalog responses come from the selected key's live
 `GET /v1/language-models` result and include text-output Grok models as
-`xai/<catalog-id>`. xAI presets require empty routing and `settings: null` (or
-an omitted `settings` field). Newly listed language-model IDs do not require a
-hard-coded OAO catalog update.
+`xai/<catalog-id>`. xAI presets require empty routing. Documented reasoning
+models accept the immutable xAI settings below; if an older client omits them,
+the API stores high effort and text format. Newly listed language-model IDs do
+not require a hard-coded OAO catalog update, but reasoning controls appear only
+after OAO can identify the model's supported effort levels.
 
 ### OpenAI model settings
 
@@ -193,6 +195,19 @@ for thinking tokens and the visible response, not a separate thinking budget.
 Models without live effort support are omitted from the OAO catalog. Manual
 `thinking.type: "enabled"` and `budget_tokens` are not accepted by this preset
 contract.
+
+### xAI model settings
+
+| Field        | Type                                           | Default  |
+| ------------ | ---------------------------------------------- | -------- |
+| `textFormat` | `"text"`                                       | `"text"` |
+| `effort`     | `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` | `"high"` |
+
+The selected catalog model must support the requested effort. OAO maps these
+values to `text.format` and `reasoning.effort` in xAI Responses requests.
+Reasoning cannot be disabled on supported Grok reasoning models. Tools and the
+system prompt remain part of the immutable agent version rather than the model
+preset.
 
 ### OpenRouter routing policy
 

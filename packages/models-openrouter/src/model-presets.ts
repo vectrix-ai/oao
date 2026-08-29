@@ -144,12 +144,13 @@ function assertGenerationSettingsMatchProvider(
 ): void {
   if (settings === null) return;
   const anthropic = "thinking" in settings;
+  const openai = "mode" in settings;
   if (providerType === "anthropic" && !anthropic)
     throw new TypeError("Anthropic model presets require Anthropic settings");
-  if (providerType === "openai" && anthropic)
+  if (providerType === "openai" && !openai)
     throw new TypeError("OpenAI model presets require OpenAI settings");
-  if (providerType === "xai")
-    throw new TypeError("xAI model presets do not support generation settings");
+  if (providerType === "xai" && (anthropic || openai))
+    throw new TypeError("xAI model presets require xAI settings");
   if (
     providerType === "anthropic" &&
     anthropic &&
@@ -231,16 +232,14 @@ export class ProjectModelPresetRegistry {
       throw new Error(
         "OpenRouter model presets do not support direct generation settings",
       );
-    if (input.providerType === "xai" && input.settings != null)
-      throw new Error(
-        "xAI model presets do not support direct generation settings",
-      );
     const settings =
       input.providerType === "openai"
         ? (input.settings ?? DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS)
         : input.providerType === "anthropic"
           ? (input.settings ?? DEFAULT_ANTHROPIC_MODEL_GENERATION_SETTINGS)
-          : null;
+          : input.providerType === "xai"
+            ? (input.settings ?? null)
+            : null;
     assertGenerationSettingsMatchProvider(
       input.providerType,
       input.model,

@@ -984,6 +984,9 @@ const modelCatalogSeed: readonly ModelCatalogEntry[] = [
     contextWindow: 500_000,
     maxOutputTokens: null,
     reasoning: true,
+    adaptiveThinking: false,
+    thinkingCanBeDisabled: false,
+    effortLevels: ["low", "medium", "high", "xhigh"],
   },
 ];
 

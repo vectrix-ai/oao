@@ -520,6 +520,14 @@ test("xAI live catalog exposes dynamically available Grok language models", asyn
     ["xai/grok-4.6"],
   );
   assert.equal(catalog[0]?.contextWindow, 500_000);
+  assert.equal(catalog[0]?.reasoning, true);
+  assert.equal(catalog[0]?.thinkingCanBeDisabled, false);
+  assert.deepEqual(catalog[0]?.effortLevels, [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+  ]);
   assert.equal(request?.url, "https://api.x.ai/v1/language-models");
   assert.equal(request?.headers.get("authorization"), "Bearer xai-test-secret");
   assert.equal(request?.url.includes("xai-test-secret"), false);
@@ -793,7 +801,7 @@ test("OpenAI project presets use direct routing and credentials can rotate", asy
   );
 });
 
-test("xAI project presets support newly discovered Grok model IDs", async () => {
+test("xAI project preset settings reach Grok through the Responses API", async () => {
   const providers: Provider[] = [];
   const registry = new ProjectModelPresetRegistry({
     deployment: new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
@@ -808,9 +816,13 @@ test("xAI project presets support newly discovered Grok model IDs", async () => 
     key: "grok-4-6-v1",
     model: "xai/grok-4.6",
     routing: {},
+    settings: { textFormat: "text", effort: "low" },
   });
   assert.equal(resolved.approvedModel, "xai/grok-4.6");
-  assert.equal(resolved.settings, null);
+  assert.deepEqual(resolved.settings, {
+    textFormat: "text",
+    effort: "low",
+  });
   const provider = providers[0];
   const model = provider?.getModels()[0];
   assert.ok(provider);
@@ -818,6 +830,8 @@ test("xAI project presets support newly discovered Grok model IDs", async () => 
   assert.equal(model.id, "grok-4.6");
   assert.equal(model.provider, provider.id);
   assert.equal(model.baseUrl, "https://api.x.ai/v1");
+  assert.equal(model.api, "openai-responses");
+  assert.equal(model.reasoning, true);
   const auth = await provider.auth.apiKey?.resolve({
     ctx: {
       env: async () => undefined,
@@ -825,25 +839,36 @@ test("xAI project presets support newly discovered Grok model IDs", async () => 
     },
   });
   assert.equal(auth?.auth.apiKey, "xai-runtime-secret");
-  assert.throws(
-    () =>
-      registry.activate({
-        ...tenantA,
-        providerType: "xai",
+  let payload: Record<string, unknown> | undefined;
+  const response = await provider
+    .streamSimple(
+      model,
+      {
+        messages: [{ role: "user", content: "Say hello.", timestamp: 1 }],
+      },
+      {
         apiKey: "xai-runtime-secret",
-        key: "grok-settings-v1",
-        model: "xai/grok-4.6",
-        routing: {},
-        settings: {
-          textFormat: "text",
-          mode: "standard",
-          effort: "medium",
-          verbosity: "medium",
-          summary: "auto",
+        reasoning: "low",
+        maxRetries: 0,
+        fetch: async (_input, init) => {
+          payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(
+            JSON.stringify({ error: { message: "expected test stop" } }),
+            {
+              status: 503,
+              headers: { "content-type": "application/json" },
+            },
+          );
         },
-      }),
-    /do not support direct generation settings/u,
+      },
+    )
+    .result();
+  assert.equal(response.stopReason, "error");
+  assert.equal(
+    (payload?.reasoning as Record<string, unknown> | undefined)?.effort,
+    "low",
   );
+  assert.deepEqual(payload?.text, { format: { type: "text" } });
 });
 
 test("OpenAI project preset settings reach the Responses API payload", async () => {

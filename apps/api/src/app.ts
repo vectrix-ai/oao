@@ -8,6 +8,7 @@ import { readCookie } from "@oao/auth-core";
 import {
   DEFAULT_ANTHROPIC_MODEL_GENERATION_SETTINGS,
   DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS,
+  DEFAULT_XAI_MODEL_GENERATION_SETTINGS,
   parseCreateProjectSandboxProviderInput,
   parseCreateProjectStorageProviderInput,
   parseCreateProjectModelProviderInput,
@@ -3848,8 +3849,8 @@ function registerModelPresetRoutes(
               throw new HttpApiError("not_found", "Model provider not found");
             const providerType = provider.provider_type;
             const apiKey = providerApiKey(actor, provider);
-            const anthropicCatalogEntry =
-              providerType === "anthropic"
+            const directCatalogEntry =
+              providerType === "anthropic" || providerType === "xai"
                 ? (
                     await catalog.listCatalog({
                       providerType,
@@ -3859,8 +3860,8 @@ function registerModelPresetRoutes(
                   ).find((entry) => entry.model === input.model)
                 : undefined;
             const approved =
-              providerType === "anthropic"
-                ? anthropicCatalogEntry !== undefined
+              providerType === "anthropic" || providerType === "xai"
+                ? directCatalogEntry !== undefined
                 : await catalog.isApprovedModel(input.model, providerType, {
                     ...(apiKey ? { apiKey } : {}),
                   });
@@ -3882,22 +3883,19 @@ function registerModelPresetRoutes(
                 "bad_request",
                 "OpenRouter model presets do not support direct generation settings",
               );
-            if (providerType === "xai" && input.settings !== null)
-              throw new HttpApiError(
-                "bad_request",
-                "xAI model presets do not support direct generation settings",
-              );
             const settings =
               providerType === "openai"
                 ? (input.settings ?? DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS)
                 : providerType === "anthropic"
                   ? (input.settings ??
                     DEFAULT_ANTHROPIC_MODEL_GENERATION_SETTINGS)
-                  : null;
+                  : providerType === "xai" &&
+                      (directCatalogEntry?.effortLevels?.length ?? 0) > 0
+                    ? (input.settings ?? DEFAULT_XAI_MODEL_GENERATION_SETTINGS)
+                    : input.settings;
             if (
               providerType === "openai" &&
-              settings !== null &&
-              "thinking" in settings
+              (settings === null || !("mode" in settings))
             )
               throw new HttpApiError(
                 "bad_request",
@@ -3911,6 +3909,23 @@ function registerModelPresetRoutes(
                 "bad_request",
                 "Anthropic model presets require Anthropic generation settings",
               );
+            if (providerType === "xai" && settings !== null) {
+              if ("thinking" in settings || "mode" in settings)
+                throw new HttpApiError(
+                  "bad_request",
+                  "xAI model presets require xAI generation settings",
+                );
+              if ((directCatalogEntry?.effortLevels?.length ?? 0) === 0)
+                throw new HttpApiError(
+                  "bad_request",
+                  "Selected xAI model does not support reasoning effort settings",
+                );
+              if (!directCatalogEntry?.effortLevels?.includes(settings.effort))
+                throw new HttpApiError(
+                  "bad_request",
+                  "Selected xAI model does not support this reasoning effort",
+                );
+            }
             if (
               providerType === "anthropic" &&
               settings !== null &&
@@ -3918,7 +3933,7 @@ function registerModelPresetRoutes(
             ) {
               if (
                 settings.thinking === "adaptive" &&
-                anthropicCatalogEntry?.adaptiveThinking === false
+                directCatalogEntry?.adaptiveThinking === false
               )
                 throw new HttpApiError(
                   "bad_request",
@@ -3926,24 +3941,24 @@ function registerModelPresetRoutes(
                 );
               if (
                 settings.thinking === "disabled" &&
-                anthropicCatalogEntry?.thinkingCanBeDisabled === false
+                directCatalogEntry?.thinkingCanBeDisabled === false
               )
                 throw new HttpApiError(
                   "bad_request",
                   "Selected Anthropic model requires thinking",
                 );
               if (
-                anthropicCatalogEntry?.maxOutputTokens !== null &&
-                anthropicCatalogEntry?.maxOutputTokens !== undefined &&
-                settings.maxTokens > anthropicCatalogEntry.maxOutputTokens
+                directCatalogEntry?.maxOutputTokens !== null &&
+                directCatalogEntry?.maxOutputTokens !== undefined &&
+                settings.maxTokens > directCatalogEntry.maxOutputTokens
               )
                 throw new HttpApiError(
                   "bad_request",
                   "Anthropic max tokens exceeds the selected model limit",
                 );
               if (
-                (anthropicCatalogEntry?.effortLevels?.length ?? 0) > 0 &&
-                !anthropicCatalogEntry?.effortLevels?.includes(settings.effort)
+                (directCatalogEntry?.effortLevels?.length ?? 0) > 0 &&
+                !directCatalogEntry?.effortLevels?.includes(settings.effort)
               )
                 throw new HttpApiError(
                   "bad_request",
@@ -3951,7 +3966,7 @@ function registerModelPresetRoutes(
                 );
               if (
                 /^claude-opus-5(?:-|$)/u.test(
-                  anthropicCatalogEntry?.catalogId ?? "",
+                  directCatalogEntry?.catalogId ?? "",
                 ) &&
                 settings.thinking === "disabled" &&
                 (settings.effort === "xhigh" || settings.effort === "max")

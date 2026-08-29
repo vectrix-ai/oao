@@ -1487,6 +1487,11 @@ describe("management console", () => {
         summary: "detailed",
       }),
     );
+    expect(
+      await screen.findByText(
+        /pro · high reasoning · low verbosity · detailed summary · text/u,
+      ),
+    ).toBeInTheDocument();
 
     const row = screen.getByText("OpenAI primary").closest("tr");
     expect(row).not.toBeNull();
@@ -1585,6 +1590,60 @@ describe("management console", () => {
         effort: "xhigh",
       }),
     );
+    expect(
+      await screen.findByText(
+        /adaptive thinking · xhigh effort · 64,000 max tokens/u,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("saves Grok reasoning settings and shows them in the model overview", async () => {
+    class XAITrackingApi extends DemoConsoleApi {
+      lastPresetInput:
+        Parameters<DemoConsoleApi["createModelPreset"]>[0] | undefined;
+      override async createModelPreset(
+        input: Parameters<DemoConsoleApi["createModelPreset"]>[0],
+      ) {
+        this.lastPresetInput = input;
+        return super.createModelPreset(input);
+      }
+    }
+    const user = userEvent.setup();
+    const api = new XAITrackingApi({ eventDelayMs: 60_000 });
+    renderConsole("/models", api);
+    await user.click(
+      await screen.findByRole("button", { name: "Add model preset" }),
+    );
+    const preset = within(
+      screen.getByRole("dialog", { name: "Add model preset" }),
+    );
+    const providerOption = preset.getByRole("option", {
+      name: "xAI primary — xai",
+    }) as HTMLOptionElement;
+    await user.selectOptions(
+      preset.getByLabelText("Provider connection"),
+      providerOption.value,
+    );
+    const model = preset.getByRole("combobox", { name: /^Model/u });
+    await user.click(model);
+    await user.type(model, "grok");
+    await user.click(await preset.findByRole("option", { name: /Grok 4\.6/u }));
+    expect(preset.getByLabelText("Response format")).toHaveValue("text");
+    expect(preset.getByLabelText("Reasoning effort")).toHaveValue("high");
+    expect(
+      preset.getByText(/Tools and the system prompt are configured/u),
+    ).toBeInTheDocument();
+    await user.selectOptions(preset.getByLabelText("Reasoning effort"), "low");
+    await user.click(preset.getByRole("button", { name: "Add model preset" }));
+    await waitFor(() =>
+      expect(api.lastPresetInput?.settings).toEqual({
+        textFormat: "text",
+        effort: "low",
+      }),
+    );
+    expect(
+      await screen.findByText(/low reasoning · text response/u),
+    ).toBeInTheDocument();
   });
 
   it("creates an API key and shows its secret only in the acknowledgement dialog", async () => {
