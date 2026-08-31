@@ -650,7 +650,7 @@ export interface ConsoleApi {
   discardSkillDraft(draftId: string): Promise<void>;
   /**
    * Disables or re-enables a Skill. Disabled Skills cannot be pinned by new
-   * agent versions and are hidden from running agents until enabled again.
+   * agent versions; published versions that pin them keep running.
    */
   setSkillEnabled(id: string, enabled: boolean): Promise<SkillDetail>;
   /** Removes (archives) a Skill; agent bindings stay immutable, the key is freed. */

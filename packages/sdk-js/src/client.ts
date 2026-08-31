@@ -711,8 +711,8 @@ export class OaoClient {
 
   /**
    * Disables or re-enables a Skill. Disabled Skills cannot be pinned by new
-   * agent versions and are not offered to runs of agents that already bind
-   * them; enabling restores both. Bindings never change.
+   * agent versions; published versions that pin them keep running. Enabling
+   * restores the Skill for new publications. Bindings never change.
    */
   setSkillEnabled(
     projectId: string,
@@ -734,8 +734,9 @@ export class OaoClient {
   }
 
   /**
-   * Removes (archives) a Skill. Versions and bindings stay immutable, the
-   * Skill leaves every list, runs stop seeing it, and its key becomes free.
+   * Removes (archives) a Skill. Versions and bindings stay immutable so
+   * published agent versions keep running; the Skill leaves every list and
+   * its key becomes free.
    */
   deleteSkill(
     projectId: string,

@@ -306,16 +306,16 @@ package, from the row actions in the Skills list, from the Skill page, or
 through the API:
 
 - **Disable Skill** pauses it. No new agent version can attach any of its
-  versions, and agents that already bind it stop seeing it on their next run.
-  Nothing is unbound: **Enable Skill** restores the Skill everywhere, including
-  in agent versions that pinned it while it was disabled. The agent editor
-  keeps showing a disabled Skill only while the version being edited pins it,
-  so the operator knows to unselect or re-enable it before publishing.
+  versions until the Skill is enabled again. Published agent versions that pin
+  it keep running with it: thread incarnations pin an immutable snapshot of
+  the bound Skill set, so nothing changes mid-session. The agent editor keeps
+  showing a disabled Skill only while the version being edited pins it, so the
+  operator knows to unselect or re-enable it before publishing.
 - **Remove Skill** archives it permanently. The Skill leaves the list and the
-  agent picker, its open drafts are discarded, runs stop seeing it, and its
-  key becomes free for a new Skill. Published versions stay stored because
-  existing agent versions and session history reference them, so nothing that
-  already ran becomes unreadable.
+  agent picker, its open drafts are discarded, and its key becomes free for a
+  new Skill. Published versions stay stored because agent versions and session
+  history reference them, so agents that pin them keep working. To also stop
+  existing sessions from using a version, revoke that version.
 
 Both actions confirm before they run and require `skill:revoke`.
 

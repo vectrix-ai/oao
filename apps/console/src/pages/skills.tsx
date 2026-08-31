@@ -1283,7 +1283,7 @@ function DisableSkillDialog({
   return (
     <ConfirmDialog
       title={`Disable “${skill.displayName}”?`}
-      description={`${skill.key} can no longer be attached to a new agent version, and agents that already bind it stop seeing it on their next run. Bindings are kept, so enabling the Skill again restores it everywhere.`}
+      description={`${skill.key} can no longer be attached when publishing a new agent version. Published agent versions that pin it keep running with it, and enabling the Skill again restores it for new publications.`}
       confirmLabel="Disable Skill"
       tone="primary"
       pending={pending}
@@ -1305,7 +1305,7 @@ function RemoveSkillDialog({
   return (
     <ConfirmDialog
       title={`Remove “${skill.displayName}”?`}
-      description={`${skill.key} disappears from this project: it can no longer be attached to a new agent version, agents that already bind it stop seeing it, and the key becomes free for a new Skill. Published versions stay stored for existing agent versions and session history. Removal cannot be undone.`}
+      description={`${skill.key} disappears from this project: it can no longer be attached to a new agent version, and the key becomes free for a new Skill. Published versions stay stored, so agent versions and sessions that pin them keep working. Removal cannot be undone.`}
       confirmLabel="Remove Skill"
       pending={pending}
       error={error?.message ?? null}

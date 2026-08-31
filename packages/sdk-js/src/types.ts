@@ -343,7 +343,7 @@ export interface SkillSummary {
   readonly status: "active" | "deprecated" | "revoked";
   readonly fileCount: number;
   readonly versionIds: readonly string[];
-  /** Set while the Skill is disabled: no new agent version can pin it and running agents stop seeing it. */
+  /** Set while the Skill is disabled: no new agent version can pin it; published versions keep running with it. */
   readonly disabledAt: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;

@@ -5,11 +5,12 @@
 -- deleted. The Skill row gains two reversible-or-not markers instead:
 --
 -- * `disabled_at` pauses a Skill. New agent versions cannot pin any of its
---   versions and the runtime stops offering it to sessions that already bind
---   it, until an operator enables the Skill again.
--- * `archived_at` removes a Skill. It leaves every list and lookup, its key
---   becomes free for a new Skill, and the runtime treats it like a disabled
---   Skill for sessions that already bind it. Removal is permanent.
+--   versions until an operator enables the Skill again; published versions
+--   and their sessions keep running with it, because thread incarnations pin
+--   an immutable snapshot of the bound Skill set.
+-- * `archived_at` removes a Skill. It leaves every list and lookup and its
+--   key becomes free for a new Skill, while published versions keep running.
+--   Removal is permanent.
 
 ALTER TABLE oao.skills
   ADD COLUMN IF NOT EXISTS disabled_at timestamptz,

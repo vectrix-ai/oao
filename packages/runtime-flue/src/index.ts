@@ -2888,21 +2888,15 @@ export class ManagedRuntimeOrchestrator {
         description: string;
         content_hash: Buffer;
         status: "active" | "deprecated" | "revoked";
-        available: boolean;
       }>(
         `SELECT version.skill_id,binding.skill_version_id,version.version,
                 version.skill_name,version.description,version.content_hash,
-                lifecycle.status,
-                (skill.disabled_at IS NULL AND skill.archived_at IS NULL) AS available
+                lifecycle.status
          FROM oao.session_skill_bindings binding
          JOIN oao.skill_versions version
            ON version.organization_id=binding.organization_id
           AND version.project_id=binding.project_id
           AND version.id=binding.skill_version_id
-         JOIN oao.skills skill
-           ON skill.organization_id=version.organization_id
-          AND skill.project_id=version.project_id
-          AND skill.id=version.skill_id
          JOIN oao.skill_version_lifecycle lifecycle
            ON lifecycle.organization_id=version.organization_id
           AND lifecycle.project_id=version.project_id
@@ -2923,16 +2917,12 @@ export class ManagedRuntimeOrchestrator {
         throw new Error(
           "Session Skill bindings do not match the agent version",
         );
-      // Disabled or removed Skills keep their immutable bindings but are not
-      // offered to the run; enabling the Skill again restores them. They are
-      // dropped before the revocation gate so an unavailable Skill's revoked
-      // version cannot fail admission of a run that would never load it.
-      const availableBindings = skillResult.rows.filter(
-        (binding) => binding.available,
-      );
-      if (availableBindings.some((binding) => binding.status === "revoked"))
+      // Skill-level disable/remove gates publication only: the thread
+      // incarnation pins this snapshot's hash, so the bound Skill set must
+      // stay byte-identical across every run of the thread.
+      if (skillResult.rows.some((binding) => binding.status === "revoked"))
         throw new Error("A bound Skill version has been revoked");
-      const skills = availableBindings.map(
+      const skills = skillResult.rows.map(
         (binding) =>
           ({
             skillId: binding.skill_id,

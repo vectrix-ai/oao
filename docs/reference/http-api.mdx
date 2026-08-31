@@ -430,21 +430,22 @@ progressive disclosure, lifecycle, and script-execution boundaries.
 the body `{ "enabled": false }` or `{ "enabled": true }`. It returns
 `{ "id", "key", "enabled", "disabledAt" }`. Disabling is reversible and never
 touches bindings: a disabled Skill cannot be attached to a new agent version
-(`400`), stays in the list with a non-null `disabledAt`, and is not offered to
-runs of agent versions that already bind it. Enabling restores both. Repeating
-the current state is a no-op that still returns `200`. The audit log and
-product events record `skill.disabled` and `skill.enabled` only when the state
-changed.
+(`400`) and stays in the list with a non-null `disabledAt`, while published
+agent versions that pin it keep running with it. Enabling makes it attachable
+again. Repeating the current state is a no-op that still returns `200`. The
+audit log and product events record `skill.disabled` and `skill.enabled` only
+when the state changed.
 
 `DELETE /skills/{skillId}` requires `skill:revoke` and an `Idempotency-Key`. It
 returns `{ "id", "key", "deleted": true }` and archives the Skill rather than
 removing rows: versions, package files, agent-version bindings, and session
-bindings are immutable and stay stored. After removal the Skill returns `404`
-from reads and version publication, disappears from the list, cannot be
-attached to a new agent version, is not offered to runs of agent versions that
-already bind it, and its open drafts are discarded. Its `key` becomes free for a
-new Skill. Removal cannot be undone. The audit log and product events record
-`skill.deleted`. Removing an already removed Skill returns `404`.
+bindings are immutable and stay stored, so published agent versions and their
+sessions keep running with it. After removal the Skill returns `404` from reads
+and version publication, disappears from the list, cannot be attached to a new
+agent version, and its open drafts are discarded. Its `key` becomes free for a
+new Skill. Removal cannot be undone. To also stop existing sessions from using
+one of its versions, revoke that version. The audit log and product events
+record `skill.deleted`. Removing an already removed Skill returns `404`.
 
 Create a blank draft with `{}`. To edit an existing package, pass exact
 `skillId` and `sourceSkillVersionId` values; OAO copies that version's metadata

@@ -327,7 +327,9 @@ describe("management console", () => {
       name: "Disable “Carrier Codes”?",
     });
     expect(
-      within(dialog).getByText(/enabling the Skill again restores it/u),
+      within(dialog).getByText(
+        /enabling the Skill again restores it for new publications/u,
+      ),
     ).toBeInTheDocument();
     await user.click(
       within(dialog).getByRole("button", { name: "Disable Skill" }),
