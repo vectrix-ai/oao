@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/vectrix-ai/oao/compare/v0.3.0...v0.4.0) (2026-08-31)
+
+
+### Features
+
+* disable, enable, and remove Skills ([#7](https://github.com/vectrix-ai/oao/issues/7)) ([1bf5f47](https://github.com/vectrix-ai/oao/commit/1bf5f472daa0a2760491ab3aa7d49887b004c916))
+
 ## [0.3.0](https://github.com/vectrix-ai/oao/compare/v0.2.0...v0.3.0) (2026-08-29)
 
 
