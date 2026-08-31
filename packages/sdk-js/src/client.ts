@@ -709,6 +709,51 @@ export class OaoClient {
     return this.#request(this.routes.skill(projectId, skillId), options);
   }
 
+  /**
+   * Disables or re-enables a Skill. Disabled Skills cannot be pinned by new
+   * agent versions and are not offered to runs of agents that already bind
+   * them; enabling restores both. Bindings never change.
+   */
+  setSkillEnabled(
+    projectId: string,
+    skillId: string,
+    enabled: boolean,
+    options: WriteOptions,
+  ): Promise<{
+    readonly id: string;
+    readonly key: string;
+    readonly enabled: boolean;
+    readonly disabledAt: string | null;
+  }> {
+    return this.#write(
+      this.routes.skill(projectId, skillId),
+      "PATCH",
+      { enabled },
+      options,
+    );
+  }
+
+  /**
+   * Removes (archives) a Skill. Versions and bindings stay immutable, the
+   * Skill leaves every list, runs stop seeing it, and its key becomes free.
+   */
+  deleteSkill(
+    projectId: string,
+    skillId: string,
+    options: WriteOptions,
+  ): Promise<{
+    readonly id: string;
+    readonly key: string;
+    readonly deleted: true;
+  }> {
+    return this.#write(
+      this.routes.skill(projectId, skillId),
+      "DELETE",
+      undefined,
+      options,
+    );
+  }
+
   publishSkillVersion(
     projectId: string,
     skillId: string,

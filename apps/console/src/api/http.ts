@@ -1771,6 +1771,23 @@ export class HttpConsoleApi implements ConsoleApi {
     });
   };
 
+  setSkillEnabled = async (
+    id: string,
+    enabled: boolean,
+  ): Promise<SkillDetail> => {
+    await this.#projectRequest(`/skills/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    });
+    return this.getSkill(id);
+  };
+
+  deleteSkill = async (id: string): Promise<void> => {
+    await this.#projectRequest(`/skills/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  };
+
   updateSkillVersionLifecycle = async (
     skillId: string,
     versionId: string,

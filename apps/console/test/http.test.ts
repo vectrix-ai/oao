@@ -217,6 +217,39 @@ describe("HTTP console adapter", () => {
     expect(new Headers(init?.headers).get("idempotency-key")).toBeTruthy();
   });
 
+  it("disables and removes Skills with idempotent PATCH and DELETE requests", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(jsonResponse({ id: "skill/one", enabled: false }))
+      .mockResolvedValueOnce(
+        jsonResponse({ id: "skill/one", disabledAt: "2026-08-30T00:00:00Z" }),
+      )
+      .mockResolvedValue(jsonResponse({ id: "skill/one", deleted: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+
+    await api.setSkillEnabled("skill/one", false);
+    await api.deleteSkill("skill/one");
+
+    const calls = fetchMock.mock.calls.slice(1);
+    expect(calls.map(([url]) => url)).toEqual([
+      `/v1/projects/${PROJECT_ID}/skills/skill%2Fone`,
+      `/v1/projects/${PROJECT_ID}/skills/skill%2Fone`,
+      `/v1/projects/${PROJECT_ID}/skills/skill%2Fone`,
+    ]);
+    const patch = calls[0]?.[1] as RequestInit;
+    expect(patch.method).toBe("PATCH");
+    expect(patch.body).toBe(JSON.stringify({ enabled: false }));
+    expect(new Headers(patch.headers).get("idempotency-key")).toBeTruthy();
+    expect((calls[1]?.[1] as RequestInit | undefined)?.method ?? "GET").toBe(
+      "GET",
+    );
+    const remove = calls[2]?.[1] as RequestInit;
+    expect(remove.method).toBe("DELETE");
+    expect(new Headers(remove.headers).get("idempotency-key")).toBeTruthy();
+  });
+
   it("bootstraps a development session once after an unauthenticated context", async () => {
     const fetchMock = vi
       .fn()

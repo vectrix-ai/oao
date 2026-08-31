@@ -32,6 +32,7 @@ const toneByStatus: Record<string, ChipTone> = {
 
   caller_pending: "warning",
   degraded: "warning",
+  disabled: "warning",
   draft: "warning",
   operator: "warning",
   pending: "warning",

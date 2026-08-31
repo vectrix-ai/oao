@@ -413,6 +413,8 @@ uses `skill:bind`, and lifecycle changes use `skill:revoke`.
 | `GET`    | `/projects/{projectId}/skills`                                          | List Skills and their latest versions.         |
 | `POST`   | `/projects/{projectId}/skills`                                          | Create a Skill and immutable version 1.        |
 | `GET`    | `/projects/{projectId}/skills/{skillId}`                                | Read all immutable versions and manifests.     |
+| `PATCH`  | `/projects/{projectId}/skills/{skillId}`                                | Disable or enable a Skill.                     |
+| `DELETE` | `/projects/{projectId}/skills/{skillId}`                                | Remove (archive) a Skill.                      |
 | `POST`   | `/projects/{projectId}/skills/{skillId}/versions`                       | Publish the next immutable version.            |
 | `GET`    | `/projects/{projectId}/skills/{skillId}/versions/{versionId}/export`    | Export exact instructions and resource bytes.  |
 | `PATCH`  | `/projects/{projectId}/skills/{skillId}/versions/{versionId}/lifecycle` | Deprecate or revoke one version.               |
@@ -423,6 +425,26 @@ optional `license`, `compatibility`, string-valued `metadata`, informational
 `displayName`. Each file is `{ path, contentType, dataBase64 }`. See
 [Versioned Skills](/concepts/skills) for validation, package hashing,
 progressive disclosure, lifecycle, and script-execution boundaries.
+
+`PATCH /skills/{skillId}` requires `skill:revoke`, an `Idempotency-Key`, and
+the body `{ "enabled": false }` or `{ "enabled": true }`. It returns
+`{ "id", "key", "enabled", "disabledAt" }`. Disabling is reversible and never
+touches bindings: a disabled Skill cannot be attached to a new agent version
+(`400`), stays in the list with a non-null `disabledAt`, and is not offered to
+runs of agent versions that already bind it. Enabling restores both. Repeating
+the current state is a no-op that still returns `200`. The audit log and
+product events record `skill.disabled` and `skill.enabled` only when the state
+changed.
+
+`DELETE /skills/{skillId}` requires `skill:revoke` and an `Idempotency-Key`. It
+returns `{ "id", "key", "deleted": true }` and archives the Skill rather than
+removing rows: versions, package files, agent-version bindings, and session
+bindings are immutable and stay stored. After removal the Skill returns `404`
+from reads and version publication, disappears from the list, cannot be
+attached to a new agent version, is not offered to runs of agent versions that
+already bind it, and its open drafts are discarded. Its `key` becomes free for a
+new Skill. Removal cannot be undone. The audit log and product events record
+`skill.deleted`. Removing an already removed Skill returns `404`.
 
 Create a blank draft with `{}`. To edit an existing package, pass exact
 `skillId` and `sourceSkillVersionId` values; OAO copies that version's metadata
@@ -475,7 +497,7 @@ console. `provider` must be a key returned by the sandbox provider list route;
 there is no public fake-sandbox provider.
 
 Set `config.skillVersionIds` to a unique array of active, exact Skill version
-UUIDs from the same project. Names must also be unique within one agent
+UUIDs from the same project whose Skills are enabled and not removed. Names must also be unique within one agent
 version. The server records immutable agent-version bindings; the array is not
 a reference to each Skill's moving latest version.
 

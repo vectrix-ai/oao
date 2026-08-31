@@ -797,7 +797,7 @@ function CreateAgentDialog({
         ) : (
           <div className="stack">
             {skills
-              .filter((skill) => skill.status === "active")
+              .filter((skill) => skill.status === "active" && !skill.disabledAt)
               .map((skill) => (
                 <CheckboxRow
                   key={skill.id}
@@ -1593,6 +1593,9 @@ function AgentEditor({
                   skillVersionIds.includes(id),
                 );
                 const checked = selectedId !== undefined;
+                // Disabled Skills stay visible only while this version pins
+                // them, so the operator can see why publishing is refused.
+                if (skill.disabledAt && !checked) return null;
                 return (
                   <CheckboxRow
                     key={skill.id}
@@ -1602,8 +1605,12 @@ function AgentEditor({
                         : checked
                           ? "older pinned version"
                           : `v${skill.version}`
-                    }`}
-                    description={skill.description}
+                    }${skill.disabledAt ? " · disabled" : ""}`}
+                    description={
+                      skill.disabledAt
+                        ? "This Skill is disabled. Unselect it or enable it again before publishing a new version."
+                        : skill.description
+                    }
                     checked={checked}
                     disabled={!isLatest || skill.status !== "active"}
                     onChange={(event) =>

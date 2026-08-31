@@ -877,6 +877,190 @@ test(
       },
     );
 
+    await t.test(
+      "Skills can be disabled, enabled again, and removed",
+      async () => {
+        const created = await app.request(
+          `${projectPath}/skills`,
+          jsonRequest(
+            {
+              key: "removable-skill",
+              displayName: "Removable skill",
+              name: "removable-skill",
+              description: "Exists only to be disabled and removed.",
+              instructions: "Activate this Skill when asked to be removed.",
+            },
+            "removable-skill-create-1",
+          ),
+        );
+        assert.equal(created.status, 201, await created.clone().text());
+        const createdBody = (await created.json()) as {
+          id: string;
+          latestVersion: { id: string };
+          disabledAt: string | null;
+        };
+        assert.equal(createdBody.disabledAt, null);
+        const removableId = createdBody.id;
+        const removableVersionId = createdBody.latestVersion.id;
+        const agentBody = (key: string, idem: string) =>
+          jsonRequest(
+            {
+              key,
+              name: key,
+              description: "",
+              config: {
+                systemPrompt: "Answer with safe public output.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                skillVersionIds: [removableVersionId],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            idem,
+          );
+
+        const disabled = await app.request(
+          `${projectPath}/skills/${removableId}`,
+          {
+            ...jsonRequest({ enabled: false }, "removable-skill-disable-1"),
+            method: "PATCH",
+          },
+        );
+        assert.equal(disabled.status, 200, await disabled.clone().text());
+        const disabledBody = (await disabled.json()) as {
+          id: string;
+          key: string;
+          enabled: boolean;
+          disabledAt: string | null;
+        };
+        assert.equal(disabledBody.enabled, false);
+        assert.ok(disabledBody.disabledAt);
+        const disabledReplay = await app.request(
+          `${projectPath}/skills/${removableId}`,
+          {
+            ...jsonRequest({ enabled: false }, "removable-skill-disable-1"),
+            method: "PATCH",
+          },
+        );
+        assert.equal(
+          disabledReplay.headers.get("idempotency-replayed"),
+          "true",
+        );
+
+        const listed = (await (
+          await app.request(`${projectPath}/skills?limit=50`)
+        ).json()) as { data: { id: string; disabledAt: string | null }[] };
+        assert.equal(
+          listed.data.find((skill) => skill.id === removableId)?.disabledAt,
+          disabledBody.disabledAt,
+        );
+
+        const refused = await app.request(
+          `${projectPath}/agents`,
+          agentBody("removable-skill-agent", "removable-skill-agent-1"),
+        );
+        assert.equal(refused.status, 400, await refused.clone().text());
+
+        const enabled = await app.request(
+          `${projectPath}/skills/${removableId}`,
+          {
+            ...jsonRequest({ enabled: true }, "removable-skill-enable-1"),
+            method: "PATCH",
+          },
+        );
+        assert.equal(enabled.status, 200, await enabled.clone().text());
+        assert.equal(
+          ((await enabled.json()) as { disabledAt: string | null }).disabledAt,
+          null,
+        );
+        const allowed = await app.request(
+          `${projectPath}/agents`,
+          agentBody("removable-skill-agent", "removable-skill-agent-2"),
+        );
+        assert.equal(allowed.status, 201, await allowed.clone().text());
+
+        const removed = await app.request(
+          `${projectPath}/skills/${removableId}`,
+          {
+            ...jsonRequest({}, "removable-skill-delete-1"),
+            method: "DELETE",
+          },
+        );
+        assert.equal(removed.status, 200, await removed.clone().text());
+        assert.deepEqual(await removed.json(), {
+          id: removableId,
+          key: "removable-skill",
+          deleted: true,
+        });
+        const removedReplay = await app.request(
+          `${projectPath}/skills/${removableId}`,
+          { ...jsonRequest({}, "removable-skill-delete-1"), method: "DELETE" },
+        );
+        assert.equal(removedReplay.headers.get("idempotency-replayed"), "true");
+        const removedAgain = await app.request(
+          `${projectPath}/skills/${removableId}`,
+          { ...jsonRequest({}, "removable-skill-delete-2"), method: "DELETE" },
+        );
+        assert.equal(removedAgain.status, 404);
+        assert.equal(
+          (await app.request(`${projectPath}/skills/${removableId}`)).status,
+          404,
+        );
+        const afterRemoval = (await (
+          await app.request(`${projectPath}/skills?limit=50`)
+        ).json()) as { data: { id: string }[] };
+        assert.equal(
+          afterRemoval.data.some((skill) => skill.id === removableId),
+          false,
+        );
+        const reusedKey = await app.request(
+          `${projectPath}/skills`,
+          jsonRequest(
+            {
+              key: "removable-skill",
+              displayName: "Removable skill again",
+              name: "removable-skill",
+              description: "Reuses the freed key.",
+              instructions: "Activate this Skill when the key was reused.",
+            },
+            "removable-skill-create-2",
+          ),
+        );
+        assert.equal(reusedKey.status, 201, await reusedKey.clone().text());
+        const bindingsSurvive = await pool.query(
+          `SELECT 1 FROM oao.agent_version_skill_bindings
+           WHERE organization_id=$1 AND project_id=$2 AND skill_version_id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            removableVersionId,
+          ],
+        );
+        assert.equal(bindingsSurvive.rowCount, 1);
+        const audit = await pool.query<{ action: string }>(
+          `SELECT action FROM oao.audit_entries
+           WHERE organization_id=$1 AND project_id=$2 AND resource_id=$3
+           ORDER BY occurred_at`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            removableId,
+          ],
+        );
+        assert.deepEqual(
+          audit.rows
+            .map((row) => row.action)
+            .filter((action) =>
+              ["skill.disabled", "skill.enabled", "skill.deleted"].includes(
+                action,
+              ),
+            ),
+          ["skill.disabled", "skill.enabled", "skill.deleted"],
+        );
+      },
+    );
+
     await t.test("agent writes are idempotent and lists paginate", async () => {
       const first = await app.request(
         `${projectPath}/agents`,

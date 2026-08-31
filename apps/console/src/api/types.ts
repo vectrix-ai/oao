@@ -281,6 +281,8 @@ export interface SkillSummary {
   readonly status: "active" | "deprecated" | "revoked";
   readonly fileCount: number;
   readonly versionIds: readonly string[];
+  /** Set while the Skill is disabled; null when it is enabled. */
+  readonly disabledAt: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -646,6 +648,13 @@ export interface ConsoleApi {
     draftId: string,
   ): Promise<{ readonly skillId: string; readonly versionId: string }>;
   discardSkillDraft(draftId: string): Promise<void>;
+  /**
+   * Disables or re-enables a Skill. Disabled Skills cannot be pinned by new
+   * agent versions and are hidden from running agents until enabled again.
+   */
+  setSkillEnabled(id: string, enabled: boolean): Promise<SkillDetail>;
+  /** Removes (archives) a Skill; agent bindings stay immutable, the key is freed. */
+  deleteSkill(id: string): Promise<void>;
   updateSkillVersionLifecycle(
     skillId: string,
     versionId: string,

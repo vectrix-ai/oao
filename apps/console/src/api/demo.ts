@@ -258,6 +258,7 @@ const skillsSeed: SkillDetail[] = [
     contentHash: "4".repeat(64),
     status: "active",
     fileCount: 0,
+    disabledAt: null,
     versionIds: ["44444444-4444-4444-8444-444444444445"],
     createdAt: "2026-08-18T09:00:00.000Z",
     updatedAt: "2026-08-18T09:00:00.000Z",
@@ -291,6 +292,7 @@ const skillsSeed: SkillDetail[] = [
     contentHash: "5".repeat(64),
     status: "active",
     fileCount: 0,
+    disabledAt: null,
     versionIds: ["44444444-4444-4444-8444-444444444447"],
     createdAt: "2026-08-18T09:05:00.000Z",
     updatedAt: "2026-08-18T09:05:00.000Z",
@@ -1312,6 +1314,7 @@ export class DemoConsoleApi implements ConsoleApi {
       contentHash: "5".repeat(64),
       status: "active",
       fileCount: input.files?.length ?? 0,
+      disabledAt: null,
       versionIds: [versionId],
       createdAt: now,
       updatedAt: now,
@@ -1666,6 +1669,28 @@ export class DemoConsoleApi implements ConsoleApi {
     this.#skillDrafts = this.#skillDrafts.map((entry) =>
       entry.id === draftId ? { ...entry, status: "discarded" } : entry,
     );
+  }
+
+  async setSkillEnabled(id: string, enabled: boolean) {
+    this.#guard();
+    const skill = this.#skills.find((item) => item.id === id);
+    if (!skill) throw new Error("Skill not found");
+    const updated: SkillDetail = {
+      ...skill,
+      disabledAt: enabled ? null : new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    this.#skills = this.#skills.map((item) =>
+      item.id === id ? updated : item,
+    );
+    return structuredClone(updated);
+  }
+
+  async deleteSkill(id: string): Promise<void> {
+    this.#guard();
+    const index = this.#skills.findIndex((item) => item.id === id);
+    if (index === -1) throw new Error("Skill not found");
+    this.#skills.splice(index, 1);
   }
 
   async updateSkillVersionLifecycle(

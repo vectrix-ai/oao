@@ -265,6 +265,12 @@ test("client publishes and manages exact Skill versions", async () => {
     "revoked",
     { idempotencyKey: "skill-revoke-1" },
   );
+  await client.setSkillEnabled("project-1", "skill-1", false, {
+    idempotencyKey: "skill-disable-1",
+  });
+  await client.deleteSkill("project-1", "skill-1", {
+    idempotencyKey: "skill-delete-1",
+  });
 
   assert.equal(
     requests[0]?.url,
@@ -278,6 +284,18 @@ test("client publishes and manages exact Skill versions", async () => {
     "https://api.example.test/v1/projects/project-1/skills/skill-1/versions/skill-version-1/lifecycle",
   );
   assert.deepEqual(await requests[1]?.json(), { status: "revoked" });
+  assert.equal(requests[2]?.method, "PATCH");
+  assert.equal(
+    requests[2]?.url,
+    "https://api.example.test/v1/projects/project-1/skills/skill-1",
+  );
+  assert.deepEqual(await requests[2]?.json(), { enabled: false });
+  assert.equal(requests[3]?.method, "DELETE");
+  assert.equal(
+    requests[3]?.url,
+    "https://api.example.test/v1/projects/project-1/skills/skill-1",
+  );
+  assert.equal(requests[3]?.headers.get("idempotency-key"), "skill-delete-1");
 });
 
 test("client authors nested Skill draft resources before publication", async () => {

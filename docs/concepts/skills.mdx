@@ -299,6 +299,26 @@ Lifecycle only moves forward: `active` to `deprecated` or `revoked`, and
 `deprecated` to `revoked`. Version rows, contents, checksums, agent bindings,
 and session bindings are immutable.
 
+### Disable or remove a whole Skill
+
+Version lifecycle is per version. Two Skill-level controls cover the whole
+package, from the row actions in the Skills list, from the Skill page, or
+through the API:
+
+- **Disable Skill** pauses it. No new agent version can attach any of its
+  versions, and agents that already bind it stop seeing it on their next run.
+  Nothing is unbound: **Enable Skill** restores the Skill everywhere, including
+  in agent versions that pinned it while it was disabled. The agent editor
+  keeps showing a disabled Skill only while the version being edited pins it,
+  so the operator knows to unselect or re-enable it before publishing.
+- **Remove Skill** archives it permanently. The Skill leaves the list and the
+  agent picker, its open drafts are discarded, runs stop seeing it, and its
+  key becomes free for a new Skill. Published versions stay stored because
+  existing agent versions and session history reference them, so nothing that
+  already ran becomes unreadable.
+
+Both actions confirm before they run and require `skill:revoke`.
+
 <Warning>
   Resource files under `scripts/` are data only. OAO never executes a Skill
   script automatically. A model could read a script and separately request an
@@ -313,5 +333,6 @@ Project-scoped actions are `skill:read`, `skill:write`, `skill:bind`, and
 validates every selected Skill version within the same tenant transaction.
 
 The console provides API parity for listing and creating Skills, publishing
-new versions, deprecating or revoking versions, selecting exact versions on a
-new agent version, and viewing the Skill versions inherited by a session.
+new versions, deprecating or revoking versions, disabling, enabling, and
+removing Skills, selecting exact versions on a new agent version, and viewing
+the Skill versions inherited by a session.

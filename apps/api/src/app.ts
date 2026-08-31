@@ -1005,7 +1005,8 @@ async function insertSkillVersion(
 ): Promise<Readonly<Record<string, unknown>>> {
   const skill = await transaction.query(
     `SELECT id FROM oao.skills
-     WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
+     WHERE organization_id=$1 AND project_id=$2 AND id=$3
+       AND archived_at IS NULL FOR UPDATE`,
     [actor.organizationId, actor.projectId, skillId],
   );
   if (!skill.rowCount) throw new HttpApiError("not_found", "Skill not found");
@@ -4251,7 +4252,7 @@ function registerSkillRoutes(
                   AND version.skill_id=skill.id
                   AND version.id=COALESCE($4::uuid,skill.latest_version_id)
                 WHERE skill.organization_id=$1 AND skill.project_id=$2
-                  AND skill.id=$3`,
+                  AND skill.id=$3 AND skill.archived_at IS NULL`,
               [
                 actor.organizationId,
                 actor.projectId,
@@ -4850,7 +4851,8 @@ function registerSkillRoutes(
       const result = await tx.query(
         `SELECT s.id,s.organization_id,s.project_id,s.skill_key AS key,
                 s.display_name,s.latest_version_id,s.created_by_principal_id,
-                s.created_at,s.updated_at,v.version,v.skill_name AS name,
+                s.created_at,s.updated_at,s.disabled_at,
+                v.version,v.skill_name AS name,
                 v.description,encode(v.content_hash,'hex') AS content_hash,
                 lifecycle.status,
                 (SELECT count(*)::int FROM oao.skill_version_files f
@@ -4870,7 +4872,8 @@ function registerSkillRoutes(
            ON lifecycle.organization_id=v.organization_id
           AND lifecycle.project_id=v.project_id
           AND lifecycle.skill_version_id=v.id
-         WHERE s.organization_id=$1 AND s.project_id=$2${condition.sql}
+         WHERE s.organization_id=$1 AND s.project_id=$2
+           AND s.archived_at IS NULL${condition.sql}
          ORDER BY s.created_at DESC,s.id DESC
          LIMIT $${3 + condition.values.length}`,
         [actor.organizationId, actor.projectId, ...condition.values, limit + 1],
@@ -4953,6 +4956,7 @@ function registerSkillRoutes(
             displayName,
             latestVersionId: String(version.id),
             latestVersion: version,
+            disabledAt: null,
           };
         },
       });
@@ -4967,7 +4971,8 @@ function registerSkillRoutes(
       const result = await tx.query(
         `SELECT s.id,s.organization_id,s.project_id,s.skill_key AS key,
                 s.display_name,s.latest_version_id,s.created_by_principal_id,
-                s.created_at,s.updated_at,v.version,v.skill_name AS name,
+                s.created_at,s.updated_at,s.disabled_at,
+                v.version,v.skill_name AS name,
                 v.description,encode(v.content_hash,'hex') AS content_hash,
                 lifecycle.status,
                 (SELECT count(*)::int FROM oao.skill_version_files f
@@ -4987,7 +4992,8 @@ function registerSkillRoutes(
            ON lifecycle.organization_id=v.organization_id
           AND lifecycle.project_id=v.project_id
           AND lifecycle.skill_version_id=v.id
-         WHERE s.organization_id=$1 AND s.project_id=$2 AND s.id=$3`,
+         WHERE s.organization_id=$1 AND s.project_id=$2 AND s.id=$3
+           AND s.archived_at IS NULL`,
         [actor.organizationId, actor.projectId, c.req.param("skillId")],
       );
       const skill = publicValue(result.rows[0]) as
@@ -5089,6 +5095,127 @@ function registerSkillRoutes(
       });
     },
   );
+
+  app.patch("/v1/projects/:projectId/skills/:skillId", async (c) => {
+    const actor = assertProject(c);
+    const skillId = c.req.param("skillId");
+    const body = await readJsonObject(c.req.raw);
+    const idem = idempotencyKey(c.req.raw);
+    if (typeof body.enabled !== "boolean")
+      throw new HttpApiError("bad_request", "enabled must be a boolean");
+    const enabled = body.enabled;
+    return dependencies.store.transaction(actor, "skill:revoke", async (tx) => {
+      const response = await dependencies.store.idempotent(tx, actor, {
+        scope: `PATCH:/skills/${skillId}`,
+        method: "PATCH",
+        key: idem,
+        hash: requestHash({ skillId, enabled }),
+        status: 200,
+        execute: async () => {
+          // Disabling is reversible: bindings stay in place, the runtime just
+          // stops offering the Skill until it is enabled again.
+          const current = await tx.query<{
+            skill_key: string;
+            disabled_at: Date | null;
+          }>(
+            `SELECT skill_key,disabled_at FROM oao.skills
+             WHERE organization_id=$1 AND project_id=$2 AND id=$3
+               AND archived_at IS NULL FOR UPDATE`,
+            [actor.organizationId, actor.projectId, skillId],
+          );
+          const existing = current.rows[0];
+          if (!existing) throw new HttpApiError("not_found", "Skill not found");
+          const changed = enabled === (existing.disabled_at !== null);
+          let skill = existing;
+          if (changed) {
+            const result = await tx.query<typeof existing>(
+              `UPDATE oao.skills
+               SET disabled_at=CASE WHEN $4 THEN NULL ELSE clock_timestamp() END,
+                   updated_at=clock_timestamp()
+               WHERE organization_id=$1 AND project_id=$2 AND id=$3
+               RETURNING skill_key,disabled_at`,
+              [actor.organizationId, actor.projectId, skillId, enabled],
+            );
+            skill = result.rows[0]!;
+          }
+          if (changed) {
+            await dependencies.store.appendEvent(tx, actor, {
+              aggregateType: "skill",
+              aggregateId: skillId,
+              kind: enabled ? "skill.enabled" : "skill.disabled",
+              payload: { key: skill.skill_key },
+            });
+            await dependencies.store.appendAudit(tx, actor, {
+              action: enabled ? "skill.enabled" : "skill.disabled",
+              resourceType: "skill",
+              resourceId: skillId,
+              detail: { key: skill.skill_key },
+            });
+          }
+          return {
+            id: skillId,
+            key: skill.skill_key,
+            enabled,
+            disabledAt: publicValue(skill.disabled_at),
+          };
+        },
+      });
+      c.header("idempotency-replayed", String(response.replayed));
+      return c.json(response.body);
+    });
+  });
+
+  app.delete("/v1/projects/:projectId/skills/:skillId", async (c) => {
+    const actor = assertProject(c);
+    const skillId = c.req.param("skillId");
+    const idem = idempotencyKey(c.req.raw);
+    return dependencies.store.transaction(actor, "skill:revoke", async (tx) => {
+      const response = await dependencies.store.idempotent(tx, actor, {
+        scope: `DELETE:/skills/${skillId}`,
+        method: "DELETE",
+        key: idem,
+        hash: requestHash({ skillId }),
+        status: 200,
+        execute: async () => {
+          // Archiving only: agent versions and sessions pin immutable Skill
+          // version rows, so the package survives; the Skill leaves every
+          // list, the runtime stops offering it, and its key becomes free.
+          const result = await tx.query<{ skill_key: string }>(
+            `UPDATE oao.skills
+             SET archived_at=clock_timestamp(),updated_at=clock_timestamp()
+             WHERE organization_id=$1 AND project_id=$2 AND id=$3
+               AND archived_at IS NULL
+             RETURNING skill_key`,
+            [actor.organizationId, actor.projectId, skillId],
+          );
+          const skill = result.rows[0];
+          if (!skill) throw new HttpApiError("not_found", "Skill not found");
+          await tx.query(
+            `UPDATE oao.skill_package_drafts
+             SET status='discarded',updated_at=clock_timestamp()
+             WHERE organization_id=$1 AND project_id=$2 AND skill_id=$3
+               AND status='editing'`,
+            [actor.organizationId, actor.projectId, skillId],
+          );
+          await dependencies.store.appendEvent(tx, actor, {
+            aggregateType: "skill",
+            aggregateId: skillId,
+            kind: "skill.deleted",
+            payload: { key: skill.skill_key },
+          });
+          await dependencies.store.appendAudit(tx, actor, {
+            action: "skill.deleted",
+            resourceType: "skill",
+            resourceId: skillId,
+            detail: { key: skill.skill_key },
+          });
+          return { id: skillId, key: skill.skill_key, deleted: true };
+        },
+      });
+      c.header("idempotency-replayed", String(response.replayed));
+      return c.json(response.body);
+    });
+  });
 
   app.patch(
     "/v1/projects/:projectId/skills/:skillId/versions/:versionId/lifecycle",

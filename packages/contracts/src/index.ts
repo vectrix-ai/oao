@@ -832,6 +832,8 @@ export const SkillSchema = v.object({
   createdByPrincipalId: IdSchema,
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
+  /** Set while the Skill is disabled; null (or absent) when it is enabled. */
+  disabledAt: v.optional(v.nullable(TimestampSchema), null),
 });
 
 export const SkillVersionFileManifestSchema = v.object({
@@ -1104,6 +1106,9 @@ export const ProductEventKindSchema = v.picklist([
   "skill.version_published",
   "skill.version_deprecated",
   "skill.version_revoked",
+  "skill.disabled",
+  "skill.enabled",
+  "skill.deleted",
   "skill.activated",
   "skill.resource_read",
   "mcp.server_created",
