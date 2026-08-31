@@ -126,6 +126,9 @@ child response, workspace contents, credentials, or authorization headers.
 | `skill.version_published`  | A new immutable package version was committed.            |
 | `skill.version_deprecated` | A version was blocked from new agent bindings.            |
 | `skill.version_revoked`    | A version was blocked from binding and runtime admission. |
+| `skill.disabled`           | The Skill was paused: no new agent version can pin it.    |
+| `skill.enabled`            | A disabled Skill became attachable again.                 |
+| `skill.deleted`            | The Skill was removed (archived) and its key released.    |
 | `skill.activated`          | Flue progressively loaded a bound Skill's instructions.   |
 | `skill.resource_read`      | Flue read one supporting resource from a bound Skill.     |
 

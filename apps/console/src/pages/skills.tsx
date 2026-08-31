@@ -1,6 +1,9 @@
 import {
   ArrowLeft,
   ChevronRight,
+  BookOpen,
+  CirclePause,
+  CirclePlay,
   Download,
   FilePlus2,
   FileText,
@@ -22,11 +25,14 @@ import type {
   SkillDraft,
   SkillDraftEntry,
   SkillFileInput,
+  SkillSummary,
 } from "../api/types";
 import {
   Button,
+  ConfirmDialog,
   Dialog,
   EmptyState,
+  EntityCell,
   ErrorState,
   Field,
   FormError,
@@ -38,6 +44,7 @@ import {
   PageHeader,
   Panel,
   StatusChip,
+  TableCard,
   Tabs,
   Textarea,
   formatDate,
@@ -291,6 +298,8 @@ export function SkillsPage() {
   const navigate = useNavigate();
   const notify = useToast();
   const [draft, setDraft] = useState<SkillDraft | null>(null);
+  const [disabling, setDisabling] = useState<SkillSummary | null>(null);
+  const [removing, setRemoving] = useState<SkillSummary | null>(null);
   const query = useQuery({
     queryKey: ["skills"],
     queryFn: () => api.listSkills({}),
@@ -298,6 +307,34 @@ export function SkillsPage() {
   const createDraft = useMutation({
     mutationFn: () => api.createSkillDraft(),
     onSuccess: setDraft,
+  });
+  const setEnabled = useMutation({
+    mutationFn: (input: {
+      readonly skill: SkillSummary;
+      readonly enabled: boolean;
+    }) => api.setSkillEnabled(input.skill.id, input.enabled),
+    onSuccess: async (_result, input) => {
+      await queryClient.invalidateQueries({ queryKey: ["skills"] });
+      await queryClient.invalidateQueries({
+        queryKey: ["skill", input.skill.id],
+      });
+      setDisabling(null);
+      notify(
+        `${input.enabled ? "Enabled" : "Disabled"} ${input.skill.displayName}.`,
+      );
+    },
+    onError: (error, input) => {
+      if (input.enabled) notify(error.message);
+    },
+  });
+  const remove = useMutation({
+    mutationFn: (skill: SkillSummary) => api.deleteSkill(skill.id),
+    onSuccess: async (_result, skill) => {
+      queryClient.removeQueries({ queryKey: ["skill", skill.id] });
+      await queryClient.invalidateQueries({ queryKey: ["skills"] });
+      setRemoving(null);
+      notify(`Removed ${skill.displayName}.`);
+    },
   });
   const importBundle = useMutation({
     mutationFn: async (file: File) => {
@@ -358,28 +395,115 @@ export function SkillsPage() {
           }
         />
       ) : (
-        <Panel
-          title="Published Skills"
-          description="Latest versions are offered when publishing an agent; existing bindings never float."
-          flush
+        <TableCard
+          label="Skills table"
+          caption="Published Skills in this project. Latest versions are offered when publishing an agent; existing bindings never float."
         >
-          <div className="compact-list">
-            {query.data.data.map((skill) => (
-              <Link key={skill.id} to={`/skills/${skill.id}`}>
-                <span className="who">
-                  <strong>{skill.displayName}</strong>
-                  <small>
-                    {skill.name} · v{skill.version} · {skill.fileCount}{" "}
-                    resources
-                  </small>
-                  <small>{skill.description}</small>
-                </span>
-                <StatusChip value={skill.status} />
-              </Link>
-            ))}
-          </div>
-        </Panel>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Description</th>
+              <th>Latest</th>
+              <th>Resources</th>
+              <th>Status</th>
+              <th>Updated</th>
+              <th className="table-actions-head">
+                <span className="sr-only">Actions</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {query.data.data.map((skill) => {
+              const busy =
+                (setEnabled.isPending &&
+                  setEnabled.variables?.skill.id === skill.id) ||
+                (remove.isPending && remove.variables?.id === skill.id);
+              return (
+                <tr key={skill.id}>
+                  <td>
+                    <Link to={`/skills/${skill.id}`}>
+                      <EntityCell
+                        icon={<BookOpen size={15} />}
+                        name={skill.displayName}
+                        meta={skill.name}
+                      />
+                    </Link>
+                  </td>
+                  <td>{skill.description}</td>
+                  <td className="mono">v{skill.version}</td>
+                  <td className="mono">{skill.fileCount}</td>
+                  <td>
+                    <span className="btn-group">
+                      {skill.disabledAt ? (
+                        <StatusChip value="disabled" />
+                      ) : null}
+                      <StatusChip value={skill.status} />
+                    </span>
+                  </td>
+                  <td>{formatDate(skill.updatedAt)}</td>
+                  <td className="table-actions">
+                    {skill.disabledAt ? (
+                      <IconButton
+                        label={`Enable Skill ${skill.displayName}`}
+                        title="Enable Skill"
+                        disabled={busy}
+                        onClick={() =>
+                          setEnabled.mutate({ skill, enabled: true })
+                        }
+                      >
+                        <CirclePlay size={14} aria-hidden="true" />
+                      </IconButton>
+                    ) : (
+                      <IconButton
+                        label={`Disable Skill ${skill.displayName}`}
+                        title="Disable Skill"
+                        disabled={busy}
+                        onClick={() => {
+                          setEnabled.reset();
+                          setDisabling(skill);
+                        }}
+                      >
+                        <CirclePause size={14} aria-hidden="true" />
+                      </IconButton>
+                    )}
+                    <IconButton
+                      label={`Remove Skill ${skill.displayName}`}
+                      title="Remove Skill"
+                      disabled={busy}
+                      onClick={() => {
+                        remove.reset();
+                        setRemoving(skill);
+                      }}
+                    >
+                      <Trash2 size={14} aria-hidden="true" />
+                    </IconButton>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </TableCard>
       )}
+      {disabling ? (
+        <DisableSkillDialog
+          skill={disabling}
+          pending={setEnabled.isPending}
+          error={setEnabled.error}
+          onClose={() => setDisabling(null)}
+          onConfirm={() =>
+            setEnabled.mutate({ skill: disabling, enabled: false })
+          }
+        />
+      ) : null}
+      {removing ? (
+        <RemoveSkillDialog
+          skill={removing}
+          pending={remove.isPending}
+          error={remove.error}
+          onClose={() => setRemoving(null)}
+          onConfirm={() => remove.mutate(removing)}
+        />
+      ) : null}
       <Panel
         title="How Skills work"
         collapsible
@@ -1140,10 +1264,62 @@ function SkillFinder({
   );
 }
 
+type SkillDialogProps = {
+  readonly skill: Pick<SkillSummary, "displayName" | "key">;
+  readonly pending: boolean;
+  readonly error: Error | null;
+  readonly onClose: () => void;
+  readonly onConfirm: () => void;
+};
+
+/** Confirms a reversible pause: bindings stay, agents stop seeing the Skill. */
+function DisableSkillDialog({
+  skill,
+  pending,
+  error,
+  onClose,
+  onConfirm,
+}: SkillDialogProps) {
+  return (
+    <ConfirmDialog
+      title={`Disable “${skill.displayName}”?`}
+      description={`${skill.key} can no longer be attached when publishing a new agent version. Published agent versions that pin it keep running with it, and enabling the Skill again restores it for new publications.`}
+      confirmLabel="Disable Skill"
+      tone="primary"
+      pending={pending}
+      error={error?.message ?? null}
+      onClose={onClose}
+      onConfirm={onConfirm}
+    />
+  );
+}
+
+/** Confirms removal; the Skill is archived, so published versions stay stored. */
+function RemoveSkillDialog({
+  skill,
+  pending,
+  error,
+  onClose,
+  onConfirm,
+}: SkillDialogProps) {
+  return (
+    <ConfirmDialog
+      title={`Remove “${skill.displayName}”?`}
+      description={`${skill.key} disappears from this project: it can no longer be attached to a new agent version, and the key becomes free for a new Skill. Published versions stay stored, so agent versions and sessions that pin them keep working. Removal cannot be undone.`}
+      confirmLabel="Remove Skill"
+      pending={pending}
+      error={error?.message ?? null}
+      onClose={onClose}
+      onConfirm={onConfirm}
+    />
+  );
+}
+
 export function SkillDetailPage() {
   const { skillId = "" } = useParams();
   const api = useApi();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const notify = useToast();
   const [draft, setDraft] = useState<SkillDraft | null>(null);
   const query = useQuery({
@@ -1206,7 +1382,35 @@ export function SkillDetailPage() {
     onSuccess: async (_, input) => {
       await queryClient.invalidateQueries({ queryKey: ["skill", skillId] });
       await queryClient.invalidateQueries({ queryKey: ["skills"] });
+      setRevoking(null);
       notify(`Skill version ${input.status}.`);
+    },
+  });
+  const [revoking, setRevoking] = useState<
+    SkillDetail["versions"][number] | null
+  >(null);
+  const [confirmDisable, setConfirmDisable] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const setEnabled = useMutation({
+    mutationFn: (enabled: boolean) => api.setSkillEnabled(skillId, enabled),
+    onSuccess: async (skill) => {
+      await queryClient.invalidateQueries({ queryKey: ["skill", skillId] });
+      await queryClient.invalidateQueries({ queryKey: ["skills"] });
+      setConfirmDisable(false);
+      notify(
+        skill.disabledAt
+          ? `Disabled ${skill.displayName}.`
+          : `Enabled ${skill.displayName}.`,
+      );
+    },
+  });
+  const remove = useMutation({
+    mutationFn: () => api.deleteSkill(skillId),
+    onSuccess: async () => {
+      queryClient.removeQueries({ queryKey: ["skill", skillId] });
+      await queryClient.invalidateQueries({ queryKey: ["skills"] });
+      notify(`Removed ${query.data?.displayName ?? "Skill"}.`);
+      navigate("/skills");
     },
   });
   if (query.isPending)
@@ -1234,6 +1438,39 @@ export function SkillDetailPage() {
         description={query.data.description}
         actions={
           <>
+            {query.data.disabledAt ? <StatusChip value="disabled" /> : null}
+            <Button
+              variant="danger"
+              icon={<Trash2 size={15} />}
+              disabled={remove.isPending || setEnabled.isPending}
+              onClick={() => {
+                remove.reset();
+                setConfirmDelete(true);
+              }}
+            >
+              Remove Skill
+            </Button>
+            {query.data.disabledAt ? (
+              <Button
+                icon={<CirclePlay size={15} />}
+                loading={setEnabled.isPending}
+                disabled={remove.isPending}
+                onClick={() => setEnabled.mutate(true)}
+              >
+                Enable Skill
+              </Button>
+            ) : (
+              <Button
+                icon={<CirclePause size={15} />}
+                disabled={remove.isPending || setEnabled.isPending}
+                onClick={() => {
+                  setEnabled.reset();
+                  setConfirmDisable(true);
+                }}
+              >
+                Disable Skill
+              </Button>
+            )}
             <SkillBundleUpload
               label="Upload version"
               pending={importVersion.isPending}
@@ -1253,6 +1490,40 @@ export function SkillDetailPage() {
           </>
         }
       />
+      {setEnabled.error && !confirmDisable ? (
+        <FormError>{setEnabled.error.message}</FormError>
+      ) : null}
+      {confirmDisable ? (
+        <DisableSkillDialog
+          skill={query.data}
+          pending={setEnabled.isPending}
+          error={setEnabled.error}
+          onClose={() => setConfirmDisable(false)}
+          onConfirm={() => setEnabled.mutate(false)}
+        />
+      ) : null}
+      {confirmDelete ? (
+        <RemoveSkillDialog
+          skill={query.data}
+          pending={remove.isPending}
+          error={remove.error}
+          onClose={() => setConfirmDelete(false)}
+          onConfirm={() => remove.mutate()}
+        />
+      ) : null}
+      {revoking ? (
+        <ConfirmDialog
+          title={`Revoke version ${revoking.version}?`}
+          description="Revoked versions can no longer be attached to an agent version, and sessions that bind this version fail admission until they move to an allowed version. Revocation cannot be undone."
+          confirmLabel="Revoke version"
+          pending={lifecycle.isPending}
+          error={lifecycle.error?.message ?? null}
+          onClose={() => setRevoking(null)}
+          onConfirm={() =>
+            lifecycle.mutate({ versionId: revoking.id, status: "revoked" })
+          }
+        />
+      ) : null}
       <Panel
         title="Immutable versions"
         description="Agent and session bindings reference these exact version IDs."
@@ -1297,15 +1568,8 @@ export function SkillDetailPage() {
                       variant="danger"
                       disabled={lifecycle.isPending}
                       onClick={() => {
-                        if (
-                          globalThis.confirm(
-                            `Revoke Skill version ${version.version}? Existing sessions will fail admission.`,
-                          )
-                        )
-                          lifecycle.mutate({
-                            versionId: version.id,
-                            status: "revoked",
-                          });
+                        lifecycle.reset();
+                        setRevoking(version);
                       }}
                     >
                       Revoke
@@ -1335,7 +1599,7 @@ export function SkillDetailPage() {
             </article>
           ))}
         </div>
-        {lifecycle.error ? (
+        {lifecycle.error && !revoking ? (
           <FormError>{lifecycle.error.message}</FormError>
         ) : null}
       </Panel>

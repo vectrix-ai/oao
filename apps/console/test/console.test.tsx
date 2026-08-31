@@ -317,6 +317,110 @@ describe("management console", () => {
     });
   });
 
+  it("disables a Skill, hides it from the agent picker, and enables it again", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/skills/44444444-4444-4444-8444-444444444446", api);
+    await screen.findByRole("heading", { name: "Carrier Codes" });
+    await user.click(screen.getByRole("button", { name: "Disable Skill" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "Disable “Carrier Codes”?",
+    });
+    expect(
+      within(dialog).getByText(
+        /enabling the Skill again restores it for new publications/u,
+      ),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("button", { name: "Disable Skill" }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Enable Skill" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("disabled").length).toBeGreaterThan(0);
+    const listed = await api.listSkills({});
+    expect(
+      listed.data.find((skill) => skill.key === "carrier-codes")?.disabledAt,
+    ).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Enable Skill" }));
+    expect(
+      await screen.findByRole("button", { name: "Disable Skill" }),
+    ).toBeInTheDocument();
+    expect(
+      (await api.getSkill("44444444-4444-4444-8444-444444444446")).disabledAt,
+    ).toBeNull();
+  });
+
+  it("disables, enables, and removes Skills from the list view", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/skills", api);
+    expect(await screen.findByText("Carrier Codes")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Disable Skill Carrier Codes" }),
+    );
+    await user.click(
+      within(
+        screen.getByRole("dialog", { name: "Disable “Carrier Codes”?" }),
+      ).getByRole("button", { name: "Disable Skill" }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Enable Skill Carrier Codes" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("disabled")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Enable Skill Carrier Codes" }),
+    );
+    expect(
+      await screen.findByRole("button", {
+        name: "Disable Skill Carrier Codes",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("disabled")).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Remove Skill Carrier Codes" }),
+    );
+    await user.click(
+      within(
+        screen.getByRole("dialog", { name: "Remove “Carrier Codes”?" }),
+      ).getByRole("button", { name: "Remove Skill" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("Carrier Codes")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("Shipment Intake")).toBeInTheDocument();
+  });
+
+  it("removes a Skill from its detail page and returns to the list", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/skills/44444444-4444-4444-8444-444444444446", api);
+    await screen.findByRole("heading", { name: "Carrier Codes" });
+    await user.click(screen.getByRole("button", { name: "Remove Skill" }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.queryByRole("dialog", { name: "Remove “Carrier Codes”?" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Remove Skill" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "Remove “Carrier Codes”?",
+    });
+    expect(
+      within(dialog).getByText(/the key becomes free for a new Skill/u),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("button", { name: "Remove Skill" }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Skills" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Shipment Intake")).toBeInTheDocument();
+    expect(screen.queryByText("Carrier Codes")).not.toBeInTheDocument();
+    await expect(
+      api.getSkill("44444444-4444-4444-8444-444444444446"),
+    ).rejects.toThrow("Skill not found");
+  });
+
   it("downloads a Skill version as a portable bundle", async () => {
     const user = userEvent.setup();
     const blobs: Blob[] = [];

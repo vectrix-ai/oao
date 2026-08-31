@@ -2917,6 +2917,9 @@ export class ManagedRuntimeOrchestrator {
         throw new Error(
           "Session Skill bindings do not match the agent version",
         );
+      // Skill-level disable/remove gates publication only: the thread
+      // incarnation pins this snapshot's hash, so the bound Skill set must
+      // stay byte-identical across every run of the thread.
       if (skillResult.rows.some((binding) => binding.status === "revoked"))
         throw new Error("A bound Skill version has been revoked");
       const skills = skillResult.rows.map(

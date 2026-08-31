@@ -54,7 +54,10 @@ and should shape integrations:
   sharing, signature service, or automatic remote update workflow. Skills are
   not materialized into Daytona workspaces; Flue reads verified resources from
   the runtime registry. Files under `scripts/` are never run automatically,
-  and `allowedTools` is informational rather than a policy control.
+  and `allowedTools` is informational rather than a policy control. Skills can
+  be disabled (reversible) or removed, but removal archives rather than
+  deletes: published versions and bindings stay stored for existing agent
+  versions and session history.
 - **Runtime execution requires a configured model provider.** Add a
   project-scoped OpenRouter, OpenAI, Anthropic, or xAI provider and preset before publishing an
   executable agent version. Daytona is required only for sandbox-enabled
