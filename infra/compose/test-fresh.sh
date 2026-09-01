@@ -30,8 +30,26 @@ docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
 docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
   -c "ALTER DATABASE oao OWNER TO oao_runtime"
 
-export DATABASE_URL="postgresql://oao_runtime:oao_runtime@127.0.0.1:${postgres_port}/oao"
-export OAO_TEST_RUNTIME_DATABASE_URL="$DATABASE_URL"
+reset_fixtures() {
+  docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d oao -c "
+    DO \$\$
+    DECLARE
+      table_list text;
+    BEGIN
+      SELECT string_agg(format('%I.%I', schemaname, tablename), ', ')
+        INTO table_list
+        FROM pg_tables
+       WHERE schemaname = 'oao';
+      IF table_list IS NOT NULL THEN
+        EXECUTE 'TRUNCATE TABLE ' || table_list || ' RESTART IDENTITY CASCADE';
+      END IF;
+    END
+    \$\$"
+}
+
+export OAO_TEST_RUNTIME_DATABASE_URL="postgresql://oao_runtime:oao_runtime@127.0.0.1:${postgres_port}/oao"
+export OAO_TEST_ADMIN_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:${postgres_port}/oao"
+export DATABASE_URL="$OAO_TEST_RUNTIME_DATABASE_URL"
 pnpm --filter @oao/db-postgres migrate
 pnpm --filter @oao/db-postgres migrate
 
@@ -44,10 +62,17 @@ docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U oao_runtime -d oao \
 # The integration suites seed and inspect fixtures outside application RLS.
 # Keep that test-only access separate while the worker continues to use the
 # Cloud SQL-like runtime login above.
-export OAO_TEST_ADMIN_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:${postgres_port}/oao"
 pnpm --filter @oao/runtime-worker test
+
+reset_fixtures
 export DATABASE_URL="$OAO_TEST_ADMIN_DATABASE_URL"
 pnpm --filter @oao/db-postgres test:integration
+
+reset_fixtures
 pnpm --filter @oao/api test:integration
+
+reset_fixtures
 pnpm --filter @oao/tool-broker test:integration
+
+reset_fixtures
 pnpm --filter @oao/sandbox-daytona test:integration
