@@ -73,7 +73,8 @@
         --radius-md: 0px;
         --radius-lg: 0px;
 
-        --font-display: "Space Grotesk", "Inter", ui-sans-serif, system-ui, sans-serif;
+        --font-display:
+          "Space Grotesk", "Inter", ui-sans-serif, system-ui, sans-serif;
         --font-body: "Inter", ui-sans-serif, system-ui, sans-serif;
         --font-mono: "Space Mono", ui-monospace, "SF Mono", monospace;
       }
@@ -516,13 +517,13 @@
           OAO's identity is neo-brutalist: a white ground, ink hardware, and
           three loud flat hues that each hold exactly one job. Everything is
           drawn with ink borders and hard offset shadows — nothing blurs,
-          nothing rounds, nothing fades. It runs at two volumes: full volume
-          on marketing surfaces, and a quieter <strong>product tier</strong>
-          in the console, where the same hardware thins out so the tool stays
-          comfortable all day. The landing page
-          (<code class="inline">vectrix-ai/oao-landing-page</code>) is the
-          reference implementation of the poster tier; this guide defines
-          both.
+          nothing rounds, nothing fades. It runs at two volumes: full volume on
+          marketing surfaces, and a quieter <strong>product tier</strong> in the
+          console, where the same hardware thins out so the tool stays
+          comfortable all day. The landing page (<code class="inline"
+            >vectrix-ai/oao-landing-page</code
+          >) is the reference implementation of the poster tier; this guide
+          defines both.
         </p>
         <div class="tags">
           <span>WHITE GROUND</span>
@@ -545,16 +546,30 @@
         </p>
         <div class="logo-grid">
           <div class="logo-cell">
-            <img src="./style-guide-assets/oao-wordmark-black.png" alt="OAO wordmark, black" />
+            <img
+              src="./style-guide-assets/oao-wordmark-black.png"
+              alt="OAO wordmark, black"
+            />
           </div>
           <div class="logo-cell dark">
-            <img src="./style-guide-assets/oao-wordmark-white.png" alt="OAO wordmark, white" />
+            <img
+              src="./style-guide-assets/oao-wordmark-white.png"
+              alt="OAO wordmark, white"
+            />
           </div>
           <div class="logo-cell">
-            <img src="./style-guide-assets/oao-mark-black.png" alt="OAO mark, black" style="height: 40px" />
+            <img
+              src="./style-guide-assets/oao-mark-black.png"
+              alt="OAO mark, black"
+              style="height: 40px"
+            />
           </div>
           <div class="logo-cell dark">
-            <img src="./style-guide-assets/oao-mark-white.png" alt="OAO mark, white" style="height: 40px" />
+            <img
+              src="./style-guide-assets/oao-mark-white.png"
+              alt="OAO mark, white"
+              style="height: 40px"
+            />
           </div>
         </div>
       </section>
@@ -566,8 +581,8 @@
         <p class="lede">
           The ground is white, the hardware is ink. On top of that, exactly
           three flat brand hues — and each one has a fixed job. Never blend
-          them, never tint them, never run a gradient through them. If a hue
-          is doing a job that isn't listed here, it's the wrong hue.
+          them, never tint them, never run a gradient through them. If a hue is
+          doing a job that isn't listed here, it's the wrong hue.
         </p>
 
         <div class="swatch-grid">
@@ -585,8 +600,8 @@
             <div class="meta">
               <strong>Ink</strong>
               <code>--line / --ink-950 #111111</code>
-              All borders, all shadows, all text. Also the ground of dark
-              bands and "dead" states (crashes, terminated).
+              All borders, all shadows, all text. Also the ground of dark bands
+              and "dead" states (crashes, terminated).
             </div>
           </div>
           <div class="swatch">
@@ -594,8 +609,8 @@
             <div class="meta">
               <strong>Action red</strong>
               <code>--primary #fa3d31</code>
-              Primary buttons only. In the product it may extend to
-              destructive confirmation and error text — nothing else.
+              Primary buttons only. In the product it may extend to destructive
+              confirmation and error text — nothing else.
             </div>
           </div>
           <div class="swatch">
@@ -603,8 +618,8 @@
             <div class="meta">
               <strong>Signal yellow</strong>
               <code>--highlight #f7ff00</code>
-              Eyebrows, highlights, tickers, live/active states, status
-              stamps, selected chips. The accent color on ink grounds.
+              Eyebrows, highlights, tickers, live/active states, status stamps,
+              selected chips. The accent color on ink grounds.
             </div>
           </div>
           <div class="swatch">
@@ -612,9 +627,10 @@
             <div class="meta">
               <strong>Accent blue</strong>
               <code>--accent #3d5bf5</code>
-              Links, italic headline accents, sequence markers
-              (<span class="mono">01/02/03</span>), focus rings. Light
-              grounds only — it drowns on ink.
+              Links, italic headline accents, sequence markers (<span
+                class="mono"
+                >01/02/03</span
+              >), focus rings. Light grounds only — it drowns on ink.
             </div>
           </div>
         </div>
@@ -634,11 +650,10 @@
 
         <p class="note">
           <strong>No theme toggle.</strong> The old green system had a dark
-          theme; the new system doesn't. There is one light system, and dark
-          is used <em>compositionally</em> — full-bleed ink bands and ink
-          cards inside a light page (see "Dark grounds" below). Do not build
-          a <code class="inline">data-theme="dark"</code> variant of the
-          console.
+          theme; the new system doesn't. There is one light system, and dark is
+          used <em>compositionally</em> — full-bleed ink bands and ink cards
+          inside a light page (see "Dark grounds" below). Do not build a
+          <code class="inline">data-theme="dark"</code> variant of the console.
         </p>
       </section>
 
@@ -652,31 +667,44 @@
           IBM Plex Mono) everywhere.
         </p>
         <div class="specimen">
-          <span class="label">DISPLAY &amp; UI — SPACE GROTESK · 700/500 · -0.03EM</span>
-          <div class="spec-display">Define the agent. <span class="accent">We run the rest.</span></div>
+          <span class="label"
+            >DISPLAY &amp; UI — SPACE GROTESK · 700/500 · -0.03EM</span
+          >
+          <div class="spec-display">
+            Define the agent. <span class="accent">We run the rest.</span>
+          </div>
         </div>
         <div class="specimen">
           <span class="label">BODY — INTER · 400/500/600</span>
           <p class="spec-body" style="margin: 0">
-            Inter carries paragraphs, descriptions, and empty states. Body
-            text is 16px/1.65 by default, 13.5–14.5px inside dense product
-            surfaces. Muted copy uses <code class="inline">--muted</code> on
-            light grounds and <code class="inline">--ink-300</code> on ink.
+            Inter carries paragraphs, descriptions, and empty states. Body text
+            is 16px/1.65 by default, 13.5–14.5px inside dense product surfaces.
+            Muted copy uses <code class="inline">--muted</code> on light grounds
+            and <code class="inline">--ink-300</code> on ink.
           </p>
         </div>
         <div class="specimen">
-          <span class="label">MACHINE — SPACE MONO · 400/700 · WIDE TRACKING FOR LABELS</span>
+          <span class="label"
+            >MACHINE — SPACE MONO · 400/700 · WIDE TRACKING FOR LABELS</span
+          >
           <div class="spec-mono">
-            f29f9f66-d877-41b2 · preset-global-medium-v1 · fence=42 ·
-            2,204 tok · $0.0041 est.<br />
-            <span style="font-weight: 700; letter-spacing: 0.14em; font-size: 10.5px">SESSIONS / SHP-1042 — LABELS TRACK AT 0.10–0.16EM</span>
+            f29f9f66-d877-41b2 · preset-global-medium-v1 · fence=42 · 2,204 tok
+            · $0.0041 est.<br />
+            <span
+              style="
+                font-weight: 700;
+                letter-spacing: 0.14em;
+                font-size: 10.5px;
+              "
+              >SESSIONS / SHP-1042 — LABELS TRACK AT 0.10–0.16EM</span
+            >
           </div>
         </div>
         <p class="note">
           <strong>Italics:</strong> Space Grotesk has no true italics — the
           italic accent style renders as synthetic oblique, and that is
-          accepted. Accent italics are blue on light grounds, signal yellow
-          on ink grounds.
+          accepted. Accent italics are blue on light grounds, signal yellow on
+          ink grounds.
         </p>
       </section>
 
@@ -685,32 +713,76 @@
         <span class="eyebrow">Shape &amp; elevation</span>
         <h2>One hardware, two volumes.</h2>
         <p class="lede">
-          Zero border radius everywhere — the <code class="inline">--radius-*</code>
-          tokens are 0 and stay 0. The same brutalist hardware runs at two
-          volumes. <strong>Poster tier</strong> (marketing pages, empty
-          states, onboarding set-pieces): 2–3px borders, shadow-m/l, big
-          presses. <strong>Product tier</strong> — the console default: 1px
-          hairlines for rows and internal chrome, 1.5px ink borders for
-          controls and cards, shadow-s (2px) at most on resting elements, and
-          <code class="inline">--line-soft</code> (ink-200) for dividers
-          inside panels. Shadows are still hard offsets — never a blur — but
-          in the product they whisper: shadow-m/l is reserved for things that
-          genuinely float (modals, popovers, toasts).
+          Zero border radius everywhere — the
+          <code class="inline">--radius-*</code> tokens are 0 and stay 0. The
+          same brutalist hardware runs at two volumes.
+          <strong>Poster tier</strong> (marketing pages, empty states,
+          onboarding set-pieces): 2–3px borders, shadow-m/l, big presses.
+          <strong>Product tier</strong> — the console default: 1px hairlines for
+          rows and internal chrome, 1.5px ink borders for controls and cards,
+          shadow-s (2px) at most on resting elements, and
+          <code class="inline">--line-soft</code> (ink-200) for dividers inside
+          panels. Shadows are still hard offsets — never a blur — but in the
+          product they whisper: shadow-m/l is reserved for things that genuinely
+          float (modals, popovers, toasts).
         </p>
         <div class="demo-row">
-          <div style="border: 1px solid var(--ink-200); padding: 10px 16px; font-size: 13px">1px soft — dividers</div>
-          <div style="border: 1px solid var(--line); padding: 10px 16px; font-size: 13px">1px — rows, tags</div>
-          <div style="border: 1.5px solid var(--line); padding: 10px 16px; font-size: 13px; box-shadow: var(--shadow-s)">1.5px + shadow-s — controls</div>
-          <div style="border: 2px solid var(--line); padding: 10px 16px; font-size: 13px; box-shadow: var(--shadow-m)">2px + shadow-m — overlays</div>
-          <div style="border: 3px solid var(--line); padding: 10px 16px; font-size: 13px; box-shadow: var(--shadow-l)">3px + shadow-l — poster</div>
+          <div
+            style="
+              border: 1px solid var(--ink-200);
+              padding: 10px 16px;
+              font-size: 13px;
+            "
+          >
+            1px soft — dividers
+          </div>
+          <div
+            style="
+              border: 1px solid var(--line);
+              padding: 10px 16px;
+              font-size: 13px;
+            "
+          >
+            1px — rows, tags
+          </div>
+          <div
+            style="
+              border: 1.5px solid var(--line);
+              padding: 10px 16px;
+              font-size: 13px;
+              box-shadow: var(--shadow-s);
+            "
+          >
+            1.5px + shadow-s — controls
+          </div>
+          <div
+            style="
+              border: 2px solid var(--line);
+              padding: 10px 16px;
+              font-size: 13px;
+              box-shadow: var(--shadow-m);
+            "
+          >
+            2px + shadow-m — overlays
+          </div>
+          <div
+            style="
+              border: 3px solid var(--line);
+              padding: 10px 16px;
+              font-size: 13px;
+              box-shadow: var(--shadow-l);
+            "
+          >
+            3px + shadow-l — poster
+          </div>
         </div>
         <p class="note">
           <strong>Motion follows the shadow — gently.</strong> In the product
-          tier, buttons press <em>into</em> the page by 1px on hover and 2px
-          on active (shadow shrinks, then disappears); cards lift by 1px.
-          The 2–4px presses belong to the poster tier. Entrances rise ~18px
-          with a fast ease-out. Story animations (status flips, event rows
-          landing) play once, then rest in their final state. Always honor
+          tier, buttons press <em>into</em> the page by 1px on hover and 2px on
+          active (shadow shrinks, then disappears); cards lift by 1px. The 2–4px
+          presses belong to the poster tier. Entrances rise ~18px with a fast
+          ease-out. Story animations (status flips, event rows landing) play
+          once, then rest in their final state. Always honor
           <code class="inline">prefers-reduced-motion</code> by showing the
           finished state, static.
         </p>
@@ -721,11 +793,11 @@
         <span class="eyebrow">Components</span>
         <h2>The hardware kit.</h2>
         <p class="lede">
-          The core controls, restyled at <strong>product volume</strong> —
-          1.5px borders, 2px shadows, 1px presses — so the console stays
-          calm and usable over a full workday. These supersede the rounded
-          green components in <code class="inline">design.html</code> until
-          that prototype is rebuilt.
+          The core controls, restyled at <strong>product volume</strong> — 1.5px
+          borders, 2px shadows, 1px presses — so the console stays calm and
+          usable over a full workday. These supersede the rounded green
+          components in <code class="inline">design.html</code> until that
+          prototype is rebuilt.
         </p>
 
         <div class="demo-row">
@@ -748,8 +820,10 @@
         <div class="demo-row">
           <div class="card-demo">
             <strong>Versioned skills</strong>
-            <p>Cards hover up and away from their shadow. 2px border,
-            shadow-m at rest.</p>
+            <p>
+              Cards hover up and away from their shadow. 2px border, shadow-m at
+              rest.
+            </p>
           </div>
           <div class="event-stack" style="margin: 0; flex: 1; min-width: 280px">
             <div class="event-row">
@@ -758,16 +832,18 @@
               <span class="dur">15.9s</span>
             </div>
             <div class="event-row crash">✕ worker.crashed · lease expired</div>
-            <div class="event-row resume">↻ run.resumed · fence=42 · nothing lost</div>
+            <div class="event-row resume">
+              ↻ run.resumed · fence=42 · nothing lost
+            </div>
           </div>
         </div>
 
         <p class="note">
-          <strong>Status stamp semantics:</strong> yellow = live or
-          successfully finished (RUNNING, RESUMED, DONE ✓); white + ink text
-          = at rest (PAUSED); white + gray text = waiting (QUEUED); ink block
-          + white text = dead (FAILED, crashed workers). Stamps are Space
-          Mono 700, ~10.5px, letter-spacing 0.1em, 1.5px border, no shadow.
+          <strong>Status stamp semantics:</strong> yellow = live or successfully
+          finished (RUNNING, RESUMED, DONE ✓); white + ink text = at rest
+          (PAUSED); white + gray text = waiting (QUEUED); ink block + white text
+          = dead (FAILED, crashed workers). Stamps are Space Mono 700, ~10.5px,
+          letter-spacing 0.1em, 1.5px border, no shadow.
         </p>
       </section>
 
@@ -778,24 +854,24 @@
         <p class="lede">
           Dark surfaces are deliberate set-pieces on the light page: a
           full-bleed <code class="inline">--ink-950</code> band with a 3px
-          border and shadow-l, or an ink card inside a light grid. On ink:
-          text is <code class="inline">#f5f5f1</code>, muted copy is
+          border and shadow-l, or an ink card inside a light grid. On ink: text
+          is <code class="inline">#f5f5f1</code>, muted copy is
           <code class="inline">--ink-300</code>, hairlines are
           <code class="inline">--ink-700</code>, small offset shadows may use
-          <code class="inline">#f5f5f1</code>, and the accent switches from
-          blue to signal yellow.
+          <code class="inline">#f5f5f1</code>, and the accent switches from blue
+          to signal yellow.
         </p>
         <div class="band-demo">
           <h3>Boring where it <span class="accent-dark">matters.</span></h3>
           <p>
-            Muted copy on ink uses --ink-300. Accent italics go yellow —
-            blue drowns here.
+            Muted copy on ink uses --ink-300. Accent italics go yellow — blue
+            drowns here.
           </p>
           <div class="panel">
             <strong>White panel on ink</strong> — must reset
             <code class="inline">color</code> to ink text explicitly, or it
-            inherits the band's light text and becomes unreadable. A 3px
-            yellow border lifts it off the band.
+            inherits the band's light text and becomes unreadable. A 3px yellow
+            border lifts it off the band.
           </div>
         </div>
       </section>
@@ -807,17 +883,59 @@
         <p class="lede">
           The design target for the console's session view is the
           <code class="inline">ConsoleSession</code> mock in the landing repo
-          (<code class="inline">src/components/ConsoleSession.astro</code>) —
-          a working specimen of every pattern above. Its anatomy, top to
-          bottom:
+          (<code class="inline">src/components/ConsoleSession.astro</code>) — a
+          working specimen of every pattern above. Its anatomy, top to bottom:
         </p>
         <ul class="rules">
-          <li><span class="verdict do mono">01</span><span><strong>Chrome bar</strong> — ink strip, Space Mono URL/crumb, small square window dots (one yellow).</span></li>
-          <li><span class="verdict do mono">02</span><span><strong>Header</strong> — mono breadcrumb in --ink-500, Space Grotesk title, mono meta chips (1px borders: agent · version, attempt, duration, tokens, cost), status stamp on the right.</span></li>
-          <li><span class="verdict do mono">03</span><span><strong>Timing ruler</strong> — segmented bar behind a 1.5px border: blue segments for model time, white for tool time, ink for the crash gap, yellow after resume. Tick labels in 9.5px mono.</span></li>
-          <li><span class="verdict do mono">04</span><span><strong>Transcript</strong> — user message on --surface-2; collapsible reasoning/tool rows (1px border, ▸, duration right-aligned); crash rows as ink blocks; resume rows on yellow; the agent's answer in a 1.5px card with shadow-s.</span></li>
-          <li><span class="verdict do mono">05</span><span><strong>Session panel</strong> — --surface-2 sidebar behind a 1.5px divider: ID, status, agent, model preset, tools, usage, cost as label/value pairs with --line-soft hairlines. Hidden under ~940px.</span></li>
-          <li><span class="verdict do mono">06</span><span><strong>Composer</strong> — 1.5px bordered field with shadow-s and a red SEND button.</span></li>
+          <li>
+            <span class="verdict do mono">01</span
+            ><span
+              ><strong>Chrome bar</strong> — ink strip, Space Mono URL/crumb,
+              small square window dots (one yellow).</span
+            >
+          </li>
+          <li>
+            <span class="verdict do mono">02</span
+            ><span
+              ><strong>Header</strong> — mono breadcrumb in --ink-500, Space
+              Grotesk title, mono meta chips (1px borders: agent · version,
+              attempt, duration, tokens, cost), status stamp on the right.</span
+            >
+          </li>
+          <li>
+            <span class="verdict do mono">03</span
+            ><span
+              ><strong>Timing ruler</strong> — segmented bar behind a 1.5px
+              border: blue segments for model time, white for tool time, ink for
+              the crash gap, yellow after resume. Tick labels in 9.5px
+              mono.</span
+            >
+          </li>
+          <li>
+            <span class="verdict do mono">04</span
+            ><span
+              ><strong>Transcript</strong> — user message on --surface-2;
+              collapsible reasoning/tool rows (1px border, ▸, duration
+              right-aligned); crash rows as ink blocks; resume rows on yellow;
+              the agent's answer in a 1.5px card with shadow-s.</span
+            >
+          </li>
+          <li>
+            <span class="verdict do mono">05</span
+            ><span
+              ><strong>Session panel</strong> — --surface-2 sidebar behind a
+              1.5px divider: ID, status, agent, model preset, tools, usage, cost
+              as label/value pairs with --line-soft hairlines. Hidden under
+              ~940px.</span
+            >
+          </li>
+          <li>
+            <span class="verdict do mono">06</span
+            ><span
+              ><strong>Composer</strong> — 1.5px bordered field with shadow-s
+              and a red SEND button.</span
+            >
+          </li>
         </ul>
       </section>
 
@@ -826,15 +944,72 @@
         <span class="eyebrow">Ground rules</span>
         <h2>Do / don't.</h2>
         <ul class="rules">
-          <li><span class="verdict do">DO</span><span>Use semantic tokens (<code class="inline">--primary</code>, <code class="inline">--accent</code>, <code class="inline">--highlight</code>, <code class="inline">--line</code>, <code class="inline">--muted</code>) rather than raw hex values.</span></li>
-          <li><span class="verdict do">DO</span><span>Keep machine data (IDs, presets, fences, tokens, costs) in Space Mono, honestly labeled — "est." when estimated.</span></li>
-          <li><span class="verdict do">DO</span><span>Reset text color to ink on any white panel placed on an ink ground.</span></li>
-          <li><span class="verdict do">DO</span><span>Keep the console at product volume: 1–1.5px borders, shadow-s or none at rest, 1px presses. Save shadow-m/l and 2–3px borders for overlays and set-pieces.</span></li>
-          <li><span class="verdict dont">DON'T</span><span>Round a corner, blur a shadow, or run a gradient. Anywhere.</span></li>
-          <li><span class="verdict dont">DON'T</span><span>Tint the brand hues (no #fdffd8-style washes) or invent new accent colors.</span></li>
-          <li><span class="verdict dont">DON'T</span><span>Use action red for anything but primary buttons, destructive confirmation, and error text.</span></li>
-          <li><span class="verdict dont">DON'T</span><span>Put accent blue on ink grounds — switch to signal yellow.</span></li>
-          <li><span class="verdict dont">DON'T</span><span>Recreate, stretch, or recolor the logo, or set the wordmark in a font.</span></li>
+          <li>
+            <span class="verdict do">DO</span
+            ><span
+              >Use semantic tokens (<code class="inline">--primary</code>,
+              <code class="inline">--accent</code>,
+              <code class="inline">--highlight</code>,
+              <code class="inline">--line</code>,
+              <code class="inline">--muted</code>) rather than raw hex
+              values.</span
+            >
+          </li>
+          <li>
+            <span class="verdict do">DO</span
+            ><span
+              >Keep machine data (IDs, presets, fences, tokens, costs) in Space
+              Mono, honestly labeled — "est." when estimated.</span
+            >
+          </li>
+          <li>
+            <span class="verdict do">DO</span
+            ><span
+              >Reset text color to ink on any white panel placed on an ink
+              ground.</span
+            >
+          </li>
+          <li>
+            <span class="verdict do">DO</span
+            ><span
+              >Keep the console at product volume: 1–1.5px borders, shadow-s or
+              none at rest, 1px presses. Save shadow-m/l and 2–3px borders for
+              overlays and set-pieces.</span
+            >
+          </li>
+          <li>
+            <span class="verdict dont">DON'T</span
+            ><span
+              >Round a corner, blur a shadow, or run a gradient. Anywhere.</span
+            >
+          </li>
+          <li>
+            <span class="verdict dont">DON'T</span
+            ><span
+              >Tint the brand hues (no #fdffd8-style washes) or invent new
+              accent colors.</span
+            >
+          </li>
+          <li>
+            <span class="verdict dont">DON'T</span
+            ><span
+              >Use action red for anything but primary buttons, destructive
+              confirmation, and error text.</span
+            >
+          </li>
+          <li>
+            <span class="verdict dont">DON'T</span
+            ><span
+              >Put accent blue on ink grounds — switch to signal yellow.</span
+            >
+          </li>
+          <li>
+            <span class="verdict dont">DON'T</span
+            ><span
+              >Recreate, stretch, or recolor the logo, or set the wordmark in a
+              font.</span
+            >
+          </li>
         </ul>
       </section>
     </div>
