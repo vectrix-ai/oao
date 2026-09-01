@@ -29,6 +29,7 @@ GRANT oao_app TO CURRENT_USER WITH SET TRUE, INHERIT FALSE;
 
 GRANT USAGE ON SCHEMA oao TO oao_recovery;
 GRANT SELECT ON oao.thread_admission_heads, oao.runtime_dispatches TO oao_recovery;
+GRANT SELECT, UPDATE ON oao.runtime_wake_jobs TO oao_recovery;
 
 CREATE POLICY recovery_visibility ON oao.thread_admission_heads
   FOR SELECT TO oao_recovery
@@ -37,6 +38,11 @@ CREATE POLICY recovery_visibility ON oao.thread_admission_heads
 CREATE POLICY recovery_visibility ON oao.runtime_dispatches
   FOR SELECT TO oao_recovery
   USING (true);
+
+CREATE POLICY recovery_visibility ON oao.runtime_wake_jobs
+  FOR ALL TO oao_recovery
+  USING (true)
+  WITH CHECK (true);
 
 -- Projection observations arrive with provider correlation IDs before tenant
 -- context is known. Resolve only the dispatch metadata needed to establish
@@ -87,6 +93,9 @@ $$;
 REVOKE ALL ON FUNCTION oao.list_runtime_recovery_heads() FROM PUBLIC, oao_app;
 REVOKE ALL ON FUNCTION oao.runtime_has_active_dispatches() FROM PUBLIC, oao_app;
 REVOKE ALL ON FUNCTION oao.find_runtime_dispatch(text,text) FROM PUBLIC, oao_app;
+REVOKE ALL ON FUNCTION oao.claim_runtime_wakes(text,integer,interval) FROM PUBLIC, oao_app;
+REVOKE ALL ON FUNCTION oao.complete_runtime_wake(uuid,uuid,uuid,text,bigint) FROM PUBLIC, oao_app;
+REVOKE ALL ON FUNCTION oao.retry_runtime_wake(uuid,uuid,uuid,text,bigint,interval,jsonb,boolean) FROM PUBLIC, oao_app;
 GRANT EXECUTE ON FUNCTION oao.list_runtime_recovery_heads() TO oao_app;
 GRANT EXECUTE ON FUNCTION oao.runtime_has_active_dispatches() TO oao_app;
 COMMENT ON FUNCTION oao.list_runtime_recovery_heads() IS
@@ -95,6 +104,12 @@ COMMENT ON FUNCTION oao.runtime_has_active_dispatches() IS
   'Cross-tenant runtime shutdown helper owned by the NOLOGIN oao_recovery role, whose RLS policy exposes only the required recovery table.';
 COMMENT ON FUNCTION oao.find_runtime_dispatch(text,text) IS
   'Cross-tenant runtime projection lookup by opaque provider correlation ID; returns only dispatch metadata needed to establish tenant context.';
+COMMENT ON FUNCTION oao.claim_runtime_wakes(text,integer,interval) IS
+  'Cross-tenant runtime worker lease claim owned by the NOLOGIN oao_recovery role and bounded by limit and lease inputs.';
+COMMENT ON FUNCTION oao.complete_runtime_wake(uuid,uuid,uuid,text,bigint) IS
+  'Cross-tenant runtime worker completion owned by the NOLOGIN oao_recovery role and guarded by worker and lease fences.';
+COMMENT ON FUNCTION oao.retry_runtime_wake(uuid,uuid,uuid,text,bigint,interval,jsonb,boolean) IS
+  'Cross-tenant runtime worker retry owned by the NOLOGIN oao_recovery role and guarded by worker and lease fences.';
 
 DO $$
 DECLARE
@@ -118,6 +133,9 @@ BEGIN
   ALTER FUNCTION oao.list_runtime_recovery_heads() OWNER TO oao_recovery;
   ALTER FUNCTION oao.runtime_has_active_dispatches() OWNER TO oao_recovery;
   ALTER FUNCTION oao.find_runtime_dispatch(text,text) OWNER TO oao_recovery;
+  ALTER FUNCTION oao.claim_runtime_wakes(text,integer,interval) OWNER TO oao_recovery;
+  ALTER FUNCTION oao.complete_runtime_wake(uuid,uuid,uuid,text,bigint) OWNER TO oao_recovery;
+  ALTER FUNCTION oao.retry_runtime_wake(uuid,uuid,uuid,text,bigint,interval,jsonb,boolean) OWNER TO oao_recovery;
   REVOKE CREATE ON SCHEMA oao FROM oao_recovery;
 
   EXECUTE format(
@@ -130,6 +148,18 @@ BEGIN
   );
   EXECUTE format(
     'GRANT EXECUTE ON FUNCTION oao.find_runtime_dispatch(text,text) TO %I',
+    migration_role
+  );
+  EXECUTE format(
+    'GRANT EXECUTE ON FUNCTION oao.claim_runtime_wakes(text,integer,interval) TO %I',
+    migration_role
+  );
+  EXECUTE format(
+    'GRANT EXECUTE ON FUNCTION oao.complete_runtime_wake(uuid,uuid,uuid,text,bigint) TO %I',
+    migration_role
+  );
+  EXECUTE format(
+    'GRANT EXECUTE ON FUNCTION oao.retry_runtime_wake(uuid,uuid,uuid,text,bigint,interval,jsonb,boolean) TO %I',
     migration_role
   );
 
@@ -148,6 +178,18 @@ BEGIN
   ) OR NOT has_function_privilege(
     migration_role,
     'oao.find_runtime_dispatch(text,text)',
+    'EXECUTE'
+  ) OR NOT has_function_privilege(
+    migration_role,
+    'oao.claim_runtime_wakes(text,integer,interval)',
+    'EXECUTE'
+  ) OR NOT has_function_privilege(
+    migration_role,
+    'oao.complete_runtime_wake(uuid,uuid,uuid,text,bigint)',
+    'EXECUTE'
+  ) OR NOT has_function_privilege(
+    migration_role,
+    'oao.retry_runtime_wake(uuid,uuid,uuid,text,bigint,interval,jsonb,boolean)',
     'EXECUTE'
   ) THEN
     RAISE EXCEPTION 'migration/runtime login lacks recovery function execution';

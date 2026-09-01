@@ -38,7 +38,7 @@ pnpm --filter @oao/db-postgres migrate
 # fixtures are introduced. The UUIDs need not exist: tenant context is a
 # transaction-local RLS input, not an authorization lookup.
 docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U oao_runtime -d oao \
-  -c "BEGIN; SET LOCAL ROLE oao_app; SELECT oao.set_tenant_context('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002'); ROLLBACK; SELECT * FROM oao.list_runtime_recovery_heads(); SELECT oao.runtime_has_active_dispatches(); SELECT * FROM oao.find_runtime_dispatch('','');"
+  -c "BEGIN; SET LOCAL ROLE oao_app; SELECT oao.set_tenant_context('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002'); ROLLBACK; SELECT * FROM oao.list_runtime_recovery_heads(); SELECT oao.runtime_has_active_dispatches(); SELECT * FROM oao.find_runtime_dispatch('',''); SELECT * FROM oao.claim_runtime_wakes('smoke',1,interval '1 second');"
 
 # The integration suites seed and inspect fixtures outside application RLS.
 # Keep that test-only access separate while the worker continues to use the

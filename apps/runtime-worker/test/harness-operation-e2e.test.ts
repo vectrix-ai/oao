@@ -452,6 +452,8 @@ test(
         fence: 1n,
       });
       await waitForCompleted(pool, fixture.runId);
+      await worker.stop();
+      worker = undefined;
 
       const evidence = await pool.query<{
         assistant_reply: string;
@@ -704,6 +706,8 @@ test(
         fence: 1n,
       });
       await waitForCompleted(pool, fixture.runId, parallelTenant);
+      await worker.stop();
+      worker = undefined;
 
       const evidence = await pool.query<{
         assistant_reply: string;
