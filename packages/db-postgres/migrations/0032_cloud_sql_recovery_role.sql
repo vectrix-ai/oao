@@ -45,6 +45,8 @@ REVOKE ALL ON FUNCTION oao.list_runtime_recovery_heads() FROM PUBLIC, oao_app;
 REVOKE ALL ON FUNCTION oao.runtime_has_active_dispatches() FROM PUBLIC, oao_app;
 GRANT EXECUTE ON FUNCTION oao.list_runtime_recovery_heads() TO oao_app;
 GRANT EXECUTE ON FUNCTION oao.runtime_has_active_dispatches() TO oao_app;
+GRANT EXECUTE ON FUNCTION oao.list_runtime_recovery_heads() TO CURRENT_USER;
+GRANT EXECUTE ON FUNCTION oao.runtime_has_active_dispatches() TO CURRENT_USER;
 COMMENT ON FUNCTION oao.list_runtime_recovery_heads() IS
   'Cross-tenant runtime recovery helper owned by the NOLOGIN oao_recovery role, whose RLS policy exposes only the required recovery table.';
 COMMENT ON FUNCTION oao.runtime_has_active_dispatches() IS
