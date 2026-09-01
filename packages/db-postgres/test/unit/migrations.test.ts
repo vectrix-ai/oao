@@ -97,7 +97,7 @@ test("runtime migration encodes durable wakes, dispatch reconciliation, and sand
   assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
 });
 
-test("Cloud SQL recovery role is non-login and limited to two RLS-protected reads", async () => {
+test("Cloud SQL recovery role is non-login with bounded RLS-protected access", async () => {
   const sql = await readFile(
     new URL(
       "../../migrations/0032_cloud_sql_recovery_role.sql",
@@ -125,10 +125,14 @@ test("Cloud SQL recovery role is non-login and limited to two RLS-protected read
   assert.equal(
     (
       sql.match(
-        /CREATE POLICY recovery_visibility ON oao\.(?:thread_admission_heads|runtime_dispatches)/gu,
+        /CREATE POLICY recovery_visibility ON oao\.(?:thread_admission_heads|runtime_dispatches|runtime_wake_jobs)/gu,
       ) ?? []
     ).length,
-    2,
+    3,
+  );
+  assert.match(
+    sql,
+    /GRANT SELECT, UPDATE ON oao\.runtime_wake_jobs TO oao_recovery/u,
   );
   assert.match(
     sql,
@@ -145,6 +149,14 @@ test("Cloud SQL recovery role is non-login and limited to two RLS-protected read
   assert.match(
     sql,
     /ALTER FUNCTION oao\.find_runtime_dispatch\(text,text\) OWNER TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.claim_runtime_wakes\(text,integer,interval\) OWNER TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /REVOKE ALL ON FUNCTION oao\.retry_runtime_wake\(uuid,uuid,uuid,text,bigint,interval,jsonb,boolean\) FROM PUBLIC, oao_app/u,
   );
   assert.match(
     sql,
@@ -170,6 +182,10 @@ test("Cloud SQL recovery role is non-login and limited to two RLS-protected read
   assert.match(
     sql,
     /GRANT EXECUTE ON FUNCTION oao\.find_runtime_dispatch\(text,text\) TO %I/u,
+  );
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.complete_runtime_wake\(uuid,uuid,uuid,text,bigint\) TO %I/u,
   );
   assert.match(
     sql,
