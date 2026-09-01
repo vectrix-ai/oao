@@ -105,6 +105,46 @@ test("client returns the provider logout redirect and includes browser credentia
   assert.equal(requests[0]?.credentials, "include");
 });
 
+test("client creates and deletes organization projects", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({
+        id: "project-2",
+        organizationId: "org-1",
+        slug: "eval-lab",
+        name: "Eval Lab",
+        createdAt: "2026-08-20T10:00:00.000Z",
+        deleted: true,
+      });
+    },
+  });
+
+  await client.createProject(
+    { slug: "eval-lab", name: "Eval Lab" },
+    { idempotencyKey: "project-create-1" },
+  );
+  await client.deleteProject("project-2", {
+    idempotencyKey: "project-delete-1",
+  });
+
+  assert.equal(requests[0]?.url, "https://api.example.test/v1/projects");
+  assert.equal(requests[0]?.method, "POST");
+  assert.equal(requests[0]?.headers.get("idempotency-key"), "project-create-1");
+  assert.deepEqual(await requests[0]?.json(), {
+    slug: "eval-lab",
+    name: "Eval Lab",
+  });
+  assert.equal(
+    requests[1]?.url,
+    "https://api.example.test/v1/projects/project-2",
+  );
+  assert.equal(requests[1]?.method, "DELETE");
+  assert.equal(requests[1]?.headers.get("idempotency-key"), "project-delete-1");
+});
+
 test("client manages project membership with exact project-scoped writes", async () => {
   const requests: Request[] = [];
   const client = new OaoClient({

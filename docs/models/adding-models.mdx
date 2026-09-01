@@ -1,22 +1,23 @@
 ---
 title: Adding models and providers
-description: Configure project-scoped OpenRouter, OpenAI, Anthropic, or xAI credentials and link approved models to agents.
+description: Configure organization-shared OpenRouter, OpenAI, Anthropic, or xAI credentials and link approved models to agents.
 ---
 
-OAO stores hosted model configuration in PostgreSQL per organization and
-project. The MVP supports four provider types: **OpenRouter**, **OpenAI**,
-**Anthropic**, and **xAI (Grok)**.
+OAO stores hosted model configuration in PostgreSQL. Provider connections are
+organization-shared — every project uses the same pool — while model presets
+stay per project. The MVP supports four provider types: **OpenRouter**,
+**OpenAI**, **Anthropic**, and **xAI (Grok)**.
 An agent version never contains a raw model identifier or credential. It names
 an immutable model preset, and that preset references a provider connection in
-the same project.
+the same organization.
 
 ## Security model
 
 Provider API keys are write-only:
 
 - the API encrypts each key with AES-256-GCM before inserting it;
-- the authenticated encryption context includes organization ID, project ID,
-  provider ID, provider type, and credential version;
+- the authenticated encryption context includes organization ID, provider ID,
+  provider type, and credential version;
 - PostgreSQL stores ciphertext, a unique nonce, authentication tag, key
   version, and SHA-256 fingerprint;
 - list and create responses expose only the first 12 fingerprint characters;
@@ -370,5 +371,5 @@ presets.
 ### A preset is unavailable
 
 Confirm it has a non-null provider connection, the connection belongs to the
-same project, and the runtime has the platform encryption key. Legacy unbound
-presets are history only.
+same organization, and the runtime has the platform encryption key. Legacy
+unbound presets are history only.

@@ -84,8 +84,67 @@ describe("management console", () => {
     expect(screen.getByText("managed-agents")).toBeInTheDocument();
     expect(screen.getByText("current")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "New project" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "New project" }),
+    ).toBeInTheDocument();
+  });
+
+  it("creates and deletes projects", async () => {
+    const user = userEvent.setup();
+    renderConsole("/projects");
+    expect(await screen.findByText("managed-agents")).toBeInTheDocument();
+
+    // The active project can never delete itself.
+    const currentCard = screen.getByText("managed-agents").closest("article");
+    if (!currentCard) throw new Error("Current project card was not rendered");
+    expect(
+      within(currentCard).getByRole("button", { name: "Delete" }),
+    ).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "New project" }));
+    const create = within(screen.getByRole("dialog", { name: "New project" }));
+    await user.type(create.getByLabelText("Project name"), "Research Sandbox");
+    expect(create.getByLabelText("Project slug")).toHaveValue(
+      "research-sandbox",
+    );
+    await user.click(create.getByRole("button", { name: "Create project" }));
+    expect(await screen.findByText("research-sandbox")).toBeInTheDocument();
+
+    const createdCard = screen.getByText("research-sandbox").closest("article");
+    if (!createdCard) throw new Error("Created project card was not rendered");
+    await user.click(
+      within(createdCard).getByRole("button", { name: "Delete" }),
+    );
+    const remove = within(
+      screen.getByRole("dialog", { name: "Delete Research Sandbox" }),
+    );
+    await user.click(remove.getByRole("button", { name: "Delete project" }));
+    await waitFor(() =>
+      expect(screen.queryByText("research-sandbox")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("opens another project and switches the active context", async () => {
+    const user = userEvent.setup();
+    renderConsole("/projects");
+    expect(await screen.findByText("evaluation-lab")).toBeInTheDocument();
+
+    const otherCard = screen.getByText("evaluation-lab").closest("article");
+    if (!otherCard) throw new Error("Project card was not rendered");
+    await user.click(within(otherCard).getByRole("button", { name: "Open" }));
+
+    // Switching lands on the agents page with the new project active.
+    expect(
+      await screen.findByRole("heading", { name: "Agents" }),
+    ).toBeInTheDocument();
+    const projectSelect = screen.getByRole("combobox", { name: "Project" });
+    await waitFor(() =>
+      expect(
+        within(projectSelect).getByRole("option", {
+          name: "Evaluation lab",
+          selected: true,
+        }),
+      ).toBeInTheDocument(),
+    );
   });
 
   it("adds, changes, and removes project members", async () => {

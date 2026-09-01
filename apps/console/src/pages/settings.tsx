@@ -12,10 +12,11 @@ import {
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
-import { Link, useLocation } from "react-router";
+import { Link, useLocation, useNavigate } from "react-router";
 import { useApi } from "../api/context";
 import type {
   CreateApiKeyInput,
+  CreateProjectInput,
   CreateSandboxProviderInput,
   CreateStorageProviderInput,
   CreatedApiKey,
@@ -110,18 +111,21 @@ const copy: Record<
 };
 
 const createLabel: Partial<Record<SettingsRoute, string>> = {
+  projects: "New project",
   members: "Add member",
   "api-keys": "Create API key",
 };
 
 type SettingsMember = SettingsData["members"][number];
 type MemberRole = SettingsMember["role"];
+type SettingsProject = SettingsData["projects"][number];
 
 export function SettingsPage() {
   const api = useApi();
   const queryClient = useQueryClient();
   const notify = useToast();
   const location = useLocation();
+  const navigate = useNavigate();
   const [creatingApiKey, setCreatingApiKey] = useState(false);
   const [createdApiKey, setCreatedApiKey] = useState<CreatedApiKey | null>(
     null,
@@ -130,6 +134,9 @@ export function SettingsPage() {
   const [removingMember, setRemovingMember] = useState<SettingsMember | null>(
     null,
   );
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [deletingProject, setDeletingProject] =
+    useState<SettingsProject | null>(null);
   const route = (
     location.pathname === "/settings/hosting"
       ? "hosting"
@@ -175,6 +182,33 @@ export function SettingsPage() {
       void queryClient.invalidateQueries({ queryKey: ["settings"] });
       notify("Project member removed.");
     },
+  });
+  const createProject = useMutation({
+    mutationFn: (input: CreateProjectInput) => api.createProject(input),
+    onSuccess: () => {
+      setCreatingProject(false);
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      void queryClient.invalidateQueries({ queryKey: ["context"] });
+      notify("Project created.");
+    },
+  });
+  const deleteProject = useMutation({
+    mutationFn: (projectId: string) => api.deleteProject(projectId),
+    onSuccess: () => {
+      setDeletingProject(null);
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      void queryClient.invalidateQueries({ queryKey: ["context"] });
+      notify("Project deleted.");
+    },
+  });
+  const openProject = useMutation({
+    mutationFn: (project: SettingsProject) => api.openProject(project.id),
+    onSuccess: async (_result, project) => {
+      await queryClient.invalidateQueries();
+      notify(`Switched to ${project.name}.`);
+      navigate("/agents");
+    },
+    onError: () => notify("The project could not be opened.", "danger"),
   });
   const heading = copy[route] ?? copy.settings;
   const action = createLabel[route];
@@ -224,7 +258,12 @@ export function SettingsPage() {
                         addMember.reset();
                         setAddingMember(true);
                       }
-                    : undefined
+                    : route === "projects"
+                      ? () => {
+                          createProject.reset();
+                          setCreatingProject(true);
+                        }
+                      : undefined
               }
             >
               {action}
@@ -242,6 +281,11 @@ export function SettingsPage() {
           updateMemberRole.mutate({ memberId, role })
         }
         onRemoveMember={setRemovingMember}
+        onDeleteProject={setDeletingProject}
+        onOpenProject={(project) => openProject.mutate(project)}
+        {...(openProject.isPending && openProject.variables
+          ? { openingProjectId: openProject.variables.id }
+          : {})}
       />
       {addingMember ? (
         <AddMemberDialog
@@ -264,6 +308,29 @@ export function SettingsPage() {
             setRemovingMember(null);
           }}
           onConfirm={() => removeMember.mutate(removingMember.id)}
+        />
+      ) : null}
+      {creatingProject ? (
+        <CreateProjectDialog
+          pending={createProject.isPending}
+          error={createProject.error}
+          onClose={() => {
+            createProject.reset();
+            setCreatingProject(false);
+          }}
+          onSubmit={(input) => createProject.mutate(input)}
+        />
+      ) : null}
+      {deletingProject ? (
+        <DeleteProjectDialog
+          project={deletingProject}
+          pending={deleteProject.isPending}
+          error={deleteProject.error}
+          onClose={() => {
+            deleteProject.reset();
+            setDeletingProject(null);
+          }}
+          onConfirm={() => deleteProject.mutate(deletingProject.id)}
         />
       ) : null}
       {creatingApiKey ? (
@@ -296,12 +363,18 @@ function SettingsBody({
   updatingMemberId,
   onUpdateMemberRole,
   onRemoveMember,
+  onDeleteProject,
+  onOpenProject,
+  openingProjectId,
 }: {
   readonly route: SettingsRoute;
   readonly data: SettingsData;
   readonly updatingMemberId?: string;
   readonly onUpdateMemberRole: (memberId: string, role: MemberRole) => void;
   readonly onRemoveMember: (member: SettingsMember) => void;
+  readonly onDeleteProject: (project: SettingsProject) => void;
+  readonly onOpenProject: (project: SettingsProject) => void;
+  readonly openingProjectId?: string;
 }) {
   if (route === "organization")
     return (
@@ -348,16 +421,40 @@ function SettingsBody({
                 {project.current ? <StatusChip value="current" /> : null}
               </h2>
               <code>{project.slug}</code>
+              <p className="muted">
+                ID <code>{project.id}</code>
+              </p>
               <p className="muted">Created {formatDate(project.createdAt)}</p>
             </div>
-            <div>
+            <div className="resource-card-actions">
               {project.current ? (
                 <Link className="btn btn--sm" to="/agents">
                   Open project
                 </Link>
               ) : (
-                <span className="muted">Provision access to open</span>
+                <Button
+                  size="sm"
+                  disabled={openingProjectId === project.id}
+                  onClick={() => onOpenProject(project)}
+                >
+                  Open
+                </Button>
               )}
+              <Button
+                size="sm"
+                variant="danger"
+                disabled={project.current || data.projects.length <= 1}
+                title={
+                  project.current
+                    ? "The active project cannot delete itself."
+                    : data.projects.length <= 1
+                      ? "The last project of an organization cannot be deleted."
+                      : undefined
+                }
+                onClick={() => onDeleteProject(project)}
+              >
+                Delete
+              </Button>
             </div>
           </article>
         ))}
@@ -1560,6 +1657,142 @@ function RemoveMemberDialog({
     >
       <Alert tone="warning" title="Project access will be revoked">
         {member.subject} will no longer resolve as a member of this project.
+      </Alert>
+      {error ? <FormError>{error.message}</FormError> : null}
+    </Dialog>
+  );
+}
+
+const PROJECT_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/u;
+
+function deriveProjectSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9]+/gu, "-")
+    .replaceAll(/^-+|-+$/gu, "")
+    .slice(0, 80);
+}
+
+function CreateProjectDialog({
+  pending,
+  error,
+  onClose,
+  onSubmit,
+}: {
+  readonly pending: boolean;
+  readonly error: Error | null;
+  readonly onClose: () => void;
+  readonly onSubmit: (input: CreateProjectInput) => void;
+}) {
+  const [name, setName] = useState("");
+  const [slug, setSlug] = useState("");
+  const [slugEdited, setSlugEdited] = useState(false);
+  const nameError =
+    name.trim().length === 0
+      ? "Name is required."
+      : name.trim().length > 200
+        ? "Name must contain at most 200 characters."
+        : undefined;
+  const slugError =
+    slug.length === 0
+      ? "Slug is required."
+      : slug.length > 80
+        ? "Slug must contain at most 80 characters."
+        : !PROJECT_SLUG_PATTERN.test(slug)
+          ? "Slug must contain lowercase letters, digits, and dashes."
+          : undefined;
+  return (
+    <Dialog
+      title="New project"
+      description="Projects isolate agents, runs, and history. Organization API keys, model providers, storage, and MCP connections are shared with every project."
+      onClose={onClose}
+      onSubmit={(event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        if (!nameError && !slugError) onSubmit({ slug, name: name.trim() });
+      }}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            type="submit"
+            loading={pending}
+            disabled={Boolean(nameError || slugError)}
+          >
+            {pending ? "Creating…" : "Create project"}
+          </Button>
+        </>
+      }
+    >
+      <Field
+        label="Project name"
+        {...(name.length > 0 && nameError ? { error: nameError } : {})}
+      >
+        <Input
+          autoFocus
+          value={name}
+          maxLength={200}
+          placeholder="Evaluation lab"
+          onChange={(event) => {
+            setName(event.target.value);
+            if (!slugEdited) setSlug(deriveProjectSlug(event.target.value));
+          }}
+        />
+      </Field>
+      <Field
+        label="Project slug"
+        {...(slug.length > 0 && slugError ? { error: slugError } : {})}
+      >
+        <Input
+          value={slug}
+          maxLength={80}
+          placeholder="evaluation-lab"
+          onChange={(event) => {
+            setSlugEdited(true);
+            setSlug(event.target.value);
+          }}
+        />
+      </Field>
+      {error ? <FormError>{error.message}</FormError> : null}
+    </Dialog>
+  );
+}
+
+function DeleteProjectDialog({
+  project,
+  pending,
+  error,
+  onClose,
+  onConfirm,
+}: {
+  readonly project: SettingsProject;
+  readonly pending: boolean;
+  readonly error: Error | null;
+  readonly onClose: () => void;
+  readonly onConfirm: () => void;
+}) {
+  return (
+    <Dialog
+      title={`Delete ${project.name}`}
+      description="This permanently removes the project and everything in it."
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button variant="danger" loading={pending} onClick={onConfirm}>
+            {pending ? "Deleting…" : "Delete project"}
+          </Button>
+        </>
+      }
+    >
+      <Alert tone="warning" title="This cannot be undone">
+        Every agent, run, event, and piece of history in{" "}
+        <code>{project.slug}</code> is permanently deleted. Organization-shared
+        API keys, model providers, storage, and MCP connections are kept.
       </Alert>
       {error ? <FormError>{error.message}</FormError> : null}
     </Dialog>

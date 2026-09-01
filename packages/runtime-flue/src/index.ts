@@ -1016,7 +1016,7 @@ export function ManagedAgent(): string {
         const outcome = await step.do("execute-delegation", () =>
           config.broker.executePlatform(
             obligation,
-            async () => {
+            async (executeSignal) => {
               const result = await config.delegations!.delegate({
                 organizationId: initial.organizationId,
                 projectId: initial.projectId,
@@ -1027,7 +1027,7 @@ export function ManagedAgent(): string {
                 delegateKey: data.agent,
                 prompt: data.prompt,
                 idempotencyKey: `delegate:${delivery.runId}:${toolCallId}`,
-                ...(signal ? { signal } : {}),
+                ...(executeSignal ? { signal: executeSignal } : {}),
               });
               return { ...result } as Readonly<Record<string, PublicValue>>;
             },
@@ -1063,7 +1063,7 @@ export function ManagedAgent(): string {
         const outcome = await step.do("execute-delegation-follow-up", () =>
           config.broker.executePlatform(
             obligation,
-            async () => {
+            async (executeSignal) => {
               const result = await config.delegations!.followUp({
                 organizationId: initial.organizationId,
                 projectId: initial.projectId,
@@ -1072,7 +1072,7 @@ export function ManagedAgent(): string {
                 delegationId: data.delegationId,
                 prompt: data.prompt,
                 idempotencyKey: `delegate-follow-up:${delivery.runId}:${toolCallId}`,
-                ...(signal ? { signal } : {}),
+                ...(executeSignal ? { signal: executeSignal } : {}),
               });
               return { ...result } as Readonly<Record<string, PublicValue>>;
             },
@@ -1126,7 +1126,7 @@ export function ManagedAgent(): string {
         const outcome = await step.do("execute-mcp-obligation", () =>
           config.broker.executePlatform(
             obligation,
-            () =>
+            (executeSignal) =>
               config.mcp!.execute(
                 {
                   organizationId: initial.organizationId as OrganizationId,
@@ -1137,7 +1137,7 @@ export function ManagedAgent(): string {
                 },
                 tool,
                 obligation.safeArguments,
-                signal,
+                executeSignal,
               ),
             signal,
           ),
@@ -1187,14 +1187,14 @@ export function ManagedAgent(): string {
         const outcome = await step.do("execute-platform-obligation", () =>
           config.broker.executePlatform(
             obligation,
-            async () => {
+            async (executeSignal) => {
               if (!handler)
                 throw new Error("Platform tool handler unavailable");
               const result = await handler(obligation.safeArguments, {
                 runId: obligation.runId,
                 toolCallId,
                 idempotencyKey: `platform:${obligation.runId}:${toolCallId}`,
-                ...(signal ? { signal } : {}),
+                ...(executeSignal ? { signal: executeSignal } : {}),
               });
               return v.parse(outputValueSchema, result) as PublicValue;
             },
@@ -3006,28 +3006,22 @@ export class ManagedRuntimeOrchestrator {
             AND selection.toolset_version_id=toolset.id
            JOIN oao.mcp_server_version_tools tool
              ON tool.organization_id=selection.organization_id
-            AND tool.project_id=selection.project_id
             AND tool.server_version_id=selection.server_version_id
             AND tool.remote_tool_name=selection.remote_tool_name
            JOIN oao.mcp_server_version_lifecycle server_lifecycle
              ON server_lifecycle.organization_id=tool.organization_id
-            AND server_lifecycle.project_id=tool.project_id
             AND server_lifecycle.server_version_id=tool.server_version_id
            JOIN oao.mcp_credential_policy_versions policy
              ON policy.organization_id=binding.organization_id
-            AND policy.project_id=binding.project_id
             AND policy.id=binding.credential_policy_version_id
            JOIN oao.mcp_credential_policy_version_lifecycle policy_lifecycle
              ON policy_lifecycle.organization_id=policy.organization_id
-            AND policy_lifecycle.project_id=policy.project_id
             AND policy_lifecycle.policy_version_id=policy.id
            JOIN oao.mcp_credentials credential
              ON credential.organization_id=policy.organization_id
-            AND credential.project_id=policy.project_id
             AND credential.id=policy.credential_id
            JOIN oao.mcp_credential_version_lifecycle credential_lifecycle
              ON credential_lifecycle.organization_id=credential.organization_id
-            AND credential_lifecycle.project_id=credential.project_id
             AND credential_lifecycle.credential_version_id=credential.active_version_id
           WHERE binding.organization_id=$1 AND binding.project_id=$2
             AND binding.session_id=$3
@@ -4086,17 +4080,14 @@ export function createPostgresMcpToolExecutor(input: {
                 AND selection.remote_tool_name=$8
                JOIN oao.mcp_server_versions server
                  ON server.organization_id=toolset.organization_id
-                AND server.project_id=toolset.project_id
                 AND server.id=toolset.server_version_id
                 AND server.id=$6
                JOIN oao.mcp_server_version_lifecycle server_lifecycle
                  ON server_lifecycle.organization_id=server.organization_id
-                AND server_lifecycle.project_id=server.project_id
                 AND server_lifecycle.server_version_id=server.id
                 AND server_lifecycle.status='active'
                JOIN oao.mcp_credential_policy_versions policy
                  ON policy.organization_id=binding.organization_id
-                AND policy.project_id=binding.project_id
                 AND policy.id=binding.credential_policy_version_id
                 AND policy.id=$7
                 AND oao.mcp_endpoint_matches_policy(
@@ -4104,20 +4095,16 @@ export function createPostgresMcpToolExecutor(input: {
                 )
                JOIN oao.mcp_credential_policy_version_lifecycle policy_lifecycle
                  ON policy_lifecycle.organization_id=policy.organization_id
-                AND policy_lifecycle.project_id=policy.project_id
                 AND policy_lifecycle.policy_version_id=policy.id
                 AND policy_lifecycle.status='active'
                JOIN oao.mcp_credentials credential
                  ON credential.organization_id=policy.organization_id
-                AND credential.project_id=policy.project_id
                 AND credential.id=policy.credential_id
                JOIN oao.mcp_credential_versions version
                  ON version.organization_id=credential.organization_id
-                AND version.project_id=credential.project_id
                 AND version.id=credential.active_version_id
                JOIN oao.mcp_credential_version_lifecycle credential_lifecycle
                  ON credential_lifecycle.organization_id=version.organization_id
-                AND credential_lifecycle.project_id=version.project_id
                 AND credential_lifecycle.credential_version_id=version.id
                 AND credential_lifecycle.status='active'
                JOIN oao.runs run
@@ -4134,8 +4121,7 @@ export function createPostgresMcpToolExecutor(input: {
                 AND member.principal_id=principal.id
                LEFT JOIN oao.api_keys api_key
                  ON api_key.organization_id=principal.organization_id
-                AND api_key.project_id=principal.project_id
-                AND api_key.principal_id=principal.id
+                AND 'api-key:'||api_key.id::text=principal.subject
                 AND api_key.revoked_at IS NULL
                 AND (api_key.expires_at IS NULL OR api_key.expires_at>clock_timestamp())
               WHERE binding.organization_id=$1 AND binding.project_id=$2
@@ -4211,7 +4197,6 @@ export function createPostgresMcpToolExecutor(input: {
         },
         {
           organizationId: tenant.organizationId,
-          projectId: tenant.projectId,
           providerId: row.credential_id,
           providerType: "mcp",
         },
@@ -4372,7 +4357,6 @@ export function createProjectModelPresetActivator(input: {
              FROM oao.project_model_presets p
              JOIN oao.project_model_providers c
                ON c.organization_id=p.organization_id
-              AND c.project_id=p.project_id
               AND c.id=p.provider_id
              WHERE p.organization_id=$1 AND p.project_id=$2 AND p.preset_key=$3`,
             [tenant.organizationId, tenant.projectId, presetKey],
@@ -4401,7 +4385,6 @@ export function createProjectModelPresetActivator(input: {
         },
         {
           organizationId: tenant.organizationId,
-          projectId: tenant.projectId,
           providerId: row.provider_id,
           providerType: row.provider_type,
         },

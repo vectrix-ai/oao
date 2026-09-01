@@ -29,8 +29,8 @@ Runtime execution requires a configured project model preset. A Daytona
 connection is required only when the published version enables a sandbox.
 There is no selectable fake model or sandbox profile.
 
-For direct API calls, use a project-scoped OAO API key and the project ID from
-`GET /v1/context`:
+For direct API calls, use an OAO API key (organization-wide; the project in the
+URL path selects where it acts) and the project ID from `GET /v1/context`:
 
 ```bash
 export OAO_API_URL=http://127.0.0.1:3000/v1
@@ -108,7 +108,7 @@ cookies.
   <Step title="Create the definition">
     Open **Agents**, select **Create agent**, enter a name and optional
     description, and choose an approved model preset. You can also enable the
-    sandbox, choose a configured project Daytona connection, select its network
+    sandbox, choose a configured organization Daytona connection, select its network
     policy, optionally select an active Daytona snapshot, select exact tool
     capabilities, and attach active Skill versions before submitting the form.
 
@@ -343,7 +343,7 @@ body returns `409 idempotency_conflict`.
 
 ### 1. Create the agent and version 1
 
-This example uses explicit project model and Daytona provider keys:
+This example uses explicit organization model and Daytona provider keys:
 
 ```bash
 curl --fail-with-body \
@@ -649,7 +649,7 @@ built-in deterministic preset.
 
 The check runs inside the same tenant transaction as the write, so an unknown
 key is rejected with `400` before an agent or version row is created. Hosted
-publication requires a provider connection in the same project and platform
+publication requires a provider connection in the same organization and platform
 credential encryption. Provider API keys are write-only and stored as
 tenant-scoped ciphertext, never in the agent config.
 
@@ -675,7 +675,7 @@ adapter to the agent:
 }
 ```
 
-`provider` is the key of a project Daytona connection, such as
+`provider` is the key of an organization Daytona connection, such as
 `daytona-primary`.
 `snapshotId` is required when the sandbox is enabled and must be an active
 snapshot UUID returned by that provider's snapshot discovery route. The

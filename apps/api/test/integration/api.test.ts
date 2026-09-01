@@ -2253,15 +2253,14 @@ test(
         });
         await pool.query(
           `INSERT INTO oao.project_storage_providers (
-             organization_id,project_id,id,provider_key,display_name,
+             organization_id,id,provider_key,display_name,
              provider_type,endpoint,region,bucket,object_prefix,force_path_style,
              is_default,encrypted_credential,encryption_nonce,encryption_tag,
              encryption_key_version,credential_fingerprint,created_by_principal_id
-           ) VALUES ($1,$2,$3,'run-files-test','Run files test','s3',NULL,
-             'test-1','run-files',NULL,false,false,$4,$5,$6,1,$7,$8)`,
+           ) VALUES ($1,$2,'run-files-test','Run files test','s3',NULL,
+             'test-1','run-files',NULL,false,false,$3,$4,$5,1,$6,$7)`,
           [
             integrationPrincipal.organizationId,
-            integrationPrincipal.projectId,
             runFileStorageProviderId,
             Buffer.from("test"),
             Buffer.alloc(12, 1),
@@ -2385,12 +2384,8 @@ test(
         );
         await pool.query(
           `DELETE FROM oao.project_storage_providers
-           WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
-          [
-            integrationPrincipal.organizationId,
-            integrationPrincipal.projectId,
-            runFileStorageProviderId,
-          ],
+           WHERE organization_id=$1 AND id=$2`,
+          [integrationPrincipal.organizationId, runFileStorageProviderId],
         );
       },
     );
@@ -2719,6 +2714,155 @@ test(
       },
     );
 
+    await t.test(
+      "projects are created, listed organization-wide, shared, and hard deleted",
+      async () => {
+        const created = await app.request(
+          "/v1/projects",
+          jsonRequest(
+            { slug: "secondary", name: "Secondary project" },
+            "project-create-1",
+          ),
+        );
+        assert.equal(created.status, 201);
+        const createdProject = (await created.json()) as {
+          id: string;
+          organizationId: string;
+          slug: string;
+        };
+        assert.equal(createdProject.slug, "secondary");
+        assert.equal(
+          createdProject.organizationId,
+          integrationPrincipal.organizationId,
+        );
+
+        const listed = await app.request("/v1/projects?limit=100");
+        const listedBody = (await listed.json()) as {
+          data: { id: string; slug: string }[];
+        };
+        assert.deepEqual(
+          listedBody.data.map((project) => project.slug).sort(),
+          ["api-integration", "secondary"],
+        );
+
+        // An organization API key works against the new project immediately,
+        // and the shared connection pool is visible from it.
+        const keyResponse = await app.request(
+          `${projectPath}/api-keys`,
+          jsonRequest(
+            { name: "Org key", scopes: ["*"] },
+            "project-share-key-1",
+          ),
+        );
+        assert.equal(keyResponse.status, 201);
+        const orgKey = (await keyResponse.json()) as { secret: string };
+        const crossProjectProviders = await app.request(
+          `/v1/projects/${createdProject.id}/model-providers`,
+          { headers: { authorization: `Bearer ${orgKey.secret}` } },
+        );
+        assert.equal(crossProjectProviders.status, 200);
+        const homeProviders = await app.request(
+          `${projectPath}/model-providers`,
+        );
+        assert.deepEqual(
+          (
+            (await crossProjectProviders.json()) as { data: { id: string }[] }
+          ).data
+            .map((provider) => provider.id)
+            .sort(),
+          ((await homeProviders.json()) as { data: { id: string }[] }).data
+            .map((provider) => provider.id)
+            .sort(),
+        );
+
+        // An organization API key creates and deletes projects through its
+        // scopes, acting from its default project.
+        const keyProjectCreated = await app.request(
+          "/v1/projects",
+          jsonRequest(
+            { slug: "key-target", name: "Key target" },
+            "project-create-key-1",
+            { authorization: `Bearer ${orgKey.secret}` },
+          ),
+        );
+        assert.equal(keyProjectCreated.status, 201);
+        const keyProject = (await keyProjectCreated.json()) as { id: string };
+        const keyProjectDeleted = await app.request(
+          `/v1/projects/${keyProject.id}`,
+          {
+            method: "DELETE",
+            headers: {
+              "idempotency-key": "project-delete-key-1",
+              authorization: `Bearer ${orgKey.secret}`,
+            },
+          },
+        );
+        assert.equal(keyProjectDeleted.status, 200);
+
+        // A signed-in session switches its active project through a cookie;
+        // the creator was provisioned into the new project at creation time.
+        const switched = await app.request(
+          "/v1/auth/switch-project",
+          jsonRequest({ projectId: createdProject.id }, "project-switch-1"),
+        );
+        assert.equal(switched.status, 200);
+        const activeProjectCookie = /oao_active_project=([^;]+)/u.exec(
+          switched.headers.get("set-cookie") ?? "",
+        )?.[1];
+        assert.equal(activeProjectCookie, createdProject.id);
+        const switchedContext = await app.request("/v1/context", {
+          headers: { cookie: `oao_active_project=${createdProject.id}` },
+        });
+        assert.equal(switchedContext.status, 200);
+        assert.equal(
+          ((await switchedContext.json()) as { project: { id: string } })
+            .project.id,
+          createdProject.id,
+        );
+        const unknownSwitch = await app.request(
+          "/v1/auth/switch-project",
+          jsonRequest(
+            { projectId: "00000000-0000-4000-8000-00000000dead" },
+            "project-switch-2",
+          ),
+        );
+        assert.equal(unknownSwitch.status, 403);
+
+        // The active project refuses to delete itself.
+        const selfDelete = await app.request(`${projectPath}`, {
+          method: "DELETE",
+          headers: { "idempotency-key": "project-delete-self-1" },
+        });
+        assert.equal(selfDelete.status, 400);
+
+        const deleted = await app.request(`/v1/projects/${createdProject.id}`, {
+          method: "DELETE",
+          headers: { "idempotency-key": "project-delete-1" },
+        });
+        assert.equal(deleted.status, 200);
+        assert.deepEqual(await deleted.json(), {
+          id: createdProject.id,
+          deleted: true,
+        });
+
+        const relisted = await app.request("/v1/projects?limit=100");
+        assert.deepEqual(
+          ((await relisted.json()) as { data: { slug: string }[] }).data.map(
+            (project) => project.slug,
+          ),
+          ["api-integration"],
+        );
+
+        // The last remaining project cannot be deleted even by an owner —
+        // and it is also the active project.
+        const lastDelete = await app.request(`${projectPath}`, {
+          method: "DELETE",
+          headers: { "idempotency-key": "project-delete-last-1" },
+        });
+        assert.equal(lastDelete.status, 400);
+      },
+    );
+
     await t.test("audit export writes a tenant-scoped artifact", async () => {
       const exported = await app.request(
         `${projectPath}/audit/export`,
@@ -2824,12 +2968,8 @@ test(
         }>(
           `SELECT encrypted_api_key,encryption_nonce,encryption_tag,encryption_key_version
            FROM oao.project_model_providers
-           WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
-          [
-            integrationPrincipal.organizationId,
-            integrationPrincipal.projectId,
-            provider.id,
-          ],
+           WHERE organization_id=$1 AND id=$2`,
+          [integrationPrincipal.organizationId, provider.id],
         );
         assert.equal(storedCredential.rows[0]?.encryption_nonce.length, 12);
         assert.equal(storedCredential.rows[0]?.encryption_tag.length, 16);
@@ -3017,12 +3157,8 @@ test(
         }>(
           `SELECT encrypted_credential,encryption_nonce,encryption_tag
              FROM oao.project_storage_providers
-            WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
-          [
-            integrationPrincipal.organizationId,
-            integrationPrincipal.projectId,
-            storageProvider.id,
-          ],
+            WHERE organization_id=$1 AND id=$2`,
+          [integrationPrincipal.organizationId, storageProvider.id],
         );
         assert.equal(
           storedStorageCredential.rows[0]?.encryption_nonce.length,

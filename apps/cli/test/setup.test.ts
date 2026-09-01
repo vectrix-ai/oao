@@ -124,7 +124,6 @@ class FakeApi implements SetupApi {
     const provider: ProjectModelProvider = {
       id: "provider-1",
       organizationId: "organization-1",
-      projectId: "project-1",
       key: input.key,
       displayName: input.displayName,
       providerType: input.providerType,

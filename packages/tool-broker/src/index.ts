@@ -98,6 +98,21 @@ function failure(code: ToolFailureCode, message: string): ToolOutcome {
   return { version: 1, status: "failure", error: { code, message } };
 }
 
+/**
+ * PostgreSQL raises class 55000 for every fencing conflict (stale execution
+ * fence, non-executable call, commit fence mismatch): another claim epoch owns
+ * the tool call, so the losing executor must stand down without submitting.
+ */
+function isFenceSupersession(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { code?: unknown; message?: unknown };
+  return (
+    candidate.code === "55000" ||
+    (typeof candidate.message === "string" &&
+      candidate.message.includes("stale tool execution fence"))
+  );
+}
+
 function decodeResult(
   value: Readonly<Record<string, PublicValue>>,
 ): ToolOutcome {
@@ -204,10 +219,23 @@ export class PostgresToolBroker {
       readonly servicePrincipalId: PrincipalId;
       readonly pollMilliseconds?: number;
       readonly approvalTtlMilliseconds?: number;
+      /** Platform execution lease duration; renewed while execute runs. */
+      readonly platformLeaseMilliseconds?: number;
+      /** Heartbeat cadence for lease renewal; defaults to a third of the lease. */
+      readonly platformLeaseRenewMilliseconds?: number;
       readonly sleep?: (
         milliseconds: number,
         signal?: AbortSignal,
       ) => Promise<void>;
+      /** Receives the redacted-away cause whenever a platform tool fails. */
+      readonly onPlatformToolError?: (
+        error: unknown,
+        context: {
+          readonly toolName: string;
+          readonly runId: string;
+          readonly toolCallId?: string;
+        },
+      ) => void;
     },
   ) {}
 
@@ -321,7 +349,7 @@ export class PostgresToolBroker {
 
   async executePlatform(
     input: ToolObligationInput,
-    execute: () => Promise<PublicValue>,
+    execute: (signal?: AbortSignal) => Promise<PublicValue>,
     signal?: AbortSignal,
   ): Promise<ToolOutcome> {
     try {
@@ -331,7 +359,11 @@ export class PostgresToolBroker {
         input,
         await this.executePlatformSafely(input, execute, signal),
       );
-    } catch {
+    } catch (error) {
+      this.options.onPlatformToolError?.(error, {
+        toolName: input.toolName,
+        runId: input.runId,
+      });
       const outcome = signal?.aborted
         ? failure("run_cancelled", "Run was cancelled")
         : failure("platform_tool_failed", "Platform tool execution failed");
@@ -341,7 +373,7 @@ export class PostgresToolBroker {
 
   private async executePlatformSafely(
     input: ToolObligationInput,
-    execute: () => Promise<PublicValue>,
+    execute: (signal?: AbortSignal) => Promise<PublicValue>,
     signal?: AbortSignal,
   ): Promise<ToolOutcome> {
     const toolCallId = await this.publishPlatform(input);
@@ -368,13 +400,13 @@ export class PostgresToolBroker {
       );
     }
     await this.resumeRun(input, terminal);
-    return this.claimExecuteCommit(input, toolCallId, execute);
+    return this.claimExecuteCommit(input, toolCallId, execute, signal);
   }
 
   private async waitUntilApprovedThenExecute(
     input: ToolObligationInput,
     toolCallId: string,
-    execute: () => Promise<PublicValue>,
+    execute: (signal?: AbortSignal) => Promise<PublicValue>,
     signal?: AbortSignal,
   ): Promise<ToolOutcome> {
     for (;;) {
@@ -386,7 +418,7 @@ export class PostgresToolBroker {
       }
       if (row.approval_status === "approved") {
         await this.resumeRun(input, row);
-        return this.claimExecuteCommit(input, toolCallId, execute);
+        return this.claimExecuteCommit(input, toolCallId, execute, signal);
       }
       await this.pause(signal);
     }
@@ -395,33 +427,88 @@ export class PostgresToolBroker {
   private async claimExecuteCommit(
     input: ToolObligationInput,
     toolCallId: string,
-    execute: () => Promise<PublicValue>,
+    execute: (signal?: AbortSignal) => Promise<PublicValue>,
+    signal?: AbortSignal,
   ): Promise<ToolOutcome> {
-    const fence = await withTenantTransaction(
+    const leaseMilliseconds = this.options.platformLeaseMilliseconds ?? 30_000;
+    const renewMilliseconds =
+      this.options.platformLeaseRenewMilliseconds ??
+      Math.max(1, Math.floor(leaseMilliseconds / 3));
+    const { fence, principalId } = await withTenantTransaction(
       this.pool,
       input,
       async (transaction) => {
-        await this.ensureServicePrincipal(transaction, input);
+        const resolved = await this.resolveServicePrincipal(transaction, input);
         const fenceResult = await transaction.query(
-          "SELECT oao.begin_platform_tool_execution($1,$2,$3,$4,interval '30 seconds') AS fence",
+          `SELECT oao.begin_platform_tool_execution($1,$2,$3,$4,($5 || ' milliseconds')::interval) AS fence`,
           [
             input.organizationId,
             input.projectId,
             toolCallId,
-            this.options.servicePrincipalId,
+            resolved,
+            leaseMilliseconds,
           ],
         );
-        return (fenceResult.rows[0] as { fence: string }).fence;
+        return {
+          fence: (fenceResult.rows[0] as { fence: string }).fence,
+          principalId: resolved,
+        };
       },
     );
+    // Long-running executions (delegations, remote MCP calls) outlive the
+    // bounded claim, so the lease is renewed on a heartbeat while execute is
+    // in flight. A fencing conflict on renewal means another claim epoch owns
+    // this call; the losing executor aborts and must not submit.
+    const supersession = new AbortController();
+    const executeSignal = signal
+      ? AbortSignal.any([signal, supersession.signal])
+      : supersession.signal;
+    let renewals: Promise<void> = Promise.resolve();
+    const heartbeat = setInterval(() => {
+      renewals = renewals.then(async () => {
+        if (supersession.signal.aborted) return;
+        try {
+          await withTenantTransaction(this.pool, input, (transaction) =>
+            transaction.query(
+              `SELECT oao.renew_tool_call_claim($1,$2,$3,$4,$5,($6 || ' milliseconds')::interval)`,
+              [
+                input.organizationId,
+                input.projectId,
+                toolCallId,
+                principalId,
+                fence,
+                leaseMilliseconds,
+              ],
+            ),
+          );
+        } catch (error) {
+          this.options.onPlatformToolError?.(error, {
+            toolName: input.toolName,
+            runId: input.runId,
+            toolCallId,
+          });
+          // A transient renewal error keeps the current lease until the next
+          // heartbeat; only a fencing conflict proves the claim is lost.
+          if (isFenceSupersession(error))
+            supersession.abort(
+              new Error("Platform tool execution lease was superseded"),
+            );
+        }
+      });
+    }, renewMilliseconds);
     let safeResult: Readonly<Record<string, PublicValue>>;
     try {
-      const value = await execute();
+      const value = await execute(executeSignal);
       if (!value || typeof value !== "object" || Array.isArray(value))
         throw new TypeError("Platform tool output must be an object");
       safeResult = { version: 1, status: "success", value };
       assertPublicPayload(safeResult);
-    } catch {
+    } catch (error) {
+      this.options.onPlatformToolError?.(error, {
+        toolName: input.toolName,
+        runId: input.runId,
+        toolCallId,
+      });
       safeResult = {
         version: 1,
         status: "failure",
@@ -430,73 +517,122 @@ export class PostgresToolBroker {
           message: "Platform tool execution failed",
         },
       };
+    } finally {
+      clearInterval(heartbeat);
+      await renewals;
     }
+    if (supersession.signal.aborted)
+      return failure("run_cancelled", "Platform tool execution was superseded");
     const idempotencyKey = `platform-result:${input.runId}:${input.flueToolCallId}`;
     const hash = createHash("sha256")
       .update(JSON.stringify(safeResult))
       .digest();
-    await withTenantTransaction(this.pool, input, async (transaction) => {
-      await transaction.query(
-        "SELECT oao.submit_tool_result($1,$2,$3,$4,$5,$6,$7,$8)",
-        [
-          input.organizationId,
-          input.projectId,
-          toolCallId,
-          this.options.servicePrincipalId,
-          fence,
-          idempotencyKey,
-          hash,
-          safeResult,
-        ],
-      );
-      await transaction.query("SELECT oao.commit_tool_result($1,$2,$3,$4,$5)", [
-        input.organizationId,
-        input.projectId,
-        toolCallId,
-        fence,
-        idempotencyKey,
-      ]);
-      await appendEventOnce(transaction, {
-        ...input,
-        eventId: stableUuid(
-          `event:tool:${input.runId}:${input.flueToolCallId}:result`,
-        ),
-        aggregateType: "run",
-        aggregateId: input.runId,
-        kind: "tool_call.result_committed",
-        payload: { toolCallId, owner: "platform" },
+    try {
+      await withTenantTransaction(this.pool, input, async (transaction) => {
+        await transaction.query(
+          "SELECT oao.submit_tool_result($1,$2,$3,$4,$5,$6,$7,$8)",
+          [
+            input.organizationId,
+            input.projectId,
+            toolCallId,
+            principalId,
+            fence,
+            idempotencyKey,
+            hash,
+            safeResult,
+          ],
+        );
+        await transaction.query(
+          "SELECT oao.commit_tool_result($1,$2,$3,$4,$5)",
+          [
+            input.organizationId,
+            input.projectId,
+            toolCallId,
+            fence,
+            idempotencyKey,
+          ],
+        );
+        await appendEventOnce(transaction, {
+          ...input,
+          eventId: stableUuid(
+            `event:tool:${input.runId}:${input.flueToolCallId}:result`,
+          ),
+          aggregateType: "run",
+          aggregateId: input.runId,
+          kind: "tool_call.result_committed",
+          payload: { toolCallId, owner: "platform" },
+        });
       });
-    });
+    } catch (error) {
+      // A fenced-out submit means another epoch took the call over after the
+      // last successful renewal; stand down instead of reporting a failure
+      // envelope the surviving executor would have to compete with.
+      if (isFenceSupersession(error)) {
+        this.options.onPlatformToolError?.(error, {
+          toolName: input.toolName,
+          runId: input.runId,
+          toolCallId,
+        });
+        return failure(
+          "run_cancelled",
+          "Platform tool execution was superseded",
+        );
+      }
+      throw error;
+    }
     await this.resumeRun(input, await this.read(input, toolCallId));
     return decodeResult(safeResult);
   }
 
-  private async ensureServicePrincipal(
+  /**
+   * Resolves the worker's service principal inside the acting project.
+   * Principals carry a UNIQUE (organization_id, id) key, so the configured
+   * principal id can exist in only one project per organization; every other
+   * project materialises a deterministic per-project principal that shares
+   * the worker's subject.
+   */
+  private async resolveServicePrincipal(
     transaction: Queryable,
     input: TenantContext,
-  ): Promise<void> {
+  ): Promise<string> {
     const subject = `oao-runtime-worker:${this.options.servicePrincipalId}`;
     await transaction.query(
       `INSERT INTO oao.principals (
          organization_id,project_id,id,kind,subject,scopes
        ) VALUES ($1,$2,$3,'service',$4,ARRAY[]::text[])
-       ON CONFLICT (organization_id,project_id,id) DO NOTHING`,
+       ON CONFLICT (organization_id,project_id,kind,subject) DO NOTHING`,
       [
         input.organizationId,
         input.projectId,
-        this.options.servicePrincipalId,
+        this.projectServicePrincipalId(input),
         subject,
       ],
     );
     const principal = await transaction.query(
-      `SELECT kind::text,subject FROM oao.principals
-       WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
-      [input.organizationId, input.projectId, this.options.servicePrincipalId],
+      `SELECT id,kind::text,subject FROM oao.principals
+       WHERE organization_id=$1 AND project_id=$2
+         AND kind='service' AND subject=$3`,
+      [input.organizationId, input.projectId, subject],
     );
     const row = principal.rows[0] as
-      { readonly kind: string; readonly subject: string } | undefined;
-    if (row?.kind !== "service" || row.subject !== subject)
+      | { readonly id: string; readonly kind: string; readonly subject: string }
+      | undefined;
+    if (!row || row.kind !== "service" || row.subject !== subject)
       throw new Error("Runtime service principal identity conflict");
+    return row.id;
+  }
+
+  private projectServicePrincipalId(input: TenantContext): string {
+    const bytes = createHash("sha256")
+      .update(
+        `oao-runtime-worker:${this.options.servicePrincipalId}:${input.organizationId}:${input.projectId}`,
+      )
+      .digest()
+      .subarray(0, 16);
+    bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+    bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+    const hex = bytes.toString("hex");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
 
   private async waitForResult(

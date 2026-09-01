@@ -323,7 +323,7 @@ test(
           secretAccessKey: "test-secret-access-key",
         }),
         {
-          ...tenant,
+          organizationId: tenant.organizationId,
           providerId: storageProviderId,
           providerType: "s3",
           keyVersion: 1,
@@ -332,15 +332,14 @@ test(
       await withTenantTransaction(pool, tenant, (transaction) =>
         transaction.query(
           `INSERT INTO oao.project_storage_providers (
-             organization_id,project_id,id,provider_key,display_name,provider_type,
+             organization_id,id,provider_key,display_name,provider_type,
              endpoint,region,bucket,object_prefix,force_path_style,is_default,
              encrypted_credential,encryption_nonce,encryption_tag,encryption_key_version,
              credential_fingerprint,created_by_principal_id
-           ) VALUES ($1,$2,$3,'workspace-test','Workspace test','s3',NULL,'test-1',
-                     'workspace-bucket','integration',true,true,$4,$5,$6,$7,$8,$9)`,
+           ) VALUES ($1,$2,'workspace-test','Workspace test','s3',NULL,'test-1',
+                     'workspace-bucket','integration',true,true,$3,$4,$5,$6,$7,$8)`,
           [
             tenant.organizationId,
-            tenant.projectId,
             storageProviderId,
             encrypted.ciphertext,
             encrypted.nonce,

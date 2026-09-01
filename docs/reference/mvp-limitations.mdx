@@ -58,20 +58,40 @@ and should shape integrations:
   be disabled (reversible) or removed, but removal archives rather than
   deletes: published versions and bindings stay stored for existing agent
   versions and session history.
-- **Runtime execution requires a configured model provider.** Add a
-  project-scoped OpenRouter, OpenAI, Anthropic, or xAI provider and preset before publishing an
-  executable agent version. Daytona is required only for sandbox-enabled
-  versions, and S3-compatible storage is required only for run files and
-  workspace backups. Test doubles are not selectable in the API or console.
+- **Runtime execution requires a configured model provider.** Add an
+  organization-shared OpenRouter, OpenAI, Anthropic, or xAI provider connection
+  and approve a project preset before publishing an executable agent version.
+  Daytona is required only for sandbox-enabled versions, and S3-compatible
+  storage is required only for run files and workspace backups. Test doubles
+  are not selectable in the API or console.
 - **Model presets are append-only.** A `project:admin` principal can approve a
   new project preset from the provider catalog, duplicate an existing one into
   a new key, and archive one so new agent versions stop seeing it. There is no
   rename or repoint route and no reviewer approval workflow; archived presets
   keep resolving for already published agent versions.
-- **Provider credentials are project-scoped encrypted records.** The console can
+- **Provider credentials are organization-scoped encrypted records.** API
+  keys, model providers, storage providers, sandbox providers, and MCP
+  servers/credentials/policies are shared by every project of the
+  organization. The console can
   create connections, rotate write-only keys, and remove a connection once no
   live preset routes through it (the key is wiped). The API never returns a
   key, and encryption-key-ring rotation is not included in this MVP.
+- **Upgrading to organization-shared credentials requires re-entering
+  secrets.** The AES-256-GCM authenticated encryption context no longer binds
+  a credential to one project, so model provider API keys, storage provider
+  credentials, MCP credentials, and Daytona credentials stored before the
+  organization-sharing release cannot be decrypted afterwards. Rotate or
+  re-enter each one after upgrading.
+- **Project deletion is a hard delete that skips object storage.** Deleting a
+  project permanently removes its PostgreSQL records — including runs, product
+  events, and the audit trail — and its Flue conversation state, but leaves
+  `workspace-backups/threads/...` and `run-files/runs/...` objects in the
+  S3-compatible store for operators to clean up. The active project and the
+  organization's last project cannot be deleted.
+- **Project switching is cookie-scoped.** The console switches projects with
+  `POST /auth/switch-project`, which sets an `oao_active_project` cookie for
+  the browser; other devices and existing bearer sessions keep their own
+  active project. API keys act on any project through the URL path.
 - **Remote MCP is HTTPS and static-credential only.** OAO supports Streamable
   HTTP and legacy SSE with static bearer or safe API-key headers, immutable
   discovery snapshots, restricted toolsets, and exact-origin credential

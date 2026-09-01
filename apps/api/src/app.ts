@@ -9,6 +9,7 @@ import {
   DEFAULT_ANTHROPIC_MODEL_GENERATION_SETTINGS,
   DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS,
   DEFAULT_XAI_MODEL_GENERATION_SETTINGS,
+  parseCreateProjectInput,
   parseCreateProjectSandboxProviderInput,
   parseCreateProjectStorageProviderInput,
   parseCreateProjectModelProviderInput,
@@ -196,6 +197,46 @@ function assertProject(c: ApiContext): Principal {
 
 function rows(result: { readonly rows: readonly unknown[] }): unknown[] {
   return result.rows.map(publicValue);
+}
+
+/**
+ * Credentials sealed before organization sharing carried the creating
+ * project in their encryption context and no longer decrypt; surface that as
+ * an actionable conflict instead of an opaque internal error.
+ */
+function decryptProviderCredential<T>(decrypt: () => T): T {
+  try {
+    return decrypt();
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("could not be decrypted")
+    )
+      throw new HttpApiError(
+        "conflict",
+        "The stored provider credential cannot be decrypted. Rotate or re-enter the API key for this connection.",
+      );
+    throw error;
+  }
+}
+
+function rethrowProjectLifecycleError(error: unknown): never {
+  const pgError = error as {
+    readonly code?: string;
+    readonly message?: string;
+  };
+  if (pgError.code === "42501")
+    throw new HttpApiError(
+      "forbidden",
+      "Organization owner or admin role is required",
+    );
+  if (
+    pgError.code === "22023" &&
+    typeof pgError.message === "string" &&
+    pgError.message.includes("project")
+  )
+    throw new HttpApiError("bad_request", pgError.message);
+  throw error;
 }
 
 function pagination<T>(items: T[], limit: number, dateKey: string) {
@@ -1344,7 +1385,6 @@ async function assertModelPresetApproved(
     `SELECT 1 FROM oao.project_model_presets p
      JOIN oao.project_model_providers c
        ON c.organization_id=p.organization_id
-      AND c.project_id=p.project_id
       AND c.id=p.provider_id
      WHERE p.organization_id=$1 AND p.project_id=$2 AND p.preset_key=$3
        AND p.archived_at IS NULL AND c.archived_at IS NULL`,
@@ -1370,7 +1410,6 @@ async function listProjectModelPresetKeys(
     `SELECT p.preset_key FROM oao.project_model_presets p
      JOIN oao.project_model_providers c
        ON c.organization_id=p.organization_id
-      AND c.project_id=p.project_id
       AND c.id=p.provider_id
      WHERE p.organization_id=$1 AND p.project_id=$2
        AND p.archived_at IS NULL AND c.archived_at IS NULL
@@ -1415,33 +1454,34 @@ async function assertSandboxProviderApproved(
     `SELECT id,provider_type,encrypted_api_key,encryption_nonce,
             encryption_tag,encryption_key_version,target,restricted_egress
        FROM oao.project_sandbox_providers
-     WHERE organization_id=$1 AND project_id=$2 AND provider_key=$3`,
-    [actor.organizationId, actor.projectId, config.provider],
+     WHERE organization_id=$1 AND provider_key=$2`,
+    [actor.organizationId, config.provider],
   );
   const provider = result.rows[0];
   if (!provider)
     throw new HttpApiError(
       "bad_request",
-      "config.sandbox.provider is not configured for this project",
+      "config.sandbox.provider is not configured for this organization",
     );
   if (!credentialCipher || !snapshotCatalog)
     throw new HttpApiError(
       "internal_error",
       "Sandbox snapshot discovery is not configured",
     );
-  const apiKey = credentialCipher.decrypt(
-    {
-      ciphertext: provider.encrypted_api_key,
-      nonce: provider.encryption_nonce,
-      tag: provider.encryption_tag,
-      keyVersion: provider.encryption_key_version,
-    },
-    {
-      organizationId: actor.organizationId,
-      projectId: actor.projectId,
-      providerId: provider.id,
-      providerType: provider.provider_type,
-    },
+  const apiKey = decryptProviderCredential(() =>
+    credentialCipher.decrypt(
+      {
+        ciphertext: provider.encrypted_api_key,
+        nonce: provider.encryption_nonce,
+        tag: provider.encryption_tag,
+        keyVersion: provider.encryption_key_version,
+      },
+      {
+        organizationId: actor.organizationId,
+        providerId: provider.id,
+        providerType: provider.provider_type,
+      },
+    ),
   );
   const snapshots = await snapshotCatalog.listSnapshots({
     apiKey,
@@ -1539,15 +1579,56 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   ) => {
     const authorization = c.req.header("authorization");
     let authenticated: Principal | undefined;
-    if (authorization?.startsWith("Bearer oao_"))
+    if (authorization?.startsWith("Bearer oao_")) {
+      // Organization API keys act inside the project addressed by the URL,
+      // falling back to the organization's earliest project. DELETE of a
+      // project itself must not bind the key to its own target.
+      const pathname = new URL(c.req.url).pathname;
+      const deletesProject =
+        c.req.method === "DELETE" &&
+        /^\/v1\/projects\/[0-9a-f-]{36}\/?$/iu.test(pathname);
+      const requestedProjectId = deletesProject
+        ? undefined
+        : /^\/v1\/projects\/([0-9a-f-]{36})(?:\/|$)/iu.exec(pathname)?.[1];
       authenticated = await dependencies.store.authenticateApiKey(
         authorization.slice("Bearer ".length),
+        requestedProjectId,
       );
-    else authenticated = await dependencies.auth.authenticate(c.req.raw);
+    } else authenticated = await dependencies.auth.authenticate(c.req.raw);
     if (!authenticated)
       throw new HttpApiError("unauthenticated", "Authentication is required");
+    authenticated = await applyActiveProjectCookie(c.req.raw, authenticated);
     c.set("principal", authenticated);
     await next();
+  };
+
+  /**
+   * The oao_active_project cookie re-homes a human session into another
+   * project of its organization. The override resolves a provisioned
+   * principal on every request, so revoked membership or a deleted project
+   * silently falls back to the session's own project.
+   */
+  const applyActiveProjectCookie = async (
+    request: Request,
+    authenticated: Principal,
+  ): Promise<Principal> => {
+    if (authenticated.kind !== "human") return authenticated;
+    const requested = readCookie(request, "oao_active_project");
+    if (
+      !requested ||
+      requested === authenticated.projectId ||
+      !/^[0-9a-f-]{36}$/iu.test(requested)
+    )
+      return authenticated;
+    const resolved = await dependencies.store.resolveProjectPrincipal(
+      authenticated.organizationId,
+      requested,
+      authenticated.subject,
+    );
+    if (!resolved) return authenticated;
+    return authenticated.displayName === undefined
+      ? resolved
+      : { ...resolved, displayName: authenticated.displayName };
   };
 
   app.get("/healthz", (c) => c.json({ status: "ok" }));
@@ -1680,6 +1761,13 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       "Strict",
       authConfiguration.cookieSecure,
     );
+    clearCookie(
+      c,
+      "oao_active_project",
+      "/",
+      "Lax",
+      authConfiguration.cookieSecure,
+    );
     return c.json(result);
   });
 
@@ -1722,6 +1810,39 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     });
   });
 
+  app.post("/v1/auth/switch-project", authenticate, async (c) => {
+    const actor = principal(c);
+    if (actor.kind !== "human")
+      throw new HttpApiError(
+        "forbidden",
+        "Only signed-in sessions can switch the active project",
+      );
+    const body = await readJsonObject(c.req.raw);
+    const projectId = requiredString(body.projectId, "projectId", 36);
+    if (!/^[0-9a-f-]{36}$/iu.test(projectId))
+      throw new HttpApiError("bad_request", "projectId must be a project id");
+    const resolved = await dependencies.store.resolveProjectPrincipal(
+      actor.organizationId,
+      projectId,
+      actor.subject,
+    );
+    if (!resolved)
+      throw new HttpApiError(
+        "forbidden",
+        "The signed-in principal is not provisioned in that project",
+      );
+    appendCookie(
+      c,
+      "oao_active_project",
+      projectId,
+      "/",
+      "Lax",
+      authConfiguration.refreshCookieMaxAgeSeconds ?? 604_800,
+      authConfiguration.cookieSecure,
+    );
+    return c.json({ projectId });
+  });
+
   app.use("/v1/projects/*", authenticate);
   app.use("/v1/projects", authenticate);
   app.use("/v1/organizations", authenticate);
@@ -1735,13 +1856,16 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
         "SELECT id,slug,name,created_at FROM oao.organizations WHERE id=$1",
         [actor.organizationId],
       );
-      const projectResult = await tx.query(
+      const projectsResult = await tx.query(
         `SELECT id,organization_id,slug,name,created_at FROM oao.projects
-         WHERE organization_id=$1 AND id=$2`,
-        [actor.organizationId, actor.projectId],
+         WHERE organization_id=$1 ORDER BY created_at,id`,
+        [actor.organizationId],
       );
       const organization = publicValue(organizationResult.rows[0]);
-      const project = publicValue(projectResult.rows[0]);
+      const projects = rows(projectsResult) as Readonly<
+        Record<string, unknown>
+      >[];
+      const project = projects.find((entry) => entry.id === actor.projectId);
       if (!organization || !project)
         throw new HttpApiError("not_found", "Authenticated project not found");
       return c.json({
@@ -1749,7 +1873,7 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
         organization,
         project,
         organizations: [organization],
-        projects: [project],
+        projects,
         activeModelPresets: [
           ...new Set([
             ...activeModelPresetKeys,
@@ -1812,13 +1936,98 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       async (tx) => {
         const result = await tx.query(
           `SELECT id,organization_id,slug,name,created_at FROM oao.projects
-         WHERE organization_id=$1 AND id=$2`,
-          [actor.organizationId, actor.projectId],
+         WHERE organization_id=$1 ORDER BY created_at,id`,
+          [actor.organizationId],
         );
         return c.json({
           data: rows(result),
           pageInfo: { hasMore: false, nextCursor: null },
         });
+      },
+    );
+  });
+
+  app.post("/v1/projects", async (c) => {
+    const actor = principal(c);
+    const body = await readJsonObject(c.req.raw);
+    const key = idempotencyKey(c.req.raw);
+    let slug: string;
+    let name: string;
+    try {
+      ({ slug, name } = parseCreateProjectInput(body));
+    } catch {
+      throw new HttpApiError(
+        "bad_request",
+        "Request must contain a kebab-case slug and a project name",
+      );
+    }
+    return dependencies.store.transaction(
+      actor,
+      "project:admin",
+      async (tx) => {
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: "POST:/projects",
+          key,
+          hash: requestHash(body),
+          status: 201,
+          execute: async () => {
+            const projectId = randomUUID();
+            const result = await tx
+              .query(
+                "SELECT * FROM oao.create_organization_project($1,$2,$3,$4,$5)",
+                [actor.organizationId, projectId, slug, name, actor.id],
+              )
+              .catch(rethrowProjectLifecycleError);
+            const project = publicValue(result.rows[0]) as Readonly<
+              Record<string, unknown>
+            >;
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "project.created",
+              resourceType: "project",
+              resourceId: projectId,
+              detail: { slug, name },
+            });
+            return project;
+          },
+        });
+        c.header("idempotency-replayed", String(response.replayed));
+        return c.json(response.body, 201);
+      },
+    );
+  });
+
+  app.delete("/v1/projects/:projectId", async (c) => {
+    const actor = principal(c);
+    const targetProjectId = c.req.param("projectId");
+    const idem = idempotencyKey(c.req.raw);
+    return dependencies.store.transaction(
+      actor,
+      "project:admin",
+      async (tx) => {
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: `DELETE:/projects/${targetProjectId}`,
+          method: "DELETE",
+          key: idem,
+          hash: requestHash({ projectId: targetProjectId }),
+          status: 200,
+          execute: async () => {
+            await tx
+              .query("SELECT oao.delete_organization_project($1,$2,$3)", [
+                actor.organizationId,
+                targetProjectId,
+                actor.id,
+              ])
+              .catch(rethrowProjectLifecycleError);
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "project.deleted",
+              resourceType: "project",
+              resourceId: targetProjectId,
+            });
+            return { id: targetProjectId, deleted: true };
+          },
+        });
+        c.header("idempotency-replayed", String(response.replayed));
+        return c.json(response.body);
       },
     );
   });
@@ -2074,18 +2283,13 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
         const condition = dependencies.store.cursorCondition(
           cursor,
           "created_at",
-          3,
+          2,
         );
         const result = await tx.query(
-          `SELECT id,organization_id,project_id,name,key_prefix AS prefix,scopes,expires_at,revoked_at,last_used_at,created_at
-         FROM oao.api_keys WHERE organization_id=$1 AND project_id=$2${condition.sql}
-         ORDER BY created_at DESC,id DESC LIMIT $${3 + condition.values.length}`,
-          [
-            actor.organizationId,
-            actor.projectId,
-            ...condition.values,
-            limit + 1,
-          ],
+          `SELECT id,organization_id,name,key_prefix AS prefix,scopes,expires_at,revoked_at,last_used_at,created_at
+         FROM oao.api_keys WHERE organization_id=$1${condition.sql}
+         ORDER BY created_at DESC,id DESC LIMIT $${2 + condition.values.length}`,
+          [actor.organizationId, ...condition.values, limit + 1],
         );
         return c.json(pagination(rows(result), limit, "createdAt"));
       },
@@ -2106,10 +2310,37 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       (!Number.isFinite(expiresAt.getTime()) || expiresAt <= new Date())
     )
       throw new HttpApiError("bad_request", "expiresAt must be in the future");
+    // Organization keys act across every project, so creating one demands
+    // organization owner/admin authority and a key may only carry scopes the
+    // creator already holds.
+    const heldScopes = actor.scopes as ReadonlySet<string>;
+    if (!heldScopes.has("*") && scopes.some((scope) => !heldScopes.has(scope)))
+      throw new HttpApiError(
+        "forbidden",
+        "API key scopes exceed the creator's scopes",
+      );
     return dependencies.store.transaction(
       actor,
       "project:admin",
       async (tx) => {
+        if (actor.kind === "api_key") {
+          if (!actor.scopes.has("*") && !actor.scopes.has("project:admin"))
+            throw new HttpApiError(
+              "forbidden",
+              "Organization owner or admin role is required",
+            );
+        } else {
+          const membership = await tx.query<{ role: string | null }>(
+            "SELECT oao.organization_role_for_subject($1,$2,$3) AS role",
+            [actor.organizationId, actor.kind, actor.subject],
+          );
+          const role = membership.rows[0]?.role;
+          if (role !== "owner" && role !== "admin")
+            throw new HttpApiError(
+              "forbidden",
+              "Organization owner or admin role is required",
+            );
+        }
         const hash = requestHash(body);
         const claim = await tx.query<{ outcome: "claimed" | "replayed" }>(
           "SELECT oao.claim_api_request_idempotency($1,$2,$3,'POST','POST:/api-keys',$4,$5,clock_timestamp() + interval '24 hours') AS outcome",
@@ -2141,7 +2372,6 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
         const storedResponse = {
           id: apiKey.id,
           organizationId: apiKey.organizationId,
-          projectId: apiKey.projectId,
           name: apiKey.name,
           prefix: apiKey.prefix,
           scopes: apiKey.scopes,
@@ -2190,8 +2420,8 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           execute: async () => {
             const result = await tx.query(
               `UPDATE oao.api_keys SET revoked_at=COALESCE(revoked_at,clock_timestamp())
-             WHERE organization_id=$1 AND project_id=$2 AND id=$3 RETURNING id`,
-              [actor.organizationId, actor.projectId, c.req.param("apiKeyId")],
+             WHERE organization_id=$1 AND id=$2 RETURNING id`,
+              [actor.organizationId, c.req.param("apiKeyId")],
             );
             if (!result.rowCount)
               throw new HttpApiError("not_found", "API key not found");
@@ -2742,7 +2972,7 @@ function registerSandboxProviderRoutes(
   app: Hono<{ Variables: Variables }>,
   dependencies: ApiDependencies,
 ): void {
-  const providerViewSql = `id,organization_id,project_id,provider_key AS key,
+  const providerViewSql = `id,organization_id,provider_key AS key,
     display_name,provider_type,true AS credential_configured,
     left(credential_fingerprint,12) AS credential_fingerprint,
     encryption_key_version AS credential_version,target,restricted_egress,
@@ -2775,25 +3005,26 @@ function registerSandboxProviderRoutes(
           `SELECT id,provider_type,encrypted_api_key,encryption_nonce,
                   encryption_tag,encryption_key_version,target
              FROM oao.project_sandbox_providers
-            WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
-          [actor.organizationId, actor.projectId, c.req.param("providerId")],
+            WHERE organization_id=$1 AND id=$2`,
+          [actor.organizationId, c.req.param("providerId")],
         );
         const provider = result.rows[0];
         if (!provider)
           throw new HttpApiError("not_found", "Sandbox provider not found");
-        const apiKey = dependencies.credentialCipher!.decrypt(
-          {
-            ciphertext: provider.encrypted_api_key,
-            nonce: provider.encryption_nonce,
-            tag: provider.encryption_tag,
-            keyVersion: provider.encryption_key_version,
-          },
-          {
-            organizationId: actor.organizationId,
-            projectId: actor.projectId,
-            providerId: provider.id,
-            providerType: provider.provider_type,
-          },
+        const apiKey = decryptProviderCredential(() =>
+          dependencies.credentialCipher!.decrypt(
+            {
+              ciphertext: provider.encrypted_api_key,
+              nonce: provider.encryption_nonce,
+              tag: provider.encryption_tag,
+              keyVersion: provider.encryption_key_version,
+            },
+            {
+              organizationId: actor.organizationId,
+              providerId: provider.id,
+              providerType: provider.provider_type,
+            },
+          ),
         );
         const snapshots =
           await dependencies.sandboxSnapshotCatalog!.listSnapshots({
@@ -2817,15 +3048,15 @@ function registerSandboxProviderRoutes(
       const condition = dependencies.store.cursorCondition(
         cursor,
         "p.created_at",
-        4,
+        3,
         "p.id",
       );
       const result = await tx.query(
         `SELECT ${providerViewSql}
          FROM oao.project_sandbox_providers p
-         WHERE organization_id=$1 AND project_id=$2${condition.sql}
-         ORDER BY created_at DESC,id DESC LIMIT $${3 + condition.values.length}`,
-        [actor.organizationId, actor.projectId, ...condition.values, limit + 1],
+         WHERE organization_id=$1${condition.sql}
+         ORDER BY created_at DESC,id DESC LIMIT $${2 + condition.values.length}`,
+        [actor.organizationId, ...condition.values, limit + 1],
       );
       return c.json({
         ...pagination(rows(result), limit, "createdAt"),
@@ -2861,7 +3092,6 @@ function registerSandboxProviderRoutes(
     const providerId = randomUUID();
     const encrypted = dependencies.credentialCipher.encrypt(input.apiKey, {
       organizationId: actor.organizationId,
-      projectId: actor.projectId,
       providerId,
       providerType: "daytona",
       keyVersion: 1,
@@ -2878,14 +3108,13 @@ function registerSandboxProviderRoutes(
           execute: async () => {
             const result = await tx.query(
               `INSERT INTO oao.project_sandbox_providers
-                 (organization_id,project_id,id,provider_key,display_name,provider_type,
+                 (organization_id,id,provider_key,display_name,provider_type,
                   encrypted_api_key,encryption_nonce,encryption_tag,encryption_key_version,
                   credential_fingerprint,target,restricted_egress,created_by_principal_id)
-               VALUES ($1,$2,$3,$4,$5,'daytona',$6,$7,$8,$9,$10,$11,$12,$13)
+               VALUES ($1,$2,$3,$4,'daytona',$5,$6,$7,$8,$9,$10,$11,$12)
                RETURNING ${providerViewSql}`,
               [
                 actor.organizationId,
-                actor.projectId,
                 providerId,
                 input.key,
                 input.displayName,
@@ -2954,12 +3183,8 @@ function registerSandboxProviderRoutes(
                 encryption_key_version: number;
               }>(
                 `SELECT encryption_key_version FROM oao.project_sandbox_providers
-                 WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
-                [
-                  actor.organizationId,
-                  actor.projectId,
-                  c.req.param("providerId"),
-                ],
+                 WHERE organization_id=$1 AND id=$2 FOR UPDATE`,
+                [actor.organizationId, c.req.param("providerId")],
               );
               const provider = current.rows[0];
               if (!provider)
@@ -2969,20 +3194,18 @@ function registerSandboxProviderRoutes(
                 );
               const encrypted = dependencies.credentialCipher!.encrypt(apiKey, {
                 organizationId: actor.organizationId,
-                projectId: actor.projectId,
                 providerId: c.req.param("providerId"),
                 providerType: "daytona",
                 keyVersion: provider.encryption_key_version + 1,
               });
               const result = await tx.query(
                 `UPDATE oao.project_sandbox_providers
-                 SET encrypted_api_key=$4,encryption_nonce=$5,encryption_tag=$6,
-                     encryption_key_version=$7,credential_fingerprint=$8
-                 WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                 SET encrypted_api_key=$3,encryption_nonce=$4,encryption_tag=$5,
+                     encryption_key_version=$6,credential_fingerprint=$7
+                 WHERE organization_id=$1 AND id=$2
                  RETURNING ${providerViewSql}`,
                 [
                   actor.organizationId,
-                  actor.projectId,
                   c.req.param("providerId"),
                   encrypted.ciphertext,
                   encrypted.nonce,
@@ -3040,12 +3263,11 @@ function registerSandboxProviderRoutes(
             execute: async () => {
               const result = await tx.query(
                 `UPDATE oao.project_sandbox_providers
-                 SET target=$4,restricted_egress=$5
-                 WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                 SET target=$3,restricted_egress=$4
+                 WHERE organization_id=$1 AND id=$2
                  RETURNING ${providerViewSql}`,
                 [
                   actor.organizationId,
-                  actor.projectId,
                   c.req.param("providerId"),
                   input.target,
                   input.restrictedEgress,
@@ -3084,7 +3306,7 @@ function registerStorageProviderRoutes(
   app: Hono<{ Variables: Variables }>,
   dependencies: ApiDependencies,
 ): void {
-  const providerViewSql = `id,organization_id,project_id,provider_key AS key,
+  const providerViewSql = `id,organization_id,provider_key AS key,
     display_name,provider_type,endpoint,region,bucket,object_prefix AS prefix,
     force_path_style,is_default AS "default",true AS credential_configured,
     left(credential_fingerprint,12) AS credential_fingerprint,
@@ -3096,9 +3318,9 @@ function registerStorageProviderRoutes(
     return dependencies.store.transaction(actor, "agent:read", async (tx) => {
       const result = await tx.query(
         `SELECT ${providerViewSql} FROM oao.project_storage_providers
-          WHERE organization_id=$1 AND project_id=$2
+          WHERE organization_id=$1
           ORDER BY is_default DESC,created_at DESC,id DESC`,
-        [actor.organizationId, actor.projectId],
+        [actor.organizationId],
       );
       return c.json({
         data: rows(result),
@@ -3135,7 +3357,6 @@ function registerStorageProviderRoutes(
       }),
       {
         organizationId: actor.organizationId,
-        projectId: actor.projectId,
         providerId,
         providerType: "s3",
         keyVersion: 1,
@@ -3153,27 +3374,26 @@ function registerStorageProviderRoutes(
           execute: async () => {
             const existingDefault = await tx.query(
               `SELECT 1 FROM oao.project_storage_providers
-                WHERE organization_id=$1 AND project_id=$2 AND is_default`,
-              [actor.organizationId, actor.projectId],
+                WHERE organization_id=$1 AND is_default`,
+              [actor.organizationId],
             );
             const makeDefault = input.setDefault || !existingDefault.rowCount;
             if (makeDefault)
               await tx.query(
                 `UPDATE oao.project_storage_providers SET is_default=false
-                  WHERE organization_id=$1 AND project_id=$2 AND is_default`,
-                [actor.organizationId, actor.projectId],
+                  WHERE organization_id=$1 AND is_default`,
+                [actor.organizationId],
               );
             const result = await tx.query(
               `INSERT INTO oao.project_storage_providers (
-                 organization_id,project_id,id,provider_key,display_name,provider_type,
+                 organization_id,id,provider_key,display_name,provider_type,
                  endpoint,region,bucket,object_prefix,force_path_style,is_default,
                  encrypted_credential,encryption_nonce,encryption_tag,
                  encryption_key_version,credential_fingerprint,created_by_principal_id
-               ) VALUES ($1,$2,$3,$4,$5,'s3',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+               ) VALUES ($1,$2,$3,$4,'s3',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
                RETURNING ${providerViewSql}`,
               [
                 actor.organizationId,
-                actor.projectId,
                 providerId,
                 input.key,
                 input.displayName,
@@ -3250,12 +3470,8 @@ function registerStorageProviderRoutes(
                 encryption_key_version: number;
               }>(
                 `SELECT encryption_key_version FROM oao.project_storage_providers
-                  WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
-                [
-                  actor.organizationId,
-                  actor.projectId,
-                  c.req.param("providerId"),
-                ],
+                  WHERE organization_id=$1 AND id=$2 FOR UPDATE`,
+                [actor.organizationId, c.req.param("providerId")],
               );
               const provider = current.rows[0];
               if (!provider)
@@ -3267,7 +3483,6 @@ function registerStorageProviderRoutes(
                 JSON.stringify(credential),
                 {
                   organizationId: actor.organizationId,
-                  projectId: actor.projectId,
                   providerId: c.req.param("providerId"),
                   providerType: "s3",
                   keyVersion: provider.encryption_key_version + 1,
@@ -3275,13 +3490,12 @@ function registerStorageProviderRoutes(
               );
               const result = await tx.query(
                 `UPDATE oao.project_storage_providers
-                    SET encrypted_credential=$4,encryption_nonce=$5,encryption_tag=$6,
-                        encryption_key_version=$7,credential_fingerprint=$8
-                  WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                    SET encrypted_credential=$3,encryption_nonce=$4,encryption_tag=$5,
+                        encryption_key_version=$6,credential_fingerprint=$7
+                  WHERE organization_id=$1 AND id=$2
                   RETURNING ${providerViewSql}`,
                 [
                   actor.organizationId,
-                  actor.projectId,
                   c.req.param("providerId"),
                   encrypted.ciphertext,
                   encrypted.nonce,
@@ -3331,12 +3545,8 @@ function registerStorageProviderRoutes(
             execute: async () => {
               const exists = await tx.query(
                 `SELECT 1 FROM oao.project_storage_providers
-                  WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
-                [
-                  actor.organizationId,
-                  actor.projectId,
-                  c.req.param("providerId"),
-                ],
+                  WHERE organization_id=$1 AND id=$2 FOR UPDATE`,
+                [actor.organizationId, c.req.param("providerId")],
               );
               if (!exists.rowCount)
                 throw new HttpApiError(
@@ -3345,18 +3555,14 @@ function registerStorageProviderRoutes(
                 );
               await tx.query(
                 `UPDATE oao.project_storage_providers SET is_default=false
-                  WHERE organization_id=$1 AND project_id=$2 AND is_default`,
-                [actor.organizationId, actor.projectId],
+                  WHERE organization_id=$1 AND is_default`,
+                [actor.organizationId],
               );
               const result = await tx.query(
                 `UPDATE oao.project_storage_providers SET is_default=true
-                  WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                  WHERE organization_id=$1 AND id=$2
                   RETURNING ${providerViewSql}`,
-                [
-                  actor.organizationId,
-                  actor.projectId,
-                  c.req.param("providerId"),
-                ],
+                [actor.organizationId, c.req.param("providerId")],
               );
               await dependencies.store.appendAudit(tx, actor, {
                 action: "storage_provider.default_changed",
@@ -3481,7 +3687,7 @@ function registerModelPresetRoutes(
       };
     });
 
-  const providerViewSql = `id,organization_id,project_id,provider_key AS key,
+  const providerViewSql = `id,organization_id,provider_key AS key,
     display_name,provider_type,true AS credential_configured,
     left(credential_fingerprint,12) AS credential_fingerprint,
     encryption_key_version AS credential_version,
@@ -3509,19 +3715,20 @@ function registerModelPresetRoutes(
         "internal_error",
         "Provider credential encryption is not configured",
       );
-    return dependencies.credentialCipher.decrypt(
-      {
-        ciphertext: provider.encrypted_api_key,
-        nonce: provider.encryption_nonce,
-        tag: provider.encryption_tag,
-        keyVersion: provider.encryption_key_version,
-      },
-      {
-        organizationId: actor.organizationId,
-        projectId: actor.projectId,
-        providerId: provider.id,
-        providerType: provider.provider_type,
-      },
+    return decryptProviderCredential(() =>
+      dependencies.credentialCipher!.decrypt(
+        {
+          ciphertext: provider.encrypted_api_key,
+          nonce: provider.encryption_nonce,
+          tag: provider.encryption_tag,
+          keyVersion: provider.encryption_key_version,
+        },
+        {
+          organizationId: actor.organizationId,
+          providerId: provider.id,
+          providerType: provider.provider_type,
+        },
+      ),
     );
   };
 
@@ -3533,15 +3740,15 @@ function registerModelPresetRoutes(
       const condition = dependencies.store.cursorCondition(
         cursor,
         "p.created_at",
-        4,
+        3,
         "p.id",
       );
       const result = await tx.query(
         `SELECT ${providerViewSql}
          FROM oao.project_model_providers
-         WHERE organization_id=$1 AND project_id=$2 AND archived_at IS NULL${condition.sql}
-         ORDER BY created_at DESC,id DESC LIMIT $${3 + condition.values.length}`,
-        [actor.organizationId, actor.projectId, ...condition.values, limit + 1],
+         WHERE organization_id=$1 AND archived_at IS NULL${condition.sql}
+         ORDER BY created_at DESC,id DESC LIMIT $${2 + condition.values.length}`,
+        [actor.organizationId, ...condition.values, limit + 1],
       );
       return c.json(pagination(rows(result), limit, "createdAt"));
     });
@@ -3568,7 +3775,6 @@ function registerModelPresetRoutes(
     const providerId = randomUUID();
     const encrypted = dependencies.credentialCipher.encrypt(input.apiKey, {
       organizationId: actor.organizationId,
-      projectId: actor.projectId,
       providerId,
       providerType: input.providerType,
       keyVersion: 1,
@@ -3585,14 +3791,13 @@ function registerModelPresetRoutes(
           execute: async () => {
             const result = await tx.query(
               `INSERT INTO oao.project_model_providers
-                 (organization_id,project_id,id,provider_key,display_name,provider_type,
+                 (organization_id,id,provider_key,display_name,provider_type,
                   encrypted_api_key,encryption_nonce,encryption_tag,encryption_key_version,
                   credential_fingerprint,created_by_principal_id)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                RETURNING ${providerViewSql}`,
               [
                 actor.organizationId,
-                actor.projectId,
                 providerId,
                 input.key,
                 input.displayName,
@@ -3662,34 +3867,28 @@ function registerModelPresetRoutes(
               }>(
                 `SELECT provider_type,encryption_key_version
                  FROM oao.project_model_providers
-                 WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                 WHERE organization_id=$1 AND id=$2
                    AND archived_at IS NULL
                  FOR UPDATE`,
-                [
-                  actor.organizationId,
-                  actor.projectId,
-                  c.req.param("providerId"),
-                ],
+                [actor.organizationId, c.req.param("providerId")],
               );
               const provider = current.rows[0];
               if (!provider)
                 throw new HttpApiError("not_found", "Model provider not found");
               const encrypted = dependencies.credentialCipher!.encrypt(apiKey, {
                 organizationId: actor.organizationId,
-                projectId: actor.projectId,
                 providerId: c.req.param("providerId"),
                 providerType: provider.provider_type,
                 keyVersion: provider.encryption_key_version + 1,
               });
               const result = await tx.query(
                 `UPDATE oao.project_model_providers
-                 SET encrypted_api_key=$4,encryption_nonce=$5,encryption_tag=$6,
-                     encryption_key_version=$7,credential_fingerprint=$8
-                 WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                 SET encrypted_api_key=$3,encryption_nonce=$4,encryption_tag=$5,
+                     encryption_key_version=$6,credential_fingerprint=$7
+                 WHERE organization_id=$1 AND id=$2
                  RETURNING ${providerViewSql}`,
                 [
                   actor.organizationId,
-                  actor.projectId,
                   c.req.param("providerId"),
                   encrypted.ciphertext,
                   encrypted.nonce,
@@ -3744,13 +3943,13 @@ function registerModelPresetRoutes(
               }>(
                 `SELECT c.provider_type,c.encryption_key_version,
                       (SELECT count(*)::int FROM oao.project_model_presets p
-                        WHERE p.organization_id=c.organization_id AND p.project_id=c.project_id
+                        WHERE p.organization_id=c.organization_id
                           AND p.provider_id=c.id AND p.archived_at IS NULL) AS live_presets
                FROM oao.project_model_providers c
-               WHERE c.organization_id=$1 AND c.project_id=$2 AND c.id=$3
+               WHERE c.organization_id=$1 AND c.id=$2
                  AND c.archived_at IS NULL
                FOR UPDATE`,
-                [actor.organizationId, actor.projectId, providerId],
+                [actor.organizationId, providerId],
               );
               const provider = current.rows[0];
               if (!provider)
@@ -3768,12 +3967,11 @@ function registerModelPresetRoutes(
                    encrypted_api_key=decode('00','hex'),
                    encryption_nonce=decode(repeat('00',12),'hex'),
                    encryption_tag=decode(repeat('00',16),'hex'),
-                   encryption_key_version=$4,
+                   encryption_key_version=$3,
                    credential_fingerprint=repeat('0',64)
-               WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+               WHERE organization_id=$1 AND id=$2`,
                 [
                   actor.organizationId,
-                  actor.projectId,
                   providerId,
                   provider.encryption_key_version + 1,
                 ],
@@ -3845,9 +4043,9 @@ function registerModelPresetRoutes(
         `SELECT id,provider_type,encrypted_api_key,encryption_nonce,
                 encryption_tag,encryption_key_version
          FROM oao.project_model_providers
-         WHERE organization_id=$1 AND project_id=$2 AND id=$3
+         WHERE organization_id=$1 AND id=$2
            AND archived_at IS NULL`,
-        [actor.organizationId, actor.projectId, providerId],
+        [actor.organizationId, providerId],
       );
       const provider = providerResult.rows[0];
       if (!provider)
@@ -3895,7 +4093,6 @@ function registerModelPresetRoutes(
          FROM oao.project_model_presets p
          LEFT JOIN oao.project_model_providers c
            ON c.organization_id=p.organization_id
-          AND c.project_id=p.project_id
           AND c.id=p.provider_id
          WHERE p.organization_id=$1 AND p.project_id=$2 AND p.archived_at IS NULL${condition.sql}
          ORDER BY p.created_at DESC,p.id DESC LIMIT $${4 + condition.values.length}`,
@@ -3964,10 +4161,10 @@ function registerModelPresetRoutes(
               `SELECT id,provider_type,encrypted_api_key,encryption_nonce,
                       encryption_tag,encryption_key_version
                FROM oao.project_model_providers
-               WHERE organization_id=$1 AND project_id=$2 AND id=$3
+               WHERE organization_id=$1 AND id=$2
                  AND archived_at IS NULL
                FOR SHARE`,
-              [actor.organizationId, actor.projectId, input.providerId],
+              [actor.organizationId, input.providerId],
             );
             const provider = providerResult.rows[0];
             if (!provider)
@@ -5971,7 +6168,6 @@ function registerRunRoutes(
                    AND selection.toolset_version_id=toolset.id
                   JOIN oao.mcp_server_version_tools tool
                     ON tool.organization_id=selection.organization_id
-                   AND tool.project_id=selection.project_id
                    AND tool.server_version_id=selection.server_version_id
                    AND tool.remote_tool_name=selection.remote_tool_name
                   WHERE binding.organization_id=s.organization_id
@@ -6130,7 +6326,7 @@ function registerRunRoutes(
                   b.backed_up_at,b.last_restored_at
              FROM oao.thread_workspace_backups b
              JOIN oao.project_storage_providers p
-               ON p.organization_id=b.organization_id AND p.project_id=b.project_id
+               ON p.organization_id=b.organization_id
               AND p.id=b.storage_provider_id
             WHERE b.organization_id=$1 AND b.project_id=$2 AND b.session_id=$3`,
         values,

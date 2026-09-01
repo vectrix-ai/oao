@@ -71,7 +71,6 @@ const projectId = "00000000-0000-4000-8000-000000000002";
 const providerId = "00000000-0000-4000-8000-000000000077";
 const encryptedProviderKey = credentialCipher.encrypt("sk-openrouter-live", {
   organizationId,
-  projectId,
   providerId,
   providerType: "openrouter",
   keyVersion: 1,
@@ -86,7 +85,6 @@ const defaultProviderRow = {
 };
 const encryptedOpenAIProviderKey = credentialCipher.encrypt("sk-openai-live", {
   organizationId,
-  projectId,
   providerId,
   providerType: "openai",
   keyVersion: 1,
@@ -103,7 +101,6 @@ const encryptedAnthropicProviderKey = credentialCipher.encrypt(
   "sk-ant-api-live",
   {
     organizationId,
-    projectId,
     providerId,
     providerType: "anthropic",
     keyVersion: 1,
@@ -119,7 +116,6 @@ const anthropicProviderRow = {
 };
 const encryptedXAIProviderKey = credentialCipher.encrypt("xai-api-live", {
   organizationId,
-  projectId,
   providerId,
   providerType: "xai",
   keyVersion: 1,

@@ -128,6 +128,33 @@ test("organization routes authenticate before reading principal context", async 
   }
 });
 
+test("project lifecycle routes authenticate before any database access", async () => {
+  const app = createApiApp({
+    store: new PostgresApiStore(unusedPool, "unit-test-api-key-pepper"),
+    auth: new DevelopmentAuthAdapter({ bearerToken: "valid-session" }),
+    runtimeCommands: unusedRuntimeCommands,
+  });
+  const created = await app.request("/v1/projects", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": "unit-project-create",
+    },
+    body: JSON.stringify({ slug: "unit-project", name: "Unit project" }),
+  });
+  assert.equal(created.status, 401);
+  assert.equal((await created.json()).error.code, "unauthenticated");
+  const deleted = await app.request(
+    "/v1/projects/00000000-0000-4000-8000-000000000099",
+    {
+      method: "DELETE",
+      headers: { "idempotency-key": "unit-project-delete" },
+    },
+  );
+  assert.equal(deleted.status, 401);
+  assert.equal((await deleted.json()).error.code, "unauthenticated");
+});
+
 test("error envelopes never return internal exception messages", async () => {
   const failingPool = {
     query: async () => {

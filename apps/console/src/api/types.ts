@@ -22,6 +22,7 @@ import type {
   RotateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
   CreateMcpToolsetInput,
+  CreateProjectInput,
 } from "@oao/contracts";
 
 export type {
@@ -544,6 +545,8 @@ export interface CreateApiKeyInput {
   readonly scopes: readonly string[];
 }
 
+export type { CreateProjectInput };
+
 export type CreatedApiKey = ApiKeySummary &
   (
     | { readonly shown: true; readonly secret: string }
@@ -770,6 +773,11 @@ export interface ConsoleApi {
   ): Promise<void>;
   removeMember(memberId: string): Promise<void>;
   createApiKey(input: CreateApiKeyInput): Promise<CreatedApiKey>;
+  createProject(input: CreateProjectInput): Promise<void>;
+  /** Permanently deletes a project and every run, agent, and event in it. */
+  deleteProject(id: string): Promise<void>;
+  /** Switches the session's active project; the caller reloads all queries. */
+  openProject(id: string): Promise<void>;
   connectEvents(input: {
     readonly after?: string;
     readonly signal?: AbortSignal;

@@ -10,9 +10,12 @@ const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
 const MAX_CREDENTIAL_BYTES = 16_384;
 
+// Credentials are organization-shared: the AAD binds ciphertext to the
+// organization and provider identity, never to a project. Secrets encrypted
+// before the organization-sharing migration were bound to their creating
+// project and must be re-entered or rotated after upgrading.
 export interface ProviderCredentialContext {
   readonly organizationId: string;
-  readonly projectId: string;
   readonly providerId: string;
   readonly providerType:
     "openrouter" | "openai" | "anthropic" | "xai" | "daytona" | "s3" | "mcp";
@@ -30,7 +33,6 @@ export interface EncryptedProviderCredential {
 function aad(context: ProviderCredentialContext): Buffer {
   const fields = [
     context.organizationId,
-    context.projectId,
     context.providerId,
     context.providerType,
     String(context.keyVersion),

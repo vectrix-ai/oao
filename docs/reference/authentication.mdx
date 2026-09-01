@@ -11,14 +11,19 @@ OAO supports two authentication modes behind the same application boundary:
   matching PostgreSQL principal and project membership; a valid WorkOS identity
   alone does not grant tenant access.
 
-Server-to-server integrations use project-scoped OAO API keys.
+Server-to-server integrations use organization-scoped OAO API keys. One key
+works against every project of its organization, including projects created
+after the key.
 
 ## Create an integration key
 
 A human principal with `project:admin` can create a key from **API keys** in the
-console. Enter a descriptive name, select the least-privilege project scopes,
-and save the secret from the acknowledgement dialog. The console removes the
-plaintext when that dialog closes and cannot reveal it later.
+console. Enter a descriptive name, select the least-privilege scopes, and save
+the secret from the acknowledgement dialog. The console removes the plaintext
+when that dialog closes and cannot reveal it later.
+
+API keys are stored per organization. The key list and revocation act on the
+same organization-wide pool from any project.
 
 For automated setup, an authenticated human or service principal with
 `project:admin` can use the project API. In local development, first create a
@@ -85,6 +90,24 @@ Send the key as a bearer credential:
 ```http
 Authorization: Bearer oao_your_secret
 ```
+
+## Cross-project key resolution
+
+An API key resolves its organization and scopes from the key record, then
+selects the acting project per request: a `/v1/projects/{projectId}/...` path
+picks that project (it must belong to the key's organization); any other path
+falls back to the organization's earliest-created project. On first use inside
+a project, OAO materialises a per-project mirror principal of kind `api_key`
+for the key, so audit entries, idempotency records, and runs always reference
+a project-local principal. The same key therefore works in new projects
+without any additional setup.
+
+Project creation and deletion require an organization `owner` or `admin`
+membership for human principals. API keys qualify through their scopes: `*` or
+`project:admin`. For `DELETE /v1/projects/{projectId}` an API key deliberately
+acts from its default (earliest-created) project rather than the addressed
+one, so it can delete the project named in the path — except its own acting
+project, and no caller can delete the organization's last project.
 
 <Warning>
   Keep OAO API keys on a server. Do not embed them in browser JavaScript, mobile
@@ -162,10 +185,18 @@ strict and return the explicit `400` response for invalid state.
 
 ## Manage project members
 
-The console's **Organization** and **Projects** pages read the active tenant and
-project directly from the API. Project creation and project switching are not
-exposed in the console yet because those operations must provision the project,
-principal, membership, RLS context, and WorkOS mapping together.
+The console's **Organization** and **Projects** pages read the active tenant
+and project directly from the API. The **Projects** page can create a project
+(**New project**) and delete a non-active project; creation provisions the
+creator's principal, owner membership, identity records, and tenant links in
+the new project within one transaction. The console switches its active
+project through `POST /auth/switch-project`: the endpoint verifies that the
+signed-in subject has a provisioned principal and membership in the target
+project, then sets an `oao_active_project` cookie. Every later request
+re-resolves that principal, so revoked membership or a deleted project falls
+back to the session's own project, and logout clears the cookie. For WorkOS
+bearer identities provisioned into several projects, the request's URL path
+selects the project; without one, the earliest-created project is used.
 
 The **Members** page lists project principals with their roles, scopes, and safe
 WorkOS display metadata. A project administrator can add an OAO principal,

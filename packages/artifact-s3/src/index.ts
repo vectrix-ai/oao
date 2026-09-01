@@ -427,17 +427,13 @@ export class ProjectArtifactStoreResolver implements ProjectArtifactStoreResolve
                   encrypted_credential,encryption_nonce,encryption_tag,
                   encryption_key_version
              FROM oao.project_storage_providers
-            WHERE organization_id=$1 AND project_id=$2
-              AND id=COALESCE($3,(
+            WHERE organization_id=$1
+              AND id=COALESCE($2,(
                 SELECT id FROM oao.project_storage_providers
-                 WHERE organization_id=$1 AND project_id=$2 AND is_default
+                 WHERE organization_id=$1 AND is_default
                  LIMIT 1
               ))`,
-          [
-            input.tenant.organizationId,
-            input.tenant.projectId,
-            input.providerId ?? null,
-          ],
+          [input.tenant.organizationId, input.providerId ?? null],
         );
         return result.rows[0];
       },
@@ -452,7 +448,6 @@ export class ProjectArtifactStoreResolver implements ProjectArtifactStoreResolve
       },
       {
         organizationId: input.tenant.organizationId,
-        projectId: input.tenant.projectId,
         providerId: provider.id,
         providerType: "s3",
       },
@@ -498,14 +493,14 @@ export class ProjectWorkspaceBackupResolver {
                   b.content_length::text AS existing_content_length
              FROM oao.project_storage_providers p
              LEFT JOIN oao.thread_workspace_backups b
-               ON b.organization_id=p.organization_id AND b.project_id=p.project_id
+               ON b.organization_id=p.organization_id AND b.project_id=$2
               AND b.thread_id=$3 AND b.storage_provider_id=p.id
-            WHERE p.organization_id=$1 AND p.project_id=$2
+            WHERE p.organization_id=$1
               AND p.id=COALESCE(
                 (SELECT storage_provider_id FROM oao.thread_workspace_backups
                   WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3),
                 (SELECT id FROM oao.project_storage_providers
-                  WHERE organization_id=$1 AND project_id=$2 AND is_default LIMIT 1)
+                  WHERE organization_id=$1 AND is_default LIMIT 1)
               )`,
           [identity.organizationId, identity.projectId, identity.threadId],
         );
@@ -522,7 +517,6 @@ export class ProjectWorkspaceBackupResolver {
       },
       {
         organizationId: identity.organizationId,
-        projectId: identity.projectId,
         providerId: provider.id,
         providerType: "s3",
       },

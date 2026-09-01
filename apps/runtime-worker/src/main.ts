@@ -85,7 +85,24 @@ export async function startRuntimeWorker(input: {
   const servicePrincipalId =
     (env.OAO_RUNTIME_SERVICE_PRINCIPAL_ID as PrincipalId | undefined) ??
     DEFAULT_SERVICE_PRINCIPAL;
-  const broker = new PostgresToolBroker(pool, { servicePrincipalId });
+  const broker = new PostgresToolBroker(pool, {
+    servicePrincipalId,
+    // The model only ever sees a redacted platform_tool_failed outcome, so
+    // the underlying cause must land in the worker log to stay diagnosable.
+    onPlatformToolError: (error, context) => {
+      console.error(
+        JSON.stringify({
+          level: "error",
+          source: "tool-broker",
+          toolName: context.toolName,
+          runId: context.runId,
+          ...(context.toolCallId ? { toolCallId: context.toolCallId } : {}),
+          errorType: error instanceof Error ? error.name : typeof error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    },
+  });
   const modelConfiguration = loadModelPresetConfiguration(env);
   const fake = input.fakeResponses
     ? createDeterministicModelProvider(input.fakeResponses)

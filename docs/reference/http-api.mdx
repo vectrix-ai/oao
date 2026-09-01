@@ -1,6 +1,6 @@
 ---
 title: HTTP API
-description: Use the current project-scoped endpoints, pagination, idempotency, and error contracts.
+description: Use the project and organization endpoints, pagination, idempotency, and error contracts.
 ---
 
 The local API base URL is `http://127.0.0.1:3000/v1`. Hosted clients should use
@@ -18,6 +18,12 @@ Idempotency-Key: unique-key-for-this-logical-write
 ```
 
 `Idempotency-Key` is required for operations that change application state.
+
+An OAO API key authenticates against any project of its organization: the
+project addressed in the URL path selects the acting project, and requests
+without a project in the path act in the organization's earliest-created
+project. See [Authentication](/reference/authentication) for how per-project
+principals are resolved.
 
 ## TypeScript SDK helpers
 
@@ -46,13 +52,14 @@ durable run.
 
 ## Browser authentication
 
-| Method | Path             | Purpose                                                    |
-| ------ | ---------------- | ---------------------------------------------------------- |
-| `POST` | `/auth/login`    | Start hosted authentication and return an HTTPS redirect.  |
-| `GET`  | `/auth/callback` | Validate one-time state and set HTTP-only session cookies. |
-| `POST` | `/auth/refresh`  | Refresh a cookie-authenticated browser session.            |
-| `POST` | `/auth/logout`   | Clear OAO cookies and end the provider session.            |
-| `GET`  | `/context`       | Return the active tenant, project, and public principal.   |
+| Method | Path                   | Purpose                                                    |
+| ------ | ---------------------- | ---------------------------------------------------------- |
+| `POST` | `/auth/login`          | Start hosted authentication and return an HTTPS redirect.  |
+| `GET`  | `/auth/callback`       | Validate one-time state and set HTTP-only session cookies. |
+| `POST` | `/auth/refresh`        | Refresh a cookie-authenticated browser session.            |
+| `POST` | `/auth/logout`         | Clear OAO cookies and end the provider session.            |
+| `POST` | `/auth/switch-project` | Set the session's active project cookie.                   |
+| `GET`  | `/context`             | Return the active tenant, project, and public principal.   |
 
 `GET /context` returns `principal` with `id`, `organizationId`, `projectId`,
 `kind`, internal `subject`, `scopes`, and optional `displayName`, plus the
@@ -68,28 +75,54 @@ is ended as well. Cookie-authenticated writes require an allowed `Origin` and an
 
 ## Organizations, projects, and members
 
-Organization and project reads expose the active PostgreSQL-authoritative
-tenant. The current API does not create projects or switch the authenticated
-project: project bootstrap and WorkOS provisioning remain operator-controlled
-so RLS, principals, memberships, and provider mappings are created together.
+Organization and project reads expose the PostgreSQL-authoritative tenant.
+`GET /projects` lists every project of the authenticated organization,
+projects can be created and deleted through the API, and a signed-in session
+switches its active project with `POST /auth/switch-project`.
 
 | Method   | Path                                       | Purpose                                              |
 | -------- | ------------------------------------------ | ---------------------------------------------------- |
 | `GET`    | `/organizations`                           | List the active principal's organization.            |
 | `GET`    | `/organizations/{organizationId}`          | Read organization identity and creation time.        |
-| `GET`    | `/projects`                                | List projects accessible in the active context.      |
+| `GET`    | `/projects`                                | List every project of the organization.              |
+| `POST`   | `/projects`                                | Create a project in the organization.                |
+| `DELETE` | `/projects/{projectId}`                    | Hard-delete a project and all of its data.           |
 | `GET`    | `/projects/{projectId}`                    | Read the active project and organization metadata.   |
 | `GET`    | `/projects/{projectId}/members`            | List project principals, roles, and scopes.          |
 | `POST`   | `/projects/{projectId}/members`            | Create or update a project principal and membership. |
 | `PATCH`  | `/projects/{projectId}/members/{memberId}` | Change a project member's role.                      |
 | `DELETE` | `/projects/{projectId}/members/{memberId}` | Remove project membership.                           |
 
-All routes require `project:admin`. Member writes also require an
-`Idempotency-Key`. Create input is `{ subject, role, scopes }`; roles are
-`owner`, `admin`, `member`, or `viewer`. A member response includes the stable
-principal `subject`, safe scopes, role, and optional identity-provider
+All routes require `project:admin`. Member and project writes also require an
+`Idempotency-Key`. Member create input is `{ subject, role, scopes }`; roles
+are `owner`, `admin`, `member`, or `viewer`. A member response includes the
+stable principal `subject`, safe scopes, role, and optional identity-provider
 `displayName` and `email`. Provider metadata is presentational and does not
 grant access.
+
+### Create a project
+
+`POST /projects` takes `{ "slug": "...", "name": "..." }`. The slug is 1-80
+characters matching `^[a-z0-9][a-z0-9-]*$` and must be unique inside the
+organization. The caller needs organization `owner` or `admin` role (an API
+key qualifies through its scopes: `*` or `project:admin`). A human creator is
+provisioned into the new project in the same transaction — a principal copy,
+an `owner` membership, identity rows, and tenant links — so the identity
+provider resolves into the new project immediately. The response is the
+project object.
+
+### Delete a project
+
+`DELETE /projects/{projectId}` permanently removes the project and every row
+it owns: agents, Skills, toolsets, presets, sessions, runs, events, and the
+audit trail, plus the Flue conversation state of its threads. Two rules apply:
+the project the caller is acting in cannot delete itself, and the last
+remaining project of an organization cannot be deleted. Organization-shared
+resources (API keys, model, storage, sandbox, and MCP connections) are
+untouched.
+Workspace archives and run files in object storage are not removed
+automatically; operators clean the project's `workspace-backups/` and
+`run-files/` prefixes separately.
 
 Adding a member does not send a WorkOS invitation or create a provider mapping.
 To let that person sign in through WorkOS, provision the existing OAO principal
@@ -100,7 +133,9 @@ The active principal cannot remove itself.
 
 A published agent version names an immutable model preset. A hosted preset
 references an OpenRouter, OpenAI, Anthropic, or xAI provider connection in the
-same project.
+same organization. Provider connections are organization-shared: every project
+uses the same pool, addressed through any project path. Model presets remain
+project-scoped.
 
 | Method   | Path                                                    | Purpose                                              |
 | -------- | ------------------------------------------------------- | ---------------------------------------------------- |
@@ -248,7 +283,7 @@ preset.
 | ------ | ----------------------------------------------------------------------------------- |
 | `400`  | Malformed input, catalog/provider mismatch, or settings unsupported by the provider |
 | `403`  | Principal lacks the required scope, or the path project is outside its tenant scope |
-| `404`  | Provider connection does not exist in this project                                  |
+| `404`  | Provider connection does not exist in this organization                             |
 | `409`  | Provider or preset key already exists                                               |
 | `500`  | Platform credential encryption is not configured                                    |
 
@@ -259,8 +294,9 @@ preset.
 
 ## Sandbox providers
 
-Sandbox provider connections are project-scoped and require `project:admin`
-for writes. List reads use `agent:read`. `daytona` is the only supported
+Sandbox provider connections are organization-shared — every project uses
+the same pool, addressed through any project path — and require
+`project:admin` for writes. List reads use `agent:read`. `daytona` is the only supported
 `providerType` today; the connection and agent contracts keep provider type
 and provider key explicit so more adapters can be added later.
 
@@ -311,23 +347,25 @@ policy whose selected connection has no allowlist.
 
 ## Object storage providers
 
-S3-compatible storage connections are project scoped. Writes require
-`project:admin`; list reads use `agent:read`. Credentials are encrypted with
-the platform credential key and are accepted only as write-only input.
+S3-compatible storage connections are organization-shared: every project uses
+the same pool of connections and the same organization-wide default. Writes
+require `project:admin`; list reads use `agent:read`. Credentials are encrypted
+with the platform credential key and are accepted only as write-only input.
 
 | Method | Path                                                      | Purpose                                      |
 | ------ | --------------------------------------------------------- | -------------------------------------------- |
 | `GET`  | `/projects/{projectId}/storage-providers`                 | List safe connection and credential metadata |
 | `POST` | `/projects/{projectId}/storage-providers`                 | Add an encrypted S3-compatible connection    |
 | `PUT`  | `/projects/{projectId}/storage-providers/{id}/credential` | Rotate write-only S3 credentials             |
-| `PUT`  | `/projects/{projectId}/storage-providers/{id}/default`    | Make the connection the project default      |
+| `PUT`  | `/projects/{projectId}/storage-providers/{id}/default`    | Make the connection the organization default |
 | `GET`  | `/projects/{projectId}/storage-providers/{id}/objects`    | List one folder level of stored objects      |
 
 Create input contains `key`, `displayName`, `providerType: "s3"`, nullable
 HTTP(S) `endpoint`, `region`, `bucket`, nullable safe relative `prefix`,
 `forcePathStyle`, optional `setDefault`, `accessKeyId`, `secretAccessKey`, and
-optional `sessionToken`. The first connection becomes default even when
-`setDefault` is false. All writes require an `Idempotency-Key`.
+optional `sessionToken`. The organization's first connection becomes the
+default even when `setDefault` is false. All writes require an
+`Idempotency-Key`.
 
 Responses contain connection coordinates, default state, a 12-character
 credential fingerprint, and credential version. They never contain S3
@@ -351,9 +389,12 @@ replacement-sandbox restore, and failure contracts.
 
 ## MCP servers, credentials, and toolsets
 
-Remote MCP resources are project scoped and immutable/versioned. All writes
-require `Idempotency-Key`. Secret values are accepted only on credential create
-or rotation and never appear in a response.
+Remote MCP servers, credentials, and credential policies are
+organization-shared and immutable/versioned: every project uses the same
+connection pool through any project path. Toolsets remain project-scoped —
+each project selects its own restricted tool sets from the shared servers. All
+writes require `Idempotency-Key`. Secret values are accepted only on credential
+create or rotation and never appear in a response.
 
 | Method   | Path                                                | Purpose                                     |
 | -------- | --------------------------------------------------- | ------------------------------------------- |

@@ -996,7 +996,6 @@ const modelProvidersSeed: readonly ProjectModelProvider[] = [
   {
     id: OPENROUTER_PROVIDER_ID,
     organizationId: ORG_ID,
-    projectId: PROJECT_ID,
     key: "openrouter-primary",
     displayName: "OpenRouter primary",
     providerType: "openrouter",
@@ -1010,7 +1009,6 @@ const modelProvidersSeed: readonly ProjectModelProvider[] = [
   {
     id: ANTHROPIC_PROVIDER_ID,
     organizationId: ORG_ID,
-    projectId: PROJECT_ID,
     key: "anthropic-primary",
     displayName: "Anthropic primary",
     providerType: "anthropic",
@@ -1024,7 +1022,6 @@ const modelProvidersSeed: readonly ProjectModelProvider[] = [
   {
     id: XAI_PROVIDER_ID,
     organizationId: ORG_ID,
-    projectId: PROJECT_ID,
     key: "xai-primary",
     displayName: "xAI primary",
     providerType: "xai",
@@ -1041,7 +1038,6 @@ const sandboxProvidersSeed: readonly ProjectSandboxProvider[] = [
   {
     id: DAYTONA_PROVIDER_ID,
     organizationId: ORG_ID,
-    projectId: PROJECT_ID,
     key: "daytona-primary",
     displayName: "Daytona primary",
     providerType: "daytona",
@@ -1099,6 +1095,9 @@ export class DemoConsoleApi implements ConsoleApi {
   #skillDrafts: SkillDraft[] = [];
   #skillFiles = new Map<string, readonly SkillFileInput[]>();
   #apiKeys = structuredClone(settingsSeed.apiKeys) as ApiKeySummary[];
+  #projects = structuredClone(
+    settingsSeed.projects,
+  ) as SettingsData["projects"][number][];
   #members = structuredClone(
     settingsSeed.members,
   ) as SettingsData["members"][number][];
@@ -1149,9 +1148,13 @@ export class DemoConsoleApi implements ConsoleApi {
   }
 
   async getContext(): Promise<ProjectContext> {
+    const current =
+      this.#projects.find((project) => project.current) ?? this.#projects[0];
     return {
       organization: { id: ORG_ID, name: "Example operations" },
-      project: { id: PROJECT_ID, name: "Managed agents" },
+      project: current
+        ? { id: current.id, name: current.name }
+        : { id: PROJECT_ID, name: "Managed agents" },
       currentPrincipal: {
         id: principalId,
         kind: "human" as const,
@@ -1161,10 +1164,10 @@ export class DemoConsoleApi implements ConsoleApi {
         scopes: ["*"],
       },
       organizations: [{ id: ORG_ID, name: "Example operations" }],
-      projects: [
-        { id: PROJECT_ID, name: "Managed agents" },
-        { id: settingsSeed.projects[1]!.id, name: "Evaluation lab" },
-      ],
+      projects: this.#projects.map((project) => ({
+        id: project.id,
+        name: project.name,
+      })),
     };
   }
 
@@ -1733,7 +1736,6 @@ export class DemoConsoleApi implements ConsoleApi {
     const created: McpServer = {
       id,
       organizationId: ORG_ID,
-      projectId: PROJECT_ID,
       key: input.key,
       displayName: input.displayName,
       latestVersionId: crypto.randomUUID(),
@@ -1809,7 +1811,6 @@ export class DemoConsoleApi implements ConsoleApi {
     const created: McpCredential = {
       id: crypto.randomUUID(),
       organizationId: ORG_ID,
-      projectId: PROJECT_ID,
       key: input.key,
       displayName: input.displayName,
       kind: input.kind,
@@ -1869,7 +1870,6 @@ export class DemoConsoleApi implements ConsoleApi {
     const created: McpCredentialPolicy = {
       id: crypto.randomUUID(),
       organizationId: ORG_ID,
-      projectId: PROJECT_ID,
       key: input.key,
       displayName: input.displayName,
       latestVersionId: crypto.randomUUID(),
@@ -2151,7 +2151,6 @@ export class DemoConsoleApi implements ConsoleApi {
     const created: ProjectModelProvider = {
       id: `55555555-5555-4555-8555-${String(this.#counter).padStart(12, "0")}`,
       organizationId: ORG_ID,
-      projectId: PROJECT_ID,
       key: input.key,
       displayName: input.displayName,
       providerType: input.providerType,
@@ -2280,7 +2279,6 @@ export class DemoConsoleApi implements ConsoleApi {
     const created: ProjectSandboxProvider = {
       id: `66666666-6666-4666-8666-${String(this.#counter).padStart(12, "0")}`,
       organizationId: ORG_ID,
-      projectId: PROJECT_ID,
       key: input.key,
       displayName: input.displayName,
       providerType: "daytona",
@@ -2369,7 +2367,6 @@ export class DemoConsoleApi implements ConsoleApi {
     const created: ProjectStorageProvider = {
       id: `88888888-8888-4888-8888-${String(this.#counter).padStart(12, "0")}`,
       organizationId: ORG_ID,
-      projectId: PROJECT_ID,
       key: input.key,
       displayName: input.displayName,
       providerType: "s3",
@@ -2539,6 +2536,7 @@ export class DemoConsoleApi implements ConsoleApi {
     this.#guard();
     return structuredClone({
       ...settingsSeed,
+      projects: this.#projects,
       members: this.#members,
       apiKeys: this.#apiKeys,
     });
@@ -2597,6 +2595,46 @@ export class DemoConsoleApi implements ConsoleApi {
     if (member.current)
       throw new Error("The active principal cannot remove itself");
     this.#members = this.#members.filter((entry) => entry.id !== memberId);
+  }
+
+  async createProject(
+    input: Parameters<ConsoleApi["createProject"]>[0],
+  ): Promise<void> {
+    this.#guard();
+    if (this.#projects.some((project) => project.slug === input.slug))
+      throw new Error("Project slug already exists");
+    this.#counter += 1;
+    this.#projects = [
+      ...this.#projects,
+      {
+        id: `ffffffff-ffff-4fff-8fff-${String(this.#counter).padStart(12, "0")}`,
+        name: input.name,
+        slug: input.slug,
+        createdAt: new Date().toISOString(),
+        current: false,
+      },
+    ];
+  }
+
+  async deleteProject(id: string): Promise<void> {
+    this.#guard();
+    const project = this.#projects.find((entry) => entry.id === id);
+    if (!project) throw new Error("Project not found");
+    if (project.current)
+      throw new Error("the active project cannot delete itself");
+    if (this.#projects.length <= 1)
+      throw new Error("the last project of an organization cannot be deleted");
+    this.#projects = this.#projects.filter((entry) => entry.id !== id);
+  }
+
+  async openProject(id: string): Promise<void> {
+    this.#guard();
+    if (!this.#projects.some((entry) => entry.id === id))
+      throw new Error("Project not found");
+    this.#projects = this.#projects.map((entry) => ({
+      ...entry,
+      current: entry.id === id,
+    }));
   }
 
   async createApiKey(input: CreateApiKeyInput): Promise<CreatedApiKey> {

@@ -2312,6 +2312,29 @@ export class HttpConsoleApi implements ConsoleApi {
     });
   };
 
+  createProject = async (
+    input: Parameters<ConsoleApi["createProject"]>[0],
+  ): Promise<void> => {
+    await this.#request("/projects", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  };
+
+  deleteProject = async (id: string): Promise<void> => {
+    await this.#request(`/projects/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  };
+
+  openProject = async (id: string): Promise<void> => {
+    await this.#request("/auth/switch-project", {
+      method: "POST",
+      body: JSON.stringify({ projectId: id }),
+    });
+    this.#contextPromise = undefined;
+  };
+
   connectEvents(
     input: Parameters<ConsoleApi["connectEvents"]>[0],
   ): EventConnection {
