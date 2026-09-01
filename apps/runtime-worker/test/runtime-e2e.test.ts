@@ -1110,6 +1110,9 @@ test(
         harness_completed: "1",
         sandbox_tools: "3",
       });
+      const sandboxCreatesBeforeReuse = fakeDaytona.calls.filter((call) =>
+        call.startsWith("create:oao-sandbox-v1:"),
+      ).length;
       const daytona = await seedFixture(
         admin,
         "daytona-composition-one",
@@ -1136,7 +1139,7 @@ test(
         fakeDaytona.calls.filter((call) =>
           call.startsWith("create:oao-sandbox-v1:"),
         ).length,
-        1,
+        sandboxCreatesBeforeReuse + 1,
       );
       const workspaces = await admin.query<{ count: string }>(
         "SELECT COUNT(*) AS count FROM oao.sandbox_instances WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3",
