@@ -38,6 +38,14 @@ CREATE POLICY recovery_visibility ON oao.runtime_dispatches
   FOR SELECT TO oao_recovery
   USING (true);
 
+-- Set the final ACL while the migration role still owns the functions. Once
+-- ownership is transferred to the NOLOGIN recovery role, the migration login
+-- must not retain role membership merely to change these privileges.
+REVOKE ALL ON FUNCTION oao.list_runtime_recovery_heads() FROM PUBLIC, oao_app;
+REVOKE ALL ON FUNCTION oao.runtime_has_active_dispatches() FROM PUBLIC, oao_app;
+GRANT EXECUTE ON FUNCTION oao.list_runtime_recovery_heads() TO oao_app;
+GRANT EXECUTE ON FUNCTION oao.runtime_has_active_dispatches() TO oao_app;
+
 DO $$
 DECLARE
   migration_role name := current_user;
@@ -61,11 +69,6 @@ BEGIN
   END IF;
 END
 $$;
-
-REVOKE ALL ON FUNCTION oao.list_runtime_recovery_heads() FROM PUBLIC, oao_app;
-REVOKE ALL ON FUNCTION oao.runtime_has_active_dispatches() FROM PUBLIC, oao_app;
-GRANT EXECUTE ON FUNCTION oao.list_runtime_recovery_heads() TO oao_app;
-GRANT EXECUTE ON FUNCTION oao.runtime_has_active_dispatches() TO oao_app;
 
 COMMENT ON FUNCTION oao.list_runtime_recovery_heads() IS
   'Cross-tenant runtime recovery helper owned by the NOLOGIN oao_recovery role, whose RLS policy exposes only the required recovery table.';
