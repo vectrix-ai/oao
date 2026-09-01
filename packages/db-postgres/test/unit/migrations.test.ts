@@ -201,6 +201,43 @@ test("Cloud SQL recovery role is non-login with bounded RLS-protected access", a
   );
 });
 
+test("Cloud SQL auth role is non-login and owns only pre-authentication boundaries", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0039_cloud_sql_auth_role.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    sql,
+    /CREATE ROLE oao_auth NOLOGIN NOCREATEDB NOCREATEROLE NOINHERIT/u,
+  );
+  assert.match(
+    sql,
+    /rolcanlogin[\s\S]*rolsuper[\s\S]*rolcreatedb[\s\S]*rolcreaterole[\s\S]*rolinherit[\s\S]*rolreplication[\s\S]*rolbypassrls/u,
+  );
+  assert.doesNotMatch(sql, /ALTER ROLE oao_auth/u);
+  assert.match(
+    sql,
+    /CREATE POLICY cloud_sql_auth_access ON oao\.organizations/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.bootstrap_project\(uuid,text,text,uuid,text,text,uuid,text,text\)[\s\S]*OWNER TO oao_auth/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.resolve_workos_principal\(text,text,uuid\)[\s\S]*OWNER TO oao_auth/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.authenticate_api_key\(text,bytea,uuid,timestamptz\)[\s\S]*OWNER TO oao_auth/u,
+  );
+  assert.match(sql, /GRANT oao_auth TO %I WITH SET TRUE, INHERIT TRUE/u);
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.jsonb_has_forbidden_public_key\(jsonb\) TO oao_auth/u,
+  );
+});
+
 test("model preset migration is additive, append-only, and tenant scoped", async () => {
   const sql = await readFile(
     new URL("../../migrations/0006_model_presets.sql", import.meta.url),

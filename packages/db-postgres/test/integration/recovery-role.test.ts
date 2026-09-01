@@ -3,7 +3,10 @@ import test from "node:test";
 import type { OrganizationId, ProjectId } from "@oao/domain";
 import { createPool, migrate, withTenantTransaction } from "../../src/index.js";
 
-const databaseUrl = process.env.DATABASE_URL;
+const databaseUrl =
+  process.env.OAO_TEST_RUNTIME_DATABASE_URL ?? process.env.DATABASE_URL;
+const testAdminDatabaseUrl =
+  process.env.OAO_TEST_ADMIN_DATABASE_URL ?? process.env.DATABASE_URL;
 
 const ids = {
   organization: "00000000-0000-4000-8000-000000009901",
@@ -25,10 +28,17 @@ const ids = {
 
 test(
   "Cloud SQL recovery role preserves tenant isolation and sees recovery state",
-  { skip: databaseUrl ? false : "DATABASE_URL is required" },
+  {
+    skip:
+      databaseUrl && testAdminDatabaseUrl
+        ? false
+        : "runtime and admin DATABASE_URL values are required",
+  },
   async () => {
     assert.ok(databaseUrl);
+    assert.ok(testAdminDatabaseUrl);
     const pool = createPool(databaseUrl);
+    const admin = createPool(testAdminDatabaseUrl);
     let testMembershipGranted = false;
     try {
       await migrate(pool);
@@ -254,17 +264,17 @@ test(
         key_allowed: true,
       });
 
-      await pool.query(
+      await admin.query(
         "INSERT INTO oao.organizations (id,slug,name) VALUES ($1,'recovery-test','Recovery test')",
         [ids.organization],
       );
-      await pool.query(
+      await admin.query(
         `INSERT INTO oao.projects (organization_id,id,slug,name)
          VALUES ($1,$2,'recovery-a','Recovery A'),
                 ($1,$3,'recovery-b','Recovery B')`,
         [ids.organization, ids.projectA, ids.projectB],
       );
-      await pool.query(
+      await admin.query(
         `INSERT INTO oao.principals
            (organization_id,project_id,id,kind,subject,scopes)
          VALUES ($1,$2,$3,'human','recovery-a',ARRAY['*']),
@@ -277,14 +287,14 @@ test(
           ids.principalB,
         ],
       );
-      await pool.query(
+      await admin.query(
         `INSERT INTO oao.agent_definitions
            (organization_id,project_id,id,agent_key,name)
          VALUES ($1,$2,$3,'recovery-a','Recovery A'),
                 ($1,$4,$5,'recovery-b','Recovery B')`,
         [ids.organization, ids.projectA, ids.agentA, ids.projectB, ids.agentB],
       );
-      await pool.query(
+      await admin.query(
         `INSERT INTO oao.agent_versions
            (organization_id,project_id,id,agent_definition_id,version,config,
             content_hash,created_by_principal_id)
@@ -302,7 +312,7 @@ test(
           ids.principalB,
         ],
       );
-      await pool.query(
+      await admin.query(
         `INSERT INTO oao.threads (organization_id,project_id,id,title)
          VALUES ($1,$2,$3,'Recovery A'),($1,$4,$5,'Recovery B')`,
         [
@@ -313,7 +323,7 @@ test(
           ids.threadB,
         ],
       );
-      await pool.query(
+      await admin.query(
         `INSERT INTO oao.sessions
            (organization_id,project_id,id,thread_id,agent_version_id)
          VALUES ($1,$2,$3,$4,$5),($1,$6,$7,$8,$9)`,
@@ -329,7 +339,7 @@ test(
           ids.versionB,
         ],
       );
-      await pool.query(
+      await admin.query(
         `INSERT INTO oao.runs
            (organization_id,project_id,id,thread_id,session_id,
             agent_version_id,created_by_principal_id,idempotency_key)
@@ -351,7 +361,7 @@ test(
           ids.principalB,
         ],
       );
-      await pool.query(
+      await admin.query(
         `INSERT INTO oao.thread_admission_heads
            (organization_id,project_id,thread_id,run_id,admission_key,request_hash)
          VALUES ($1,$2,$3,$4,'recovery-a',digest('recovery-a','sha256')),
@@ -366,7 +376,7 @@ test(
           ids.runB,
         ],
       );
-      await pool.query(
+      await admin.query(
         `INSERT INTO oao.runtime_thread_instances
            (organization_id,project_id,thread_id,session_id,agent_version_id,
             snapshot_hash,flue_instance_id)
@@ -384,7 +394,7 @@ test(
           ids.versionB,
         ],
       );
-      await pool.query(
+      await admin.query(
         `INSERT INTO oao.runtime_dispatches
            (organization_id,project_id,run_id,thread_id,admission_key,
             request_hash,snapshot_hash,state,fence,flue_conversation_id,deadline_at)
@@ -478,65 +488,66 @@ test(
         await pool
           .query("REVOKE oao_recovery FROM CURRENT_USER")
           .catch(() => undefined);
-      await pool
+      await admin
         .query(
           "DELETE FROM oao.runtime_dispatches WHERE run_id = ANY($1::uuid[])",
           [[ids.runA, ids.runB]],
         )
         .catch(() => undefined);
-      await pool
+      await admin
         .query(
           "DELETE FROM oao.runtime_thread_instances WHERE thread_id = ANY($1::uuid[])",
           [[ids.threadA, ids.threadB]],
         )
         .catch(() => undefined);
-      await pool
+      await admin
         .query(
           "DELETE FROM oao.thread_admission_heads WHERE run_id = ANY($1::uuid[])",
           [[ids.runA, ids.runB]],
         )
         .catch(() => undefined);
-      await pool
+      await admin
         .query("DELETE FROM oao.runs WHERE id = ANY($1::uuid[])", [
           [ids.runA, ids.runB],
         ])
         .catch(() => undefined);
-      await pool
+      await admin
         .query("DELETE FROM oao.sessions WHERE id = ANY($1::uuid[])", [
           [ids.sessionA, ids.sessionB],
         ])
         .catch(() => undefined);
-      await pool
+      await admin
         .query("DELETE FROM oao.threads WHERE id = ANY($1::uuid[])", [
           [ids.threadA, ids.threadB],
         ])
         .catch(() => undefined);
-      await pool
+      await admin
         .query("DELETE FROM oao.agent_versions WHERE id = ANY($1::uuid[])", [
           [ids.versionA, ids.versionB],
         ])
         .catch(() => undefined);
-      await pool
+      await admin
         .query("DELETE FROM oao.agent_definitions WHERE id = ANY($1::uuid[])", [
           [ids.agentA, ids.agentB],
         ])
         .catch(() => undefined);
-      await pool
+      await admin
         .query("DELETE FROM oao.principals WHERE id = ANY($1::uuid[])", [
           [ids.principalA, ids.principalB],
         ])
         .catch(() => undefined);
-      await pool
+      await admin
         .query("DELETE FROM oao.projects WHERE organization_id = $1", [
           ids.organization,
         ])
         .catch(() => undefined);
-      await pool
+      await admin
         .query("DELETE FROM oao.organizations WHERE id = $1", [
           ids.organization,
         ])
         .catch(() => undefined);
       await pool.end();
+      await admin.end();
     }
   },
 );
