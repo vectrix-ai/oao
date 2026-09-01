@@ -31,6 +31,7 @@ GRANT USAGE ON SCHEMA oao TO oao_recovery;
 GRANT SELECT ON oao.thread_admission_heads, oao.runtime_dispatches TO oao_recovery;
 GRANT SELECT, UPDATE ON oao.runtime_wake_jobs TO oao_recovery;
 GRANT EXECUTE ON FUNCTION oao.jsonb_has_forbidden_public_key(jsonb) TO oao_recovery;
+GRANT EXECUTE ON FUNCTION oao.is_sensitive_public_key(text) TO oao_recovery;
 
 CREATE POLICY recovery_visibility ON oao.thread_admission_heads
   FOR SELECT TO oao_recovery
