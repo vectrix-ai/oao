@@ -6,15 +6,20 @@ BEGIN
     SELECT 1
     FROM pg_roles
     WHERE rolname = 'oao_recovery'
-      AND (rolsuper OR rolreplication OR rolbypassrls)
+      AND (
+        rolcanlogin
+        OR rolsuper
+        OR rolcreatedb
+        OR rolcreaterole
+        OR rolinherit
+        OR rolreplication
+        OR rolbypassrls
+      )
   ) THEN
     RAISE EXCEPTION 'oao_recovery has forbidden privileged attributes';
   END IF;
 END
 $$;
-
-ALTER ROLE oao_recovery
-  NOLOGIN NOCREATEDB NOCREATEROLE NOINHERIT;
 
 -- PostgreSQL 17 gives a non-superuser CREATEROLE creator ADMIN membership on
 -- newly created roles, but not SET membership. The DEV Cloud SQL runtime and
