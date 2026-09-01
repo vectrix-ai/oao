@@ -103,7 +103,25 @@ are also taken from their durable upload manifest and merged by their exact
 **Uploaded + backed up**, while a generated workspace file shows **Backed up**.
 Legacy archives without a sidecar manifest retain the earlier command-audit
 fallback until a later run writes a new backup. The panel never downloads or
-returns archive contents.
+returns the archive itself. Each manifest-backed file has a download action
+that calls the authenticated session Files API. That API reads the verified
+archive from the bound persistent storage provider and never contacts Daytona.
+
+## Retrieve a workspace file
+
+List the latest persisted files with
+`GET /projects/{projectId}/sessions/{sessionId}/files`, then download an exact
+relative path with
+`GET /projects/{projectId}/sessions/{sessionId}/files/{path}`. These routes use
+`session:read`, the same organization/project tenant checks as session detail,
+and the workspace owner's storage binding. This also makes a coordinator's
+shared workspace available through an authorized delegated child session.
+
+The list is empty until the first successful backup. Download verifies the
+manifest binding, archive length, archive SHA-256, entry type, and file size
+before returning bytes as a non-cacheable attachment. A missing or corrupt
+object fails closed. OAO does not query or revive the Daytona sandbox for this
+read path.
 
 ## API example
 
@@ -140,5 +158,8 @@ selection routes.
   provider exists. There is no per-agent or per-session storage selector.
 - OAO does not test bucket connectivity during connection creation. The first
   backup is the first live write.
+- File downloads currently read and verify the latest compressed archive before
+  extracting the requested entry; the API does not maintain one object per
+  workspace file or support HTTP range requests.
 - Removing remote objects or changing bucket policy outside OAO can make a
   recorded backup unrestorable.

@@ -105,7 +105,10 @@ and should shape integrations:
   historical rollback requires bucket versioning and there is no generation
   browser. The 512 MiB compressed and 2 GiB expanded limits are enforced.
   Archive objects rely on provider-side encryption; OAO does not add
-  application-layer object encryption.
+  application-layer object encryption. The authenticated Files API can list and
+  download regular files from the latest verified archive, but each download
+  currently reads that compressed archive and does not support ranges or
+  historical generations.
 - **Routing price caps are not budgets.** There is no project budget,
   reservation ledger, quota, or spend alerting, and no autonomous per-run model
   routing.

@@ -1101,6 +1101,25 @@
 .session-facts .fact-sub {
   color: var(--text-3);
 }
+.session-facts .fact.session-elapsed-live {
+  color: var(--text);
+  background: var(--primary);
+  border-color: var(--line);
+}
+.session-facts .fact.session-elapsed-live svg,
+.session-facts .fact.session-elapsed-live .fact-sub {
+  color: var(--text);
+}
+
+.session-elapsed-live .chip {
+  color: var(--text);
+  background: var(--primary);
+  border-color: var(--line);
+}
+.session-elapsed-live .chip > .lucide-play {
+  flex: none;
+  animation: oao-pulse 2s var(--ease) infinite;
+}
 
 .session-controls {
   display: flex;
@@ -2061,7 +2080,7 @@
 }
 .workspace-file-list li {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: var(--sp-2);
   min-width: 0;

@@ -1,6 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   parseWorkspaceBackupManifest,
+  streamWorkspaceBackupFile,
   workspaceBackupManifestObjectKey,
 } from "@oao/artifact-s3";
 import type { AuthSession, AuthTenantAdapter } from "@oao/auth-core";
@@ -603,6 +604,156 @@ async function publicWorkspaceBackups(
       }
     }),
   );
+}
+
+interface SessionWorkspaceBackupRow {
+  readonly storage_provider_id: string | null;
+  readonly last_run_id: string | null;
+  readonly object_key: string | null;
+  readonly content_length: string | null;
+  readonly archive_sha256: string | null;
+  readonly generation: string | null;
+  readonly backed_up_at: Date | string | null;
+}
+
+async function sessionWorkspaceBackup(
+  transaction: Queryable,
+  actor: Principal,
+  sessionId: string,
+): Promise<SessionWorkspaceBackupRow | undefined> {
+  const result = await transaction.query(
+    `SELECT backup.storage_provider_id,backup.last_run_id,backup.object_key,
+            backup.content_length::text,
+            encode(backup.content_sha256,'hex') AS archive_sha256,
+            backup.generation::text,backup.backed_up_at
+       FROM oao.sessions session
+       LEFT JOIN oao.thread_workspace_bindings binding
+         ON binding.organization_id=session.organization_id
+        AND binding.project_id=session.project_id
+        AND binding.thread_id=session.thread_id
+       LEFT JOIN oao.agent_workspaces workspace
+         ON workspace.organization_id=binding.organization_id
+        AND workspace.project_id=binding.project_id
+        AND workspace.id=binding.workspace_id
+       LEFT JOIN oao.thread_workspace_backups backup
+         ON backup.organization_id=workspace.organization_id
+        AND backup.project_id=workspace.project_id
+        AND backup.thread_id=workspace.owner_thread_id
+      WHERE session.organization_id=$1 AND session.project_id=$2
+        AND session.id=$3`,
+    [actor.organizationId, actor.projectId, sessionId],
+  );
+  return result.rows[0] as SessionWorkspaceBackupRow | undefined;
+}
+
+function completeSessionWorkspaceBackup(
+  row: SessionWorkspaceBackupRow,
+): row is SessionWorkspaceBackupRow & {
+  readonly storage_provider_id: string;
+  readonly last_run_id: string;
+  readonly object_key: string;
+  readonly content_length: string;
+  readonly archive_sha256: string;
+  readonly generation: string;
+  readonly backed_up_at: Date | string;
+} {
+  return (
+    row.storage_provider_id !== null &&
+    row.last_run_id !== null &&
+    row.object_key !== null &&
+    row.content_length !== null &&
+    row.archive_sha256 !== null &&
+    row.generation !== null &&
+    row.backed_up_at !== null
+  );
+}
+
+async function loadSessionWorkspaceManifest(
+  dependencies: ApiDependencies,
+  actor: Principal,
+  backup: SessionWorkspaceBackupRow & {
+    readonly storage_provider_id: string;
+    readonly object_key: string;
+    readonly content_length: string;
+    readonly archive_sha256: string;
+  },
+) {
+  if (!dependencies.runFileStorage)
+    throw new HttpApiError(
+      "conflict",
+      "Project object storage is not configured",
+    );
+  const resolution = await dependencies.runFileStorage.resolve({
+    tenant: actor,
+    providerId: backup.storage_provider_id,
+  });
+  if (!resolution)
+    throw new HttpApiError(
+      "conflict",
+      "The workspace backup storage provider is unavailable",
+    );
+  const stored = await resolution.store.get({
+    tenant: actor,
+    key: workspaceBackupManifestObjectKey(backup.object_key),
+  });
+  if (!stored)
+    throw new HttpApiError(
+      "conflict",
+      "The workspace backup manifest is unavailable",
+    );
+  try {
+    return {
+      resolution,
+      manifest: parseWorkspaceBackupManifest(stored.bytes, {
+        archiveSha256: backup.archive_sha256,
+        archiveSizeBytes: Number(backup.content_length),
+      }),
+    };
+  } catch {
+    throw new HttpApiError(
+      "conflict",
+      "The workspace backup manifest failed integrity validation",
+    );
+  }
+}
+
+function parseSessionWorkspaceFilePath(value: string | undefined): string {
+  if (!value || value.length > 1_024 || value.startsWith("/"))
+    throw new HttpApiError("bad_request", "file path is invalid");
+  const segments = value.split("/");
+  if (
+    segments.some(
+      (segment) =>
+        !segment ||
+        segment === "." ||
+        segment === ".." ||
+        [...segment].some((character) => {
+          const codePoint = character.codePointAt(0) ?? 0;
+          return codePoint < 32 || codePoint === 127;
+        }),
+    )
+  )
+    throw new HttpApiError("bad_request", "file path is invalid");
+  return value;
+}
+
+function contentDisposition(name: string): string {
+  const fallback = [...name]
+    .map((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint >= 32 &&
+        codePoint <= 126 &&
+        character !== '"' &&
+        character !== "\\"
+        ? character
+        : "_";
+    })
+    .join("")
+    .slice(0, 255);
+  const encoded = [...Buffer.from(name, "utf8")]
+    .map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, "0")}`)
+    .join("");
+  return `attachment; filename="${fallback || "download"}"; filename*=UTF-8''${encoded}`;
 }
 
 async function assertAgentCanInspectRunFiles(
@@ -5904,6 +6055,91 @@ function registerRunRoutes(
     });
   });
 
+  app.get("/v1/projects/:projectId/sessions/:sessionId/files", async (c) => {
+    const actor = assertProject(c);
+    const backup = await dependencies.store.transaction(
+      actor,
+      "session:read",
+      (tx) => sessionWorkspaceBackup(tx, actor, c.req.param("sessionId")),
+    );
+    if (!backup) throw new HttpApiError("not_found", "Session not found");
+    if (!completeSessionWorkspaceBackup(backup))
+      return c.json({
+        data: [],
+        generation: null,
+        backedUpAt: null,
+        lastRunId: null,
+      });
+    const { manifest } = await loadSessionWorkspaceManifest(
+      dependencies,
+      actor,
+      backup,
+    );
+    return c.json({
+      data: manifest.files,
+      generation: Number(backup.generation),
+      backedUpAt: new Date(backup.backed_up_at).toISOString(),
+      lastRunId: backup.last_run_id,
+    });
+  });
+
+  app.get(
+    "/v1/projects/:projectId/sessions/:sessionId/files/:filePath{.+}",
+    async (c) => {
+      const actor = assertProject(c);
+      const filePath = parseSessionWorkspaceFilePath(c.req.param("filePath"));
+      const backup = await dependencies.store.transaction(
+        actor,
+        "session:read",
+        (tx) => sessionWorkspaceBackup(tx, actor, c.req.param("sessionId")),
+      );
+      if (!backup) throw new HttpApiError("not_found", "Session not found");
+      if (!completeSessionWorkspaceBackup(backup))
+        throw new HttpApiError(
+          "not_found",
+          "Session does not have a persisted workspace backup",
+        );
+      const { resolution, manifest } = await loadSessionWorkspaceManifest(
+        dependencies,
+        actor,
+        backup,
+      );
+      const file = manifest.files.find((entry) => entry.path === filePath);
+      if (!file)
+        throw new HttpApiError(
+          "not_found",
+          "File is not present in the persisted workspace backup",
+        );
+      const stored = await resolution.store.get({
+        tenant: actor,
+        key: backup.object_key,
+      });
+      if (
+        !stored ||
+        stored.bytes.byteLength !== Number(backup.content_length) ||
+        createHash("sha256").update(stored.bytes).digest("hex") !==
+          backup.archive_sha256
+      )
+        throw new HttpApiError(
+          "conflict",
+          "The workspace backup failed integrity validation",
+        );
+      let body: ReadableStream<Uint8Array>;
+      try {
+        body = await streamWorkspaceBackupFile(stored.bytes, file);
+      } catch {
+        throw new HttpApiError(
+          "conflict",
+          "The workspace backup file failed integrity validation",
+        );
+      }
+      c.header("content-type", "application/octet-stream");
+      c.header("content-length", String(file.sizeBytes));
+      c.header("content-disposition", contentDisposition(file.name));
+      return c.body(body);
+    },
+  );
+
   app.post("/v1/projects/:projectId/sessions", async (c) => {
     const actor = assertProject(c);
     const body = await readJsonObject(c.req.raw);
@@ -6324,11 +6560,25 @@ function registerRunRoutes(
                   b.object_key,b.content_length::text,
                   encode(b.content_sha256,'hex') AS archive_sha256,b.generation::text,
                   b.backed_up_at,b.last_restored_at
-             FROM oao.thread_workspace_backups b
+             FROM oao.sessions workspace_session
+             JOIN oao.thread_workspace_bindings binding
+               ON binding.organization_id=workspace_session.organization_id
+              AND binding.project_id=workspace_session.project_id
+              AND binding.thread_id=workspace_session.thread_id
+             JOIN oao.agent_workspaces workspace
+               ON workspace.organization_id=binding.organization_id
+              AND workspace.project_id=binding.project_id
+              AND workspace.id=binding.workspace_id
+             JOIN oao.thread_workspace_backups b
+               ON b.organization_id=workspace.organization_id
+              AND b.project_id=workspace.project_id
+              AND b.thread_id=workspace.owner_thread_id
              JOIN oao.project_storage_providers p
                ON p.organization_id=b.organization_id
               AND p.id=b.storage_provider_id
-            WHERE b.organization_id=$1 AND b.project_id=$2 AND b.session_id=$3`,
+            WHERE workspace_session.organization_id=$1
+              AND workspace_session.project_id=$2
+              AND workspace_session.id=$3`,
         values,
       );
       const skills = await tx.query(
