@@ -306,10 +306,22 @@ test("Harness Operations honor timeout and parent cancellation signals", async (
   const waitForAbort = (signal: AbortSignal) =>
     new Promise<never>((_resolve, reject) => {
       if (signal.aborted) reject(signal.reason);
-      else
-        signal.addEventListener("abort", () => reject(signal.reason), {
-          once: true,
-        });
+      else {
+        // AbortSignal.timeout() uses a weak timer, so keep Node 22 alive long
+        // enough to observe the abort or fail this test deterministically.
+        const watchdog = setTimeout(
+          () => reject(new Error("Abort signal was not delivered")),
+          2_000,
+        );
+        signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(watchdog);
+            reject(signal.reason);
+          },
+          { once: true },
+        );
+      }
     });
   const base = {
     data: { task: "Wait until stopped." },
