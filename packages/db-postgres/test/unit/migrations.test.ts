@@ -140,6 +140,18 @@ test("Cloud SQL recovery role is non-login and limited to two RLS-protected read
   );
   assert.match(
     sql,
+    /CREATE FUNCTION oao\.find_runtime_dispatch\([\s\S]*SECURITY DEFINER[\s\S]*SET search_path = pg_catalog, oao/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.find_runtime_dispatch\(text,text\) OWNER TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /REVOKE ALL ON FUNCTION oao\.find_runtime_dispatch\(text,text\) FROM PUBLIC, oao_app/u,
+  );
+  assert.match(
+    sql,
     /REVOKE ALL ON FUNCTION oao\.list_runtime_recovery_heads\(\) FROM PUBLIC, oao_app/u,
   );
   assert.match(
@@ -150,6 +162,10 @@ test("Cloud SQL recovery role is non-login and limited to two RLS-protected read
   assert.match(
     sql,
     /GRANT EXECUTE ON FUNCTION oao\.runtime_has_active_dispatches\(\) TO %I/u,
+  );
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.find_runtime_dispatch\(text,text\) TO %I/u,
   );
   assert.match(
     sql,

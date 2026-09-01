@@ -3220,11 +3220,7 @@ export class RuntimeProjection {
     harnessCorrelation?: HarnessObservationCorrelation,
   ): Promise<void> {
     const dispatchResult = await this.pool.query<DispatchRow>(
-      `SELECT * FROM oao.runtime_dispatches
-       WHERE flue_submission_id=$1 OR
-         ($1='' AND flue_conversation_id=$2 AND state <> 'settled')
-       ORDER BY CASE WHEN flue_submission_id=$1 THEN 0 ELSE 1 END,created_at DESC
-       LIMIT 1`,
+      "SELECT * FROM oao.find_runtime_dispatch($1,$2)",
       [event.submissionId ?? "", event.conversationId ?? ""],
     );
     const runtimeDispatch = dispatchResult.rows[0];
