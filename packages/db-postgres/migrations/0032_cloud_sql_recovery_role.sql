@@ -45,8 +45,6 @@ REVOKE ALL ON FUNCTION oao.list_runtime_recovery_heads() FROM PUBLIC, oao_app;
 REVOKE ALL ON FUNCTION oao.runtime_has_active_dispatches() FROM PUBLIC, oao_app;
 GRANT EXECUTE ON FUNCTION oao.list_runtime_recovery_heads() TO oao_app;
 GRANT EXECUTE ON FUNCTION oao.runtime_has_active_dispatches() TO oao_app;
-GRANT EXECUTE ON FUNCTION oao.list_runtime_recovery_heads() TO CURRENT_USER;
-GRANT EXECUTE ON FUNCTION oao.runtime_has_active_dispatches() TO CURRENT_USER;
 COMMENT ON FUNCTION oao.list_runtime_recovery_heads() IS
   'Cross-tenant runtime recovery helper owned by the NOLOGIN oao_recovery role, whose RLS policy exposes only the required recovery table.';
 COMMENT ON FUNCTION oao.runtime_has_active_dispatches() IS
@@ -62,7 +60,12 @@ DECLARE
   );
 BEGIN
   IF granted_membership THEN
-    EXECUTE format('GRANT oao_recovery TO %I', migration_role);
+    -- INHERIT is temporary: it lets the migration login grant from the new
+    -- function owner after the transfer. The membership is revoked below.
+    EXECUTE format(
+      'GRANT oao_recovery TO %I WITH SET TRUE, INHERIT TRUE',
+      migration_role
+    );
   END IF;
 
   GRANT CREATE ON SCHEMA oao TO oao_recovery;
@@ -70,8 +73,29 @@ BEGIN
   ALTER FUNCTION oao.runtime_has_active_dispatches() OWNER TO oao_recovery;
   REVOKE CREATE ON SCHEMA oao FROM oao_recovery;
 
+  EXECUTE format(
+    'GRANT EXECUTE ON FUNCTION oao.list_runtime_recovery_heads() TO %I',
+    migration_role
+  );
+  EXECUTE format(
+    'GRANT EXECUTE ON FUNCTION oao.runtime_has_active_dispatches() TO %I',
+    migration_role
+  );
+
   IF granted_membership THEN
     EXECUTE format('REVOKE oao_recovery FROM %I', migration_role);
+  END IF;
+
+  IF NOT has_function_privilege(
+    migration_role,
+    'oao.list_runtime_recovery_heads()',
+    'EXECUTE'
+  ) OR NOT has_function_privilege(
+    migration_role,
+    'oao.runtime_has_active_dispatches()',
+    'EXECUTE'
+  ) THEN
+    RAISE EXCEPTION 'migration/runtime login lacks recovery function execution';
   END IF;
 END
 $$;
