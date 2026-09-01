@@ -109,7 +109,11 @@ test("Cloud SQL recovery role is non-login and limited to two RLS-protected read
     sql,
     /CREATE ROLE oao_recovery NOLOGIN NOCREATEDB NOCREATEROLE NOINHERIT/u,
   );
-  assert.match(sql, /rolsuper OR rolreplication OR rolbypassrls/u);
+  assert.match(
+    sql,
+    /rolcanlogin[\s\S]*rolsuper[\s\S]*rolcreatedb[\s\S]*rolcreaterole[\s\S]*rolinherit[\s\S]*rolreplication[\s\S]*rolbypassrls/u,
+  );
+  assert.doesNotMatch(sql, /ALTER ROLE oao_recovery/u);
   assert.match(
     sql,
     /GRANT oao_app TO CURRENT_USER WITH SET TRUE, INHERIT FALSE/u,
