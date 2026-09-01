@@ -76,9 +76,8 @@ AS $$
     p_flue_submission_id = ''
     AND p_flue_conversation_id <> ''
     AND d.flue_conversation_id = p_flue_conversation_id
-    AND d.state <> 'settled'
   )
-  ORDER BY d.created_at DESC
+  ORDER BY CASE WHEN d.state <> 'settled' THEN 0 ELSE 1 END,d.created_at DESC
   LIMIT 1
 $$;
 

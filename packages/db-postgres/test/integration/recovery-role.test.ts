@@ -346,6 +346,11 @@ test(
         ],
       );
 
+      const settledDispatch = await pool.query<{ run_id: string }>(
+        "SELECT run_id FROM oao.find_runtime_dispatch('', 'recovery-a')",
+      );
+      assert.equal(settledDispatch.rows[0]?.run_id, ids.runA);
+
       const appClient = await pool.connect();
       try {
         await appClient.query("BEGIN");

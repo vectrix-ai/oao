@@ -152,6 +152,10 @@ test("Cloud SQL recovery role is non-login and limited to two RLS-protected read
   );
   assert.match(
     sql,
+    /ORDER BY CASE WHEN d\.state <> 'settled' THEN 0 ELSE 1 END,d\.created_at DESC/u,
+  );
+  assert.match(
+    sql,
     /REVOKE ALL ON FUNCTION oao\.list_runtime_recovery_heads\(\) FROM PUBLIC, oao_app/u,
   );
   assert.match(
