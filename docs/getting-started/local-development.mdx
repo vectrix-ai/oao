@@ -264,8 +264,9 @@ Restart `pnpm dev:local` after editing `.env`. The console uses Vite's strict-po
 
 ## Configure runtime providers
 
-Runtime execution requires project-scoped model and Daytona providers. There is
-no credential-free fake execution profile.
+Runtime execution requires an organization-shared model provider and a
+organization-shared Daytona provider. There is no credential-free fake execution
+profile.
 
 ### OpenRouter, OpenAI, Anthropic, and xAI models
 
@@ -325,9 +326,10 @@ contracts.
 ### S3-compatible attachments and workspace backups
 
 To submit run attachments or preserve Daytona files after a sandbox is deleted,
-open **Storage providers** and add a project-scoped S3-compatible connection.
+open **Storage providers** and add an organization-shared S3-compatible
+connection.
 The API and runtime use the same `OAO_CREDENTIAL_ENCRYPTION_KEY` to protect its
-write-only credentials. The first connection becomes the project default
+write-only credentials. The first connection becomes the organization default
 automatically; you can explicitly select another default later. Attachment
 bytes go directly to this object store and are never persisted in PostgreSQL.
 

@@ -4,7 +4,7 @@
 
 - Use TypeScript, ESM, Node.js 22.19+, pnpm, and Turbo.
 - Keep domain packages independent from Hono, React, Flue, Railway, WorkOS, Daytona, and OpenRouter implementation types; consume providers through the ports in `@oao/domain` with adapters in their own packages.
-- Every tenant-owned database relation repeats organization/project identity in keys and foreign keys, and tenant queries run through the RLS transaction helpers.
+- Project-scoped database relations repeat organization/project identity in keys and foreign keys; organization-shared resource families (API keys, model providers, storage providers, sandbox providers, MCP servers/credentials/policies) carry organization identity alone. Tenant queries run through the RLS transaction helpers.
 - Never expose secrets, authorization headers in logs, traces, list views, or SSE events. Provider credentials are write-only: encrypted at rest, returned only as fingerprint plus version.
 - A public API change is a vertical slice: update `packages/contracts`, the endpoint in `apps/api`, `packages/sdk-js` (routes, client, types), the console (`src/api/types.ts` plus both the `http.ts` and `demo.ts` implementations, and the page), tests in each package, and `docs/reference/http-api.mdx` together.
 - Every feature addition, behavior change, or feature removal must update the corresponding Mintlify documentation under `docs/` in the same change. Feature work is not complete until setup guides, examples, API/event contracts, limitations, and navigation accurately reflect the implemented behavior.

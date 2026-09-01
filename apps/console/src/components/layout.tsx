@@ -18,7 +18,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink, Outlet } from "react-router";
 import { useState } from "react";
 import { useApi, useProjectEvents } from "../api/context";
@@ -81,6 +81,7 @@ const navGroups: readonly {
 export function AppLayout() {
   const api = useApi();
   const notify = useToast();
+  const queryClient = useQueryClient();
   const context = useQuery({
     queryKey: ["context"],
     queryFn: () => api.getContext(),
@@ -95,6 +96,13 @@ export function AppLayout() {
   const logout = useMutation({
     mutationFn: () => api.logout(),
     onError: () => notify("Logout failed. Please try again.", "danger"),
+  });
+  const openProject = useMutation({
+    mutationFn: (projectId: string) => api.openProject(projectId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries();
+    },
+    onError: () => notify("The project could not be opened.", "danger"),
   });
   const queueCounts = { "pending-work": pendingWork.data?.length ?? 0 };
 
@@ -137,7 +145,14 @@ export function AppLayout() {
             className="select context-select"
             aria-label="Project"
             value={context.data?.project.id ?? ""}
-            onChange={() => undefined}
+            disabled={openProject.isPending}
+            onChange={(event) => {
+              if (
+                event.target.value &&
+                event.target.value !== context.data?.project.id
+              )
+                openProject.mutate(event.target.value);
+            }}
           >
             {context.data?.projects.map((project) => (
               <option key={project.id} value={project.id}>

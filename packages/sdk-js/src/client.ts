@@ -23,6 +23,7 @@ import type {
   AuthLogoutResult,
   AuthSession,
   CreateAgentInput,
+  CreateProjectInput,
   CreateProjectMemberInput,
   CreatedSession,
   DelegationMessageResult,
@@ -210,6 +211,7 @@ export class OaoClient {
     return this.#request(this.routes.organization(organizationId), options);
   }
 
+  /** Lists every project of the authenticated organization. */
   listProjects(
     pagination: PaginationOptions = {},
     options?: RequestOptions,
@@ -219,6 +221,30 @@ export class OaoClient {
 
   getProject(projectId: string, options?: RequestOptions): Promise<Project> {
     return this.#request(this.routes.project(projectId), options);
+  }
+
+  /** Creates a project; requires an organization owner or admin. */
+  createProject(
+    input: CreateProjectInput,
+    options: WriteOptions,
+  ): Promise<Project> {
+    return this.#write(this.routes.projects, "POST", input, options);
+  }
+
+  /**
+   * Permanently deletes a project and all of its data. The active project
+   * and the organization's last project cannot be deleted.
+   */
+  deleteProject(
+    projectId: string,
+    options: WriteOptions,
+  ): Promise<{ readonly id: string; readonly deleted: boolean }> {
+    return this.#write(
+      this.routes.project(projectId),
+      "DELETE",
+      undefined,
+      options,
+    );
   }
 
   listMembers(

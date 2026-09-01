@@ -15,7 +15,6 @@ import type { ListCursor } from "./http.js";
 export interface ApiKeySecret {
   readonly id: string;
   readonly organizationId: string;
-  readonly projectId: string;
   readonly name: string;
   readonly prefix: string;
   readonly secret: string;
@@ -28,6 +27,7 @@ interface ApiKeyAuthRow {
   organization_id: string;
   project_id: string;
   principal_id: string;
+  subject: string;
   scopes: string[];
 }
 
@@ -51,15 +51,18 @@ export class PostgresApiStore {
     }
   }
 
-  async authenticateApiKey(token: string): Promise<Principal | undefined> {
+  async authenticateApiKey(
+    token: string,
+    requestedProjectId?: string,
+  ): Promise<Principal | undefined> {
     const match = /^oao_([a-zA-Z0-9]{10,32})_([a-zA-Z0-9_-]{32,128})$/u.exec(
       token,
     );
     if (!match?.[1] || !match[2]) return undefined;
     const hash = this.keyedHash(token);
     const result = await this.pool.query<ApiKeyAuthRow>(
-      "SELECT * FROM oao.authenticate_api_key($1,$2,clock_timestamp())",
-      [match[1], hash],
+      "SELECT * FROM oao.authenticate_api_key($1,$2,$3,clock_timestamp())",
+      [match[1], hash, requestedProjectId ?? null],
     );
     const row = result.rows[0];
     if (!row) return undefined;
@@ -68,7 +71,46 @@ export class PostgresApiStore {
       organizationId: row.organization_id as Principal["organizationId"],
       projectId: row.project_id as Principal["projectId"],
       kind: "api_key",
-      subject: `api-key:${match[1]}`,
+      subject: row.subject,
+      scopes: new Set(row.scopes as AuthorizationScope[]),
+    };
+  }
+
+  /**
+   * Resolves the human principal provisioned for a subject inside another
+   * project of the same organization, or undefined when the subject has no
+   * membership there. Backs active-project switching.
+   */
+  async resolveProjectPrincipal(
+    organizationId: Principal["organizationId"],
+    projectId: string,
+    subject: string,
+  ): Promise<Principal | undefined> {
+    const result = await withTenantTransaction(
+      this.pool,
+      {
+        organizationId,
+        projectId: projectId as Principal["projectId"],
+      },
+      (transaction) =>
+        transaction.query<{ id: string; scopes: string[] }>(
+          `SELECT p.id,p.scopes FROM oao.principals p
+           JOIN oao.project_members m
+             ON m.organization_id=p.organization_id
+            AND m.project_id=p.project_id AND m.principal_id=p.id
+           WHERE p.organization_id=$1 AND p.project_id=$2
+             AND p.kind='human' AND p.subject=$3`,
+          [organizationId, projectId, subject],
+        ),
+    );
+    const row = result.rows[0];
+    if (!row) return undefined;
+    return {
+      id: brandedId<PrincipalId>(row.id),
+      organizationId,
+      projectId: projectId as Principal["projectId"],
+      kind: "human",
+      subject,
       scopes: new Set(row.scopes as AuthorizationScope[]),
     };
   }
@@ -247,29 +289,20 @@ export class PostgresApiStore {
     },
   ): Promise<ApiKeySecret> {
     const id = randomUUID();
-    const principalId = randomUUID();
     const prefix = randomBytes(8).toString("hex");
     const token = `oao_${prefix}_${randomBytes(32).toString("base64url")}`;
     const created = await transaction.query<{ created_at: Date }>(
-      `WITH principal AS (
-         INSERT INTO oao.principals
-           (organization_id,project_id,id,kind,subject,scopes)
-         VALUES ($1,$2,$3,'api_key',$4,$5) RETURNING id
-       )
-       INSERT INTO oao.api_keys
-         (organization_id,project_id,id,principal_id,name,key_prefix,key_hash,scopes,created_by_principal_id,expires_at)
-       VALUES ($1,$2,$6,$3,$7,$8,$9,$5,$10,$11)
+      `INSERT INTO oao.api_keys
+         (organization_id,id,name,key_prefix,key_hash,scopes,created_by_principal_id,expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        RETURNING created_at`,
       [
         principal.organizationId,
-        principal.projectId,
-        principalId,
-        `api-key:${id}`,
-        input.scopes,
         id,
         input.name,
         prefix,
         this.keyedHash(token),
+        input.scopes,
         principal.id,
         input.expiresAt ?? null,
       ],
@@ -277,7 +310,6 @@ export class PostgresApiStore {
     return {
       id,
       organizationId: principal.organizationId,
-      projectId: principal.projectId,
       name: input.name,
       prefix,
       secret: token,

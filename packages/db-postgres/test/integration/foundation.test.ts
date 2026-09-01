@@ -188,7 +188,7 @@ test(
     try {
       await t.test("migration applies cleanly and is idempotent", async () => {
         const first = await migrate(pool);
-        assert.equal(first.applied.length + first.alreadyApplied.length, 34);
+        assert.equal(first.applied.length + first.alreadyApplied.length, 36);
         const second = await migrate(pool);
         assert.deepEqual(second.alreadyApplied, [
           "0001_foundation.sql",
@@ -225,6 +225,8 @@ test(
           "0034_agent_archive.sql",
           "0035_model_archive.sql",
           "0036_skill_disable_archive.sql",
+          "0037_organization_projects.sql",
+          "0038_organization_sandbox_providers.sql",
         ]);
         await seed(pool);
       });
@@ -598,6 +600,8 @@ test(
             ),
             /foreign key constraint/u,
           );
+          // Project rows are organization-visible so any project can list its
+          // organization's projects; project-scoped tables stay isolated.
           const visible = await withTenantTransaction(
             pool,
             tenant,
@@ -606,7 +610,7 @@ test(
           );
           assert.deepEqual(
             visible.rows.map((row) => row.id),
-            [ids.project],
+            [ids.project, ids.otherProject],
           );
         },
       );

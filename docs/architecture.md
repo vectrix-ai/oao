@@ -45,9 +45,10 @@ OTel SDK -> optional Collector -> configured OTLP backend
 8. Cancellation of an unreserved queued run is database-only. Once admission becomes ambiguous or succeeds, cancellation completes keyed admission reconciliation, performs Flue abort, and waits for canonical settlement.
 9. A sandbox workspace is keyed by organization, project, and platform thread. Successive submissions in that thread reuse the same workspace; Flue callback identifiers are correlation metadata, not lifecycle identity.
 10. An awaited at-least-once finish hook overwrites the thread's latest tenant-scoped workspace archive. A replacement sandbox is not exposed until the recorded object passes tenant metadata, length, checksum, and archive validation.
-11. Run attachment bytes live only in the project-scoped S3-compatible object
-    store. PostgreSQL keeps the immutable run manifest and provider/object
-    binding, never attachment bytes or extracted text. Runtime admission
+11. Run attachment bytes live only in the S3-compatible object store reached
+    through an organization-shared storage connection, under tenant-scoped
+    object keys. PostgreSQL keeps the immutable run manifest and
+    provider/object binding, never attachment bytes or extracted text. Runtime admission
     downloads the bound object and revalidates content type, byte length, and
     SHA-256 before copying it unchanged into Daytona. Product events, audit
     details, and transcript responses contain safe metadata only.
@@ -69,6 +70,22 @@ OTel SDK -> optional Collector -> configured OTLP backend
     egress broker injects it only for the policy's exact HTTPS origin and path
     prefix. MCP secrets never enter Flue state, prompts, events, logs, or the
     sandbox.
+15. API keys, model provider connections, storage provider connections,
+    sandbox provider connections, and MCP servers/credentials/credential
+    policies are organization-scoped rows shared by every project; their
+    row-level security widens to the organization and their encrypted
+    credentials bind to organization and provider identity, never a project.
+    MCP toolsets, model presets, agents, and Skills stay project-scoped. An API key acts inside
+    the project addressed by the request path (fallback: the organization's
+    earliest project) through a per-project mirror principal of kind
+    `api_key` materialised on first use.
+16. Projects are organization-visible and lifecycle-managed through the API:
+    creation provisions the creator's principal, owner membership, identity
+    rows, and tenant links atomically; deletion is a hard purge of every
+    project-scoped record — including product events, the audit trail, and
+    Flue conversation state — refused for the caller's active project and for
+    the organization's last project. Organization-shared connections survive
+    project deletion; object-storage cleanup is an operator task.
 
 ## Public run states
 
@@ -110,15 +127,15 @@ OTel SDK -> optional Collector -> configured OTLP backend
 
 - Skills list/detail, immutable packages and versions, and publication workflow
 - Agents list/detail, immutable versions, prompts, models, exact Skill and delegate bindings, tools, and sandbox policy
-- Project-scoped OpenRouter/OpenAI/Anthropic/xAI provider connections, write-only encrypted API keys, and approval of model presets from the matching provider catalog
-- Project-scoped S3-compatible storage connections, automatic latest-thread workspace backup, and safe restore diagnostics
-- Project-scoped remote MCP servers, write-only credentials, exact-origin
-  policies, discovery snapshots, restricted toolsets, and agent bindings
+- Organization-shared OpenRouter/OpenAI/Anthropic/xAI provider connections, write-only encrypted API keys, and approval of project model presets from the matching provider catalog
+- Organization-shared S3-compatible storage connections, automatic latest-thread workspace backup, and safe restore diagnostics
+- Organization-shared remote MCP servers, write-only credentials, exact-origin
+  policies, discovery snapshots, project-scoped restricted toolsets, and agent bindings
 - Sessions list with status, agent, usage, cost, creation and last activity
 - Session detail with Transcript and Debug tabs plus persistent child-session links
 - Pending tool calls and approvals
 - Errors, attempts/recovery, timing waterfall, usage/cost provenance, and redacted payload inspection
-- Organization/project/API-key/member/settings screens
+- Organization/project/API-key/member/settings screens, including project creation and deletion
 - Hosting diagnostics for local services and optional Railway/Daytona targets; no residency claim in MVP
 
 ## Authentication
@@ -127,8 +144,9 @@ Local development uses a deterministic development identity adapter. Hosted huma
 
 The runnable local topology uses a Hono REST/SSE API, a React/Vite console, and
 the Flue runtime worker. `pnpm dev:local` migrates and seeds PostgreSQL before it
-starts those three processes. Operators must configure a project model provider,
-approve a preset, configure Daytona, and publish an agent version against both.
+starts those three processes. Operators must configure an organization model
+provider, approve a project preset, configure Daytona, and publish an agent
+version against both.
 
 ## Hosting posture
 

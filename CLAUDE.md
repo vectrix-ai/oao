@@ -46,7 +46,7 @@ Before committing: `greptile review --agent`, review every finding, fix the corr
 
 - Every feature addition/change/removal must update the matching Mintlify docs under `docs/` in the same change — guides, API/event contracts, limitations, navigation. Feature work is not complete without it.
 - Keep domain packages independent of Hono, React, Flue, Railway, WorkOS, Daytona, and OpenRouter implementation types. Providers are consumed through ports defined in `@oao/domain` (e.g. `ModelPort`, `SandboxPort`, `ArtifactStorePort`) with adapters in their own packages.
-- Every tenant-owned relation repeats `organization_id`/`project_id` in keys and foreign keys; all tenant queries run through `withTenantTransaction` (RLS).
+- Project-scoped relations repeat `organization_id`/`project_id` in keys and foreign keys; organization-shared resource families (API keys, model providers, storage providers, sandbox providers, MCP servers/credentials/policies) are keyed by `organization_id` alone with organization-wide RLS. All tenant queries run through `withTenantTransaction` (RLS).
 - Never expose secrets or authorization headers in logs, traces, list views, or SSE events. Provider credentials are write-only: AES-256-GCM ciphertext in Postgres (`@oao/provider-credentials`), responses carry only fingerprint + version.
 - The console (`apps/console`) consumes only public contracts and SDKs — never database or runtime packages.
 

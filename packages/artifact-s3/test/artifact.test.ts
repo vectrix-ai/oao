@@ -170,7 +170,7 @@ test("project artifact resolver binds an exact encrypted S3 provider", async () 
   });
   const resolved = await resolver.resolve({ tenant, providerId });
   assert.equal(resolved?.providerId, providerId);
-  assert.equal(queryValues[0]?.[2], providerId);
+  assert.equal(queryValues[0]?.[1], providerId);
 });
 
 test("S3 adapter delegates through the narrow client with tenant metadata", async () => {

@@ -328,11 +328,18 @@ test(
         value: { echoed: true },
       });
       assert.equal(executions, 1);
+      // The service principal id is derived per project; the worker subject
+      // is the stable identity.
       const service = await withTenantTransaction(pool, tenant, (transaction) =>
         transaction.query(
           `SELECT kind::text,subject,scopes FROM oao.principals
-             WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
-          [tenant.organizationId, tenant.projectId, servicePrincipal],
+             WHERE organization_id=$1 AND project_id=$2
+               AND kind='service' AND subject=$3`,
+          [
+            tenant.organizationId,
+            tenant.projectId,
+            `oao-runtime-worker:${servicePrincipal}`,
+          ],
         ),
       );
       assert.deepEqual(service.rows, [

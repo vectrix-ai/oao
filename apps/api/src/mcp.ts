@@ -20,10 +20,14 @@ import type {
 import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { HttpApiError } from "./errors.js";
 
+// MCP servers, credentials, and credential policies are organization-shared:
+// their tables carry no project column and their encrypted secrets bind the
+// organization (projectId "" in the credential AAD) so any project of the
+// organization can use them.
+
 interface ServerRow {
   id: string;
   organization_id: string;
-  project_id: string;
   server_key: string;
   display_name: string;
   latest_version_id: string;
@@ -41,7 +45,6 @@ interface ServerRow {
 interface CredentialRow {
   id: string;
   organization_id: string;
-  project_id: string;
   credential_key: string;
   display_name: string;
   credential_kind: "static_bearer" | "api_key_header";
@@ -57,7 +60,6 @@ interface CredentialRow {
 interface PolicyRow {
   id: string;
   organization_id: string;
-  project_id: string;
   policy_key: string;
   display_name: string;
   latest_version_id: string;
@@ -127,7 +129,6 @@ function server(row: ServerRow): McpServer {
   return {
     id: row.id,
     organizationId: row.organization_id,
-    projectId: row.project_id,
     key: row.server_key,
     displayName: row.display_name,
     latestVersionId: row.latest_version_id,
@@ -149,7 +150,6 @@ function credential(row: CredentialRow): McpCredential {
   return {
     id: row.id,
     organizationId: row.organization_id,
-    projectId: row.project_id,
     key: row.credential_key,
     displayName: row.display_name,
     kind: row.credential_kind,
@@ -168,7 +168,6 @@ function policy(row: PolicyRow): McpCredentialPolicy {
   return {
     id: row.id,
     organizationId: row.organization_id,
-    projectId: row.project_id,
     key: row.policy_key,
     displayName: row.display_name,
     latestVersionId: row.latest_version_id,
@@ -204,7 +203,7 @@ function toolset(row: ToolsetRow): McpToolset {
 }
 
 const SERVER_SELECT = `
-  SELECT resource.id,resource.organization_id,resource.project_id,
+  SELECT resource.id,resource.organization_id,
          resource.server_key,resource.display_name,resource.latest_version_id,
          version.version,version.endpoint_url,version.transport,lifecycle.status,
          COALESCE((
@@ -218,27 +217,23 @@ const SERVER_SELECT = `
            ) ORDER BY tool.remote_tool_name)
            FROM oao.mcp_server_version_tools tool
            WHERE tool.organization_id=version.organization_id
-             AND tool.project_id=version.project_id
              AND tool.server_version_id=version.id
          ),'[]'::jsonb) AS tools,
          (SELECT max(tool.discovered_at)
             FROM oao.mcp_server_version_tools tool
            WHERE tool.organization_id=version.organization_id
-             AND tool.project_id=version.project_id
              AND tool.server_version_id=version.id) AS last_discovered_at,
          resource.created_by_principal_id,resource.created_at,resource.updated_at
     FROM oao.mcp_servers resource
     JOIN oao.mcp_server_versions version
       ON version.organization_id=resource.organization_id
-     AND version.project_id=resource.project_id
      AND version.id=resource.latest_version_id
     JOIN oao.mcp_server_version_lifecycle lifecycle
       ON lifecycle.organization_id=version.organization_id
-     AND lifecycle.project_id=version.project_id
      AND lifecycle.server_version_id=version.id`;
 
 const CREDENTIAL_SELECT = `
-  SELECT resource.id,resource.organization_id,resource.project_id,
+  SELECT resource.id,resource.organization_id,
          resource.credential_key,resource.display_name,resource.credential_kind,
          resource.header_name,version.credential_fingerprint,
          version.version AS credential_version,lifecycle.status,
@@ -246,15 +241,13 @@ const CREDENTIAL_SELECT = `
     FROM oao.mcp_credentials resource
     JOIN oao.mcp_credential_versions version
       ON version.organization_id=resource.organization_id
-     AND version.project_id=resource.project_id
      AND version.id=resource.active_version_id
     JOIN oao.mcp_credential_version_lifecycle lifecycle
       ON lifecycle.organization_id=version.organization_id
-     AND lifecycle.project_id=version.project_id
      AND lifecycle.credential_version_id=version.id`;
 
 const POLICY_SELECT = `
-  SELECT resource.id,resource.organization_id,resource.project_id,
+  SELECT resource.id,resource.organization_id,
          resource.policy_key,resource.display_name,resource.latest_version_id,
          version.version,version.credential_id,version.exact_origin,
          version.path_prefix,version.timeout_ms,version.maximum_response_bytes,
@@ -263,11 +256,9 @@ const POLICY_SELECT = `
     FROM oao.mcp_credential_policies resource
     JOIN oao.mcp_credential_policy_versions version
       ON version.organization_id=resource.organization_id
-     AND version.project_id=resource.project_id
      AND version.id=resource.latest_version_id
     JOIN oao.mcp_credential_policy_version_lifecycle lifecycle
       ON lifecycle.organization_id=version.organization_id
-     AND lifecycle.project_id=version.project_id
      AND lifecycle.policy_version_id=version.id`;
 
 const TOOLSET_SELECT = `
@@ -285,7 +276,6 @@ const TOOLSET_SELECT = `
            FROM oao.mcp_toolset_version_tools selection
            JOIN oao.mcp_server_version_tools tool
              ON tool.organization_id=selection.organization_id
-            AND tool.project_id=selection.project_id
             AND tool.server_version_id=selection.server_version_id
             AND tool.remote_tool_name=selection.remote_tool_name
            WHERE selection.organization_id=version.organization_id
@@ -315,9 +305,9 @@ export class McpAdminService {
   ): Promise<readonly McpServer[]> {
     const result = await tx.query<ServerRow>(
       `${SERVER_SELECT}
-       WHERE resource.organization_id=$1 AND resource.project_id=$2
+       WHERE resource.organization_id=$1
        ORDER BY resource.created_at DESC,resource.id DESC`,
-      [actor.organizationId, actor.projectId],
+      [actor.organizationId],
     );
     return result.rows.map(server);
   }
@@ -331,26 +321,18 @@ export class McpAdminService {
     const versionId = randomUUID();
     await tx.query(
       `INSERT INTO oao.mcp_servers (
-         organization_id,project_id,id,server_key,display_name,
+         organization_id,id,server_key,display_name,
          created_by_principal_id
-       ) VALUES ($1,$2,$3,$4,$5,$6)`,
-      [
-        actor.organizationId,
-        actor.projectId,
-        id,
-        input.key,
-        input.displayName,
-        actor.id,
-      ],
+       ) VALUES ($1,$2,$3,$4,$5)`,
+      [actor.organizationId, id, input.key, input.displayName, actor.id],
     );
     await tx.query(
       `INSERT INTO oao.mcp_server_versions (
-         organization_id,project_id,id,server_id,version,endpoint_url,transport,
+         organization_id,id,server_id,version,endpoint_url,transport,
          content_hash,created_by_principal_id
-       ) VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8)`,
+       ) VALUES ($1,$2,$3,1,$4,$5,$6,$7)`,
       [
         actor.organizationId,
-        actor.projectId,
         versionId,
         id,
         input.endpointUrl,
@@ -361,19 +343,19 @@ export class McpAdminService {
     );
     await tx.query(
       `INSERT INTO oao.mcp_server_version_lifecycle (
-         organization_id,project_id,server_version_id,updated_by_principal_id
-       ) VALUES ($1,$2,$3,$4)`,
-      [actor.organizationId, actor.projectId, versionId, actor.id],
+         organization_id,server_version_id,updated_by_principal_id
+       ) VALUES ($1,$2,$3)`,
+      [actor.organizationId, versionId, actor.id],
     );
     await tx.query(
-      `UPDATE oao.mcp_servers SET latest_version_id=$4,updated_at=clock_timestamp()
-       WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
-      [actor.organizationId, actor.projectId, id, versionId],
+      `UPDATE oao.mcp_servers SET latest_version_id=$3,updated_at=clock_timestamp()
+       WHERE organization_id=$1 AND id=$2`,
+      [actor.organizationId, id, versionId],
     );
     const result = await tx.query<ServerRow>(
       `${SERVER_SELECT}
-       WHERE resource.organization_id=$1 AND resource.project_id=$2 AND resource.id=$3`,
-      [actor.organizationId, actor.projectId, id],
+       WHERE resource.organization_id=$1 AND resource.id=$2`,
+      [actor.organizationId, id],
     );
     return server(result.rows[0]!);
   }
@@ -384,9 +366,9 @@ export class McpAdminService {
   ): Promise<readonly McpCredential[]> {
     const result = await tx.query<CredentialRow>(
       `${CREDENTIAL_SELECT}
-       WHERE resource.organization_id=$1 AND resource.project_id=$2
+       WHERE resource.organization_id=$1
        ORDER BY resource.created_at DESC,resource.id DESC`,
-      [actor.organizationId, actor.projectId],
+      [actor.organizationId],
     );
     return result.rows.map(credential);
   }
@@ -400,19 +382,17 @@ export class McpAdminService {
     const versionId = randomUUID();
     const encrypted = this.cipher.encrypt(input.secret, {
       organizationId: actor.organizationId,
-      projectId: actor.projectId,
       providerId: id,
       providerType: "mcp",
       keyVersion: 1,
     });
     await tx.query(
       `INSERT INTO oao.mcp_credentials (
-         organization_id,project_id,id,credential_key,display_name,
+         organization_id,id,credential_key,display_name,
          credential_kind,header_name,created_by_principal_id
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
       [
         actor.organizationId,
-        actor.projectId,
         id,
         input.key,
         input.displayName,
@@ -423,13 +403,12 @@ export class McpAdminService {
     );
     await tx.query(
       `INSERT INTO oao.mcp_credential_versions (
-         organization_id,project_id,id,credential_id,version,encrypted_secret,
+         organization_id,id,credential_id,version,encrypted_secret,
          encryption_nonce,encryption_tag,encryption_key_version,
          credential_fingerprint,created_by_principal_id
-       ) VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10)`,
+       ) VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9)`,
       [
         actor.organizationId,
-        actor.projectId,
         versionId,
         id,
         encrypted.ciphertext,
@@ -442,19 +421,19 @@ export class McpAdminService {
     );
     await tx.query(
       `INSERT INTO oao.mcp_credential_version_lifecycle (
-         organization_id,project_id,credential_version_id,updated_by_principal_id
-       ) VALUES ($1,$2,$3,$4)`,
-      [actor.organizationId, actor.projectId, versionId, actor.id],
+         organization_id,credential_version_id,updated_by_principal_id
+       ) VALUES ($1,$2,$3)`,
+      [actor.organizationId, versionId, actor.id],
     );
     await tx.query(
-      `UPDATE oao.mcp_credentials SET active_version_id=$4,updated_at=clock_timestamp()
-       WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
-      [actor.organizationId, actor.projectId, id, versionId],
+      `UPDATE oao.mcp_credentials SET active_version_id=$3,updated_at=clock_timestamp()
+       WHERE organization_id=$1 AND id=$2`,
+      [actor.organizationId, id, versionId],
     );
     const result = await tx.query<CredentialRow>(
       `${CREDENTIAL_SELECT}
-       WHERE resource.organization_id=$1 AND resource.project_id=$2 AND resource.id=$3`,
-      [actor.organizationId, actor.projectId, id],
+       WHERE resource.organization_id=$1 AND resource.id=$2`,
+      [actor.organizationId, id],
     );
     return credential(result.rows[0]!);
   }
@@ -473,11 +452,10 @@ export class McpAdminService {
          FROM oao.mcp_credentials credential
          JOIN oao.mcp_credential_versions version
            ON version.organization_id=credential.organization_id
-          AND version.project_id=credential.project_id
           AND version.id=credential.active_version_id
-        WHERE credential.organization_id=$1 AND credential.project_id=$2
-          AND credential.id=$3 FOR UPDATE OF credential`,
-      [actor.organizationId, actor.projectId, credentialId],
+        WHERE credential.organization_id=$1
+          AND credential.id=$2 FOR UPDATE OF credential`,
+      [actor.organizationId, credentialId],
     );
     const current = locked.rows[0];
     if (!current)
@@ -486,31 +464,24 @@ export class McpAdminService {
     const versionId = randomUUID();
     const encrypted = this.cipher.encrypt(secret, {
       organizationId: actor.organizationId,
-      projectId: actor.projectId,
       providerId: credentialId,
       providerType: "mcp",
       keyVersion: version,
     });
     await tx.query(
       `UPDATE oao.mcp_credential_version_lifecycle
-          SET status='deprecated',updated_by_principal_id=$4,updated_at=clock_timestamp()
-        WHERE organization_id=$1 AND project_id=$2 AND credential_version_id=$3`,
-      [
-        actor.organizationId,
-        actor.projectId,
-        current.active_version_id,
-        actor.id,
-      ],
+          SET status='deprecated',updated_by_principal_id=$3,updated_at=clock_timestamp()
+        WHERE organization_id=$1 AND credential_version_id=$2`,
+      [actor.organizationId, current.active_version_id, actor.id],
     );
     await tx.query(
       `INSERT INTO oao.mcp_credential_versions (
-         organization_id,project_id,id,credential_id,version,encrypted_secret,
+         organization_id,id,credential_id,version,encrypted_secret,
          encryption_nonce,encryption_tag,encryption_key_version,
          credential_fingerprint,created_by_principal_id
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [
         actor.organizationId,
-        actor.projectId,
         versionId,
         credentialId,
         version,
@@ -524,19 +495,19 @@ export class McpAdminService {
     );
     await tx.query(
       `INSERT INTO oao.mcp_credential_version_lifecycle (
-         organization_id,project_id,credential_version_id,updated_by_principal_id
-       ) VALUES ($1,$2,$3,$4)`,
-      [actor.organizationId, actor.projectId, versionId, actor.id],
+         organization_id,credential_version_id,updated_by_principal_id
+       ) VALUES ($1,$2,$3)`,
+      [actor.organizationId, versionId, actor.id],
     );
     await tx.query(
-      `UPDATE oao.mcp_credentials SET active_version_id=$4,updated_at=clock_timestamp()
-       WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
-      [actor.organizationId, actor.projectId, credentialId, versionId],
+      `UPDATE oao.mcp_credentials SET active_version_id=$3,updated_at=clock_timestamp()
+       WHERE organization_id=$1 AND id=$2`,
+      [actor.organizationId, credentialId, versionId],
     );
     const result = await tx.query<CredentialRow>(
       `${CREDENTIAL_SELECT}
-       WHERE resource.organization_id=$1 AND resource.project_id=$2 AND resource.id=$3`,
-      [actor.organizationId, actor.projectId, credentialId],
+       WHERE resource.organization_id=$1 AND resource.id=$2`,
+      [actor.organizationId, credentialId],
     );
     return credential(result.rows[0]!);
   }
@@ -548,22 +519,21 @@ export class McpAdminService {
   ): Promise<McpCredential> {
     const result = await tx.query(
       `UPDATE oao.mcp_credential_version_lifecycle lifecycle
-          SET status='revoked',updated_by_principal_id=$4,updated_at=clock_timestamp()
+          SET status='revoked',updated_by_principal_id=$3,updated_at=clock_timestamp()
          FROM oao.mcp_credentials credential
-        WHERE credential.organization_id=$1 AND credential.project_id=$2
-          AND credential.id=$3
+        WHERE credential.organization_id=$1
+          AND credential.id=$2
           AND lifecycle.organization_id=credential.organization_id
-          AND lifecycle.project_id=credential.project_id
           AND lifecycle.credential_version_id=credential.active_version_id
           AND lifecycle.status<>'revoked'`,
-      [actor.organizationId, actor.projectId, credentialId, actor.id],
+      [actor.organizationId, credentialId, actor.id],
     );
     if (!result.rowCount)
       throw new HttpApiError("not_found", "Active MCP credential not found");
     const revoked = await tx.query<CredentialRow>(
       `${CREDENTIAL_SELECT}
-       WHERE resource.organization_id=$1 AND resource.project_id=$2 AND resource.id=$3`,
-      [actor.organizationId, actor.projectId, credentialId],
+       WHERE resource.organization_id=$1 AND resource.id=$2`,
+      [actor.organizationId, credentialId],
     );
     return credential(revoked.rows[0]!);
   }
@@ -574,9 +544,9 @@ export class McpAdminService {
   ): Promise<readonly McpCredentialPolicy[]> {
     const result = await tx.query<PolicyRow>(
       `${POLICY_SELECT}
-       WHERE resource.organization_id=$1 AND resource.project_id=$2
+       WHERE resource.organization_id=$1
        ORDER BY resource.created_at DESC,resource.id DESC`,
-      [actor.organizationId, actor.projectId],
+      [actor.organizationId],
     );
     return result.rows.map(policy);
   }
@@ -590,12 +560,11 @@ export class McpAdminService {
       `SELECT 1 FROM oao.mcp_credentials credential
        JOIN oao.mcp_credential_version_lifecycle lifecycle
          ON lifecycle.organization_id=credential.organization_id
-        AND lifecycle.project_id=credential.project_id
         AND lifecycle.credential_version_id=credential.active_version_id
         AND lifecycle.status='active'
-       WHERE credential.organization_id=$1 AND credential.project_id=$2
-         AND credential.id=$3`,
-      [actor.organizationId, actor.projectId, input.credentialId],
+       WHERE credential.organization_id=$1
+         AND credential.id=$2`,
+      [actor.organizationId, input.credentialId],
     );
     if (!credentialExists.rowCount)
       throw new HttpApiError("bad_request", "MCP credential is unavailable");
@@ -603,26 +572,18 @@ export class McpAdminService {
     const versionId = randomUUID();
     await tx.query(
       `INSERT INTO oao.mcp_credential_policies (
-         organization_id,project_id,id,policy_key,display_name,created_by_principal_id
-       ) VALUES ($1,$2,$3,$4,$5,$6)`,
-      [
-        actor.organizationId,
-        actor.projectId,
-        id,
-        input.key,
-        input.displayName,
-        actor.id,
-      ],
+         organization_id,id,policy_key,display_name,created_by_principal_id
+       ) VALUES ($1,$2,$3,$4,$5)`,
+      [actor.organizationId, id, input.key, input.displayName, actor.id],
     );
     await tx.query(
       `INSERT INTO oao.mcp_credential_policy_versions (
-         organization_id,project_id,id,policy_id,version,credential_id,
+         organization_id,id,policy_id,version,credential_id,
          exact_origin,path_prefix,timeout_ms,maximum_response_bytes,
          content_hash,created_by_principal_id
-       ) VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10,$11)`,
+       ) VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9,$10)`,
       [
         actor.organizationId,
-        actor.projectId,
         versionId,
         id,
         input.credentialId,
@@ -636,19 +597,19 @@ export class McpAdminService {
     );
     await tx.query(
       `INSERT INTO oao.mcp_credential_policy_version_lifecycle (
-         organization_id,project_id,policy_version_id,updated_by_principal_id
-       ) VALUES ($1,$2,$3,$4)`,
-      [actor.organizationId, actor.projectId, versionId, actor.id],
+         organization_id,policy_version_id,updated_by_principal_id
+       ) VALUES ($1,$2,$3)`,
+      [actor.organizationId, versionId, actor.id],
     );
     await tx.query(
-      `UPDATE oao.mcp_credential_policies SET latest_version_id=$4,updated_at=clock_timestamp()
-       WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
-      [actor.organizationId, actor.projectId, id, versionId],
+      `UPDATE oao.mcp_credential_policies SET latest_version_id=$3,updated_at=clock_timestamp()
+       WHERE organization_id=$1 AND id=$2`,
+      [actor.organizationId, id, versionId],
     );
     const result = await tx.query<PolicyRow>(
       `${POLICY_SELECT}
-       WHERE resource.organization_id=$1 AND resource.project_id=$2 AND resource.id=$3`,
-      [actor.organizationId, actor.projectId, id],
+       WHERE resource.organization_id=$1 AND resource.id=$2`,
+      [actor.organizationId, id],
     );
     return policy(result.rows[0]!);
   }
@@ -672,16 +633,14 @@ export class McpAdminService {
            FROM oao.mcp_servers resource
            JOIN oao.mcp_server_versions version
              ON version.organization_id=resource.organization_id
-            AND version.project_id=resource.project_id
             AND version.id=resource.latest_version_id
            JOIN oao.mcp_server_version_lifecycle lifecycle
              ON lifecycle.organization_id=version.organization_id
-            AND lifecycle.project_id=version.project_id
             AND lifecycle.server_version_id=version.id
             AND lifecycle.status='active'
-          WHERE resource.organization_id=$1 AND resource.project_id=$2
-            AND resource.id=$3`,
-        [actor.organizationId, actor.projectId, serverId],
+          WHERE resource.organization_id=$1
+            AND resource.id=$2`,
+        [actor.organizationId, serverId],
       );
       const row = result.rows[0];
       if (!row) throw new HttpApiError("not_found", "MCP server not found");
@@ -703,46 +662,34 @@ export class McpAdminService {
          FROM oao.mcp_servers resource
          JOIN oao.mcp_server_versions server
            ON server.organization_id=resource.organization_id
-          AND server.project_id=resource.project_id
           AND server.id=resource.latest_version_id
          JOIN oao.mcp_server_version_lifecycle server_lifecycle
            ON server_lifecycle.organization_id=server.organization_id
-          AND server_lifecycle.project_id=server.project_id
           AND server_lifecycle.server_version_id=server.id
           AND server_lifecycle.status='active'
          JOIN oao.mcp_credential_policy_versions policy
            ON policy.organization_id=resource.organization_id
-          AND policy.project_id=resource.project_id
-          AND policy.id=$4
+          AND policy.id=$3
           AND oao.mcp_endpoint_matches_policy(
             server.endpoint_url,policy.exact_origin,policy.path_prefix
           )
          JOIN oao.mcp_credential_policy_version_lifecycle policy_lifecycle
            ON policy_lifecycle.organization_id=policy.organization_id
-          AND policy_lifecycle.project_id=policy.project_id
           AND policy_lifecycle.policy_version_id=policy.id
           AND policy_lifecycle.status='active'
          JOIN oao.mcp_credentials credential
            ON credential.organization_id=policy.organization_id
-          AND credential.project_id=policy.project_id
           AND credential.id=policy.credential_id
          JOIN oao.mcp_credential_versions version
            ON version.organization_id=credential.organization_id
-          AND version.project_id=credential.project_id
           AND version.id=credential.active_version_id
          JOIN oao.mcp_credential_version_lifecycle credential_lifecycle
            ON credential_lifecycle.organization_id=version.organization_id
-          AND credential_lifecycle.project_id=version.project_id
           AND credential_lifecycle.credential_version_id=version.id
           AND credential_lifecycle.status='active'
-        WHERE resource.organization_id=$1 AND resource.project_id=$2
-          AND resource.id=$3`,
-      [
-        actor.organizationId,
-        actor.projectId,
-        serverId,
-        credentialPolicyVersionId,
-      ],
+        WHERE resource.organization_id=$1
+          AND resource.id=$2`,
+      [actor.organizationId, serverId, credentialPolicyVersionId],
     );
     const row = result.rows[0];
     if (!row)
@@ -759,7 +706,6 @@ export class McpAdminService {
       },
       {
         organizationId: actor.organizationId,
-        projectId: actor.projectId,
         providerId: row.credential_id,
         providerType: "mcp",
       },
@@ -807,9 +753,9 @@ export class McpAdminService {
     }>(
       `SELECT remote_tool_name,title,description,schema_hash
          FROM oao.mcp_server_version_tools
-       WHERE organization_id=$1 AND project_id=$2 AND server_version_id=$3
+       WHERE organization_id=$1 AND server_version_id=$2
        ORDER BY remote_tool_name`,
-      [actor.organizationId, actor.projectId, serverVersionId],
+      [actor.organizationId, serverVersionId],
     );
     const snapshots = tools
       .map((tool) => ({
@@ -844,12 +790,11 @@ export class McpAdminService {
              FROM oao.mcp_servers resource
              JOIN oao.mcp_server_versions version
                ON version.organization_id=resource.organization_id
-              AND version.project_id=resource.project_id
               AND version.server_id=resource.id
-              AND version.id=$3
-            WHERE resource.organization_id=$1 AND resource.project_id=$2
+              AND version.id=$2
+            WHERE resource.organization_id=$1
             FOR UPDATE OF resource`,
-          [actor.organizationId, actor.projectId, serverVersionId],
+          [actor.organizationId, serverVersionId],
         );
         const current = source.rows[0];
         if (!current)
@@ -862,12 +807,11 @@ export class McpAdminService {
         targetVersionId = randomUUID();
         await tx.query(
           `INSERT INTO oao.mcp_server_versions (
-             organization_id,project_id,id,server_id,version,endpoint_url,
+             organization_id,id,server_id,version,endpoint_url,
              transport,content_hash,created_by_principal_id
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
           [
             actor.organizationId,
-            actor.projectId,
             targetVersionId,
             current.server_id,
             current.version + 1,
@@ -890,9 +834,9 @@ export class McpAdminService {
         );
         await tx.query(
           `INSERT INTO oao.mcp_server_version_lifecycle (
-             organization_id,project_id,server_version_id,updated_by_principal_id
-           ) VALUES ($1,$2,$3,$4)`,
-          [actor.organizationId, actor.projectId, targetVersionId, actor.id],
+             organization_id,server_version_id,updated_by_principal_id
+           ) VALUES ($1,$2,$3)`,
+          [actor.organizationId, targetVersionId, actor.id],
         );
       }
       if (same) targetVersionId = serverVersionId;
@@ -901,12 +845,11 @@ export class McpAdminService {
       for (const snapshot of snapshots)
         await tx.query(
           `INSERT INTO oao.mcp_server_version_tools (
-             organization_id,project_id,server_version_id,remote_tool_name,
+             organization_id,server_version_id,remote_tool_name,
              title,description,input_schema,output_schema,schema_hash
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
           [
             actor.organizationId,
-            actor.projectId,
             targetVersionId,
             snapshot.name,
             snapshot.title ?? null,
@@ -920,20 +863,15 @@ export class McpAdminService {
     if (targetVersionId !== serverVersionId)
       await tx.query(
         `UPDATE oao.mcp_servers
-            SET latest_version_id=$4,updated_at=clock_timestamp()
-          WHERE organization_id=$1 AND project_id=$2 AND latest_version_id=$3`,
-        [
-          actor.organizationId,
-          actor.projectId,
-          serverVersionId,
-          targetVersionId,
-        ],
+            SET latest_version_id=$3,updated_at=clock_timestamp()
+          WHERE organization_id=$1 AND latest_version_id=$2`,
+        [actor.organizationId, serverVersionId, targetVersionId],
       );
     const result = await tx.query<ServerRow>(
       `${SERVER_SELECT}
-       WHERE resource.organization_id=$1 AND resource.project_id=$2
-         AND resource.latest_version_id=$3`,
-      [actor.organizationId, actor.projectId, targetVersionId],
+       WHERE resource.organization_id=$1
+         AND resource.latest_version_id=$2`,
+      [actor.organizationId, targetVersionId],
     );
     if (!result.rows[0])
       throw new HttpApiError("not_found", "MCP server not found");
@@ -963,15 +901,13 @@ export class McpAdminService {
          FROM oao.mcp_server_version_tools tool
          JOIN oao.mcp_server_version_lifecycle lifecycle
            ON lifecycle.organization_id=tool.organization_id
-          AND lifecycle.project_id=tool.project_id
           AND lifecycle.server_version_id=tool.server_version_id
           AND lifecycle.status='active'
-        WHERE tool.organization_id=$1 AND tool.project_id=$2
-          AND tool.server_version_id=$3
-          AND tool.remote_tool_name=ANY($4::text[])`,
+        WHERE tool.organization_id=$1
+          AND tool.server_version_id=$2
+          AND tool.remote_tool_name=ANY($3::text[])`,
       [
         actor.organizationId,
-        actor.projectId,
         input.serverVersionId,
         input.tools.map((tool) => tool.remoteToolName),
       ],

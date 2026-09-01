@@ -141,15 +141,9 @@ test(
           await withTenantTransaction(pool, tenant, (transaction) =>
             transaction.query(
               `INSERT INTO oao.api_keys
-                (organization_id,project_id,id,principal_id,name,key_prefix,key_hash,scopes,created_by_principal_id)
-               VALUES ($1,$2,$3,$4,'Test key','abcdef12',digest('keyed-value','sha256'),ARRAY['run:read'],$5)`,
-              [
-                ids.organization,
-                ids.project,
-                ids.apiKey,
-                ids.apiKeyPrincipal,
-                ids.principal,
-              ],
+                (organization_id,id,name,key_prefix,key_hash,scopes,created_by_principal_id)
+               VALUES ($1,$2,'Test key','abcdef12',digest('keyed-value','sha256'),ARRAY['run:read'],$3)`,
+              [ids.organization, ids.apiKey, ids.principal],
             ),
           );
           const columns = await pool.query<{ column_name: string }>(
@@ -163,18 +157,29 @@ test(
             false,
           );
           const authenticated = await asApp(pool, (client) =>
-            client.query(
-              "SELECT * FROM oao.authenticate_api_key('abcdef12',digest('keyed-value','sha256'),clock_timestamp())",
+            client.query<{
+              organization_id: string;
+              project_id: string;
+              principal_id: string;
+              subject: string;
+              scopes: string[];
+            }>(
+              "SELECT * FROM oao.authenticate_api_key('abcdef12',digest('keyed-value','sha256'),NULL,clock_timestamp())",
             ),
           );
-          assert.deepEqual(authenticated.rows, [
-            {
-              organization_id: ids.organization,
-              project_id: ids.project,
-              principal_id: ids.apiKeyPrincipal,
-              scopes: ["run:read"],
-            },
-          ]);
+          const resolved = authenticated.rows[0];
+          assert.ok(resolved);
+          assert.equal(resolved.organization_id, ids.organization);
+          assert.equal(resolved.project_id, ids.project);
+          assert.equal(resolved.subject, `api-key:${ids.apiKey}`);
+          assert.deepEqual(resolved.scopes, ["run:read"]);
+          // The mirror principal is stable across authentications.
+          const again = await asApp(pool, (client) =>
+            client.query<{ principal_id: string }>(
+              "SELECT * FROM oao.authenticate_api_key('abcdef12',digest('keyed-value','sha256'),NULL,clock_timestamp())",
+            ),
+          );
+          assert.equal(again.rows[0]?.principal_id, resolved.principal_id);
           assert.equal(
             (
               await withTenantTransaction(pool, tenant, (transaction) =>
@@ -196,7 +201,7 @@ test(
             (
               await asApp(pool, (client) =>
                 client.query(
-                  "SELECT * FROM oao.authenticate_api_key('abcdef12',digest('keyed-value','sha256'),clock_timestamp())",
+                  "SELECT * FROM oao.authenticate_api_key('abcdef12',digest('keyed-value','sha256'),NULL,clock_timestamp())",
                 ),
               )
             ).rowCount,

@@ -24,6 +24,7 @@ import {
   parseCreateMcpServerInput,
   parseCreateMcpCredentialInput,
   parseCreateMcpCredentialPolicyInput,
+  CreateProjectInputSchema,
 } from "../src/index.js";
 
 const id = "00000000-0000-4000-8000-000000000001";
@@ -46,6 +47,23 @@ test("authentication contracts expose optional presentation metadata and logout 
       redirectUrl: "https://authkit.example.test/logout",
     }).redirectUrl,
     "https://authkit.example.test/logout",
+  );
+});
+
+test("project creation input requires a kebab-case slug and bounded name", () => {
+  assert.deepEqual(
+    v.parse(CreateProjectInputSchema, { slug: "eval-lab", name: "Eval Lab" }),
+    { slug: "eval-lab", name: "Eval Lab" },
+  );
+  assert.throws(() =>
+    v.parse(CreateProjectInputSchema, { slug: "Eval Lab", name: "Eval Lab" }),
+  );
+  assert.throws(() =>
+    v.parse(CreateProjectInputSchema, {
+      slug: "eval-lab",
+      name: "Eval Lab",
+      organizationId: id,
+    }),
   );
 });
 

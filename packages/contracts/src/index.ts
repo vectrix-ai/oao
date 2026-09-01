@@ -762,6 +762,16 @@ export const ProjectSchema = v.object({
   createdAt: TimestampSchema,
 });
 
+export const CreateProjectInputSchema = v.strictObject({
+  slug: v.pipe(
+    v.string(),
+    v.minLength(1),
+    v.maxLength(80),
+    v.regex(/^[a-z0-9][a-z0-9-]*$/u),
+  ),
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+});
+
 export const ProjectMemberRoleSchema = v.picklist([
   "owner",
   "admin",
@@ -1574,6 +1584,7 @@ export const ApiErrorSchema = v.object({
 
 export type Organization = v.InferOutput<typeof OrganizationSchema>;
 export type Project = v.InferOutput<typeof ProjectSchema>;
+export type CreateProjectInput = v.InferOutput<typeof CreateProjectInputSchema>;
 export type ProjectMemberRole = v.InferOutput<typeof ProjectMemberRoleSchema>;
 export type ProjectMember = v.InferOutput<typeof ProjectMemberSchema>;
 export type CreateProjectMemberInput = v.InferOutput<
@@ -1816,7 +1827,6 @@ export const McpDiscoveredToolSchema = v.object({
 export const McpServerSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
-  projectId: IdSchema,
   key: McpResourceKeySchema,
   displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
   latestVersionId: IdSchema,
@@ -1845,7 +1855,6 @@ export const DiscoverMcpServerInputSchema = v.strictObject({
 export const McpCredentialSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
-  projectId: IdSchema,
   key: McpResourceKeySchema,
   displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
   kind: McpCredentialKindSchema,
@@ -1882,7 +1891,6 @@ export const RotateMcpCredentialInputSchema = v.strictObject({
 export const McpCredentialPolicySchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
-  projectId: IdSchema,
   key: McpResourceKeySchema,
   displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
   latestVersionId: IdSchema,
@@ -1981,7 +1989,6 @@ export const CreateMcpToolsetInputSchema = v.strictObject({
 export const ProjectModelProviderSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
-  projectId: IdSchema,
   key: v.pipe(v.string(), v.minLength(1), v.maxLength(120)),
   displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
   providerType: ModelProviderTypeSchema,
@@ -2039,7 +2046,6 @@ export const SandboxRestrictedEgressSchema = v.strictObject({
 export const ProjectSandboxProviderSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
-  projectId: IdSchema,
   key: ProjectSandboxProviderKeySchema,
   displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
   providerType: v.literal("daytona"),
@@ -2129,7 +2135,6 @@ const S3ObjectPrefixSchema = v.pipe(
 export const ProjectStorageProviderSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
-  projectId: IdSchema,
   key: ProjectSandboxProviderKeySchema,
   displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
   providerType: v.literal("s3"),
@@ -2229,6 +2234,10 @@ export const ModelCatalogEntrySchema = v.object({
     v.array(v.picklist(["low", "medium", "high", "xhigh", "max"])),
   ),
 });
+
+export function parseCreateProjectInput(input: unknown): CreateProjectInput {
+  return v.parse(CreateProjectInputSchema, input);
+}
 
 export function parseCreateModelPresetInput(
   input: unknown,

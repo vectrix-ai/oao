@@ -99,6 +99,11 @@ Flue conversation and transcript remain isolated.
   tenant-scoped service principal. Internal broker or database failures become
   a generic platform-tool failure instead of exposing database details to the
   model or transcript.
+- The platform tool claim behind `delegate_agent` and `message_agent` holds a
+  bounded lease that the runtime renews on a heartbeat for as long as the child
+  runs, so a delegation that takes minutes still returns the child's response
+  in one attempt. If another worker takes the claim over, the superseded
+  executor aborts its wait and stands down without submitting a result.
 - Child threads use the normal fenced admission, wake recovery, product-run
   deadline, and Flue retry paths.
 - Cancelling or timing out a parent run cascades cancellation to its unsettled

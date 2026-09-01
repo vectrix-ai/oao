@@ -1706,13 +1706,13 @@ export function createProjectDaytonaFlueSandbox(input: {
             `SELECT id,provider_type,encrypted_api_key,encryption_nonce,
                     encryption_tag,encryption_key_version,target,restricted_egress
                FROM oao.project_sandbox_providers
-              WHERE organization_id=$1 AND project_id=$2 AND provider_key=$3`,
-            [input.organizationId, input.projectId, input.providerKey],
+              WHERE organization_id=$1 AND provider_key=$2`,
+            [input.organizationId, input.providerKey],
           );
           const row = result.rows[0];
           if (!row)
             throw new Error(
-              `Sandbox provider ${input.providerKey} is not configured for this project`,
+              `Sandbox provider ${input.providerKey} is not configured for this organization`,
             );
           return row;
         },
@@ -1729,7 +1729,6 @@ export function createProjectDaytonaFlueSandbox(input: {
         },
         {
           organizationId: input.organizationId,
-          projectId: input.projectId,
           providerId,
           providerType: "daytona",
         },

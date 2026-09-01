@@ -1,6 +1,6 @@
 ---
 title: Workspace backups
-description: Persist Daytona session files in project-scoped S3-compatible storage and restore deleted sandboxes.
+description: Persist Daytona session files in organization-shared S3-compatible storage and restore deleted sandboxes.
 ---
 
 OAO can copy each Daytona thread workspace to S3-compatible object storage.
@@ -8,7 +8,8 @@ This is separate from Daytona's own sandbox lifecycle: if Daytona no longer has
 the sandbox, OAO creates a replacement and restores the latest verified archive
 before the agent receives any sandbox tools.
 
-The same project storage connections also hold raw run attachments. Attachment
+The same organization-shared storage connections also hold raw run
+attachments. Attachment
 objects use separate deterministic keys, bind to the selected provider at
 upload time, and are downloaded and integrity-checked before Daytona receives
 them. PostgreSQL stores their run manifest but never their bytes or extracted

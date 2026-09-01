@@ -4,7 +4,6 @@ import { ProviderCredentialCipher } from "../src/index.js";
 
 const context = {
   organizationId: "org-1",
-  projectId: "project-1",
   providerId: "provider-1",
   providerType: "openrouter" as const,
   keyVersion: 1,
@@ -27,7 +26,7 @@ test("tenant and provider identity are authenticated as associated data", () => 
     () =>
       cipher.decrypt(encrypted, {
         ...context,
-        projectId: "another-project",
+        organizationId: "another-organization",
       }),
     /could not be decrypted/u,
   );

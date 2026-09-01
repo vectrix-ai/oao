@@ -16,6 +16,7 @@ import type {
   Project,
   ProjectMember,
   ProjectMemberRole,
+  CreateProjectInput,
   CreateProjectMemberInput,
   UpdateProjectMemberInput,
   ProjectSandboxProvider,
@@ -59,6 +60,7 @@ export type {
   Project,
   ProjectMember,
   ProjectMemberRole,
+  CreateProjectInput,
   CreateProjectMemberInput,
   UpdateProjectMemberInput,
   ProjectSandboxProvider,
@@ -139,7 +141,6 @@ export type Member = ProjectMember;
 export interface PlatformApiKey {
   readonly id: string;
   readonly organizationId: string;
-  readonly projectId: string;
   readonly name: string;
   readonly prefix: string;
   readonly scopes: readonly string[];
