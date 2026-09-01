@@ -4,7 +4,8 @@ import { afterEach } from "vitest";
 
 afterEach(() => {
   cleanup();
-  sessionStorage.clear();
-  localStorage.clear();
-  delete document.documentElement.dataset.theme;
+  if (typeof sessionStorage !== "undefined") sessionStorage.clear();
+  if (typeof localStorage !== "undefined") localStorage.clear();
+  if (typeof document !== "undefined")
+    delete document.documentElement.dataset.theme;
 });

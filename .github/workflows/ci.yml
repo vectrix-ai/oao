@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+
+      - name: Enable pnpm
+        run: corepack enable && corepack install --global pnpm@10.27.0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check
+        run: pnpm check
+
+      - name: Verify Cloud SQL PostgreSQL 17 role semantics
+        run: pnpm test:postgres:fresh
+
+      - name: Build delivery image
+        run: docker build --tag oao:ci .
