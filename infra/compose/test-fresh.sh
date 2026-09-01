@@ -31,6 +31,7 @@ docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
   -c "ALTER DATABASE oao OWNER TO oao_runtime"
 
 export DATABASE_URL="postgresql://oao_runtime:oao_runtime@127.0.0.1:${postgres_port}/oao"
+export OAO_TEST_RUNTIME_DATABASE_URL="$DATABASE_URL"
 pnpm --filter @oao/db-postgres migrate
 pnpm --filter @oao/db-postgres migrate
 
@@ -46,7 +47,6 @@ docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U oao_runtime -d oao \
 export OAO_TEST_ADMIN_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:${postgres_port}/oao"
 pnpm --filter @oao/runtime-worker test
 export DATABASE_URL="$OAO_TEST_ADMIN_DATABASE_URL"
-unset OAO_TEST_ADMIN_DATABASE_URL
 pnpm --filter @oao/db-postgres test:integration
 pnpm --filter @oao/api test:integration
 pnpm --filter @oao/tool-broker test:integration
