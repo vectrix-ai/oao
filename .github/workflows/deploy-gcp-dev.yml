@@ -1,0 +1,212 @@
+name: Deploy GCP dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_ref:
+        description: "Immutable Artifact Registry image (IMAGE@sha256:...); omit to build this revision."
+        required: false
+        type: string
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: oao-dev-release
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  GCP_REGION: ${{ vars.GCP_REGION }}
+  GCP_ARTIFACT_REGISTRY_REPOSITORY: ${{ vars.GCP_ARTIFACT_REGISTRY_REPOSITORY }}
+  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+  GCP_RELEASE_SERVICE_ACCOUNT: ${{ vars.GCP_RELEASE_SERVICE_ACCOUNT }}
+  CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+  CLOUD_RUN_WORKER_POOL: ${{ vars.CLOUD_RUN_WORKER_POOL }}
+  OAO_IMAGE_NAME: oao
+
+jobs:
+  check:
+    if: ${{ inputs.image_ref == '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+
+      - name: Enable pnpm
+        run: corepack enable && corepack install --global pnpm@10.27.0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check
+        run: pnpm check
+
+  build:
+    if: ${{ inputs.image_ref == '' }}
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: oao-dev
+    outputs:
+      image_ref: ${{ steps.image.outputs.image_ref }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate delivery configuration
+        run: |
+          set -eu
+          missing=""
+          for name in GCP_PROJECT_ID GCP_REGION GCP_ARTIFACT_REGISTRY_REPOSITORY GCP_WORKLOAD_IDENTITY_PROVIDER GCP_RELEASE_SERVICE_ACCOUNT; do
+            eval "value=\${$name:-}"
+            if [ -z "$value" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository variables:$missing"
+            exit 1
+          fi
+
+      - name: Build immutable image
+        env:
+          IMAGE: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_ARTIFACT_REGISTRY_REPOSITORY }}/${{ env.OAO_IMAGE_NAME }}
+          TAG: ${{ github.sha }}
+        run: docker build --tag "${IMAGE}:${TAG}" .
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_RELEASE_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Configure Artifact Registry authentication
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Push immutable image
+        id: image
+        env:
+          IMAGE: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_ARTIFACT_REGISTRY_REPOSITORY }}/${{ env.OAO_IMAGE_NAME }}
+          TAG: ${{ github.sha }}
+        run: |
+          set -eu
+          docker push "${IMAGE}:${TAG}"
+          digest="$(gcloud artifacts docker images describe "${IMAGE}:${TAG}" --format='value(image_summary.digest)')"
+          if ! printf '%s' "$digest" | grep -Eq '^sha256:[[:xdigit:]]{64}$'; then
+            echo "::error::Artifact Registry did not return an image digest"
+            exit 1
+          fi
+          echo "image_ref=${IMAGE}@${digest}" >> "$GITHUB_OUTPUT"
+          echo "Built \`${IMAGE}@${digest}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    if: >-
+      ${{
+        always() &&
+        (inputs.image_ref != '' || needs.build.result == 'success') &&
+        (inputs.image_ref != '' || vars.OAO_DEV_RELEASE_ENABLED == 'true')
+      }}
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: oao-dev
+    env:
+      IMAGE_REF: ${{ inputs.image_ref || needs.build.outputs.image_ref }}
+
+    steps:
+      - name: Validate release configuration
+        run: |
+          set -eu
+          missing=""
+          for name in GCP_PROJECT_ID GCP_REGION GCP_WORKLOAD_IDENTITY_PROVIDER GCP_RELEASE_SERVICE_ACCOUNT CLOUD_RUN_SERVICE CLOUD_RUN_WORKER_POOL IMAGE_REF; do
+            eval "value=\${$name:-}"
+            if [ -z "$value" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository variables or image reference:$missing"
+            exit 1
+          fi
+          if ! printf '%s' "$IMAGE_REF" | grep -Eq '^.+@sha256:[[:xdigit:]]{64}$'; then
+            echo "::error::IMAGE_REF must use an immutable SHA-256 digest"
+            exit 1
+          fi
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_RELEASE_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Release the image and verify readiness
+        run: |
+          set -euo pipefail
+
+          api_previous="$(gcloud run services describe "$CLOUD_RUN_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(spec.template.spec.containers[0].image)')"
+          worker_previous="$(gcloud run worker-pools describe "$CLOUD_RUN_WORKER_POOL" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(spec.template.spec.containers[0].image)')"
+          {
+            echo "## Image rollback references"
+            echo
+            echo "- API: \`$api_previous\`"
+            echo "- Worker pool: \`$worker_previous\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Terraform owns all durable Cloud Run settings. These commands mutate only images.
+          gcloud run worker-pools update "$CLOUD_RUN_WORKER_POOL" \
+            --image "$IMAGE_REF" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --quiet
+
+          worker_ready_revision=""
+          for attempt in $(seq 1 60); do
+            worker_status="$(gcloud run worker-pools describe "$CLOUD_RUN_WORKER_POOL" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format=json)"
+            read -r generation observed ready_status created_revision ready_revision <<EOF
+          $(python3 -c 'import json, sys; data = json.load(sys.stdin); status = data.get("status", {}); ready = next((item.get("status", "") for item in status.get("conditions", []) if item.get("type") == "Ready"), ""); print(data.get("metadata", {}).get("generation", ""), status.get("observedGeneration", ""), ready, status.get("latestCreatedRevisionName", ""), status.get("latestReadyRevisionName", ""))' <<<"$worker_status")
+          EOF
+
+            if [ -n "$generation" ] && [ "$generation" = "$observed" ]; then
+              if [ "$ready_status" = "False" ]; then
+                echo "::error::Worker-pool revision failed to become ready"
+                gcloud run worker-pools describe "$CLOUD_RUN_WORKER_POOL" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='yaml(status.conditions)'
+                exit 1
+              fi
+              if [ "$ready_status" = "True" ] && [ -n "$created_revision" ] && [ "$created_revision" = "$ready_revision" ]; then
+                worker_ready_revision="$ready_revision"
+                break
+              fi
+            fi
+
+            if [ "$attempt" -eq 60 ]; then
+              echo "::error::Timed out waiting for the worker pool to reconcile its new revision"
+              gcloud run worker-pools describe "$CLOUD_RUN_WORKER_POOL" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='yaml(status)'
+              exit 1
+            fi
+            sleep 5
+          done
+
+          worker_image="$(gcloud run worker-pools revisions describe "$worker_ready_revision" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.imageDigest)')"
+          test "$worker_image" = "$IMAGE_REF"
+
+          gcloud run services update "$CLOUD_RUN_SERVICE" \
+            --image "$IMAGE_REF" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --quiet
+
+          api_revision="$(gcloud run services describe "$CLOUD_RUN_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.latestReadyRevisionName)')"
+          api_image="$(gcloud run revisions describe "$api_revision" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.imageDigest)')"
+          test "$api_image" = "$IMAGE_REF"
+
+          api_url="$(gcloud run services describe "$CLOUD_RUN_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.url)')"
+          curl --fail --retry 6 --retry-all-errors --retry-delay 5 "${api_url}/readyz"
+
+          echo "Released \`$IMAGE_REF\`" >> "$GITHUB_STEP_SUMMARY"

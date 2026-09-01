@@ -23,7 +23,14 @@ while [ "$(docker inspect --format '{{.State.Health.Status}}' "$container_name")
 done
 
 postgres_port=$(docker port "$container_name" 5432/tcp | head -n 1 | sed 's/.*://')
-export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:${postgres_port}/oao"
+# Match Cloud SQL's PostgreSQL 17 privilege model: the application credential
+# owns the database and can create roles, but it is not a true superuser.
+docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  -c "CREATE ROLE oao_runtime LOGIN NOSUPERUSER NOCREATEDB CREATEROLE NOINHERIT PASSWORD 'oao_runtime'"
+docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  -c "ALTER DATABASE oao OWNER TO oao_runtime"
+
+export DATABASE_URL="postgresql://oao_runtime:oao_runtime@127.0.0.1:${postgres_port}/oao"
 pnpm --filter @oao/db-postgres migrate
 pnpm --filter @oao/db-postgres migrate
 # Run the recovery suite before other integration fixtures enqueue synthetic

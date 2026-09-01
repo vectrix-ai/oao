@@ -97,6 +97,53 @@ test("runtime migration encodes durable wakes, dispatch reconciliation, and sand
   assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
 });
 
+test("Cloud SQL recovery role is non-login and limited to two RLS-protected reads", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0032_cloud_sql_recovery_role.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(
+    sql,
+    /CREATE ROLE oao_recovery NOLOGIN NOCREATEDB NOCREATEROLE NOINHERIT/u,
+  );
+  assert.match(sql, /rolsuper OR rolreplication OR rolbypassrls/u);
+  assert.match(
+    sql,
+    /GRANT oao_app TO CURRENT_USER WITH SET TRUE, INHERIT FALSE/u,
+  );
+  assert.match(
+    sql,
+    /GRANT SELECT ON oao\.thread_admission_heads, oao\.runtime_dispatches TO oao_recovery/u,
+  );
+  assert.equal(
+    (
+      sql.match(
+        /CREATE POLICY recovery_visibility ON oao\.(?:thread_admission_heads|runtime_dispatches)/gu,
+      ) ?? []
+    ).length,
+    2,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.list_runtime_recovery_heads\(\) OWNER TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.runtime_has_active_dispatches\(\) OWNER TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /REVOKE ALL ON FUNCTION oao\.list_runtime_recovery_heads\(\) FROM PUBLIC, oao_app/u,
+  );
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.runtime_has_active_dispatches\(\) TO oao_app/u,
+  );
+});
+
 test("model preset migration is additive, append-only, and tenant scoped", async () => {
   const sql = await readFile(
     new URL("../../migrations/0006_model_presets.sql", import.meta.url),

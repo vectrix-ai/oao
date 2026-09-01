@@ -1,0 +1,123 @@
+---
+title: "Deploy to Google Cloud"
+description: "Release OAO to the development Cloud Run service and worker pool without giving application CI control of infrastructure."
+---
+
+OAO's development deployment uses one immutable container image in Artifact
+Registry. Terraform owns the Cloud Run service, worker pool, Cloud SQL
+attachment, runtime identities, IAM, scaling, probes, environment variables,
+and secret references. The OAO repository owns application tests, image builds,
+and image-only releases.
+
+## Required repository variables
+
+Configure these repository variables after Terraform has created the resources.
+The protected `oao-dev` environment remains the deployment approval boundary;
+do not put these values only in that environment, because the workflow decides
+whether a release is enabled before protected-environment setup:
+
+```text
+GCP_PROJECT_ID
+GCP_REGION
+GCP_ARTIFACT_REGISTRY_REPOSITORY
+GCP_WORKLOAD_IDENTITY_PROVIDER
+GCP_RELEASE_SERVICE_ACCOUNT
+CLOUD_RUN_SERVICE
+CLOUD_RUN_WORKER_POOL
+OAO_DEV_RELEASE_ENABLED
+```
+
+Keep repository variable `OAO_DEV_RELEASE_ENABLED` set to `false` for the
+first merge. The workflow builds and pushes the bootstrap image without
+attempting to update Cloud Run.
+After Terraform creates both workloads, set it to `true` so pushes to `main`
+perform image-only releases.
+
+The release identity uses GitHub OIDC. Do not add service-account keys, database
+passwords, or other secret payloads to GitHub Actions.
+
+## Release
+
+Pushing to `main` runs the workspace checks, builds a Node 22.19/pnpm 10.27
+image, pushes it under the commit SHA, resolves its Artifact Registry digest,
+and releases that same digest to both workloads. The API runs the image's
+default `api` command; the worker pool uses its `worker` command.
+
+The release workflow changes only each workload's image field. It verifies the
+worker-pool image, API revision digest, and public API `/readyz` response. It
+records the previous immutable image references in the workflow summary for a
+manual rollback. A failed Cloud Run revision does not replace the last ready
+revision.
+
+To redeploy a known-good build, run **Deploy GCP dev** manually and provide its
+full digest reference, for example:
+
+```text
+europe-west1-docker.pkg.dev/example-project/oao/oao@sha256:...
+```
+
+Use only an image digest, never a mutable tag such as `latest`.
+
+## One-time database and identity setup
+
+Before creating the workloads, take `expected_api_uri` from Terraform and
+configure the WorkOS staging application with these endpoints:
+
+```text
+Callback: ORIGIN/v1/auth/callback
+Sign-out: ORIGIN
+Webhook: ORIGIN/v1/auth/workos/webhook
+```
+
+Creating the webhook produces the signing secret required by
+`oao-workos-webhook-secret`. Add it and the other five runtime payloads as
+Secret Manager versions outside Terraform.
+
+Generate `oao-credential-encryption-key` as the canonical base64 encoding of
+exactly 32 random bytes (`openssl rand -base64 32`). Generate a separate
+`oao-workos-cookie-password` with at least 32 random characters; the same
+command produces a suitable value. Never reuse either value or commit their
+payloads.
+
+For this disposable DEV pilot only, set a password on Cloud SQL's built-in
+`postgres` user outside Terraform. Both application processes auto-migrate, so
+they temporarily share this admin-capable credential. Do not carry this into
+UAT or production; separating migrator and runtime identities is deferred.
+Store the runtime Unix-socket URL only as a version of `oao-database-url`:
+
+```text
+postgresql://postgres:ENCODED_PASSWORD@localhost/oao?host=/cloudsql/PROJECT:REGION:INSTANCE
+```
+
+URL-encode reserved password characters; never put the URL in Git or Terraform.
+
+Before the first login, run Cloud SQL Auth Proxy locally on
+`127.0.0.1:5432`. From the `oao-tf/environments/dev` root, read the exact
+connection name from Terraform and start the proxy:
+
+```sh
+CLOUD_SQL_CONNECTION_NAME="$(terraform output -raw cloud_sql_connection_name)"
+cloud-sql-proxy --address 127.0.0.1 --port 5432 "$CLOUD_SQL_CONNECTION_NAME"
+```
+
+In a second shell, use its TCP URL to migrate and idempotently seed the
+disposable DEV tenant:
+
+```sh
+DATABASE_URL=postgresql://postgres:ENCODED_PASSWORD@127.0.0.1:5432/oao \
+pnpm --filter @oao/api seed:dev
+```
+
+The seed creates organization `00000000-0000-4000-8000-000000000001`, project
+`00000000-0000-4000-8000-000000000002`, and owner principal
+`00000000-0000-4000-8000-000000000003`. Link that principal to the verified
+WorkOS staging user and organization:
+
+```sh
+DATABASE_URL=postgresql://postgres:ENCODED_PASSWORD@127.0.0.1:5432/oao \
+OAO_ORGANIZATION_ID=00000000-0000-4000-8000-000000000001 \
+OAO_PROJECT_ID=00000000-0000-4000-8000-000000000002 \
+OAO_PRINCIPAL_ID=00000000-0000-4000-8000-000000000003 \
+WORKOS_USER_ID=user_... WORKOS_ORGANIZATION_ID=org_... \
+pnpm --filter @oao/api provision:workos
+```
