@@ -149,11 +149,13 @@ test(
         proname: string;
         owner: string;
         app_can_execute: boolean;
+        runtime_can_execute: boolean;
         public_can_execute: boolean;
       }>(
         `SELECT p.proname,
                 pg_get_userbyid(p.proowner) AS owner,
                 has_function_privilege('oao_app', p.oid, 'EXECUTE') AS app_can_execute,
+                has_function_privilege(current_user, p.oid, 'EXECUTE') AS runtime_can_execute,
                 EXISTS (
                   SELECT 1
                     FROM aclexplode(
@@ -175,12 +177,14 @@ test(
           proname: "list_runtime_recovery_heads",
           owner: "oao_recovery",
           app_can_execute: true,
+          runtime_can_execute: true,
           public_can_execute: false,
         },
         {
           proname: "runtime_has_active_dispatches",
           owner: "oao_recovery",
           app_can_execute: true,
+          runtime_can_execute: true,
           public_can_execute: false,
         },
       ]);

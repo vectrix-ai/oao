@@ -146,6 +146,10 @@ test("Cloud SQL recovery role is non-login and limited to two RLS-protected read
     sql,
     /GRANT EXECUTE ON FUNCTION oao\.runtime_has_active_dispatches\(\) TO oao_app/u,
   );
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.runtime_has_active_dispatches\(\) TO CURRENT_USER/u,
+  );
 });
 
 test("model preset migration is additive, append-only, and tenant scoped", async () => {
