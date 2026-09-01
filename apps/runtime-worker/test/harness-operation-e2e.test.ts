@@ -19,6 +19,8 @@ import { FakeSandboxProvider } from "@oao/sandbox-daytona";
 import { startRuntimeWorker, type RuntimeWorkerHandle } from "../src/main.js";
 
 const databaseUrl = process.env.DATABASE_URL;
+const testAdminDatabaseUrl =
+  process.env.OAO_TEST_ADMIN_DATABASE_URL ?? databaseUrl;
 
 function uuid(label: string): string {
   const bytes = createHash("sha256").update(label).digest().subarray(0, 16);
@@ -329,7 +331,8 @@ test(
   { skip: databaseUrl ? false : "DATABASE_URL is required", timeout: 60_000 },
   async () => {
     assert.ok(databaseUrl);
-    const pool = createPool(databaseUrl);
+    assert.ok(testAdminDatabaseUrl);
+    const pool = createPool(testAdminDatabaseUrl);
     const sandbox = new FakeSandboxProvider();
     let worker: RuntimeWorkerHandle | undefined;
     const observedTools: string[] = [];
@@ -516,7 +519,8 @@ test(
   { skip: databaseUrl ? false : "DATABASE_URL is required", timeout: 60_000 },
   async () => {
     assert.ok(databaseUrl);
-    const pool = createPool(databaseUrl);
+    assert.ok(testAdminDatabaseUrl);
+    const pool = createPool(testAdminDatabaseUrl);
     const sandbox = new FakeSandboxProvider();
     let worker: RuntimeWorkerHandle | undefined;
     const harnessToolLifecycle: string[] = [];

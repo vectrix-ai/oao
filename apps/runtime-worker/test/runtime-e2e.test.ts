@@ -27,6 +27,8 @@ import { FakeSandboxProvider } from "@oao/sandbox-daytona";
 import { startRuntimeWorker, type RuntimeWorkerHandle } from "../src/main.js";
 
 const databaseUrl = process.env.DATABASE_URL;
+const testAdminDatabaseUrl =
+  process.env.OAO_TEST_ADMIN_DATABASE_URL ?? databaseUrl;
 
 async function startRuntimeChild(url: string): Promise<ChildProcess> {
   const child = fork(
@@ -495,7 +497,8 @@ test(
   { skip: databaseUrl ? false : "DATABASE_URL is required", timeout: 180_000 },
   async () => {
     assert.ok(databaseUrl);
-    const admin = createPool(databaseUrl);
+    assert.ok(testAdminDatabaseUrl);
+    const admin = createPool(testAdminDatabaseUrl);
     let worker: RuntimeWorkerHandle | undefined;
     let runtimeChild: ChildProcess | undefined;
     let platformEffects = 0;

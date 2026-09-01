@@ -33,10 +33,20 @@ docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
 export DATABASE_URL="postgresql://oao_runtime:oao_runtime@127.0.0.1:${postgres_port}/oao"
 pnpm --filter @oao/db-postgres migrate
 pnpm --filter @oao/db-postgres migrate
-# Run the recovery suite before other integration fixtures enqueue synthetic
-# wakes. The worker claims globally by design, so sharing those fixture wakes
-# would make its intentional lease-bound restart assertion order-dependent.
+
+# Exercise the exact non-superuser runtime boundary before test-only admin
+# fixtures are introduced. The UUIDs need not exist: tenant context is a
+# transaction-local RLS input, not an authorization lookup.
+docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U oao_runtime -d oao \
+  -c "BEGIN; SET LOCAL ROLE oao_app; SELECT oao.set_tenant_context('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002'); ROLLBACK; SELECT * FROM oao.list_runtime_recovery_heads(); SELECT oao.runtime_has_active_dispatches();"
+
+# The integration suites seed and inspect fixtures outside application RLS.
+# Keep that test-only access separate while the worker continues to use the
+# Cloud SQL-like runtime login above.
+export OAO_TEST_ADMIN_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:${postgres_port}/oao"
 pnpm --filter @oao/runtime-worker test
+export DATABASE_URL="$OAO_TEST_ADMIN_DATABASE_URL"
+unset OAO_TEST_ADMIN_DATABASE_URL
 pnpm --filter @oao/db-postgres test:integration
 pnpm --filter @oao/api test:integration
 pnpm --filter @oao/tool-broker test:integration
