@@ -167,12 +167,20 @@ test(
            JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE n.nspname = 'oao'
             AND p.proname IN (
+              'find_runtime_dispatch',
               'list_runtime_recovery_heads',
               'runtime_has_active_dispatches'
             )
           ORDER BY p.proname`,
       );
       assert.deepEqual(functions.rows, [
+        {
+          proname: "find_runtime_dispatch",
+          owner: "oao_recovery",
+          app_can_execute: false,
+          runtime_can_execute: true,
+          public_can_execute: false,
+        },
         {
           proname: "list_runtime_recovery_heads",
           owner: "oao_recovery",
