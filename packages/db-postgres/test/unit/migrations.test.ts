@@ -140,6 +140,10 @@ test("Cloud SQL recovery role is non-login with bounded RLS-protected access", a
   );
   assert.match(
     sql,
+    /GRANT EXECUTE ON FUNCTION oao\.is_sensitive_public_key\(text\) TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
     /ALTER FUNCTION oao\.list_runtime_recovery_heads\(\) OWNER TO oao_recovery/u,
   );
   assert.match(

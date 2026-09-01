@@ -234,14 +234,25 @@ test(
         },
       ]);
 
-      const validatorPrivilege = await pool.query<{ allowed: boolean }>(
+      const validatorPrivileges = await pool.query<{
+        json_allowed: boolean;
+        key_allowed: boolean;
+      }>(
         `SELECT has_function_privilege(
            'oao_recovery',
            'oao.jsonb_has_forbidden_public_key(jsonb)',
            'EXECUTE'
-         ) AS allowed`,
+         ) AS json_allowed,
+         has_function_privilege(
+           'oao_recovery',
+           'oao.is_sensitive_public_key(text)',
+           'EXECUTE'
+         ) AS key_allowed`,
       );
-      assert.equal(validatorPrivilege.rows[0]?.allowed, true);
+      assert.deepEqual(validatorPrivileges.rows[0], {
+        json_allowed: true,
+        key_allowed: true,
+      });
 
       await pool.query(
         "INSERT INTO oao.organizations (id,slug,name) VALUES ($1,'recovery-test','Recovery test')",
