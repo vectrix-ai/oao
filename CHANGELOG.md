@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/vectrix-ai/oao/compare/v0.5.0...v0.6.0) (2026-09-02)
+
+
+### Features
+
+* expose persistent session files ([#13](https://github.com/vectrix-ai/oao/issues/13)) ([b9092c4](https://github.com/vectrix-ai/oao/commit/b9092c4601db1c05cab0b7bda673f70ebbed40ae))
+
 ## [0.5.0](https://github.com/vectrix-ai/oao/compare/v0.4.0...v0.5.0) (2026-09-01)
 
 
