@@ -10,7 +10,11 @@ import {
 } from "@oao/auth-core";
 import type { PgPool } from "@oao/db-postgres";
 import { createApiApp } from "../../src/app.js";
-import { apiLogLevel, HttpApiError } from "../../src/errors.js";
+import {
+  apiErrorLogFields,
+  apiLogLevel,
+  HttpApiError,
+} from "../../src/errors.js";
 import { PostgresApiStore } from "../../src/store.js";
 import type { RuntimeCommandPort } from "../../src/runtime-commands.js";
 
@@ -92,6 +96,16 @@ test("expected authentication boundaries are informational in server logs", () =
     "error",
   );
   assert.equal(apiLogLevel(new Error("database unavailable")), "error");
+});
+
+test("unexpected errors retain their type and message in server log fields", () => {
+  const error = new Error("The request signature does not match");
+  error.name = "SignatureDoesNotMatch";
+  assert.deepEqual(apiErrorLogFields(error), {
+    level: "error",
+    errorType: "SignatureDoesNotMatch",
+    errorMessage: "The request signature does not match",
+  });
 });
 
 test("route tenant scope is checked before database access", async () => {

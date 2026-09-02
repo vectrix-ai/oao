@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import test from "node:test";
+import { gzipSync } from "node:zlib";
 import { DevelopmentAuthAdapter } from "@oao/auth-core";
 import {
   encodeWorkspaceBackupManifest,
@@ -57,6 +58,43 @@ const fileSandbox = {
   network: "none",
   capabilities: ["filesystem_read", "filesystem_write", "shell"],
 } as const;
+
+function gzipTar(
+  files: readonly { readonly path: string; readonly bytes: Uint8Array }[],
+): Buffer {
+  const blocks: Buffer[] = [];
+  for (const file of files) {
+    assert.ok(Buffer.byteLength(file.path) <= 100);
+    const header = Buffer.alloc(512);
+    header.write(file.path, 0, 100, "utf8");
+    header.write("0000644\0", 100, 8, "ascii");
+    header.write("0000000\0", 108, 8, "ascii");
+    header.write("0000000\0", 116, 8, "ascii");
+    header.write(
+      `${file.bytes.byteLength.toString(8).padStart(11, "0")}\0`,
+      124,
+      12,
+      "ascii",
+    );
+    header.write("00000000000\0", 136, 12, "ascii");
+    header.fill(0x20, 148, 156);
+    header.write("0", 156, 1, "ascii");
+    header.write("ustar\0", 257, 6, "ascii");
+    header.write("00", 263, 2, "ascii");
+    const checksum = [...header].reduce((total, byte) => total + byte, 0);
+    header.write(
+      `${checksum.toString(8).padStart(6, "0")}\0 `,
+      148,
+      8,
+      "ascii",
+    );
+    const body = Buffer.from(file.bytes);
+    const padding = Buffer.alloc((512 - (body.byteLength % 512)) % 512);
+    blocks.push(header, body, padding);
+  }
+  blocks.push(Buffer.alloc(1_024));
+  return gzipSync(Buffer.concat(blocks));
+}
 
 class TransactionalTestRuntimeCommands implements RuntimeCommandPort {
   failNext = false;
@@ -2231,17 +2269,34 @@ test(
         );
         const backupThreadId = backupIdentity.rows[0]?.thread_id;
         assert.ok(backupThreadId);
-        const archive = Buffer.from("workspace archive");
-        const archiveSha256 = createHash("sha256").update(archive).digest();
         const backupObjectKey = `workspace-backups/threads/${backupThreadId}/workspace.tar.gz`;
+        const resultCsv = Buffer.from("account,total\nNorthwind,42000\n");
         const workspaceFiles = [
           {
             name: "account-brief.rtf",
             path: `.oao/attachments/${runId}/account-brief.rtf`,
             sizeBytes: Buffer.byteLength(officeContext, "utf8"),
           },
-          { name: "result.csv", path: "output/result.csv", sizeBytes: 42 },
+          {
+            name: "result.csv",
+            path: "output/result.csv",
+            sizeBytes: resultCsv.byteLength,
+          },
         ];
+        const archive = gzipTar([
+          {
+            path: workspaceFiles[0]!.path,
+            bytes: Buffer.from(officeContext, "utf8"),
+          },
+          { path: workspaceFiles[1]!.path, bytes: resultCsv },
+        ]);
+        const archiveSha256 = createHash("sha256").update(archive).digest();
+        await artifacts.put({
+          tenant: integrationPrincipal,
+          key: backupObjectKey,
+          bytes: archive,
+          contentType: "application/gzip",
+        });
         await artifacts.put({
           tenant: integrationPrincipal,
           key: workspaceBackupManifestObjectKey(backupObjectKey),
@@ -2373,6 +2428,62 @@ test(
           detailBody.debug.workspaceBackups[0]?.files,
           workspaceFiles,
         );
+        const fileList = await app.request(
+          `${projectPath}/sessions/${sessionId}/files`,
+        );
+        assert.equal(fileList.status, 200, await fileList.clone().text());
+        const fileListBody = (await fileList.json()) as {
+          data: readonly { path: string; sizeBytes: number }[];
+          generation: number;
+          lastRunId: string;
+        };
+        assert.deepEqual(fileListBody.data, workspaceFiles);
+        assert.equal(fileListBody.generation, 1);
+        assert.equal(fileListBody.lastRunId, runId);
+        const scopedFilesApp = (scopes: readonly AuthorizationScope[]) =>
+          createApiApp({
+            store: new PostgresApiStore(pool, "integration-api-key-pepper"),
+            auth: new DevelopmentAuthAdapter({
+              principal: {
+                ...integrationPrincipal,
+                scopes: new Set<AuthorizationScope>(scopes),
+              },
+            }),
+            runFileStorage,
+            runtimeCommands,
+          });
+        const authorizedFileList = await scopedFilesApp([
+          "session:read",
+        ]).request(`${projectPath}/sessions/${sessionId}/files`);
+        assert.equal(authorizedFileList.status, 200);
+        const forbiddenFileList = await scopedFilesApp(["agent:read"]).request(
+          `${projectPath}/sessions/${sessionId}/files`,
+        );
+        assert.equal(forbiddenFileList.status, 403);
+        const downloaded = await app.request(
+          `${projectPath}/sessions/${sessionId}/files/output/result.csv`,
+        );
+        assert.equal(downloaded.status, 200, await downloaded.clone().text());
+        assert.equal(
+          downloaded.headers.get("content-type"),
+          "application/octet-stream",
+        );
+        assert.match(
+          downloaded.headers.get("content-disposition") ?? "",
+          /^attachment; filename="result\.csv";/u,
+        );
+        assert.deepEqual(
+          Buffer.from(await downloaded.arrayBuffer()),
+          resultCsv,
+        );
+        const missingFile = await app.request(
+          `${projectPath}/sessions/${sessionId}/files/output/missing.csv`,
+        );
+        assert.equal(missingFile.status, 404);
+        const unknownSessionFiles = await app.request(
+          `${projectPath}/sessions/00000000-0000-4000-8000-000000009999/files`,
+        );
+        assert.equal(unknownSessionFiles.status, 404);
         await pool.query(
           `DELETE FROM oao.thread_workspace_backups
            WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3`,

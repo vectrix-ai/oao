@@ -68,6 +68,8 @@ import type {
   SandboxSnapshotList,
   StorageObjectList,
   StorageProviderList,
+  SessionWorkspaceFileDownload,
+  SessionWorkspaceFileList,
   ToolClaim,
   ToolResultEnvelope,
   ToolResultSubmission,
@@ -1047,6 +1049,59 @@ export class OaoClient {
     options?: RequestOptions,
   ): Promise<Session> {
     return this.#request(this.routes.session(projectId, sessionId), options);
+  }
+
+  listSessionFiles(
+    projectId: string,
+    sessionId: string,
+    options?: RequestOptions,
+  ): Promise<SessionWorkspaceFileList> {
+    return this.#request(
+      this.routes.sessionFiles(projectId, sessionId),
+      options,
+    );
+  }
+
+  async downloadSessionFile(
+    projectId: string,
+    sessionId: string,
+    path: string,
+    options: RequestOptions = {},
+  ): Promise<SessionWorkspaceFileDownload> {
+    const headers = await this.#requestHeaders({
+      accept: "application/octet-stream",
+    });
+    const response = await this.#fetch(
+      this.#url(this.routes.sessionFile(projectId, sessionId, path)),
+      {
+        method: "GET",
+        headers,
+        credentials: this.#credentials,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      },
+    );
+    if (!response.ok) await this.#throwResponseError(response);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const contentLength = response.headers.get("content-length");
+    if (
+      contentLength !== null &&
+      Number.isSafeInteger(Number(contentLength)) &&
+      Number(contentLength) !== bytes.byteLength
+    )
+      throw new OaoApiError(
+        response.status,
+        "invalid_response",
+        "Downloaded file length did not match the API response",
+        response.headers.get("x-request-id") ?? undefined,
+      );
+    return {
+      name: path.split("/").at(-1) ?? path,
+      path,
+      contentType:
+        response.headers.get("content-type") ?? "application/octet-stream",
+      sizeBytes: bytes.byteLength,
+      bytes,
+    };
   }
 
   getDelegation(

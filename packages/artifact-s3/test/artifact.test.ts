@@ -1,16 +1,25 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { create as createTar } from "tar";
 
 import type { PgPool } from "@oao/db-postgres";
 import type { ProjectId, OrganizationId } from "@oao/domain";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
 
 import {
+  AwsS3CompatibleObjectClient,
   encodeWorkspaceBackupManifest,
+  extractWorkspaceBackupFile,
   InMemoryArtifactAdapter,
   parseWorkspaceBackupManifest,
   ProjectArtifactStoreResolver,
   S3ArtifactAdapter,
+  streamWorkspaceBackupFile,
   tenantArtifactObjectKey,
   tenantArtifactRootPrefix,
   workspaceBackupManifestObjectKey,
@@ -58,6 +67,49 @@ test("workspace backup manifests are deterministic and archive-bound", () => {
         archiveSha256: "0".repeat(64),
       }),
     /manifest is invalid/u,
+  );
+});
+
+test("workspace backup files are extracted from gzip archives in memory", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "oao-workspace-file-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(join(directory, "output"));
+  await writeFile(join(directory, "output", "result.csv"), "id,total\n1,42\n");
+  const stream = createTar({ cwd: directory, gzip: true }, ["output"]);
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  const archive = Buffer.concat(chunks);
+  const file = {
+    name: "result.csv",
+    path: "output/result.csv",
+    sizeBytes: Buffer.byteLength("id,total\n1,42\n"),
+  };
+
+  assert.equal(
+    Buffer.from(await extractWorkspaceBackupFile(archive, file)).toString(
+      "utf8",
+    ),
+    "id,total\n1,42\n",
+  );
+  assert.equal(
+    Buffer.from(
+      await new Response(
+        await streamWorkspaceBackupFile(archive, file),
+      ).arrayBuffer(),
+    ).toString("utf8"),
+    "id,total\n1,42\n",
+  );
+  await assert.rejects(
+    extractWorkspaceBackupFile(archive, { ...file, sizeBytes: 1 }),
+    /does not match its manifest/u,
+  );
+  await assert.rejects(
+    extractWorkspaceBackupFile(archive, {
+      name: "missing.txt",
+      path: "output/missing.txt",
+      sizeBytes: 1,
+    }),
+    /missing from its archive/u,
   );
 });
 
@@ -213,6 +265,52 @@ test("S3 adapter delegates through the narrow client with tenant metadata", asyn
     (await store.get({ tenant, key: "result.txt" }))?.bytes,
     object,
   );
+});
+
+test("real S3 client sends only ASCII artifact metadata values", async (t) => {
+  let metadataHeaders: Readonly<Record<string, string | readonly string[]>> =
+    {};
+  const server = createServer((request, response) => {
+    metadataHeaders = Object.fromEntries(
+      Object.entries(request.headers).filter(([name]) =>
+        name.startsWith("x-amz-meta-"),
+      ),
+    ) as Readonly<Record<string, string | readonly string[]>>;
+    response.writeHead(200, { etag: '"capture-etag"' }).end();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+
+  const client = new AwsS3CompatibleObjectClient({
+    endpoint: `http://127.0.0.1:${address.port}`,
+    region: "eu-test-1",
+    forcePathStyle: true,
+    accessKeyId: "capture-access-key",
+    secretAccessKey: "capture-secret-key",
+  });
+  const store = new S3ArtifactAdapter({ bucket: "artifacts", client });
+  const key = "run-files/runs/run-1/file-1/saisie régulière.xlsx";
+  await store.put({
+    tenant,
+    key,
+    bytes: new Uint8Array([1]),
+    contentType:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+
+  assert.equal(
+    metadataHeaders["x-amz-meta-oao-logical-key"],
+    encodeURIComponent(key),
+  );
+  assert.ok(Object.keys(metadataHeaders).length > 0);
+  for (const value of Object.values(metadataHeaders).flat()) {
+    assert.ok(
+      [...value].every((character) => (character.codePointAt(0) ?? 128) <= 127),
+    );
+  }
 });
 
 test("S3 reads fail closed when stored tenant metadata disagrees", async () => {

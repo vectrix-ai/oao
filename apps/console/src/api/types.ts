@@ -329,6 +329,9 @@ export interface SessionSummary {
   readonly cacheWriteTokens: number;
   readonly observedCostUsd: number | null;
   readonly costProvenance: "provider_observed" | "estimated" | "unavailable";
+  /** Latest run timestamps, used for settled and live elapsed time. */
+  readonly startedAt: string | null;
+  readonly completedAt: string | null;
   readonly createdAt: string;
   readonly lastActivityAt: string;
 }
@@ -420,7 +423,6 @@ export interface SessionDetail extends SessionSummary {
   readonly model?: string;
   readonly agentVersion: number;
   readonly startedAt: string;
-  readonly completedAt: string | null;
   readonly attempt: number;
   readonly events: readonly TimelineEvent[];
   readonly workspaceFiles: readonly {
@@ -684,6 +686,7 @@ export interface ConsoleApi {
   createMcpToolset(input: CreateMcpToolsetInput): Promise<McpToolset>;
   listSessions(filters: ListFilters): Promise<PageResult<SessionSummary>>;
   getSession(id: string): Promise<SessionDetail>;
+  getSessionFile(sessionId: string, path: string): Promise<Uint8Array>;
   createSession(input: {
     readonly agentId: string;
     readonly title: string;

@@ -34,6 +34,17 @@ export function apiLogLevel(error: unknown): "info" | "error" {
     : "error";
 }
 
+export function apiErrorLogFields(
+  error: unknown,
+): Readonly<Record<string, string>> {
+  return {
+    level: apiLogLevel(error),
+    errorType: error instanceof Error ? error.name : "UnknownError",
+    ...(error instanceof HttpApiError ? { errorCode: error.code } : {}),
+    ...(error instanceof Error ? { errorMessage: error.message } : {}),
+  };
+}
+
 export function errorEnvelope(
   error: unknown,
   requestId: string,

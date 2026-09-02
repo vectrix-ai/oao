@@ -316,6 +316,8 @@ describe("HTTP console adapter", () => {
               cacheWriteTokens: 128,
               costMicrounits: 0,
               costProvenance: "estimated",
+              startedAt: "2026-08-21T07:48:01.000Z",
+              completedAt: "2026-08-21T07:48:03.000Z",
               createdAt,
               lastActivityAt: createdAt,
             },
@@ -332,6 +334,8 @@ describe("HTTP console adapter", () => {
       delegateKey: "shipment-extraction",
       cacheReadTokens: 640,
       cacheWriteTokens: 128,
+      startedAt: "2026-08-21T07:48:01.000Z",
+      completedAt: "2026-08-21T07:48:03.000Z",
     });
   });
 
@@ -716,6 +720,36 @@ describe("HTTP console adapter", () => {
       `/v1/projects/${PROJECT_ID}/storage-providers/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/objects?prefix=run-files%2Fruns%2Frun-1%2F&cursor=cursor-1`,
     );
     expect(result).toEqual(listing);
+  });
+
+  it("downloads a persisted session file through the secured project route", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(
+        new Response("id,total\n1,42\n", {
+          headers: { "content-type": "application/octet-stream" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bytes = await new HttpConsoleApi().getSessionFile(
+      "session-1",
+      "output/monthly result.csv",
+    );
+
+    expect(Buffer.from(bytes).toString("utf8")).toBe("id,total\n1,42\n");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      `/v1/projects/${PROJECT_ID}/sessions/session-1/files/output/monthly%20result.csv`,
+    );
+    expect(fetchMock.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({
+        credentials: "include",
+        headers: expect.objectContaining({
+          accept: "application/octet-stream",
+        }),
+      }),
+    );
   });
 
   it("reads and creates project model presets through the public API", async () => {

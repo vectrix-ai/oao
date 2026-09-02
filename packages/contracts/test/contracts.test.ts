@@ -12,6 +12,7 @@ import {
   UpdateProjectMemberInputSchema,
   PublicPrincipalSchema,
   RunSchema,
+  SessionWorkspaceFileListSchema,
   SessionSchema,
   ToolCallSchema,
   parseCreateModelPresetInput,
@@ -146,6 +147,25 @@ test("run and event public contracts accept safe wire representations", () => {
       occurredAt: timestamp,
     }).kind,
     "harness.operation_completed",
+  );
+});
+
+test("session workspace file contracts describe persisted backup contents", () => {
+  const list = v.parse(SessionWorkspaceFileListSchema, {
+    data: [{ name: "result.csv", path: "output/result.csv", sizeBytes: 42 }],
+    generation: 3,
+    backedUpAt: timestamp,
+    lastRunId: id,
+  });
+  assert.equal(list.data[0]?.path, "output/result.csv");
+  assert.equal(list.generation, 3);
+  assert.throws(() =>
+    v.parse(SessionWorkspaceFileListSchema, {
+      data: [{ name: "result.csv", path: "output/result.csv", sizeBytes: -1 }],
+      generation: 1,
+      backedUpAt: timestamp,
+      lastRunId: id,
+    }),
   );
 });
 

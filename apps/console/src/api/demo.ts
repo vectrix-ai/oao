@@ -1953,6 +1953,13 @@ export class DemoConsoleApi implements ConsoleApi {
     return structuredClone(value);
   }
 
+  async getSessionFile(sessionId: string, path: string): Promise<Uint8Array> {
+    this.#guard();
+    if (!this.#sessions.some((session) => session.id === sessionId))
+      throw new Error("Session not found");
+    return new TextEncoder().encode(`Demo workspace file: ${path}\n`);
+  }
+
   async createSession(input: {
     readonly agentId: string;
     readonly title: string;

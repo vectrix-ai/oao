@@ -600,15 +600,17 @@ transaction. The response contains the session, `latestRunId`, and first queued
 session bindings in that transaction. Session create and follow-up bodies do
 not accept a Skill list.
 
-| Method | Path                                              | Purpose                                                             |
-| ------ | ------------------------------------------------- | ------------------------------------------------------------------- |
-| `GET`  | `/projects/{projectId}/sessions`                  | List sessions for the console or an integration.                    |
-| `GET`  | `/projects/{projectId}/sessions/{sessionId}`      | Get transcript, runs, timing, pending work, and safe debug records. |
-| `POST` | `/projects/{projectId}/sessions/{sessionId}/runs` | Submit a later message after the latest run settles.                |
-| `GET`  | `/projects/{projectId}/runs/{runId}`              | Read one run.                                                       |
-| `POST` | `/projects/{projectId}/runs/{runId}/cancel`       | Record cancellation intent and drain safely.                        |
-| `GET`  | `/projects/{projectId}/runs/{runId}/messages`     | Page through public messages for a run.                             |
-| `GET`  | `/projects/{projectId}/runs/{runId}/timeline`     | Page through the safe timing waterfall.                             |
+| Method | Path                                                      | Purpose                                                             |
+| ------ | --------------------------------------------------------- | ------------------------------------------------------------------- |
+| `GET`  | `/projects/{projectId}/sessions`                          | List sessions for the console or an integration.                    |
+| `GET`  | `/projects/{projectId}/sessions/{sessionId}`              | Get transcript, runs, timing, pending work, and safe debug records. |
+| `GET`  | `/projects/{projectId}/sessions/{sessionId}/files`        | List files in the latest persisted workspace backup.                |
+| `GET`  | `/projects/{projectId}/sessions/{sessionId}/files/{path}` | Download one persisted workspace file.                              |
+| `POST` | `/projects/{projectId}/sessions/{sessionId}/runs`         | Submit a later message after the latest run settles.                |
+| `GET`  | `/projects/{projectId}/runs/{runId}`                      | Read one run.                                                       |
+| `POST` | `/projects/{projectId}/runs/{runId}/cancel`               | Record cancellation intent and drain safely.                        |
+| `GET`  | `/projects/{projectId}/runs/{runId}/messages`             | Page through public messages for a run.                             |
+| `GET`  | `/projects/{projectId}/runs/{runId}/timeline`             | Page through the safe timing waterfall.                             |
 
 Each session-list item created by delegation includes `parentSessionId` and
 `delegateKey`. Both fields are `null` for root sessions. This lets clients group a
@@ -642,6 +644,54 @@ runtime downloads and verifies the bound object, then copies the original bytes 
 `.oao/attachments/{runId}/{filename}` under the sandbox's writable working
 directory before the first model turn;
 it does not extract file content into the prompt.
+
+### Retrieve persisted workspace files
+
+The session Files API exposes every regular file recorded in the latest
+workspace-backup manifest. Both routes require `session:read` and the normal
+authenticated project boundary. An API key can address a project only inside
+its organization, and a signed-in user must resolve to that project; the
+session and workspace-owner lookup remains tenant-filtered in PostgreSQL.
+
+`GET /projects/{projectId}/sessions/{sessionId}/files` returns:
+
+```json
+{
+  "data": [
+    { "name": "result.csv", "path": "output/result.csv", "sizeBytes": 42 }
+  ],
+  "generation": 3,
+  "backedUpAt": "2026-09-01T10:00:00.000Z",
+  "lastRunId": "b1111111-1111-4111-8111-111111111111"
+}
+```
+
+A session without a completed backup returns an empty `data` array and `null`
+backup fields. To download a file, append its exact relative `path`, encoding
+each path segment independently:
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --output result.csv \
+  "$OAO_API_URL/v1/projects/$OAO_PROJECT_ID/sessions/$OAO_SESSION_ID/files/output/result.csv"
+```
+
+The response is `application/octet-stream` with `Content-Disposition:
+attachment`, `Content-Length`, `Cache-Control: no-store`, and
+`X-Content-Type-Options: nosniff`. The API resolves delegated sessions through
+their shared workspace owner, downloads the archive and manifest from the
+workspace's bound persistent storage provider, verifies the recorded archive
+length and SHA-256, validates the complete tar stream, and streams only the
+requested regular file without writing it to the API host filesystem. It does
+not read from Daytona. Missing sessions or paths return `404`; missing,
+changed, or invalid persistent backup data returns `409` and no bytes.
+
+The SDK exposes the same contract through `listSessionFiles(projectId,
+sessionId)` and `downloadSessionFile(projectId, sessionId, path)`. A model can
+therefore mention a relative path such as `output/result.csv`; the caller
+combines that path with the known session ID without giving the model a storage
+credential or provider URL.
 
 The session detail response includes `debug.sandboxCommands`. Each item returns
 the recorded `safeCommand` and `safeResult`, including model-facing arguments,

@@ -53,10 +53,12 @@ export function statusTone(value: string): ChipTone {
 export function Chip({
   tone = "neutral",
   live = false,
+  showDot = true,
   children,
 }: {
   readonly tone?: ChipTone;
   readonly live?: boolean;
+  readonly showDot?: boolean;
   readonly children: ReactNode;
 }) {
   const classes = ["chip"];
@@ -64,7 +66,7 @@ export function Chip({
   if (live) classes.push("chip--live");
   return (
     <span className={classes.join(" ")}>
-      <span className="dot" aria-hidden="true" />
+      {showDot ? <span className="dot" aria-hidden="true" /> : null}
       {children}
     </span>
   );

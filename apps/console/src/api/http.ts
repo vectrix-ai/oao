@@ -649,6 +649,9 @@ function sessionSummary(
         ? null
         : numeric(value.costMicrounits) / 1_000_000,
     costProvenance,
+    startedAt: typeof value.startedAt === "string" ? value.startedAt : null,
+    completedAt:
+      typeof value.completedAt === "string" ? value.completedAt : null,
     createdAt: text(value.createdAt),
     lastActivityAt: text(value.lastActivityAt ?? value.createdAt),
   };
@@ -1410,6 +1413,16 @@ export class HttpConsoleApi implements ConsoleApi {
     init: RequestInit = {},
     allowRefresh = true,
   ): Promise<T> {
+    const response = await this.#response(path, init, allowRefresh);
+    if (response.status === 204) return undefined as T;
+    return (await response.json()) as T;
+  }
+
+  async #response(
+    path: string,
+    init: RequestInit = {},
+    allowRefresh = true,
+  ): Promise<Response> {
     const token = await this.#getAccessToken();
     const method = (init.method ?? "GET").toUpperCase();
     const response = await fetch(`${this.#baseUrl}${path}`, {
@@ -1446,7 +1459,7 @@ export class HttpConsoleApi implements ConsoleApi {
       if (this.#authProvider === "workos" && path !== "/auth/login") {
         if (error.status === 401 && allowRefresh && path !== "/auth/refresh") {
           if (await this.#refreshSession())
-            return this.#request<T>(path, init, false);
+            return this.#response(path, init, false);
           return this.#startWorkOsLogin(error);
         }
         if (hasMismatchedWorkOsOrigin(error))
@@ -1454,8 +1467,7 @@ export class HttpConsoleApi implements ConsoleApi {
       }
       throw error;
     }
-    if (response.status === 204) return undefined as T;
-    return (await response.json()) as T;
+    return response;
   }
 
   #refreshSession(): Promise<boolean> {
@@ -1887,6 +1899,23 @@ export class HttpConsoleApi implements ConsoleApi {
         `/sessions/${encodeURIComponent(id)}`,
       ),
     );
+
+  getSessionFile = async (
+    sessionId: string,
+    path: string,
+  ): Promise<Uint8Array> => {
+    const encodedPath = path
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
+    const response = await this.#response(
+      await this.#projectPath(
+        `/sessions/${encodeURIComponent(sessionId)}/files/${encodedPath}`,
+      ),
+      { headers: { accept: "application/octet-stream" } },
+    );
+    return new Uint8Array(await response.arrayBuffer());
+  };
 
   createSession = async (input: Parameters<ConsoleApi["createSession"]>[0]) => {
     const agent = await this.getAgent(input.agentId);

@@ -22,6 +22,8 @@ import type {
   ProjectSandboxProvider,
   ProjectStorageProvider,
   RunFile,
+  SessionWorkspaceFile,
+  SessionWorkspaceFileList,
   SandboxSnapshotEntry,
   Run,
   Session,
@@ -66,6 +68,8 @@ export type {
   ProjectSandboxProvider,
   ProjectStorageProvider,
   RunFile,
+  SessionWorkspaceFile,
+  SessionWorkspaceFileList,
   SandboxSnapshotEntry,
   Run,
   Session,
@@ -464,6 +468,14 @@ export interface StorageObjectList {
   readonly objects: readonly StorageObjectEntry[];
   readonly truncated: boolean;
   readonly cursor?: string;
+}
+
+export interface SessionWorkspaceFileDownload {
+  readonly name: string;
+  readonly path: string;
+  readonly contentType: string;
+  readonly sizeBytes: number;
+  readonly bytes: Uint8Array;
 }
 
 export interface CreateAgentInput {

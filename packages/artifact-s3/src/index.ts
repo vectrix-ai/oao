@@ -15,6 +15,7 @@ import type {
 } from "@oao/domain";
 import type { RunId, SessionId, ThreadId } from "@oao/domain";
 import type { ProviderCredentialCipher } from "@oao/provider-credentials";
+import { list as listTar } from "tar";
 
 export interface ArtifactLocation {
   readonly tenant: TenantIdentity;
@@ -267,6 +268,19 @@ export interface WorkspaceBackupManifest {
 
 const MAX_WORKSPACE_MANIFEST_BYTES = 5 * 1024 * 1024;
 const MAX_WORKSPACE_MANIFEST_FILES = 10_000;
+const MAX_EXPANDED_WORKSPACE_BYTES = 2 * 1024 * 1024 * 1024;
+
+function validWorkspaceBackupFiles(
+  files: readonly unknown[],
+): files is readonly WorkspaceBackupFile[] {
+  let totalBytes = 0;
+  for (const file of files) {
+    if (!validWorkspaceBackupFile(file)) return false;
+    totalBytes += file.sizeBytes;
+    if (totalBytes > MAX_EXPANDED_WORKSPACE_BYTES) return false;
+  }
+  return true;
+}
 
 export function workspaceBackupManifestObjectKey(objectKey: string): string {
   return objectKey.endsWith(".tar.gz")
@@ -309,7 +323,7 @@ export function encodeWorkspaceBackupManifest(input: {
 }): Uint8Array {
   if (
     input.files.length > MAX_WORKSPACE_MANIFEST_FILES ||
-    input.files.some((file) => !validWorkspaceBackupFile(file))
+    !validWorkspaceBackupFiles(input.files)
   )
     throw new Error("Workspace backup file manifest is invalid");
   const manifest: WorkspaceBackupManifest = {
@@ -354,7 +368,7 @@ export function parseWorkspaceBackupManifest(
     manifest.archiveSizeBytes < 0 ||
     !Array.isArray(files) ||
     files.length > MAX_WORKSPACE_MANIFEST_FILES ||
-    files.some((file) => !validWorkspaceBackupFile(file)) ||
+    !validWorkspaceBackupFiles(files) ||
     (expected?.archiveSha256 !== undefined &&
       manifest.archiveSha256 !== expected.archiveSha256) ||
     (expected?.archiveSizeBytes !== undefined &&
@@ -362,6 +376,168 @@ export function parseWorkspaceBackupManifest(
   )
     throw new Error("Workspace backup file manifest is invalid");
   return manifest as unknown as WorkspaceBackupManifest;
+}
+
+async function scanWorkspaceBackupFile(
+  archive: Uint8Array,
+  file: WorkspaceBackupFile,
+  onChunk?: (chunk: Buffer) => void,
+): Promise<void> {
+  if (!validWorkspaceBackupFile(file))
+    throw new Error("Workspace backup file request is invalid");
+  let matched = false;
+  let completed = false;
+  let extractionError: Error | undefined;
+  const parser = listTar({
+    gzip: true,
+    noResume: true,
+    strict: true,
+    onReadEntry(entry) {
+      const path = entry.path.startsWith("./")
+        ? entry.path.slice(2)
+        : entry.path;
+      if (path !== file.path) {
+        entry.resume();
+        return;
+      }
+      if (matched) {
+        extractionError = new Error(
+          "Workspace backup contains a duplicate file path",
+        );
+        entry.resume();
+        return;
+      }
+      matched = true;
+      if (entry.type !== "File" || entry.size !== file.sizeBytes) {
+        extractionError = new Error(
+          "Workspace backup file does not match its manifest",
+        );
+        entry.resume();
+        return;
+      }
+      let size = 0;
+      entry.on("data", (chunk: Buffer) => {
+        size += chunk.byteLength;
+        if (size > file.sizeBytes) {
+          extractionError = new Error(
+            "Workspace backup file exceeds its manifest size",
+          );
+          return;
+        }
+        onChunk?.(chunk);
+      });
+      entry.on("end", () => {
+        if (extractionError) return;
+        if (size !== file.sizeBytes) {
+          extractionError = new Error(
+            "Workspace backup file does not match its manifest",
+          );
+          return;
+        }
+        completed = true;
+      });
+      entry.resume();
+    },
+  });
+  await new Promise<void>((resolve, reject) => {
+    parser.once("error", reject);
+    parser.once("end", resolve);
+    parser.end(Buffer.from(archive));
+  });
+  if (extractionError) throw extractionError;
+  if (!matched || !completed)
+    throw new Error("Workspace backup file is missing from its archive");
+}
+
+/**
+ * Reads one regular file from a verified workspace archive without writing the
+ * archive or its contents to the API host filesystem.
+ */
+export async function extractWorkspaceBackupFile(
+  archive: Uint8Array,
+  file: WorkspaceBackupFile,
+): Promise<Uint8Array> {
+  const chunks: Buffer[] = [];
+  await scanWorkspaceBackupFile(archive, file, (chunk) => {
+    chunks.push(Buffer.from(chunk));
+  });
+  return new Uint8Array(Buffer.concat(chunks, file.sizeBytes));
+}
+
+/**
+ * Validates the complete gzip tar before returning a backpressure-aware stream
+ * for one manifest-bound regular file.
+ */
+export async function streamWorkspaceBackupFile(
+  archive: Uint8Array,
+  file: WorkspaceBackupFile,
+): Promise<ReadableStream<Uint8Array>> {
+  // This is intentionally a separate first pass. A single-pass response could
+  // expose the requested entry before a malformed or duplicate entry later in
+  // the tar is discovered. Buffering the requested file until validation would
+  // instead make API memory usage proportional to a potentially multi-GiB
+  // manifest entry, so the second decompression is the fail-closed tradeoff.
+  await scanWorkspaceBackupFile(archive, file);
+  let currentEntry: { pause(): unknown; resume(): unknown } | undefined;
+  let parser: { abort(error: Error): unknown } | undefined;
+  let settled = false;
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      const tar = listTar({
+        gzip: true,
+        noResume: true,
+        strict: true,
+        onReadEntry(entry) {
+          const path = entry.path.startsWith("./")
+            ? entry.path.slice(2)
+            : entry.path;
+          if (path !== file.path) {
+            entry.resume();
+            return;
+          }
+          currentEntry = entry;
+          entry.on("data", (chunk: Buffer) => {
+            if (settled) return;
+            controller.enqueue(Uint8Array.from(chunk));
+            if ((controller.desiredSize ?? 1) <= 0) entry.pause();
+          });
+          entry.once("end", () => {
+            if (settled) return;
+            settled = true;
+            currentEntry = undefined;
+            controller.close();
+          });
+          entry.once("error", (error: Error) => {
+            if (settled) return;
+            settled = true;
+            controller.error(error);
+          });
+          entry.resume();
+        },
+      });
+      parser = tar;
+      tar.once("error", (error: Error) => {
+        if (settled) return;
+        settled = true;
+        controller.error(error);
+      });
+      tar.once("end", () => {
+        if (settled) return;
+        settled = true;
+        controller.error(
+          new Error("Workspace backup file is missing from its archive"),
+        );
+      });
+      queueMicrotask(() => tar.end(Buffer.from(archive)));
+    },
+    pull() {
+      currentEntry?.resume();
+    },
+    cancel() {
+      settled = true;
+      parser?.abort(new Error("Workspace backup file stream was cancelled"));
+    },
+  });
 }
 
 export interface WorkspaceBackupIdentity extends TenantContext {
@@ -1004,7 +1180,7 @@ function tenantMetadata(
   return {
     "oao-organization-id": input.tenant.organizationId,
     "oao-project-id": input.tenant.projectId,
-    "oao-logical-key": input.key,
+    "oao-logical-key": encodeURIComponent(input.key),
   };
 }
 

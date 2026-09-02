@@ -867,6 +867,14 @@ Open a session and use:
   GitHub Flavored Markdown, including lists, emphasis, links, code, task lists,
   and tables. Raw HTML is not rendered. A persistent sandbox in `running` state
   is ready for the session and is not shown as pending work.
+- The session sidebar for the Agent name and exact pinned Agent version used by
+  the session, alongside its model, Tools, Skills, files, cost, and token usage.
+  Files present in the latest persistent workspace backup can be downloaded
+  through the secured Files API without reopening the Daytona sandbox.
+- The sessions overview and compact session facts for the latest run's elapsed
+  time. The overview boxes active timers in a red live status badge with a play
+  icon, and the detail view colors its active counter red as well. The timer
+  updates every second while the run is active and freezes when the run settles.
 - The message composer for another durable run after the latest run settles.
   Select **Send** or press <kbd>Command</kbd>+<kbd>Enter</kbd>; Enter by itself
   adds a new line. On viewports 1024px wide or narrower, or 820px tall or

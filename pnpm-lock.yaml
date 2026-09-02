@@ -208,6 +208,9 @@ importers:
       '@oao/provider-credentials':
         specifier: workspace:*
         version: link:../provider-credentials
+      tar:
+        specifier: 7.5.22
+        version: 7.5.22
 
   packages/auth-core:
     dependencies:

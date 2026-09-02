@@ -1046,6 +1046,34 @@ export const RunFileSchema = v.object({
   sha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
   createdAt: TimestampSchema,
 });
+export const SessionWorkspaceFileSchema = v.object({
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(255)),
+  path: v.pipe(
+    v.string(),
+    v.minLength(1),
+    v.maxLength(1_024),
+    v.check(
+      (value) =>
+        !value.startsWith("/") &&
+        value
+          .split("/")
+          .every((segment) => segment && segment !== "." && segment !== ".."),
+      "path must be a safe relative workspace path",
+    ),
+  ),
+  sizeBytes: v.pipe(
+    v.number(),
+    v.integer(),
+    v.minValue(0),
+    v.maxValue(2 * 1024 * 1024 * 1024),
+  ),
+});
+export const SessionWorkspaceFileListSchema = v.object({
+  data: v.array(SessionWorkspaceFileSchema),
+  generation: v.nullable(v.pipe(v.number(), v.integer(), v.minValue(1))),
+  backedUpAt: v.nullable(TimestampSchema),
+  lastRunId: v.nullable(IdSchema),
+});
 export const MessageSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
@@ -1621,6 +1649,12 @@ export type RunState = v.InferOutput<typeof RunStateSchema>;
 export type Run = v.InferOutput<typeof RunSchema>;
 export type Message = v.InferOutput<typeof MessageSchema>;
 export type RunFile = v.InferOutput<typeof RunFileSchema>;
+export type SessionWorkspaceFile = v.InferOutput<
+  typeof SessionWorkspaceFileSchema
+>;
+export type SessionWorkspaceFileList = v.InferOutput<
+  typeof SessionWorkspaceFileListSchema
+>;
 export type ToolCall = v.InferOutput<typeof ToolCallSchema>;
 export type ToolOwner = v.InferOutput<typeof ToolOwnerSchema>;
 export type ToolStage = v.InferOutput<typeof ToolStageSchema>;

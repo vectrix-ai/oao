@@ -55,6 +55,7 @@ import type {
 } from "../api/types";
 import {
   Button,
+  Chip,
   ConfirmDialog,
   Dialog,
   EmptyState,
@@ -232,6 +233,73 @@ interface SessionTreeRow {
   readonly depth: number;
 }
 
+function runIsLive(
+  session: Pick<SessionSummary, "completedAt" | "status">,
+): boolean {
+  return (
+    session.completedAt === null && !settledStates.includes(session.status)
+  );
+}
+
+function useLiveClock(enabled: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    const update = () => setNow(Date.now());
+    update();
+    const interval = window.setInterval(update, 1_000);
+    return () => window.clearInterval(interval);
+  }, [enabled]);
+  return now;
+}
+
+function sessionElapsed(
+  session: Pick<SessionSummary, "completedAt" | "startedAt" | "status">,
+  now: number,
+): string | null {
+  if (session.startedAt === null) return null;
+  const startedAt = Date.parse(session.startedAt);
+  const endedAt = session.completedAt
+    ? Date.parse(session.completedAt)
+    : runIsLive(session)
+      ? now
+      : null;
+  if (
+    !Number.isFinite(startedAt) ||
+    endedAt === null ||
+    !Number.isFinite(endedAt) ||
+    endedAt < startedAt
+  )
+    return null;
+  return formatCompactDuration(endedAt - startedAt);
+}
+
+function SessionElapsed({
+  session,
+  now,
+}: {
+  readonly session: SessionSummary;
+  readonly now: number;
+}) {
+  const live = runIsLive(session);
+  const elapsed = sessionElapsed(session, now);
+  if (elapsed === null) return <>—</>;
+  if (live)
+    return (
+      <span
+        className="session-elapsed-live"
+        role="timer"
+        aria-label={`Elapsed time ${elapsed}`}
+      >
+        <Chip tone="success" live showDot={false}>
+          <Play size={9} fill="currentColor" aria-hidden="true" />
+          {elapsed} live
+        </Chip>
+      </span>
+    );
+  return <span className="mono">{elapsed}</span>;
+}
+
 /**
  * Keep the API's activity ordering for roots and siblings while placing every
  * visible delegated session immediately after its visible coordinator.
@@ -305,6 +373,7 @@ export function SessionsPage() {
   const rows = selectedAgent
     ? query.data?.data.filter((session) => session.agentId === selectedAgent)
     : query.data?.data;
+  const overviewNow = useLiveClock(rows?.some(runIsLive) ?? false);
   const treeRows = sessionTreeRows(rows ?? []);
   const filtered = Boolean(search || status || date || selectedAgent);
 
@@ -414,6 +483,7 @@ export function SessionsPage() {
             <tr>
               <th>Session</th>
               <th>Status</th>
+              <th className="numeric">Elapsed</th>
               <th>Agent</th>
               <th className="numeric">Input</th>
               <th className="numeric">Output</th>
@@ -465,6 +535,9 @@ export function SessionsPage() {
                 </td>
                 <td>
                   <StatusChip value={session.status} />
+                </td>
+                <td className="numeric">
+                  <SessionElapsed session={session} now={overviewNow} />
                 </td>
                 <td>{session.agentName}</td>
                 <td className="numeric">{formatNumber(session.inputTokens)}</td>
@@ -929,9 +1002,9 @@ function SessionDetailView({
 
 /** One dense strip of session facts, so the transcript starts near the top. */
 function SessionFacts({ session }: { readonly session: SessionDetail }) {
-  const elapsed = session.completedAt
-    ? Date.parse(session.completedAt) - Date.parse(session.startedAt)
-    : null;
+  const liveElapsed = runIsLive(session);
+  const now = useLiveClock(liveElapsed);
+  const formattedElapsed = sessionElapsed(session, now);
   return (
     <div className="session-facts">
       <span className="fact">
@@ -982,10 +1055,20 @@ function SessionFacts({ session }: { readonly session: SessionDetail }) {
           <span className="fact-sub">attempt {session.attempt}</span>
         ) : null}
       </span>
-      {elapsed !== null && elapsed >= 0 ? (
-        <span className="fact" title="Elapsed time of the latest run">
+      {formattedElapsed !== null ? (
+        <span
+          className={`fact${liveElapsed ? " session-elapsed-live" : ""}`}
+          title="Elapsed time of the latest run"
+          {...(liveElapsed
+            ? {
+                role: "timer",
+                "aria-label": `Elapsed time ${formattedElapsed}`,
+              }
+            : {})}
+        >
           <Timer size={13} aria-hidden="true" />
-          {formatCompactDuration(elapsed)}
+          <span className="mono">{formattedElapsed}</span>
+          {liveElapsed ? <span className="fact-sub">live</span> : null}
         </span>
       ) : null}
       <span className="fact" title="Input / output tokens">
@@ -1225,6 +1308,27 @@ function SessionSidebar({
   readonly session: SessionDetail;
   readonly onClose: () => void;
 }) {
+  const api = useApi();
+  const notify = useToast();
+  const downloadFile = useMutation({
+    mutationFn: async (file: SessionDetail["workspaceFiles"][number]) => ({
+      file,
+      bytes: await api.getSessionFile(session.id, file.path),
+    }),
+    onSuccess: ({ file, bytes }) => {
+      const buffer = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(buffer).set(bytes);
+      const blob = new Blob([buffer], { type: "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = file.name;
+      link.click();
+      URL.revokeObjectURL(url);
+      notify(`${file.name} downloaded.`);
+    },
+    onError: () => notify("The backed-up file could not be downloaded."),
+  });
   const points = costSeries(session);
   const isUsed = skillWasUsed(session);
   const usedCount = session.skills.filter(isUsed).length;
@@ -1269,6 +1373,10 @@ function SessionSidebar({
           <dd>
             <Link to={`/agents/${session.agentId}`}>{session.agentName}</Link>
           </dd>
+        </div>
+        <div>
+          <dt>Agent version</dt>
+          <dd>v{session.agentVersion}</dd>
         </div>
         {session.model ? (
           <div>
@@ -1416,6 +1524,18 @@ function SessionSidebar({
                       ? "Backed up"
                       : "Sandbox only"}
                 </span>
+                {file.backedUp ? (
+                  <IconButton
+                    label={`Download ${file.name}`}
+                    disabled={
+                      downloadFile.isPending &&
+                      downloadFile.variables?.path === file.path
+                    }
+                    onClick={() => downloadFile.mutate(file)}
+                  >
+                    <Download size={13} aria-hidden="true" />
+                  </IconButton>
+                ) : null}
               </li>
             ))}
           </ul>

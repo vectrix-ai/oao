@@ -9,6 +9,26 @@ function prefixPath(prefix: string): string {
   return `/${prefix.replace(/^\/+|\/+$/gu, "")}`;
 }
 
+function relativeFilePath(value: string): string {
+  if (value.length === 0 || value.length > 1_024 || value.startsWith("/"))
+    throw new TypeError("File path must be a safe relative path");
+  const segments = value.split("/");
+  if (
+    segments.some(
+      (entry) =>
+        !entry ||
+        entry === "." ||
+        entry === ".." ||
+        [...entry].some((character) => {
+          const codePoint = character.codePointAt(0) ?? 0;
+          return codePoint < 32 || codePoint === 127;
+        }),
+    )
+  )
+    throw new TypeError("File path must be a safe relative path");
+  return segments.map(segment).join("/");
+}
+
 export function createRoutes(apiPrefix = "/v1") {
   const api = prefixPath(apiPrefix);
   const project = (projectId: string) =>
@@ -122,6 +142,10 @@ export function createRoutes(apiPrefix = "/v1") {
     sessions: (projectId: string) => `${project(projectId)}/sessions`,
     session: (projectId: string, sessionId: string) =>
       `${project(projectId)}/sessions/${segment(sessionId)}`,
+    sessionFiles: (projectId: string, sessionId: string) =>
+      `${project(projectId)}/sessions/${segment(sessionId)}/files`,
+    sessionFile: (projectId: string, sessionId: string, path: string) =>
+      `${project(projectId)}/sessions/${segment(sessionId)}/files/${relativeFilePath(path)}`,
     sessionRuns: (projectId: string, sessionId: string) =>
       `${project(projectId)}/sessions/${segment(sessionId)}/runs`,
     delegation,
