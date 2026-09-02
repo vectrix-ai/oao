@@ -188,6 +188,43 @@ when the exact sandbox path is also present in the archive's object-storage
 manifest. This is an authoritative path comparison rather than an inference
 from shell command text.
 
+Every **Backed up** file also has a download action. It calls the authenticated
+session Files API, not Daytona and not a provider-specific public URL. The API
+reads the latest verified workspace archive from the persistent storage
+provider bound to that workspace.
+
+## Retrieve model-created files
+
+For the complete list, download, authentication, and error contracts, see the
+dedicated [Files API reference](/reference/files-api).
+
+Ask the model to return the relative path of the file it created, for example
+`output/result.csv`. After the run completes and its workspace backup succeeds,
+the caller can use the known session ID:
+
+```ts
+import { writeFile } from "node:fs/promises";
+
+const files = await client.listSessionFiles(projectId, sessionId);
+const result = files.data.find((file) => file.path === "output/result.csv");
+if (!result) throw new Error("The file was not persisted");
+
+const download = await client.downloadSessionFile(
+  projectId,
+  sessionId,
+  result.path,
+);
+await writeFile(result.name, download.bytes);
+```
+
+The route is
+`GET /projects/{projectId}/sessions/{sessionId}/files/{relativePath}` and
+requires `session:read`. The session, its shared workspace owner, and the
+storage-provider object are resolved inside the caller's organization and
+project. The API verifies the persistent archive and streams the requested
+regular file without writing it to the API host filesystem. It never reaches
+back into the live or stopped Daytona sandbox.
+
 ## Runtime and event behavior
 
 Before the first model turn, the runtime downloads the original object from the
