@@ -1,0 +1,125 @@
+---
+title: "Files API"
+description: "List and download files from a session's latest persistent workspace backup."
+---
+
+The Files API makes every regular file in a session's latest completed
+workspace backup retrievable by session ID and relative file path. It reads
+the archive and manifest from the workspace's configured persistent storage
+provider. It never reads files from a live or stopped Daytona sandbox.
+
+## Authentication and tenant boundary
+
+Both endpoints require `session:read`:
+
+- A server integration sends its organization-scoped OAO API key as
+  `Authorization: Bearer $OAO_API_KEY`. The project in the URL must belong to
+  that key's organization.
+- A signed-in Console user is authorized through the normal HTTP-only browser
+  session and must resolve to the requested project.
+
+The API tenant-filters the session, shared workspace owner, backup record, and
+storage provider. Knowing a session ID or file path from another organization
+does not grant access.
+
+## List files
+
+```http
+GET /v1/projects/{projectId}/sessions/{sessionId}/files
+```
+
+The response contains the regular files recorded by the latest verified
+workspace-backup manifest:
+
+```json
+{
+  "data": [
+    {
+      "name": "result.csv",
+      "path": "output/result.csv",
+      "sizeBytes": 42
+    }
+  ],
+  "generation": 3,
+  "backedUpAt": "2026-09-01T10:00:00.000Z",
+  "lastRunId": "b1111111-1111-4111-8111-111111111111"
+}
+```
+
+A session without a completed backup returns `data: []` and `null` for the
+three backup fields.
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  "$OAO_API_URL/v1/projects/$OAO_PROJECT_ID/sessions/$OAO_SESSION_ID/files"
+```
+
+## Download a file
+
+```http
+GET /v1/projects/{projectId}/sessions/{sessionId}/files/{relativePath}
+```
+
+Use the exact `path` returned by the list endpoint. Encode every path segment
+independently while preserving `/` separators.
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  --output result.csv \
+  "$OAO_API_URL/v1/projects/$OAO_PROJECT_ID/sessions/$OAO_SESSION_ID/files/output/result.csv"
+```
+
+The response uses `application/octet-stream` and includes
+`Content-Disposition: attachment`, `Content-Length`, `Cache-Control: no-store`,
+and `X-Content-Type-Options: nosniff`.
+
+## JavaScript SDK
+
+```ts
+import { writeFile } from "node:fs/promises";
+import { OaoClient } from "@oao/sdk-js";
+
+const client = new OaoClient({
+  baseUrl: process.env.OAO_API_URL!,
+  apiKey: process.env.OAO_API_KEY!,
+});
+
+const listed = await client.listSessionFiles(projectId, sessionId);
+const result = listed.data.find((file) => file.path === "output/result.csv");
+if (!result) throw new Error("The file was not persisted");
+
+const downloaded = await client.downloadSessionFile(
+  projectId,
+  sessionId,
+  result.path,
+);
+await writeFile(result.name, downloaded.bytes);
+```
+
+## Shared workspaces and integrity
+
+Delegated child sessions resolve through the coordinator's shared workspace,
+so the same persistent backup is available through either session ID when the
+caller is authorized. Before sending bytes, OAO verifies the manifest binding,
+archive length, SHA-256 digest, tar structure, entry type, and declared file
+size. Extraction is streamed without writing the requested file to the API
+host filesystem.
+
+The current API exposes only the latest successful backup generation. It does
+not provide historical generations, directory downloads, or byte ranges.
+
+## Errors
+
+| Status | Meaning                                                                                    |
+| ------ | ------------------------------------------------------------------------------------------ |
+| `400`  | The requested relative path is unsafe or malformed.                                        |
+| `401`  | Authentication is missing or invalid.                                                      |
+| `403`  | The caller lacks `session:read` or cannot access the project.                              |
+| `404`  | The session or exact manifest path does not exist.                                         |
+| `409`  | The persistent backup, manifest, provider, or integrity binding is unavailable or invalid. |
+
+See [Authentication](/reference/authentication) for API-key creation and
+cross-project organization behavior, and [Send files to an agent](/integrations/files)
+for the separate upload contract.

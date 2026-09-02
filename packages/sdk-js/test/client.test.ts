@@ -34,7 +34,65 @@ test("route builders scope resources to a project and allow a custom prefix", ()
     routes.agentVersion("project/one", "agent one", "version/one"),
     "/platform/v2/projects/project%2Fone/agents/agent%20one/versions/version%2Fone",
   );
+  assert.equal(
+    routes.sessionFile(
+      "project/one",
+      "session one",
+      "output/quarterly report.csv",
+    ),
+    "/platform/v2/projects/project%2Fone/sessions/session%20one/files/output/quarterly%20report.csv",
+  );
+  assert.throws(() =>
+    routes.sessionFile("project/one", "session one", "../secret.txt"),
+  );
   assert.equal(routes.context, "/platform/v2/context");
+});
+
+test("client lists and downloads persisted session workspace files", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    apiKey: "oao_test_key",
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      requests.push(request);
+      if (request.url.endsWith("/files"))
+        return Response.json({
+          data: [
+            { name: "result.csv", path: "output/result.csv", sizeBytes: 4 },
+          ],
+          generation: 2,
+          backedUpAt: "2026-09-01T10:00:00.000Z",
+          lastRunId: "00000000-0000-4000-8000-000000000001",
+        });
+      return new Response("a,b\n", {
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-length": "4",
+        },
+      });
+    },
+  });
+
+  const listed = await client.listSessionFiles("project-1", "session-1");
+  const downloaded = await client.downloadSessionFile(
+    "project-1",
+    "session-1",
+    "output/result.csv",
+  );
+
+  assert.equal(listed.data[0]?.path, "output/result.csv");
+  assert.equal(Buffer.from(downloaded.bytes).toString("utf8"), "a,b\n");
+  assert.equal(downloaded.name, "result.csv");
+  assert.equal(
+    requests[1]?.url,
+    "https://api.example.test/v1/projects/project-1/sessions/session-1/files/output/result.csv",
+  );
+  assert.equal(
+    requests[1]?.headers.get("authorization"),
+    "Bearer oao_test_key",
+  );
+  assert.equal(requests[1]?.headers.get("accept"), "application/octet-stream");
 });
 
 test("client reads project context", async () => {

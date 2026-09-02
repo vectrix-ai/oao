@@ -68,6 +68,10 @@
         ]
       },
       {
+        "group": "Files API",
+        "pages": ["reference/files-api"]
+      },
+      {
         "group": "Reference",
         "pages": [
           "reference/authentication",

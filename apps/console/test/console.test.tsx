@@ -1,5 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -1048,7 +1049,22 @@ describe("management console", () => {
 
   it("shows reasoning and sandbox contents directly in the transcript", async () => {
     const user = userEvent.setup();
+    const clicked = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+    globalThis.URL.createObjectURL = vi.fn(() => "blob:workspace-file");
+    globalThis.URL.revokeObjectURL = vi.fn();
     class SandboxActivityApi extends DemoConsoleApi {
+      readonly fileRequests: {
+        readonly sessionId: string;
+        readonly path: string;
+      }[] = [];
+
+      override async getSessionFile(sessionId: string, path: string) {
+        this.fileRequests.push({ sessionId, path });
+        return new TextEncoder().encode("id,name\n1,Alice\n");
+      }
+
       override async getSession(id: string) {
         const session = await super.getSession(id);
         return {
@@ -1066,7 +1082,7 @@ describe("management console", () => {
             },
             {
               name: "test.csv",
-              path: "/root/test.csv",
+              path: "test.csv",
               backedUp: true,
               backedUpAt: "2026-08-20T19:21:49.000Z",
             },
@@ -1118,10 +1134,8 @@ describe("management console", () => {
       }
     }
 
-    renderConsole(
-      "/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V",
-      new SandboxActivityApi({ eventDelayMs: 60_000 }),
-    );
+    const api = new SandboxActivityApi({ eventDelayMs: 60_000 });
+    renderConsole("/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V", api);
     const reasoning = await screen.findByRole("button", {
       name: /^Reasoning/u,
     });
@@ -1181,10 +1195,26 @@ describe("management console", () => {
       "input.xlsx — open in storage provider",
     );
     expect(within(panel).getByText("Uploaded + backed up")).toBeInTheDocument();
-    const sandboxFile = within(panel).getByText("test.csv");
+    const sandboxFile = within(panel)
+      .getAllByText("test.csv")
+      .find((element) => element.tagName === "STRONG");
+    expect(sandboxFile).toBeDefined();
+    if (!sandboxFile) throw new Error("Sandbox filename was not rendered");
     expect(sandboxFile).toHaveAttribute("title", "test.csv");
     expect(sandboxFile.closest("a")).toBeNull();
     expect(within(panel).getByText("Backed up")).toBeInTheDocument();
+    await user.click(
+      within(panel).getByRole("button", { name: "Download test.csv" }),
+    );
+    await vi.waitFor(() =>
+      expect(api.fileRequests).toEqual([
+        {
+          sessionId: "session_01J5QTXE7W9M2R6C4A8K3N1P0V",
+          path: "test.csv",
+        },
+      ]),
+    );
+    expect(clicked).toHaveBeenCalled();
   });
 
   it("renders message Markdown without executing raw HTML", async () => {
@@ -1420,6 +1450,45 @@ describe("management console", () => {
     expect(document.querySelector(".minimap-tip")).toBeNull();
   });
 
+  it("updates the latest run elapsed time while the agent is running", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T07:02:20.000Z"));
+    try {
+      class RunningSessionApi extends DemoConsoleApi {
+        override async getSession(id: string) {
+          const session = await super.getSession(id);
+          return {
+            ...session,
+            status: "running" as const,
+            startedAt: "2026-08-20T07:02:11.000Z",
+            completedAt: null,
+          };
+        }
+      }
+
+      renderConsole(
+        "/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V",
+        new RunningSessionApi({ eventDelayMs: 60_000 }),
+      );
+      await vi.waitFor(() => {
+        const timer = screen.getByRole("timer", {
+          name: /^Elapsed time 9\.\d+s$/u,
+        });
+        expect(timer).toHaveTextContent(/9\.\d+slive/u);
+        expect(timer).toHaveClass("fact", "session-elapsed-live");
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      expect(
+        screen.getByRole("timer", { name: /^Elapsed time 11\.\d+s$/u }),
+      ).toHaveTextContent(/11\.\d+slive/u);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows the session panel with details, cost chart, and usage", async () => {
     const user = userEvent.setup();
     renderConsole("/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V");
@@ -1432,6 +1501,8 @@ describe("management console", () => {
     expect(
       within(panel).getByRole("link", { name: "Support operator" }),
     ).toBeInTheDocument();
+    expect(within(panel).getByText("Agent version")).toBeInTheDocument();
+    expect(within(panel).getByText("v3")).toBeInTheDocument();
     expect(within(panel).getByText("$0.0184")).toBeInTheDocument();
     expect(within(panel).getByText("2,841")).toBeInTheDocument();
     expect(within(panel).getByText("Cache read tokens")).toBeInTheDocument();
@@ -1586,6 +1657,71 @@ describe("management console", () => {
     ).not.toHaveLength(0);
     expect(await screen.findByText("renewal.eml")).toBeInTheDocument();
     expect(screen.getByText(/message\/rfc822/u)).toBeInTheDocument();
+  });
+
+  it("shows live elapsed time for a running session in the overview", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T07:02:20.000Z"));
+    try {
+      class RunningSessionsApi extends DemoConsoleApi {
+        override async listSessions(
+          filters: Parameters<DemoConsoleApi["listSessions"]>[0],
+        ) {
+          const page = await super.listSessions(filters);
+          return {
+            ...page,
+            data: page.data.map((session, index) =>
+              index === 0
+                ? {
+                    ...session,
+                    status: "running" as const,
+                    startedAt: "2026-08-20T07:02:11.000Z",
+                    completedAt: null,
+                  }
+                : session,
+            ),
+          };
+        }
+      }
+
+      renderConsole(
+        "/sessions",
+        new RunningSessionsApi({ eventDelayMs: 60_000 }),
+      );
+      const table = await vi.waitFor(() =>
+        screen.getByRole("region", { name: "Sessions table" }),
+      );
+      expect(
+        within(table).getByRole("columnheader", { name: "Elapsed" }),
+      ).toBeInTheDocument();
+      const sessionLink = within(table).getByRole("link", {
+        name: /Refund request · Northwind #4831/u,
+      });
+      const row = sessionLink.closest("tr");
+      expect(row).not.toBeNull();
+      if (!row) throw new Error("Running session row was not rendered");
+      const timer = within(row).getByRole("timer", {
+        name: /^Elapsed time 9\.\d+s$/u,
+      });
+      expect(timer).toHaveTextContent(/9\.\d+s live/u);
+      expect(timer).toHaveClass("session-elapsed-live");
+      expect(timer.firstElementChild).toHaveClass(
+        "chip",
+        "chip--success",
+        "chip--live",
+      );
+      expect(timer.querySelector(".lucide-play")).toBeInTheDocument();
+      expect(timer.querySelector(".dot")).not.toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      expect(
+        within(row).getByRole("timer", { name: /^Elapsed time 11\.\d+s$/u }),
+      ).toHaveTextContent(/11\.\d+s live/u);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("groups a delegated child session directly beneath its coordinator", async () => {
