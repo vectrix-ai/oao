@@ -44,10 +44,12 @@ and releases that same digest to both workloads. The API runs the image's
 default `api` command; the worker pool uses its `worker` command.
 
 The release workflow changes only each workload's image field. It verifies the
-worker-pool image, API revision digest, and private API `/readyz` response with
-a short-lived Google OIDC identity token. It records the previous immutable
-image references in the workflow summary for a manual rollback. A failed Cloud
-Run revision does not replace the last ready revision.
+image belongs to this repository, waits for both new revisions to become ready,
+checks their digests, and calls the private API `/readyz` endpoint with a
+short-lived Google OIDC identity token. It records the previous immutable image
+references and automatically restores both workloads when a later release step
+fails. An incomplete rollback is surfaced as an explicit workflow error for
+operator intervention.
 
 To redeploy a known-good build, run **Deploy GCP dev** manually and provide its
 full digest reference, for example:
