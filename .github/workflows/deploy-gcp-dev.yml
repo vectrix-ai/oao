@@ -207,6 +207,13 @@ jobs:
           test "$api_image" = "$IMAGE_REF"
 
           api_url="$(gcloud run services describe "$CLOUD_RUN_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.url)')"
-          curl --fail --retry 6 --retry-all-errors --retry-delay 5 "${api_url}/readyz"
+          api_id_token="$(gcloud auth print-identity-token --audiences="$api_url")"
+          if [ -z "$api_id_token" ]; then
+            echo "::error::Unable to mint an OIDC identity token for the private API"
+            exit 1
+          fi
+          curl --fail --retry 6 --retry-all-errors --retry-delay 5 \
+            --header "X-Serverless-Authorization: Bearer $api_id_token" \
+            "${api_url}/readyz"
 
           echo "Released \`$IMAGE_REF\`" >> "$GITHUB_STEP_SUMMARY"

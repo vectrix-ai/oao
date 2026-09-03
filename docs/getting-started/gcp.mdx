@@ -44,10 +44,10 @@ and releases that same digest to both workloads. The API runs the image's
 default `api` command; the worker pool uses its `worker` command.
 
 The release workflow changes only each workload's image field. It verifies the
-worker-pool image, API revision digest, and public API `/readyz` response. It
-records the previous immutable image references in the workflow summary for a
-manual rollback. A failed Cloud Run revision does not replace the last ready
-revision.
+worker-pool image, API revision digest, and private API `/readyz` response with
+a short-lived Google OIDC identity token. It records the previous immutable
+image references in the workflow summary for a manual rollback. A failed Cloud
+Run revision does not replace the last ready revision.
 
 To redeploy a known-good build, run **Deploy GCP dev** manually and provide its
 full digest reference, for example:
@@ -60,24 +60,18 @@ Use only an image digest, never a mutable tag such as `latest`.
 
 ## One-time database and identity setup
 
-Before creating the workloads, take `expected_api_uri` from Terraform and
-configure the WorkOS staging application with these endpoints:
-
-```text
-Callback: ORIGIN/v1/auth/callback
-Sign-out: ORIGIN
-Webhook: ORIGIN/v1/auth/workos/webhook
-```
-
-Creating the webhook produces the signing secret required by
-`oao-workos-webhook-secret`. Add it and the other five runtime payloads as
-Secret Manager versions outside Terraform.
+The DEV pilot keeps the Cloud Run service private and uses OAO development
+auth behind Cloud Run IAM while the team evaluates IAP and WorkOS. Grant only
+explicit callers `roles/run.invoker`; callers must send a Google OIDC identity
+token whose audience is the Cloud Run service URL in the
+`X-Serverless-Authorization` header. OAO keeps the standard `Authorization`
+header for its own API keys. Browser login is deferred until an identity
+provider is selected.
 
 Generate `oao-credential-encryption-key` as the canonical base64 encoding of
-exactly 32 random bytes (`openssl rand -base64 32`). Generate a separate
-`oao-workos-cookie-password` with at least 32 random characters; the same
-command produces a suitable value. Never reuse either value or commit their
-payloads.
+exactly 32 random bytes (`openssl rand -base64 32`). Generate a separate random
+`oao-api-key-pepper`. Store both only as Secret Manager versions outside
+Terraform and never commit their payloads.
 
 For this disposable DEV pilot only, set a password on Cloud SQL's built-in
 `postgres` user outside Terraform. Both application processes auto-migrate, so
@@ -110,14 +104,6 @@ pnpm --filter @oao/api seed:dev
 
 The seed creates organization `00000000-0000-4000-8000-000000000001`, project
 `00000000-0000-4000-8000-000000000002`, and owner principal
-`00000000-0000-4000-8000-000000000003`. Link that principal to the verified
-WorkOS staging user and organization:
-
-```sh
-DATABASE_URL=postgresql://postgres:ENCODED_PASSWORD@127.0.0.1:5432/oao \
-OAO_ORGANIZATION_ID=00000000-0000-4000-8000-000000000001 \
-OAO_PROJECT_ID=00000000-0000-4000-8000-000000000002 \
-OAO_PRINCIPAL_ID=00000000-0000-4000-8000-000000000003 \
-WORKOS_USER_ID=user_... WORKOS_ORGANIZATION_ID=org_... \
-pnpm --filter @oao/api provision:workos
-```
+`00000000-0000-4000-8000-000000000003`. All IAM-authorized callers share that
+development identity during the pilot; this is not suitable for production or
+per-user auditing.
