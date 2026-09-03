@@ -67,6 +67,10 @@ jobs:
       - name: Validate delivery configuration
         run: |
           set -eu
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::DEV images may be built only from the OAO main branch"
+            exit 1
+          fi
           missing=""
           for name in GCP_PROJECT_ID GCP_REGION GCP_ARTIFACT_REGISTRY_REPOSITORY GCP_WORKLOAD_IDENTITY_PROVIDER GCP_RELEASE_SERVICE_ACCOUNT; do
             eval "value=\${$name:-}"
@@ -97,6 +101,7 @@ jobs:
         id: image
         env:
           IMAGE: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GCP_ARTIFACT_REGISTRY_REPOSITORY }}/${{ env.OAO_IMAGE_NAME }}
+          RELEASE_ENABLED: ${{ vars.OAO_DEV_RELEASE_ENABLED || 'false' }}
           TAG: ${{ github.sha }}
         run: |
           set -eu
@@ -105,6 +110,15 @@ jobs:
           if ! printf '%s' "$digest" | grep -Eq '^sha256:[[:xdigit:]]{64}$'; then
             echo "::error::Artifact Registry did not return an image digest"
             exit 1
+          fi
+          if [ "$RELEASE_ENABLED" != "true" ]; then
+            # Seed the marker before the DEV workloads exist. Once releases are
+            # enabled, it advances only after both workloads pass readiness.
+            gcloud artifacts docker tags add \
+              "${IMAGE}@${digest}" \
+              "${IMAGE}:dev-bootstrap" \
+              --project "$GCP_PROJECT_ID" \
+              --quiet
           fi
           echo "image_ref=${IMAGE}@${digest}" >> "$GITHUB_OUTPUT"
           echo "Built \`${IMAGE}@${digest}\`" >> "$GITHUB_STEP_SUMMARY"
@@ -130,6 +144,10 @@ jobs:
       - name: Validate release configuration
         run: |
           set -eu
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::DEV images may be released only from the OAO main branch"
+            exit 1
+          fi
           missing=""
           for name in GCP_PROJECT_ID GCP_REGION GCP_WORKLOAD_IDENTITY_PROVIDER GCP_RELEASE_SERVICE_ACCOUNT CLOUD_RUN_SERVICE CLOUD_RUN_WORKER_POOL IMAGE_REF; do
             eval "value=\${$name:-}"
@@ -331,6 +349,12 @@ jobs:
           curl --fail --retry 6 --retry-all-errors --retry-delay 5 \
             --header "X-Serverless-Authorization: Bearer $api_id_token" \
             "${api_url}/readyz"
+
+          gcloud artifacts docker tags add \
+            "$IMAGE_REF" \
+            "${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GCP_ARTIFACT_REGISTRY_REPOSITORY}/${OAO_IMAGE_NAME}:dev-bootstrap" \
+            --project "$GCP_PROJECT_ID" \
+            --quiet
 
           trap - EXIT
           echo "Released \`$IMAGE_REF\`" >> "$GITHUB_STEP_SUMMARY"
