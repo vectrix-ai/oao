@@ -118,7 +118,7 @@ jobs:
       }}
     needs: [check, build]
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     environment: oao-dev
     permissions:
       contents: read
@@ -161,6 +161,13 @@ jobs:
           api_previous="$(gcloud run services describe "$CLOUD_RUN_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(spec.template.spec.containers[0].image)')"
           worker_previous="$(gcloud run worker-pools describe "$CLOUD_RUN_WORKER_POOL" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(spec.template.spec.containers[0].image)')"
           expected_digest="${IMAGE_REF##*@}"
+          api_previous_digest="${api_previous##*@}"
+          worker_previous_digest="${worker_previous##*@}"
+          if ! printf '%s' "$api_previous_digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || \
+            ! printf '%s' "$worker_previous_digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::Current workload images must use immutable SHA-256 digests before release"
+            exit 1
+          fi
           {
             echo "## Image rollback references"
             echo
@@ -168,32 +175,135 @@ jobs:
             echo "- Worker pool: \`$worker_previous\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+          wait_for_worker_digest() {
+            local target_digest=$1
+            local phase=$2
+            local worker_ready_revision=""
+            local worker_status generation observed ready_status created_revision ready_revision
+            local worker_image_digest
+            local attempt
+            for attempt in $(seq 1 60); do
+              if ! worker_status="$(gcloud run worker-pools describe "$CLOUD_RUN_WORKER_POOL" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format=json)"; then
+                echo "::error::${phase} could not read worker-pool status"
+                return 1
+              fi
+              read -r generation observed ready_status created_revision ready_revision <<EOF
+            $(python3 -c 'import json, sys; data = json.load(sys.stdin); status = data.get("status", {}); ready = next((item.get("status", "") for item in status.get("conditions", []) if item.get("type") == "Ready"), ""); print(data.get("metadata", {}).get("generation", ""), status.get("observedGeneration", ""), ready, status.get("latestCreatedRevisionName", ""), status.get("latestReadyRevisionName", ""))' <<<"$worker_status")
+          EOF
+
+              if [ -n "$generation" ] && [ "$generation" = "$observed" ]; then
+                if [ "$ready_status" = "False" ]; then
+                  echo "::error::${phase} worker-pool revision failed to become ready"
+                  gcloud run worker-pools describe "$CLOUD_RUN_WORKER_POOL" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='yaml(status.conditions)' || true
+                  return 1
+                fi
+                if [ "$ready_status" = "True" ] && [ -n "$created_revision" ] && [ "$created_revision" = "$ready_revision" ]; then
+                  worker_ready_revision="$ready_revision"
+                  break
+                fi
+              fi
+
+              if [ "$attempt" -eq 60 ]; then
+                echo "::error::${phase} timed out waiting for the worker pool to reconcile"
+                gcloud run worker-pools describe "$CLOUD_RUN_WORKER_POOL" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='yaml(status)' || true
+                return 1
+              fi
+              sleep 5
+            done
+
+            if ! worker_image_digest="$(gcloud run worker-pools revisions describe "$worker_ready_revision" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.imageDigest)')"; then
+              echo "::error::${phase} could not read the ready worker-pool revision"
+              return 1
+            fi
+            if [ "${worker_image_digest##*@}" != "$target_digest" ]; then
+              echo "::error::${phase} ready worker-pool revision does not use the expected digest"
+              return 1
+            fi
+          }
+
+          wait_for_api_digest() {
+            local target_digest=$1
+            local phase=$2
+            local api_ready_revision=""
+            local api_status generation observed ready_status created_revision ready_revision
+            local api_image_digest
+            local attempt
+            for attempt in $(seq 1 60); do
+              if ! api_status="$(gcloud run services describe "$CLOUD_RUN_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format=json)"; then
+                echo "::error::${phase} could not read API status"
+                return 1
+              fi
+              read -r generation observed ready_status created_revision ready_revision <<EOF
+            $(python3 -c 'import json, sys; data = json.load(sys.stdin); status = data.get("status", {}); ready = next((item.get("status", "") for item in status.get("conditions", []) if item.get("type") == "Ready"), ""); print(data.get("metadata", {}).get("generation", ""), status.get("observedGeneration", ""), ready, status.get("latestCreatedRevisionName", ""), status.get("latestReadyRevisionName", ""))' <<<"$api_status")
+          EOF
+
+              if [ -n "$generation" ] && [ "$generation" = "$observed" ]; then
+                if [ "$ready_status" = "False" ]; then
+                  echo "::error::${phase} API revision failed to become ready"
+                  gcloud run services describe "$CLOUD_RUN_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='yaml(status.conditions)' || true
+                  return 1
+                fi
+                if [ "$ready_status" = "True" ] && [ -n "$created_revision" ] && [ "$created_revision" = "$ready_revision" ]; then
+                  api_ready_revision="$ready_revision"
+                  break
+                fi
+              fi
+
+              if [ "$attempt" -eq 60 ]; then
+                echo "::error::${phase} timed out waiting for the API to reconcile"
+                gcloud run services describe "$CLOUD_RUN_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='yaml(status)' || true
+                return 1
+              fi
+              sleep 5
+            done
+
+            if ! api_image_digest="$(gcloud run revisions describe "$api_ready_revision" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.imageDigest)')"; then
+              echo "::error::${phase} could not read the ready API revision"
+              return 1
+            fi
+            if [ "${api_image_digest##*@}" != "$target_digest" ]; then
+              echo "::error::${phase} ready API revision does not use the expected digest"
+              return 1
+            fi
+          }
+
           rollback_release() {
-            exit_code=$?
+            local exit_code=$1
+            local rollback_failed=0
             trap - EXIT
             if [ "$exit_code" -ne 0 ]; then
               set +e
               echo "::warning::Release failed; restoring both workloads to their previous images"
-              rollback_failed=0
               gcloud run services update "$CLOUD_RUN_SERVICE" \
                 --image "$api_previous" \
                 --project "$GCP_PROJECT_ID" \
                 --region "$GCP_REGION" \
-                --quiet || rollback_failed=1
+                --quiet || echo "::warning::Rollback API update command failed; verifying current state"
               gcloud run worker-pools update "$CLOUD_RUN_WORKER_POOL" \
                 --image "$worker_previous" \
                 --project "$GCP_PROJECT_ID" \
                 --region "$GCP_REGION" \
-                --quiet || rollback_failed=1
+                --quiet || echo "::warning::Rollback worker-pool update command failed; verifying current state"
+              if ! wait_for_api_digest "$api_previous_digest" "Rollback"; then
+                rollback_failed=1
+              fi
+              if ! wait_for_worker_digest "$worker_previous_digest" "Rollback"; then
+                rollback_failed=1
+              fi
               if [ "$rollback_failed" -ne 0 ]; then
                 echo "::error::Automatic rollback was incomplete; use the recorded image references"
+                {
+                  echo "Automatic rollback verification failed. Restore these images manually:"
+                  echo "- API: \`$api_previous\`"
+                  echo "- Worker pool: \`$worker_previous\`"
+                } >> "$GITHUB_STEP_SUMMARY"
               else
-                echo "Restored both workloads to their previous images" >> "$GITHUB_STEP_SUMMARY"
+                echo "Verified both workloads on their previous ready image digests" >> "$GITHUB_STEP_SUMMARY"
               fi
             fi
             exit "$exit_code"
           }
-          trap rollback_release EXIT
+          trap 'rollback_release $?' EXIT
 
           # Terraform owns all durable Cloud Run settings. These commands mutate only images.
           gcloud run worker-pools update "$CLOUD_RUN_WORKER_POOL" \
@@ -202,38 +312,7 @@ jobs:
             --region "$GCP_REGION" \
             --quiet
 
-          worker_ready_revision=""
-          for attempt in $(seq 1 60); do
-            worker_status="$(gcloud run worker-pools describe "$CLOUD_RUN_WORKER_POOL" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format=json)"
-            read -r generation observed ready_status created_revision ready_revision <<EOF
-          $(python3 -c 'import json, sys; data = json.load(sys.stdin); status = data.get("status", {}); ready = next((item.get("status", "") for item in status.get("conditions", []) if item.get("type") == "Ready"), ""); print(data.get("metadata", {}).get("generation", ""), status.get("observedGeneration", ""), ready, status.get("latestCreatedRevisionName", ""), status.get("latestReadyRevisionName", ""))' <<<"$worker_status")
-          EOF
-
-            if [ -n "$generation" ] && [ "$generation" = "$observed" ]; then
-              if [ "$ready_status" = "False" ]; then
-                echo "::error::Worker-pool revision failed to become ready"
-                gcloud run worker-pools describe "$CLOUD_RUN_WORKER_POOL" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='yaml(status.conditions)'
-                exit 1
-              fi
-              if [ "$ready_status" = "True" ] && [ -n "$created_revision" ] && [ "$created_revision" = "$ready_revision" ]; then
-                worker_ready_revision="$ready_revision"
-                break
-              fi
-            fi
-
-            if [ "$attempt" -eq 60 ]; then
-              echo "::error::Timed out waiting for the worker pool to reconcile its new revision"
-              gcloud run worker-pools describe "$CLOUD_RUN_WORKER_POOL" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='yaml(status)'
-              exit 1
-            fi
-            sleep 5
-          done
-
-          worker_image_digest="$(gcloud run worker-pools revisions describe "$worker_ready_revision" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.imageDigest)')"
-          if [ "${worker_image_digest##*@}" != "$expected_digest" ]; then
-            echo "::error::Ready worker-pool revision does not use the requested digest"
-            exit 1
-          fi
+          wait_for_worker_digest "$expected_digest" "Release"
 
           gcloud run services update "$CLOUD_RUN_SERVICE" \
             --image "$IMAGE_REF" \
@@ -241,38 +320,7 @@ jobs:
             --region "$GCP_REGION" \
             --quiet
 
-          api_ready_revision=""
-          for attempt in $(seq 1 60); do
-            api_status="$(gcloud run services describe "$CLOUD_RUN_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format=json)"
-            read -r generation observed ready_status created_revision ready_revision <<EOF
-          $(python3 -c 'import json, sys; data = json.load(sys.stdin); status = data.get("status", {}); ready = next((item.get("status", "") for item in status.get("conditions", []) if item.get("type") == "Ready"), ""); print(data.get("metadata", {}).get("generation", ""), status.get("observedGeneration", ""), ready, status.get("latestCreatedRevisionName", ""), status.get("latestReadyRevisionName", ""))' <<<"$api_status")
-          EOF
-
-            if [ -n "$generation" ] && [ "$generation" = "$observed" ]; then
-              if [ "$ready_status" = "False" ]; then
-                echo "::error::API revision failed to become ready"
-                gcloud run services describe "$CLOUD_RUN_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='yaml(status.conditions)'
-                exit 1
-              fi
-              if [ "$ready_status" = "True" ] && [ -n "$created_revision" ] && [ "$created_revision" = "$ready_revision" ]; then
-                api_ready_revision="$ready_revision"
-                break
-              fi
-            fi
-
-            if [ "$attempt" -eq 60 ]; then
-              echo "::error::Timed out waiting for the API to reconcile its new revision"
-              gcloud run services describe "$CLOUD_RUN_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='yaml(status)'
-              exit 1
-            fi
-            sleep 5
-          done
-
-          api_image_digest="$(gcloud run revisions describe "$api_ready_revision" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.imageDigest)')"
-          if [ "${api_image_digest##*@}" != "$expected_digest" ]; then
-            echo "::error::Ready API revision does not use the requested digest"
-            exit 1
-          fi
+          wait_for_api_digest "$expected_digest" "Release"
 
           api_url="$(gcloud run services describe "$CLOUD_RUN_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.url)')"
           api_id_token="$(gcloud auth print-identity-token --audiences="$api_url")"

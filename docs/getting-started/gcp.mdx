@@ -48,8 +48,9 @@ image belongs to this repository, waits for both new revisions to become ready,
 checks their digests, and calls the private API `/readyz` endpoint with a
 short-lived Google OIDC identity token. It records the previous immutable image
 references and automatically restores both workloads when a later release step
-fails. An incomplete rollback is surfaced as an explicit workflow error for
-operator intervention.
+fails. It verifies that both rollback revisions are ready on their captured
+digests before reporting restoration; an incomplete rollback is surfaced with
+the exact manual recovery references for operator intervention.
 
 To redeploy a known-good build, run **Deploy GCP dev** manually and provide its
 full digest reference, for example:
