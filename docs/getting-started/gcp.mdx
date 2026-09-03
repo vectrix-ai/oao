@@ -29,9 +29,18 @@ OAO_DEV_RELEASE_ENABLED
 
 Keep repository variable `OAO_DEV_RELEASE_ENABLED` set to `false` for the
 first merge. The workflow builds and pushes the bootstrap image without
-attempting to update Cloud Run.
-After Terraform creates both workloads, set it to `true` so pushes to `main`
-perform image-only releases.
+attempting to update Cloud Run. That bootstrap build advances the
+`dev-bootstrap` Artifact Registry tag. Terraform resolves that marker to its
+immutable digest when it creates the DEV workloads, so no image digest needs
+to be copied into a Terraform repository variable. The mutable marker is never
+used directly by Cloud Run. Once releases are enabled, it advances only after
+both workloads pass digest and readiness verification; failed releases leave
+the last known-good marker intact.
+
+After Terraform creates both workloads, set `OAO_DEV_RELEASE_ENABLED` to
+`true` so pushes to `main` perform image-only releases.
+Builds and releases are rejected when the workflow is dispatched from any
+other branch.
 
 The release identity uses GitHub OIDC. Do not add service-account keys, database
 passwords, or other secret payloads to GitHub Actions.
