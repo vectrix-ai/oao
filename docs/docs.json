@@ -42,7 +42,8 @@
         "pages": [
           "getting-started/quickstart",
           "getting-started/local-development",
-          "getting-started/railway"
+          "getting-started/railway",
+          "getting-started/gcp"
         ]
       },
       {

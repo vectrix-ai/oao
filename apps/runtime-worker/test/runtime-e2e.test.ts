@@ -27,6 +27,8 @@ import { FakeSandboxProvider } from "@oao/sandbox-daytona";
 import { startRuntimeWorker, type RuntimeWorkerHandle } from "../src/main.js";
 
 const databaseUrl = process.env.DATABASE_URL;
+const testAdminDatabaseUrl =
+  process.env.OAO_TEST_ADMIN_DATABASE_URL ?? databaseUrl;
 
 async function startRuntimeChild(url: string): Promise<ChildProcess> {
   const child = fork(
@@ -462,13 +464,50 @@ async function waitRun(
   state: string,
   timeoutMs = 20_000,
 ): Promise<void> {
-  await waitFor(
-    pool,
-    "SELECT state FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$3",
-    [tenant.organizationId, tenant.projectId, runId],
-    (rows) => rows[0]?.state === state,
-    timeoutMs,
-  );
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const result = await pool.query<{ state: string }>(
+      "SELECT state FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$3",
+      [tenant.organizationId, tenant.projectId, runId],
+    );
+    const actual = result.rows[0]?.state;
+    if (actual === state) return;
+    if (
+      actual &&
+      ["completed", "failed", "cancelled", "timed_out"].includes(actual)
+    ) {
+      const diagnostic = await pool.query(
+        `SELECT r.input_public,
+          (SELECT call.stage FROM oao.tool_calls call
+            WHERE call.organization_id=r.organization_id
+              AND call.project_id=r.project_id AND call.run_id=r.id
+            ORDER BY call.created_at DESC LIMIT 1) AS tool_stage,
+          (SELECT approval.status FROM oao.approvals approval
+            WHERE approval.organization_id=r.organization_id
+              AND approval.project_id=r.project_id AND approval.run_id=r.id
+            ORDER BY approval.created_at DESC LIMIT 1) AS approval_status,
+          (SELECT entry.safe_detail FROM oao.timeline_entries entry
+            WHERE entry.organization_id=r.organization_id
+              AND entry.project_id=r.project_id AND entry.run_id=r.id
+            ORDER BY entry.entry_sequence DESC LIMIT 1) AS timeline_detail,
+          (SELECT jsonb_build_object(
+             'kind',event.event_kind,'payload',event.public_payload
+           ) FROM oao.product_events event
+            WHERE event.organization_id=r.organization_id
+              AND event.project_id=r.project_id AND event.aggregate_id=r.id
+            ORDER BY event.project_position DESC LIMIT 1) AS latest_event
+         FROM oao.runs r
+        WHERE r.organization_id=$1 AND r.project_id=$2 AND r.id=$3`,
+        [tenant.organizationId, tenant.projectId, runId],
+      );
+      throw new Error(
+        `Run reached ${actual} while waiting for ${state}: ${JSON.stringify(diagnostic.rows[0])}`,
+      );
+    }
+    if (Date.now() >= deadline)
+      throw new Error(`Timed out waiting for run ${runId} to reach ${state}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 const callerTool = {
@@ -495,7 +534,8 @@ test(
   { skip: databaseUrl ? false : "DATABASE_URL is required", timeout: 180_000 },
   async () => {
     assert.ok(databaseUrl);
-    const admin = createPool(databaseUrl);
+    assert.ok(testAdminDatabaseUrl);
+    const admin = createPool(testAdminDatabaseUrl);
     let worker: RuntimeWorkerHandle | undefined;
     let runtimeChild: ChildProcess | undefined;
     let platformEffects = 0;
@@ -1107,6 +1147,9 @@ test(
         harness_completed: "1",
         sandbox_tools: "3",
       });
+      const sandboxCreatesBeforeReuse = fakeDaytona.calls.filter((call) =>
+        call.startsWith("create:oao-sandbox-v1:"),
+      ).length;
       const daytona = await seedFixture(
         admin,
         "daytona-composition-one",
@@ -1133,7 +1176,7 @@ test(
         fakeDaytona.calls.filter((call) =>
           call.startsWith("create:oao-sandbox-v1:"),
         ).length,
-        1,
+        sandboxCreatesBeforeReuse + 1,
       );
       const workspaces = await admin.query<{ count: string }>(
         "SELECT COUNT(*) AS count FROM oao.sandbox_instances WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3",
