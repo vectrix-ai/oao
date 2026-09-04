@@ -97,6 +97,147 @@ test("runtime migration encodes durable wakes, dispatch reconciliation, and sand
   assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
 });
 
+test("Cloud SQL recovery role is non-login with bounded RLS-protected access", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0032_cloud_sql_recovery_role.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(
+    sql,
+    /CREATE ROLE oao_recovery NOLOGIN NOCREATEDB NOCREATEROLE NOINHERIT/u,
+  );
+  assert.match(
+    sql,
+    /rolcanlogin[\s\S]*rolsuper[\s\S]*rolcreatedb[\s\S]*rolcreaterole[\s\S]*rolinherit[\s\S]*rolreplication[\s\S]*rolbypassrls/u,
+  );
+  assert.doesNotMatch(sql, /ALTER ROLE oao_recovery/u);
+  assert.match(
+    sql,
+    /GRANT oao_app TO CURRENT_USER WITH SET TRUE, INHERIT FALSE/u,
+  );
+  assert.match(
+    sql,
+    /GRANT SELECT ON oao\.thread_admission_heads, oao\.runtime_dispatches TO oao_recovery/u,
+  );
+  assert.equal(
+    (
+      sql.match(
+        /CREATE POLICY recovery_visibility ON oao\.(?:thread_admission_heads|runtime_dispatches|runtime_wake_jobs)/gu,
+      ) ?? []
+    ).length,
+    3,
+  );
+  assert.match(
+    sql,
+    /GRANT SELECT, UPDATE ON oao\.runtime_wake_jobs TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.jsonb_has_forbidden_public_key\(jsonb\) TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.is_sensitive_public_key\(text\) TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.list_runtime_recovery_heads\(\) OWNER TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.runtime_has_active_dispatches\(\) OWNER TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /CREATE FUNCTION oao\.find_runtime_dispatch\([\s\S]*SECURITY DEFINER[\s\S]*SET search_path = pg_catalog, oao/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.find_runtime_dispatch\(text,text\) OWNER TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.claim_runtime_wakes\(text,integer,interval\) OWNER TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /REVOKE ALL ON FUNCTION oao\.retry_runtime_wake\(uuid,uuid,uuid,text,bigint,interval,jsonb,boolean\) FROM PUBLIC, oao_app/u,
+  );
+  assert.match(
+    sql,
+    /REVOKE ALL ON FUNCTION oao\.find_runtime_dispatch\(text,text\) FROM PUBLIC, oao_app/u,
+  );
+  assert.match(
+    sql,
+    /ORDER BY CASE WHEN d\.state <> 'settled' THEN 0 ELSE 1 END,d\.created_at DESC/u,
+  );
+  assert.match(
+    sql,
+    /REVOKE ALL ON FUNCTION oao\.list_runtime_recovery_heads\(\) FROM PUBLIC, oao_app/u,
+  );
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.runtime_has_active_dispatches\(\) TO oao_app/u,
+  );
+  assert.match(sql, /GRANT oao_recovery TO %I WITH SET TRUE, INHERIT TRUE/u);
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.runtime_has_active_dispatches\(\) TO %I/u,
+  );
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.find_runtime_dispatch\(text,text\) TO %I/u,
+  );
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.complete_runtime_wake\(uuid,uuid,uuid,text,bigint\) TO %I/u,
+  );
+  assert.match(
+    sql,
+    /migration\/runtime login lacks recovery function execution/u,
+  );
+});
+
+test("Cloud SQL auth role is non-login and owns only pre-authentication boundaries", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0039_cloud_sql_auth_role.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    sql,
+    /CREATE ROLE oao_auth NOLOGIN NOCREATEDB NOCREATEROLE NOINHERIT/u,
+  );
+  assert.match(
+    sql,
+    /rolcanlogin[\s\S]*rolsuper[\s\S]*rolcreatedb[\s\S]*rolcreaterole[\s\S]*rolinherit[\s\S]*rolreplication[\s\S]*rolbypassrls/u,
+  );
+  assert.doesNotMatch(sql, /ALTER ROLE oao_auth/u);
+  assert.match(
+    sql,
+    /CREATE POLICY cloud_sql_auth_access ON oao\.organizations/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.bootstrap_project\(uuid,text,text,uuid,text,text,uuid,text,text\)[\s\S]*OWNER TO oao_auth/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.resolve_workos_principal\(text,text,uuid\)[\s\S]*OWNER TO oao_auth/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.authenticate_api_key\(text,bytea,uuid,timestamptz\)[\s\S]*OWNER TO oao_auth/u,
+  );
+  assert.match(sql, /GRANT oao_auth TO %I WITH SET TRUE, INHERIT TRUE/u);
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.jsonb_has_forbidden_public_key\(jsonb\) TO oao_auth/u,
+  );
+});
+
 test("model preset migration is additive, append-only, and tenant scoped", async () => {
   const sql = await readFile(
     new URL("../../migrations/0006_model_presets.sql", import.meta.url),

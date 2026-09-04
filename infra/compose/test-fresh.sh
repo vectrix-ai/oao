@@ -23,14 +23,56 @@ while [ "$(docker inspect --format '{{.State.Health.Status}}' "$container_name")
 done
 
 postgres_port=$(docker port "$container_name" 5432/tcp | head -n 1 | sed 's/.*://')
-export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:${postgres_port}/oao"
+# Match Cloud SQL's PostgreSQL 17 privilege model: the application credential
+# owns the database and can create roles, but it is not a true superuser.
+docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  -c "CREATE ROLE oao_runtime LOGIN NOSUPERUSER NOCREATEDB CREATEROLE NOINHERIT PASSWORD 'oao_runtime'"
+docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  -c "ALTER DATABASE oao OWNER TO oao_runtime"
+
+reset_fixtures() {
+  docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U postgres -d oao -c "
+    DO \$\$
+    DECLARE
+      table_list text;
+    BEGIN
+      SELECT string_agg(format('%I.%I', schemaname, tablename), ', ')
+        INTO table_list
+        FROM pg_tables
+       WHERE schemaname = 'oao';
+      IF table_list IS NOT NULL THEN
+        EXECUTE 'TRUNCATE TABLE ' || table_list || ' RESTART IDENTITY CASCADE';
+      END IF;
+    END
+    \$\$"
+}
+
+export OAO_TEST_RUNTIME_DATABASE_URL="postgresql://oao_runtime:oao_runtime@127.0.0.1:${postgres_port}/oao"
+export OAO_TEST_ADMIN_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:${postgres_port}/oao"
+export DATABASE_URL="$OAO_TEST_RUNTIME_DATABASE_URL"
 pnpm --filter @oao/db-postgres migrate
 pnpm --filter @oao/db-postgres migrate
-# Run the recovery suite before other integration fixtures enqueue synthetic
-# wakes. The worker claims globally by design, so sharing those fixture wakes
-# would make its intentional lease-bound restart assertion order-dependent.
+
+# Exercise the exact non-superuser runtime boundary before test-only admin
+# fixtures are introduced. The UUIDs need not exist: tenant context is a
+# transaction-local RLS input, not an authorization lookup.
+docker exec "$container_name" psql -v ON_ERROR_STOP=1 -U oao_runtime -d oao \
+  -c "BEGIN; SET LOCAL ROLE oao_app; SELECT oao.set_tenant_context('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002'); ROLLBACK; SELECT * FROM oao.list_runtime_recovery_heads(); SELECT oao.runtime_has_active_dispatches(); SELECT * FROM oao.find_runtime_dispatch('',''); SELECT * FROM oao.claim_runtime_wakes('smoke',1,interval '1 second');"
+
+# The integration suites seed and inspect fixtures outside application RLS.
+# Keep that test-only access separate while the worker continues to use the
+# Cloud SQL-like runtime login above.
 pnpm --filter @oao/runtime-worker test
+
+reset_fixtures
+export DATABASE_URL="$OAO_TEST_ADMIN_DATABASE_URL"
 pnpm --filter @oao/db-postgres test:integration
+
+reset_fixtures
 pnpm --filter @oao/api test:integration
+
+reset_fixtures
 pnpm --filter @oao/tool-broker test:integration
+
+reset_fixtures
 pnpm --filter @oao/sandbox-daytona test:integration

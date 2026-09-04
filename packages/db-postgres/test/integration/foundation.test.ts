@@ -188,7 +188,7 @@ test(
     try {
       await t.test("migration applies cleanly and is idempotent", async () => {
         const first = await migrate(pool);
-        assert.equal(first.applied.length + first.alreadyApplied.length, 36);
+        assert.equal(first.applied.length + first.alreadyApplied.length, 38);
         const second = await migrate(pool);
         assert.deepEqual(second.alreadyApplied, [
           "0001_foundation.sql",
@@ -221,12 +221,14 @@ test(
           "0029_provider_neutral_model_generation_settings.sql",
           "0030_anthropic_model_provider.sql",
           "0031_xai_model_provider.sql",
+          "0032_cloud_sql_recovery_role.sql",
           "0033_xai_model_generation_settings.sql",
           "0034_agent_archive.sql",
           "0035_model_archive.sql",
           "0036_skill_disable_archive.sql",
           "0037_organization_projects.sql",
           "0038_organization_sandbox_providers.sql",
+          "0039_cloud_sql_auth_role.sql",
         ]);
         await seed(pool);
       });

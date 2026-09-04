@@ -1,0 +1,117 @@
+---
+title: "Deploy to Google Cloud"
+description: "Release OAO to a Cloud Run service and worker pool without giving application CI control of infrastructure."
+---
+
+OAO's Google Cloud deployment uses one immutable container image in Artifact
+Registry. Your infrastructure tooling (for example Terraform) owns the Cloud
+Run service, worker pool, Cloud SQL attachment, runtime identities, IAM,
+scaling, probes, environment variables, and secret references. The OAO
+repository owns application tests, image builds, and image-only releases.
+
+## Required repository variables
+
+Configure these repository variables after the Google Cloud resources exist.
+The protected `oao-dev` environment remains the deployment approval boundary;
+do not put these values only in that environment, because the workflow decides
+whether a release is enabled before protected-environment setup:
+
+```text
+GCP_PROJECT_ID
+GCP_REGION
+GCP_ARTIFACT_REGISTRY_REPOSITORY
+GCP_WORKLOAD_IDENTITY_PROVIDER
+GCP_RELEASE_SERVICE_ACCOUNT
+CLOUD_RUN_SERVICE
+CLOUD_RUN_WORKER_POOL
+OAO_DEV_RELEASE_ENABLED
+```
+
+Keep repository variable `OAO_DEV_RELEASE_ENABLED` set to `false` until both
+Cloud Run workloads exist. While it is `false`, the workflow builds and pushes
+the image without attempting to update Cloud Run and advances the
+`dev-bootstrap` Artifact Registry tag. Your infrastructure tooling can resolve
+that marker to its immutable digest when it creates the workloads, so no image
+digest needs to be copied by hand. The mutable marker is never used directly
+by Cloud Run. Once releases are enabled, it advances only after both workloads
+pass digest and readiness verification; failed releases leave the last
+known-good marker intact.
+
+After both workloads exist, set `OAO_DEV_RELEASE_ENABLED` to `true` so pushes
+to `main` perform image-only releases. Builds and releases are rejected when
+the workflow is dispatched from any other branch.
+
+The release identity uses GitHub OIDC. Do not add service-account keys, database
+passwords, or other secret payloads to GitHub Actions.
+
+## Release
+
+Pushing to `main` runs the workspace checks, builds a Node 22.19/pnpm 10.27
+image, pushes it under the commit SHA, resolves its Artifact Registry digest,
+and releases that same digest to both workloads. The API runs the image's
+default `api` command; the worker pool uses its `worker` command.
+
+The release workflow changes only each workload's image field. It verifies the
+image belongs to this repository, waits for both new revisions to become ready,
+checks their digests, and calls the private API `/readyz` endpoint with a
+short-lived Google OIDC identity token. It records the previous immutable image
+references and automatically restores both workloads when a later release step
+fails. It verifies that both rollback revisions are ready on their captured
+digests before reporting restoration; an incomplete rollback is surfaced with
+the exact manual recovery references for operator intervention.
+
+To redeploy a known-good build, run **Deploy GCP dev** manually and provide its
+full digest reference, for example:
+
+```text
+europe-west1-docker.pkg.dev/example-project/oao/oao@sha256:...
+```
+
+Use only an image digest, never a mutable tag such as `latest`.
+
+## One-time database and identity setup
+
+The workflow assumes a private Cloud Run service. Grant only explicit callers
+`roles/run.invoker`; callers must send a Google OIDC identity token whose
+audience is the Cloud Run service URL in the `X-Serverless-Authorization`
+header. OAO keeps the standard `Authorization` header for its own API keys.
+Configure `AUTH_PROVIDER` on both workloads as described in
+[Deploy to Railway](/getting-started/railway); the development identity is not
+browser-accessible.
+
+Generate `oao-credential-encryption-key` as the canonical base64 encoding of
+exactly 32 random bytes (`openssl rand -base64 32`). Generate a separate random
+`oao-api-key-pepper`. Store both only as Secret Manager versions outside your
+infrastructure code and never commit their payloads.
+
+Store the runtime Unix-socket database URL only as a version of
+`oao-database-url`. Both application processes auto-migrate on start, so the
+role in that URL must be able to run migrations. Use a dedicated migrator role
+for production rather than an admin-capable credential:
+
+```text
+postgresql://USER:ENCODED_PASSWORD@localhost/oao?host=/cloudsql/PROJECT:REGION:INSTANCE
+```
+
+URL-encode reserved password characters; never put the URL in Git or
+infrastructure code.
+
+Before the first login, run Cloud SQL Auth Proxy locally on `127.0.0.1:5432`
+with the instance connection name from your infrastructure outputs:
+
+```sh
+cloud-sql-proxy --address 127.0.0.1 --port 5432 "PROJECT:REGION:INSTANCE"
+```
+
+In a second shell, use its TCP URL to migrate and idempotently seed a
+development tenant:
+
+```sh
+DATABASE_URL=postgresql://USER:ENCODED_PASSWORD@127.0.0.1:5432/oao \
+pnpm --filter @oao/api seed:dev
+```
+
+The seed creates organization `00000000-0000-4000-8000-000000000001`, project
+`00000000-0000-4000-8000-000000000002`, and owner principal
+`00000000-0000-4000-8000-000000000003`. It is intended for development
+environments only and does not provide per-user auditing.
