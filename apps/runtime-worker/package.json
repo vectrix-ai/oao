@@ -8,7 +8,7 @@
     "dev": "node --import tsx --watch src/main.ts",
     "lint": "eslint src test",
     "start": "node dist/main.js",
-    "test": "node --import tsx --test test/**/*.test.ts",
+    "test": "node --import tsx --test --test-concurrency=1 test/**/*.test.ts",
     "test:harness:e2e": "node --import tsx --test test/harness-operation-e2e.test.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
