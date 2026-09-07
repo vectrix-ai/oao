@@ -23,15 +23,30 @@ service runs the image's `api` entrypoint and the worker pool runs its
 
 ## Build and deliver an image
 
-Build and publish an image to a registry you control. Use explicit placeholders
-for every target-specific value:
+Create an Artifact Registry Docker repository in your own project and authenticate
+the Google Cloud CLI as an identity with permission to push to that repository.
+Configure Docker authentication before building and publishing. Replace each
+placeholder with your own value:
 
 ```sh
-docker build --tag "<REGION>-docker.pkg.dev/<PROJECT_ID>/<ARTIFACT_REPOSITORY>/oao:<IMAGE_TAG>" .
+gcloud auth configure-docker "<REGION>-docker.pkg.dev"
+docker build --build-arg VITE_OAO_API_MODE=http --tag "<REGION>-docker.pkg.dev/<PROJECT_ID>/<ARTIFACT_REPOSITORY>/oao:<IMAGE_TAG>" .
 docker push "<REGION>-docker.pkg.dev/<PROJECT_ID>/<ARTIFACT_REPOSITORY>/oao:<IMAGE_TAG>"
 ```
 
-Resolve the published image to an immutable digest before deploying it:
+`VITE_OAO_API_MODE` is a console build setting; changing it on a running
+container does not rebuild the console. See the Google Cloud
+[Docker authentication guide](https://cloud.google.com/artifact-registry/docs/docker/authentication)
+for credential-helper setup.
+
+Resolve the published tag to an immutable digest:
+
+```sh
+gcloud artifacts docker images describe "<REGION>-docker.pkg.dev/<PROJECT_ID>/<ARTIFACT_REPOSITORY>/oao:<IMAGE_TAG>" --format="value(image_summary.digest)"
+```
+
+The command returns `sha256:<IMAGE_DIGEST>`. Use that digest in the deployment
+image reference:
 
 ```text
 <REGION>-docker.pkg.dev/<PROJECT_ID>/<ARTIFACT_REPOSITORY>/oao@sha256:<IMAGE_DIGEST>
@@ -49,23 +64,37 @@ delivery; see [Releases](/reference/releases).
 
 ## Runtime configuration
 
-Store production secrets in a secret manager and supply them to both
-application workloads. These example values are placeholders:
+Store production secrets in a secret manager and grant each workload access
+only to the values it needs. Configure these shared settings on both the API
+and worker; all example values are placeholders:
 
 ```dotenv
 NODE_ENV=production
 DATABASE_URL=postgresql://<DATABASE_USER>:<URL_ENCODED_PASSWORD>@<DATABASE_HOST>:5432/<DATABASE_NAME>
 OAO_CREDENTIAL_ENCRYPTION_KEY=<BASE64_ENCODED_32_BYTE_SECRET>
+```
+
+Configure these additional settings only on the API service:
+
+```dotenv
 API_KEY_PEPPER=<RANDOM_SECRET>
 APP_ORIGIN=https://<PUBLIC_HOSTNAME>
-VITE_OAO_API_MODE=http
 OAO_SERVE_CONSOLE=true
 ```
 
 Use the container image's default `api` command for the public service and
 the `worker` command for the worker pool. Migrations run idempotently when
-each process starts. Use a database role with the migration
-permissions required by your production policy.
+each process starts, using `DATABASE_URL`. Its database principal must own the
+OAO database and have `CREATEROLE`, permission to create `pgcrypto` and schema
+objects, and permission to manage role memberships, object grants, and function
+ownership. An ordinary application-only database login cannot run these
+startup migrations.
+
+The bundled migrations support a non-superuser database owner on Cloud SQL.
+They create restricted no-login roles, including `oao_app`, which application
+transactions assume after migration. Do not grant PostgreSQL superuser or
+`BYPASSRLS` solely for OAO; verify the required ownership and role-management
+permissions with your PostgreSQL provider.
 
 For a full explanation of local configuration and disposable PostgreSQL checks,
 see [Local development](/getting-started/local-development). The
@@ -74,7 +103,9 @@ layout on another managed platform.
 
 ## Authentication
 
-Choose one hosted authentication provider and configure it explicitly.
+Choose one hosted authentication provider and configure its settings only on
+the API service. The worker does not need `AUTH_PROVIDER`, WorkOS credentials,
+or IAP audience and identity settings.
 
 For WorkOS, set `AUTH_PROVIDER=workos` and provide the WorkOS configuration
 and callback URL for `https://<PUBLIC_HOSTNAME>/v1/auth/callback`. Provision
