@@ -62,6 +62,18 @@ test(
       );
       assert.equal(deniedAudience.rowCount, 0);
 
+      const deniedUnclaimedEmail = await pool.query(
+        "SELECT * FROM oao.resolve_iap_principal($1,$2,$3,$4,$5)",
+        [
+          "accounts.google.com:123456789",
+          "renamed@example.test",
+          expectedAudience,
+          ids.organization,
+          ids.project,
+        ],
+      );
+      assert.equal(deniedUnclaimedEmail.rowCount, 0);
+
       const resolved = await pool.query<{
         organization_id: string;
         project_id: string;
@@ -71,7 +83,7 @@ test(
         scopes: string[];
       }>("SELECT * FROM oao.resolve_iap_principal($1,$2,$3,$4,$5)", [
         "accounts.google.com:123456789",
-        "renamed@example.test",
+        input.email,
         expectedAudience,
         ids.organization,
         ids.project,
@@ -84,6 +96,30 @@ test(
         subject: "iap-test-principal",
         scopes: ["*"],
       });
+
+      const renamed = await pool.query(
+        "SELECT * FROM oao.resolve_iap_principal($1,$2,$3,$4,$5)",
+        [
+          "accounts.google.com:123456789",
+          "renamed@example.test",
+          expectedAudience,
+          ids.organization,
+          ids.project,
+        ],
+      );
+      assert.deepEqual(renamed.rows[0], resolved.rows[0]);
+
+      const deniedReplacementSubject = await pool.query(
+        "SELECT * FROM oao.resolve_iap_principal($1,$2,$3,$4,$5)",
+        [
+          "accounts.google.com:replacement",
+          input.email,
+          expectedAudience,
+          ids.organization,
+          ids.project,
+        ],
+      );
+      assert.equal(deniedReplacementSubject.rowCount, 0);
 
       const identity = await pool.query<{ email: string }>(
         `SELECT email FROM oao.auth_identities
@@ -106,6 +142,11 @@ test(
          ) AS public_can_execute`,
       );
       assert.equal(privilege.rows[0]?.public_can_execute, false);
+
+      const schemaPrivilege = await pool.query<{ can_create: boolean }>(
+        "SELECT has_schema_privilege('oao_auth','oao','CREATE') AS can_create",
+      );
+      assert.equal(schemaPrivilege.rows[0]?.can_create, false);
     } finally {
       await pool.end();
     }

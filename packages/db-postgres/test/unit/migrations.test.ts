@@ -257,7 +257,7 @@ test("IAP migration resolves only explicitly provisioned identities", async () =
   assert.match(sql, /pg_advisory_xact_lock\(hashtextextended\(/u);
   assert.match(
     sql,
-    /ALTER FUNCTION oao\.resolve_iap_principal\(text,text,text,uuid,uuid\)[\s\S]*OWNER TO oao_auth/u,
+    /GRANT CREATE ON SCHEMA oao TO oao_auth;[\s\S]*ALTER FUNCTION oao\.resolve_iap_principal\(text,text,text,uuid,uuid\)[\s\S]*OWNER TO oao_auth;[\s\S]*REVOKE CREATE ON SCHEMA oao FROM oao_auth;/u,
   );
   assert.doesNotMatch(sql, /INSERT INTO oao\.(?:principals|project_members)/u);
   assert.doesNotMatch(sql, /bootstrap_owner|p_bootstrap/u);

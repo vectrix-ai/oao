@@ -119,6 +119,10 @@ REVOKE ALL ON FUNCTION oao.resolve_iap_principal(text,text,text,uuid,uuid)
 GRANT EXECUTE ON FUNCTION oao.resolve_iap_principal(text,text,text,uuid,uuid)
   TO oao_app;
 
+-- Add metadata while the migrator still owns the function.
+COMMENT ON FUNCTION oao.resolve_iap_principal(text,text,text,uuid,uuid) IS
+  'Resolves an explicitly provisioned Google IAP subject after exact audience verification.';
+
 DO $$
 DECLARE
   migration_role name := current_user;
@@ -131,8 +135,12 @@ BEGIN
     );
   END IF;
 
+  -- PostgreSQL requires the new owner to have schema CREATE permission
+  -- during ownership transfer, even for a database-owner migrator.
+  GRANT CREATE ON SCHEMA oao TO oao_auth;
   ALTER FUNCTION oao.resolve_iap_principal(text,text,text,uuid,uuid)
     OWNER TO oao_auth;
+  REVOKE CREATE ON SCHEMA oao FROM oao_auth;
   EXECUTE format(
     'GRANT EXECUTE ON FUNCTION oao.resolve_iap_principal(text,text,text,uuid,uuid) TO %I',
     migration_role
@@ -143,6 +151,3 @@ BEGIN
   END IF;
 END
 $$;
-
-COMMENT ON FUNCTION oao.resolve_iap_principal(text,text,text,uuid,uuid) IS
-  'Resolves an explicitly provisioned Google IAP subject after exact audience verification.';

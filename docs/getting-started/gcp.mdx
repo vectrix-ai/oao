@@ -92,7 +92,11 @@ infrastructure code and never commit their payloads.
 Store the runtime Unix-socket database URL only as a version of
 `oao-database-url`. Both application processes auto-migrate on start, so the
 role in that URL must be able to run migrations. Use a dedicated migrator role
-for production rather than an admin-capable credential:
+for production rather than an admin-capable credential.
+
+The IAP migration supports a non-superuser database owner with `CREATEROLE`.
+It temporarily grants schema `CREATE` to the `oao_auth` function-owner role
+during ownership transfer and revokes it in the same migration transaction.
 
 ```text
 postgresql://USER:ENCODED_PASSWORD@localhost/oao?host=/cloudsql/PROJECT:REGION:INSTANCE
