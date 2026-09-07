@@ -84,6 +84,17 @@ test("health is public and deterministic", async () => {
   assert.ok(response.headers.get("x-request-id"));
 });
 
+test("authentication provider discovery is public and deterministic", async () => {
+  const app = createApiApp({
+    store: new PostgresApiStore(unusedPool, "unit-test-api-key-pepper"),
+    auth: new DevelopmentAuthAdapter(),
+    runtimeCommands: unusedRuntimeCommands,
+  });
+  const response = await app.request("/v1/auth/provider");
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { authProvider: "development" });
+});
+
 test("expected authentication boundaries are informational in server logs", () => {
   assert.equal(
     apiLogLevel(
@@ -271,6 +282,40 @@ test("cookie-authenticated writes enforce APP_ORIGIN", async () => {
     },
   );
   assert.equal(bearerDoesNotBypassPublicCookieAuth.status, 403);
+});
+
+test("IAP browser writes enforce APP_ORIGIN while API-key calls keep their own authorization", async () => {
+  const app = createApiApp({
+    store: new PostgresApiStore(unusedPool, "unit-test-api-key-pepper"),
+    auth: new DevelopmentAuthAdapter(),
+    runtimeCommands: unusedRuntimeCommands,
+    authConfiguration: {
+      provider: "iap",
+      appOrigins: ["https://oao.example.test"],
+      appOrigin: "https://oao.example.test",
+      callbackUri: "https://oao.example.test/v1/auth/callback",
+      cookieSecure: true,
+    },
+  });
+  const iapHeaders = { "x-goog-iap-jwt-assertion": "verified-at-edge" };
+  const rejected = await app.request("/v1/auth/refresh", {
+    method: "POST",
+    headers: iapHeaders,
+  });
+  assert.equal(rejected.status, 403);
+  const allowedOrigin = await app.request("/v1/auth/refresh", {
+    method: "POST",
+    headers: { ...iapHeaders, origin: "https://oao.example.test" },
+  });
+  assert.equal(allowedOrigin.status, 401);
+  const apiKeyRequest = await app.request("/v1/auth/refresh", {
+    method: "POST",
+    headers: {
+      ...iapHeaders,
+      authorization: "Bearer oao_machine-key",
+    },
+  });
+  assert.equal(apiKeyRequest.status, 401);
 });
 
 test("login uses configured callback, binds state, and rejects caller redirects", async () => {

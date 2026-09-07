@@ -67,7 +67,52 @@ test("WorkOS configuration requires an allowed fixed callback and secrets", () =
   );
 });
 
-test("server composition seeds only development and selects hosted WorkOS", async () => {
+test("IAP configuration requires an exact Cloud Run audience and tenant", () => {
+  const configuration = loadServerConfiguration({
+    AUTH_PROVIDER: "iap",
+    APP_ORIGIN: "https://oao.example.test",
+    DATABASE_URL: databaseUrl,
+    NODE_ENV: "production",
+    API_KEY_PEPPER: "pepper",
+    IAP_EXPECTED_AUDIENCE:
+      "/projects/123456789/locations/europe-west1/services/oao-api",
+    IAP_ORGANIZATION_ID: "00000000-0000-4000-8000-000000000001",
+    IAP_PROJECT_ID: "00000000-0000-4000-8000-000000000002",
+  });
+  assert.equal(
+    configuration.iap?.expectedAudience,
+    "/projects/123456789/locations/europe-west1/services/oao-api",
+  );
+  assert.throws(
+    () =>
+      loadServerConfiguration({
+        AUTH_PROVIDER: "iap",
+        APP_ORIGIN: "https://oao.example.test",
+        DATABASE_URL: databaseUrl,
+        NODE_ENV: "production",
+        API_KEY_PEPPER: "pepper",
+        IAP_EXPECTED_AUDIENCE: "https://oao.example.test",
+        IAP_ORGANIZATION_ID: "not-a-uuid",
+        IAP_PROJECT_ID: "00000000-0000-4000-8000-000000000002",
+      }),
+    /IAP_EXPECTED_AUDIENCE/u,
+  );
+});
+
+test("hosted configuration fails closed without an explicit auth provider", () => {
+  assert.throws(
+    () =>
+      loadServerConfiguration({
+        APP_ORIGIN: "https://oao.example.test",
+        DATABASE_URL: databaseUrl,
+        NODE_ENV: "production",
+        API_KEY_PEPPER: "pepper",
+      }),
+    /AUTH_PROVIDER is required/u,
+  );
+});
+
+test("server composition seeds only local development", async () => {
   const calls: string[] = [];
   const pool = {
     async query(text: string) {
@@ -85,6 +130,22 @@ test("server composition seeds only development and selects hosted WorkOS", asyn
   assert.equal(developmentComposition.webhookAuth, undefined);
   assert.equal(calls.length, 1);
   assert.match(calls[0] ?? "", /bootstrap_project/u);
+
+  calls.length = 0;
+  const iap = loadServerConfiguration({
+    AUTH_PROVIDER: "iap",
+    APP_ORIGIN: "https://oao.example.test",
+    DATABASE_URL: databaseUrl,
+    NODE_ENV: "production",
+    API_KEY_PEPPER: "pepper",
+    IAP_EXPECTED_AUDIENCE:
+      "/projects/123456789/locations/europe-west1/services/oao-api",
+    IAP_ORGANIZATION_ID: "00000000-0000-4000-8000-000000000001",
+    IAP_PROJECT_ID: "00000000-0000-4000-8000-000000000002",
+  });
+  const iapComposition = await composeAuthentication(iap, pool);
+  assert.equal(iapComposition.webhookAuth, undefined);
+  assert.equal(calls.length, 0);
 
   calls.length = 0;
   const workos = loadServerConfiguration({
