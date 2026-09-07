@@ -214,6 +214,20 @@ three-minute deadline. Its cleanup retains the original error, and the parent
 terminates the scenario process group so background workers cannot hang the
 test runner. CI also caps the complete PostgreSQL step at ten minutes.
 
+The restart test allows 65 seconds for recovery with pinned Flue 2.0.3:
+a 30-second ownership lease, up to two 15-second scan intervals (the scan has
+its own elapsed-time gate), and five seconds for startup/completion. Lease
+expiry is not an immediate-recovery guarantee. The test still verifies that
+recovery reuses the original submission and instance, completes on the second
+attempt, and commits the caller's result.
+
+The database suite also holds a tool-publication replay transaction open while
+another connection denies or expires its approval. These operations must not
+block each other; the test checks the resulting tool stage and claim fence,
+and verifies conflicting publication requests are still rejected. Migration
+`0041_tool_publication_lock.sql` narrows the replay lock without changing the
+approval policy or claim/result fencing.
+
 `test:postgres:fresh` creates a PostgreSQL container on a random host port,
 applies migrations twice, and runs the database and runtime integration suites.
 Automated tests use explicit provider doubles at adapter boundaries; those

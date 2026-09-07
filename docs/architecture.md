@@ -161,7 +161,7 @@ deployment-policy layer with explicit verification and diagnostics.
 
 The MVP publication contract accepts a single platform turn cap of 32 and rejects any other per-agent value. Runtime enforces that cap before provider calls. Each immutable agent snapshot also carries a durable product deadline; expiry aborts the Flue submission and settles the product run as `timed_out`.
 
-Flue 2.0.3's in-process `stop()` aborts active tool executions and records that abort in conversation history. OAO therefore separates full idle-process disposal from process handoff: SIGTERM stops new wake intake, projections, and HTTP, preserves any live Flue lease without calling the aborting stop path, and exits so startup recovery can reclaim that same submission after the bounded 30-second lease. In-process hot restart with an active submission is intentionally unsupported.
+Flue 2.0.3's in-process `stop()` aborts active tool executions and records that abort in conversation history. OAO therefore separates full idle-process disposal from process handoff: SIGTERM stops new wake intake, projections, and HTTP, preserves any live Flue lease without calling the aborting stop path, and exits so recovery can reclaim that same submission after its 30-second lease expires. Reclaiming also depends on Flue's 15-second periodic scan and elapsed-time gate; lease expiry does not guarantee immediate recovery. In-process hot restart with an active submission is intentionally unsupported.
 
 ## Implementation order
 

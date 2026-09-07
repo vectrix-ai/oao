@@ -188,7 +188,7 @@ test(
     try {
       await t.test("migration applies cleanly and is idempotent", async () => {
         const first = await migrate(pool);
-        assert.equal(first.applied.length + first.alreadyApplied.length, 39);
+        assert.equal(first.applied.length + first.alreadyApplied.length, 40);
         const second = await migrate(pool);
         assert.deepEqual(second.alreadyApplied, [
           "0001_foundation.sql",
@@ -230,6 +230,7 @@ test(
           "0038_organization_sandbox_providers.sql",
           "0039_cloud_sql_auth_role.sql",
           "0040_iap_auth.sql",
+          "0041_tool_publication_lock.sql",
         ]);
         await seed(pool);
       });
@@ -933,6 +934,90 @@ test(
           );
           assert.equal(await claim(1), "replayed");
           await assert.rejects(claim(2), /idempotency key reused/u);
+        },
+      );
+
+      await t.test(
+        "publication replay allows concurrent approval denial and expiry",
+        async () => {
+          for (const [offset, resolution] of [
+            [650, "denied"],
+            [660, "expired"],
+          ] as const) {
+            const run = uuid(offset) as RunId;
+            const call = uuid(offset + 1);
+            const approval = uuid(offset + 2);
+            const requestKey = `approval-race:${resolution}`;
+            const publishSql =
+              "SELECT oao.publish_runtime_tool_call($1,$2,$3,$4,$5,$6,$7,$8,'caller','{}')";
+            const publishArgs = [
+              ids.organization,
+              ids.project,
+              call,
+              run,
+              requestKey,
+              requestKey,
+              Buffer.alloc(32, 1),
+              "caller.approved",
+            ];
+            await insertRun(pool, run, requestKey);
+            await withTenantTransaction(pool, tenant, async (transaction) => {
+              await transaction.query(publishSql, publishArgs);
+              await transaction.query(
+                `INSERT INTO oao.approvals
+                  (organization_id,project_id,id,run_id,tool_call_id,summary,expires_at)
+                 VALUES ($1,$2,$3,$4,$5,'Approve race',clock_timestamp()+interval '1 minute')`,
+                [ids.organization, ids.project, approval, run, call],
+              );
+            });
+            // Keep the replay transaction open while a different connection
+            // resolves its approval. An exclusive tool lock makes resolution
+            // wait here and can deadlock when replay then touches the approval.
+            await withTenantTransaction(pool, tenant, async (publisher) => {
+              const replay = await publisher.query(publishSql, publishArgs);
+              assert.equal(replay.rowCount, 1);
+              await withTenantTransaction(pool, tenant, async (resolver) => {
+                await resolver.query("SET LOCAL lock_timeout = '1s'");
+                if (resolution === "denied") {
+                  await resolver.query(
+                    "SELECT oao.resolve_approval($1,$2,$3,'denied',$4,'race denial')",
+                    [ids.organization, ids.project, approval, ids.principal],
+                  );
+                } else {
+                  await resolver.query(
+                    "SELECT oao.expire_approvals(clock_timestamp()+interval '2 minutes')",
+                  );
+                }
+              });
+              const state = await publisher.query(
+                `SELECT a.status,c.stage,c.claim_fence FROM oao.approvals a
+                 JOIN oao.tool_calls c ON c.organization_id=a.organization_id
+                   AND c.project_id=a.project_id AND c.id=a.tool_call_id
+                 WHERE a.organization_id=$1 AND a.project_id=$2 AND a.id=$3`,
+                [ids.organization, ids.project, approval],
+              );
+              assert.deepEqual(state.rows, [
+                {
+                  status: resolution,
+                  stage:
+                    resolution === "denied"
+                      ? "approval_denied"
+                      : "approval_expired",
+                  claim_fence: "1",
+                },
+              ]);
+            });
+            await assert.rejects(
+              withTenantTransaction(pool, tenant, (transaction) =>
+                transaction.query(publishSql, [
+                  ...publishArgs.slice(0, 6),
+                  Buffer.alloc(32, 2),
+                  publishArgs[7],
+                ]),
+              ),
+              /runtime tool request idempotency conflict/u,
+            );
+          }
         },
       );
 
