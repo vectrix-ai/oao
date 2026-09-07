@@ -71,13 +71,18 @@ Use only an image digest, never a mutable tag such as `latest`.
 
 ## One-time database and identity setup
 
-The workflow assumes a private Cloud Run service. Grant only explicit callers
-`roles/run.invoker`; callers must send a Google OIDC identity token whose
-audience is the Cloud Run service URL in the `X-Serverless-Authorization`
-header. OAO keeps the standard `Authorization` header for its own API keys.
-Configure `AUTH_PROVIDER` on both workloads as described in
-[Deploy to Railway](/getting-started/railway); the development identity is not
-browser-accessible.
+Google IAP is an optional authentication mode for the combined console/API
+Cloud Run service. Enable direct Cloud Run IAP, grant only reviewed users or
+service accounts `roles/iap.httpsResourceAccessor`, and grant the IAP service
+agent `roles/run.invoker`. Configure `AUTH_PROVIDER=iap` and the exact
+`/projects/NUMBER/locations/REGION/services/SERVICE` audience. OAO verifies the
+signed assertion again and ignores unsigned identity headers. The worker pool
+has no public HTTP surface and does not use IAP.
+
+Programmatic callers send their short-lived IAP credential in
+`Proxy-Authorization`; an OAO API key remains in `Authorization`. IAP is not
+mandatory for other deployment platforms—WorkOS and local development remain
+separate adapters.
 
 Generate `oao-credential-encryption-key` as the canonical base64 encoding of
 exactly 32 random bytes (`openssl rand -base64 32`). Generate a separate random
@@ -87,7 +92,11 @@ infrastructure code and never commit their payloads.
 Store the runtime Unix-socket database URL only as a version of
 `oao-database-url`. Both application processes auto-migrate on start, so the
 role in that URL must be able to run migrations. Use a dedicated migrator role
-for production rather than an admin-capable credential:
+for production rather than an admin-capable credential.
+
+The IAP migration supports a non-superuser database owner with `CREATEROLE`.
+It temporarily grants schema `CREATE` to the `oao_auth` function-owner role
+during ownership transfer and revokes it in the same migration transaction.
 
 ```text
 postgresql://USER:ENCODED_PASSWORD@localhost/oao?host=/cloudsql/PROJECT:REGION:INSTANCE
@@ -115,3 +124,20 @@ The seed creates organization `00000000-0000-4000-8000-000000000001`, project
 `00000000-0000-4000-8000-000000000002`, and owner principal
 `00000000-0000-4000-8000-000000000003`. It is intended for development
 environments only and does not provide per-user auditing.
+
+For an IAP-backed DEV pilot, link the reviewed email to that existing owner
+before first login:
+
+```sh
+DATABASE_URL=postgresql://USER:ENCODED_PASSWORD@127.0.0.1:5432/oao \
+OAO_ORGANIZATION_ID=00000000-0000-4000-8000-000000000001 \
+OAO_PROJECT_ID=00000000-0000-4000-8000-000000000002 \
+OAO_PRINCIPAL_ID=00000000-0000-4000-8000-000000000003 \
+IAP_EXPECTED_AUDIENCE=/projects/123456789/locations/europe-west1/services/<CLOUD_RUN_SERVICE> \
+IAP_USER_EMAIL=user@example.com \
+pnpm --filter @oao/api provision:iap
+```
+
+This changes only the identity link. It does not grant Google IAP access or
+create OAO membership; those remain explicit infrastructure and operator
+steps.

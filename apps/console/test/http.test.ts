@@ -254,6 +254,7 @@ describe("HTTP console adapter", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({}, 401))
+      .mockResolvedValueOnce(jsonResponse({ authProvider: "development" }))
       .mockResolvedValueOnce(jsonResponse({ principal: CONTEXT.principal }))
       .mockResolvedValueOnce(jsonResponse(CONTEXT));
     vi.stubGlobal("fetch", fetchMock);
@@ -264,10 +265,11 @@ describe("HTTP console adapter", () => {
     });
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "/v1/context",
+      "/v1/auth/provider",
       "/v1/auth/development/login",
       "/v1/context",
     ]);
-    expect(fetchMock.mock.calls[1]?.[1]).toEqual(
+    expect(fetchMock.mock.calls[2]?.[1]).toEqual(
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({
@@ -291,6 +293,44 @@ describe("HTTP console adapter", () => {
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "/v1/auth/development/login",
       "/v1/context",
+    ]);
+  });
+
+  it("uses IAP without application login or refresh", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ ...CONTEXT, authProvider: "iap" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new HttpConsoleApi({ authProvider: "iap" });
+    await expect(api.getContext()).resolves.toMatchObject({
+      authProvider: "iap",
+      project: { id: PROJECT_ID },
+    });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/v1/context"]);
+  });
+
+  it("does not fall back to another provider after an IAP rejection", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({}, 401));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new HttpConsoleApi({ authProvider: "iap" });
+    await expect(api.getContext()).rejects.toThrow("Request failed (401)");
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/v1/context"]);
+  });
+
+  it("discovers IAP before handling an unmapped identity rejection", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({}, 401))
+      .mockResolvedValueOnce(jsonResponse({ authProvider: "iap" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new HttpConsoleApi();
+    await expect(api.getContext()).rejects.toThrow("Request failed (401)");
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/context",
+      "/v1/auth/provider",
     ]);
   });
 
@@ -345,7 +385,8 @@ describe("HTTP console adapter", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({}, 401))
-      .mockResolvedValueOnce(jsonResponse({}, 404))
+      .mockResolvedValueOnce(jsonResponse({ authProvider: "workos" }))
+      .mockResolvedValueOnce(jsonResponse({}, 401))
       .mockResolvedValueOnce(jsonResponse({ redirectUrl }));
     const navigateTo = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -359,7 +400,8 @@ describe("HTTP console adapter", () => {
     );
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "/v1/context",
-      "/v1/auth/development/login",
+      "/v1/auth/provider",
+      "/v1/auth/refresh",
       "/v1/auth/login",
     ]);
     expect(navigateTo).toHaveBeenCalledWith(redirectUrl);

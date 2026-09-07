@@ -44,6 +44,9 @@ importers:
       '@oao/auth-core':
         specifier: workspace:*
         version: link:../../packages/auth-core
+      '@oao/auth-iap':
+        specifier: workspace:*
+        version: link:../../packages/auth-iap
       '@oao/auth-workos':
         specifier: workspace:*
         version: link:../../packages/auth-workos
@@ -217,6 +220,18 @@ importers:
       '@oao/domain':
         specifier: workspace:*
         version: link:../domain
+
+  packages/auth-iap:
+    dependencies:
+      '@oao/auth-core':
+        specifier: workspace:*
+        version: link:../auth-core
+      '@oao/domain':
+        specifier: workspace:*
+        version: link:../domain
+      google-auth-library:
+        specifier: 10.9.1
+        version: 10.9.1
 
   packages/auth-workos:
     dependencies:

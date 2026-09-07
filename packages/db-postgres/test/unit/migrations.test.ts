@@ -238,6 +238,31 @@ test("Cloud SQL auth role is non-login and owns only pre-authentication boundari
   );
 });
 
+test("IAP migration resolves only explicitly provisioned identities", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0040_iap_auth.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /provider IN \('development', 'iap', 'workos'\)/u);
+  assert.match(
+    sql,
+    /CREATE FUNCTION oao\.resolve_iap_principal\([\s\S]*SECURITY DEFINER[\s\S]*SET search_path = pg_catalog, oao/u,
+  );
+  assert.match(sql, /tenant\.provider_tenant_id = p_expected_audience/u);
+  assert.match(sql, /identity\.provider_subject = p_provider_subject/u);
+  assert.match(
+    sql,
+    /identity\.provider_subject = 'pending-email:' \|\| p_email/u,
+  );
+  assert.match(sql, /pg_advisory_xact_lock\(hashtextextended\(/u);
+  assert.match(
+    sql,
+    /GRANT CREATE ON SCHEMA oao TO oao_auth;[\s\S]*ALTER FUNCTION oao\.resolve_iap_principal\(text,text,text,uuid,uuid\)[\s\S]*OWNER TO oao_auth;[\s\S]*REVOKE CREATE ON SCHEMA oao FROM oao_auth;/u,
+  );
+  assert.doesNotMatch(sql, /INSERT INTO oao\.(?:principals|project_members)/u);
+  assert.doesNotMatch(sql, /bootstrap_owner|p_bootstrap/u);
+});
+
 test("model preset migration is additive, append-only, and tenant scoped", async () => {
   const sql = await readFile(
     new URL("../../migrations/0006_model_presets.sql", import.meta.url),

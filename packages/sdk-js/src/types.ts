@@ -131,7 +131,7 @@ export interface ProjectContext {
   readonly organizations: readonly Organization[];
   readonly projects: readonly Project[];
   readonly activeModelPresets: readonly string[];
-  readonly authProvider: "development" | "workos";
+  readonly authProvider: "development" | "iap" | "workos";
 }
 
 export interface WaitForRunOptions extends RequestOptions {

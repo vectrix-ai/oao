@@ -531,7 +531,7 @@ export interface ProjectContext {
   }[];
   readonly projects: readonly { readonly id: string; readonly name: string }[];
   readonly activeModelPresets?: readonly string[];
-  readonly authProvider?: "development" | "workos";
+  readonly authProvider?: "development" | "iap" | "workos";
 }
 
 export interface ApiKeySummary {

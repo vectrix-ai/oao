@@ -3,10 +3,12 @@ title: Authentication
 description: Authenticate browser users and project integrations without mixing identity with tenant authorization.
 ---
 
-OAO supports two authentication modes behind the same application boundary:
+OAO supports three authentication modes behind the same application boundary:
 
 - **Development auth** is the credential-free local default. The console signs
   in to the seeded development tenant through an HTTP-only session cookie.
+- **Google IAP** verifies the signed assertion injected at the application edge
+  and maps its immutable subject to an explicitly provisioned OAO principal.
 - **WorkOS AuthKit** is the hosted human-auth adapter. OAO still requires a
   matching PostgreSQL principal and project membership; a valid WorkOS identity
   alone does not grant tenant access.
@@ -14,6 +16,27 @@ OAO supports two authentication modes behind the same application boundary:
 Server-to-server integrations use organization-scoped OAO API keys. One key
 works against every project of its organization, including projects created
 after the key.
+
+## Google IAP
+
+IAP and OAO enforce separate gates: IAP decides who may reach the service, then
+OAO maps the signed `sub` to an existing principal, membership, and scopes. A
+valid Google identity alone never creates a tenant or grants OAO access.
+
+Set `AUTH_PROVIDER=iap` with the exact Cloud Run resource audience and default
+OAO tenant. Before first login, run `provision:iap` as documented in
+`apps/api/README.md`. The command may pre-authorize the signed email when the
+IAP `sub` is not known yet; the first matching assertion binds that immutable
+subject without creating or promoting a principal.
+
+The console discovers the configured application provider from
+`GET /v1/auth/provider`. This keeps a promoted container image independent of
+the hosted authentication provider.
+
+For service-to-service calls through IAP, place the short-lived IAP credential
+in `Proxy-Authorization` and the OAO API key in `Authorization`. This preserves
+edge authentication and OAO authorization as independent checks. Never use a
+service-account key.
 
 ## Create an integration key
 
@@ -130,8 +153,9 @@ non-empty, and at most 200 characters.
 
 ## Browser sessions
 
-The React console uses secure HTTP-only cookies in WorkOS mode. Unsafe
-cookie-authenticated requests are origin-checked. API-key clients do not need
+The React console uses secure HTTP-only cookies in WorkOS mode. IAP browser
+requests are authenticated by the signed edge assertion. Unsafe browser writes
+are origin-checked in both modes. API-key clients do not need
 the browser cookie or a custom tenant header: the key resolves its organization,
 project, principal, and scopes before tenant queries run.
 
