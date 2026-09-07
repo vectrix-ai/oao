@@ -35,6 +35,12 @@ const databaseUrl = process.env.DATABASE_URL;
 const testAdminDatabaseUrl =
   process.env.OAO_TEST_ADMIN_DATABASE_URL ?? databaseUrl;
 
+// Flue 2.0.3 renews ownership for 30s and scans expired leases every 15s.
+// Its scan also checks elapsed time: a timer tick just before that gate can
+// defer reconciliation to the following tick. Allow two scan intervals plus
+// child startup/completion grace; lease expiry alone is not a recovery SLA.
+const recoveryBudgetMs = 30_000 + 2 * 15_000 + 5_000;
+
 async function startRuntimeChild(url: string): Promise<ChildProcess> {
   const child = fork(
     fileURLToPath(new URL("./runtime-child.ts", import.meta.url)),
@@ -804,11 +810,16 @@ async function runRuntimeScenario() {
     );
     const recoveryStartedAt = Date.now();
     runtimeChild = await startRuntimeChild(databaseUrl);
-    await waitRun(admin, caller.runId, "completed", 40_000);
+    await waitRun(
+      admin,
+      caller.runId,
+      "completed",
+      recoveryBudgetMs - (Date.now() - recoveryStartedAt),
+    );
     const recoveryElapsedMs = Date.now() - recoveryStartedAt;
     assert.ok(
-      recoveryElapsedMs <= 35_000,
-      `Flue recovery exceeded its lease bound: ${recoveryElapsedMs}ms`,
+      recoveryElapsedMs <= recoveryBudgetMs,
+      `Flue recovery exceeded its ${recoveryBudgetMs}ms lease/scan budget: ${recoveryElapsedMs}ms`,
     );
     const obligation = await admin.query<{
       stage: string;
