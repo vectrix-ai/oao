@@ -208,6 +208,12 @@ pnpm test:postgres:fresh
 pnpm test:stack:fresh
 ```
 
+CI runs these checks with Node.js 22.19.0; use that version when reproducing
+CI-only failures. The long runtime scenario runs in an isolated process with a
+three-minute deadline. Its cleanup retains the original error, and the parent
+terminates the scenario process group so background workers cannot hang the
+test runner. CI also caps the complete PostgreSQL step at ten minutes.
+
 `test:postgres:fresh` creates a PostgreSQL container on a random host port,
 applies migrations twice, and runs the database and runtime integration suites.
 Automated tests use explicit provider doubles at adapter boundaries; those

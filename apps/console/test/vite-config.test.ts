@@ -14,11 +14,15 @@ describe("console build auth provider", () => {
   });
 
   it("falls back to the loaded dotenv environment", () => {
-    expect(resolveAuthProvider({ AUTH_PROVIDER: "workos" }, {})).toBe("workos");
+    expect(resolveAuthProvider({ AUTH_PROVIDER: "iap" }, {})).toBe("iap");
   });
 
   it("defaults to development authentication", () => {
     expect(resolveAuthProvider({}, {})).toBe("development");
+  });
+
+  it("keeps a hosted provider-neutral image in discovery mode", () => {
+    expect(resolveAuthProvider({}, { AUTH_PROVIDER: "" })).toBe("");
   });
 });
 

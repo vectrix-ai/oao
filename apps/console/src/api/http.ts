@@ -73,7 +73,7 @@ interface ContextResponse {
   }[];
   readonly projects: readonly { readonly id: string; readonly name: string }[];
   readonly activeModelPresets?: readonly string[];
-  readonly authProvider?: "development" | "workos";
+  readonly authProvider?: "development" | "iap" | "workos";
 }
 
 class HttpConsoleError extends Error {
@@ -1388,7 +1388,7 @@ export class HttpConsoleApi implements ConsoleApi {
   readonly #baseUrl: string;
   readonly #getAccessToken: () => Promise<string | null>;
   readonly #navigateTo: (url: string) => void;
-  readonly #authProvider: "development" | "workos" | undefined;
+  #authProvider: "development" | "iap" | "workos" | undefined;
   #contextPromise: Promise<ProjectContext> | undefined;
   #authenticationRedirectPromise: Promise<never> | undefined;
   #refreshPromise: Promise<boolean> | undefined;
@@ -1398,7 +1398,7 @@ export class HttpConsoleApi implements ConsoleApi {
       readonly baseUrl?: string;
       readonly getAccessToken?: () => Promise<string | null>;
       readonly navigateTo?: (url: string) => void;
-      readonly authProvider?: "development" | "workos";
+      readonly authProvider?: "development" | "iap" | "workos";
     } = {},
   ) {
     this.#baseUrl = (input.baseUrl ?? "/v1").replace(/\/$/u, "");
@@ -1511,34 +1511,58 @@ export class HttpConsoleApi implements ConsoleApi {
     return this.#authenticationRedirectPromise;
   }
 
+  async #discoverAuthProvider(): Promise<"development" | "iap" | "workos"> {
+    const response = await this.#request<{ readonly authProvider?: unknown }>(
+      "/auth/provider",
+    );
+    const provider = response.authProvider;
+    if (
+      provider !== "development" &&
+      provider !== "iap" &&
+      provider !== "workos"
+    )
+      throw new Error("The API returned an invalid authentication provider.");
+    this.#authProvider = provider;
+    return provider;
+  }
+
+  async #requestContext(): Promise<ProjectContext> {
+    const response = await this.#request<ContextResponse>("/context");
+    if (
+      response.authProvider === "development" ||
+      response.authProvider === "iap" ||
+      response.authProvider === "workos"
+    )
+      this.#authProvider = response.authProvider;
+    return contextView(response);
+  }
+
   async #loadContext(): Promise<ProjectContext> {
     if (this.#authProvider === "development") {
       await this.#request("/auth/development/login", {
         method: "POST",
         body: "{}",
       });
-      return contextView(await this.#request<ContextResponse>("/context"));
+      return this.#requestContext();
     }
+    if (this.#authProvider === "iap") return this.#requestContext();
     try {
-      return contextView(await this.#request<ContextResponse>("/context"));
+      return await this.#requestContext();
     } catch (error) {
       if (!(error instanceof HttpConsoleError) || error.status !== 401)
         throw error;
       if (this.#authProvider === "workos") return this.#startWorkOsLogin(error);
-      try {
-        await this.#request("/auth/development/login", {
-          method: "POST",
-          body: "{}",
-        });
-      } catch (loginError) {
-        if (
-          !(loginError instanceof HttpConsoleError) ||
-          loginError.status !== 404
-        )
-          throw loginError;
-        return this.#startWorkOsLogin(loginError);
+      const provider = await this.#discoverAuthProvider();
+      if (provider === "iap") throw error;
+      if (provider === "workos") {
+        if (await this.#refreshSession()) return this.#requestContext();
+        return this.#startWorkOsLogin(error);
       }
-      return contextView(await this.#request<ContextResponse>("/context"));
+      await this.#request("/auth/development/login", {
+        method: "POST",
+        body: "{}",
+      });
+      return this.#requestContext();
     }
   }
 

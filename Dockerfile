@@ -2,7 +2,9 @@
 
 FROM node:22.19.0-bookworm-slim AS build
 
-ARG AUTH_PROVIDER=workos
+# Keep the promoted image provider-neutral. The API receives AUTH_PROVIDER at
+# runtime; the console discovers the configured provider from API behavior.
+ARG AUTH_PROVIDER
 ARG VITE_OAO_API_MODE=http
 ENV PNPM_HOME=/pnpm
 ENV PATH="${PNPM_HOME}:${PATH}"

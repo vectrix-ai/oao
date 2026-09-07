@@ -14,9 +14,12 @@ import type { ConsoleApi, SessionDetail, SessionSummary } from "./types";
 
 const ApiContext = createContext<ConsoleApi | null>(null);
 
-function configuredAuthProvider(): "development" | "workos" | undefined {
+function configuredAuthProvider():
+  "development" | "iap" | "workos" | undefined {
   const provider = import.meta.env.VITE_OAO_AUTH_PROVIDER;
-  return provider === "development" || provider === "workos"
+  return provider === "development" ||
+    provider === "iap" ||
+    provider === "workos"
     ? provider
     : undefined;
 }

@@ -22,6 +22,33 @@ the HTTP adapter establish a development session before requesting protected
 context, or skip directly to WorkOS sign-in, without using expected `401` and
 `404` responses as provider discovery.
 
+Hosted processes must set `AUTH_PROVIDER` explicitly; OAO will not fall back to
+development authentication when `NODE_ENV` is not `development`.
+
+## Google IAP
+
+Set `AUTH_PROVIDER=iap`, `IAP_EXPECTED_AUDIENCE`, `IAP_ORGANIZATION_ID`, and
+`IAP_PROJECT_ID`. OAO verifies Google's signed `x-goog-iap-jwt-assertion`
+against the exact Cloud Run audience and maps its immutable subject to a
+pre-provisioned OAO principal. Unsigned identity headers are ignored.
+
+Provision an existing principal and membership before its first IAP request:
+
+```sh
+DATABASE_URL=postgresql://... \
+OAO_ORGANIZATION_ID=00000000-0000-4000-8000-000000000001 \
+OAO_PROJECT_ID=00000000-0000-4000-8000-000000000002 \
+OAO_PRINCIPAL_ID=00000000-0000-4000-8000-000000000003 \
+IAP_EXPECTED_AUDIENCE=/projects/123456789/locations/europe-west1/services/oao-api \
+IAP_USER_EMAIL=user@example.com \
+pnpm --filter @oao/api provision:iap
+```
+
+The first signed assertion for that email binds its immutable IAP `sub` to the
+existing principal. Operators that already know the `sub` may additionally set
+`IAP_SUBJECT`. The command never creates a principal or grants membership and
+refuses remapping an audience or identity to a different target.
+
 ## WorkOS AuthKit
 
 ```sh
@@ -41,13 +68,16 @@ pnpm --filter @oao/api start
 
 Environment contract:
 
-- `AUTH_PROVIDER`: `development` (default) or `workos`.
+- `AUTH_PROVIDER`: `development`, `iap`, or `workos`; required outside local
+  development.
 - `APP_ORIGIN`: comma-separated exact HTTP(S) origin allowlist. The first is the
   post-login/logout application origin. HTTP is accepted only with explicit
   `NODE_ENV=development`.
 - `DATABASE_URL`: PostgreSQL connection string.
 - `PORT`: optional, defaults to `3000`.
 - `API_KEY_PEPPER`: required outside local development.
+- `IAP_EXPECTED_AUDIENCE`, `IAP_ORGANIZATION_ID`, `IAP_PROJECT_ID`: required
+  only for IAP.
 - `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD` (at least 32
   characters), `WORKOS_WEBHOOK_SECRET`: required only for WorkOS.
 - `WORKOS_COOKIE_MAX_AGE`: optional refresh-cookie lifetime in seconds;
