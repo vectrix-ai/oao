@@ -30,6 +30,7 @@ jobs:
         run: pnpm check
 
       - name: Verify Cloud SQL PostgreSQL 17 role semantics
+        timeout-minutes: 10
         run: pnpm test:postgres:fresh
 
       - name: Build delivery image
