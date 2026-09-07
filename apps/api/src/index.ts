@@ -11,6 +11,9 @@ export type { AuthenticationComposition } from "./composition.js";
 export { HttpApiError } from "./errors.js";
 export { PostgresApiStore } from "./store.js";
 export { seedDevelopment } from "./bootstrap.js";
+export { PostgresIapTenantResolver } from "./iap-postgres.js";
+export { provisionIapIdentity } from "./iap-provisioning.js";
+export type { IapIdentityProvisioningInput } from "./iap-provisioning.js";
 export {
   PostgresWorkOsTenantResolver,
   PostgresWorkOsWebhookLedger,

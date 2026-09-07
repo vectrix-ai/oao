@@ -139,7 +139,7 @@ export interface ApiDependencies {
 }
 
 export interface ApiAuthConfiguration {
-  readonly provider: "development" | "workos";
+  readonly provider: "development" | "iap" | "workos";
   readonly appOrigins: readonly string[];
   readonly appOrigin: string;
   readonly callbackUri: string;
@@ -1708,10 +1708,14 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     const cookieAuthenticated =
       readCookie(request, "oao_session") !== undefined ||
       readCookie(request, "oao_refresh") !== undefined;
+    const iapBrowserAuthenticated =
+      authConfiguration.provider === "iap" &&
+      request.headers.has("x-goog-iap-jwt-assertion") &&
+      !apiKeyBearer;
     const startsAuthentication = pathname === "/v1/auth/login";
     if (
       UNSAFE_METHODS.has(request.method) &&
-      cookieAuthenticated &&
+      (cookieAuthenticated || iapBrowserAuthenticated) &&
       !(apiKeyBearer && apiKeyProtectedRoute) &&
       !startsAuthentication &&
       pathname !== "/v1/auth/workos/webhook"
@@ -1787,6 +1791,9 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     const ready = await dependencies.store.ready();
     return c.json({ status: ready ? "ready" : "not_ready" }, ready ? 200 : 503);
   });
+  app.get("/v1/auth/provider", (c) =>
+    c.json({ authProvider: authConfiguration.provider }),
+  );
 
   const startAuthentication = async (
     c: ApiContext,

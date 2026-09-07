@@ -341,13 +341,23 @@ jobs:
           wait_for_api_digest "$expected_digest" "Release"
 
           api_url="$(gcloud run services describe "$CLOUD_RUN_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.url)')"
-          api_id_token="$(gcloud auth print-identity-token --audiences="$api_url")"
-          if [ -z "$api_id_token" ]; then
-            echo "::error::Unable to mint an OIDC identity token for the private API"
-            exit 1
-          fi
+          issued_at="$(date +%s)"
+          expires_at="$((issued_at + 600))"
+          IAP_AUDIENCE="${api_url}/readyz" \
+          IAP_ISSUED_AT="$issued_at" \
+          IAP_EXPIRES_AT="$expires_at" \
+          IAP_SERVICE_ACCOUNT="$GCP_RELEASE_SERVICE_ACCOUNT" \
+            python3 -c 'import json, os; print(json.dumps({"iss": os.environ["IAP_SERVICE_ACCOUNT"], "sub": os.environ["IAP_SERVICE_ACCOUNT"], "aud": os.environ["IAP_AUDIENCE"], "iat": int(os.environ["IAP_ISSUED_AT"]), "exp": int(os.environ["IAP_EXPIRES_AT"])}))' \
+              > "$RUNNER_TEMP/iap-claims.json"
+          gcloud iam service-accounts sign-jwt \
+            "$RUNNER_TEMP/iap-claims.json" \
+            "$RUNNER_TEMP/iap-assertion.jwt" \
+            --iam-account "$GCP_RELEASE_SERVICE_ACCOUNT" \
+            --project "$GCP_PROJECT_ID" \
+            --quiet
+          iap_assertion="$(< "$RUNNER_TEMP/iap-assertion.jwt")"
           curl --fail --retry 6 --retry-all-errors --retry-delay 5 \
-            --header "X-Serverless-Authorization: Bearer $api_id_token" \
+            --header "Proxy-Authorization: Bearer $iap_assertion" \
             "${api_url}/readyz"
 
           gcloud artifacts docker tags add \

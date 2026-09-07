@@ -1,4 +1,10 @@
-export type AuthProvider = "development" | "workos";
+export type AuthProvider = "development" | "iap" | "workos";
+
+export interface IapServerConfiguration {
+  readonly expectedAudience: string;
+  readonly organizationId: string;
+  readonly projectId: string;
+}
 
 export interface WorkOsServerConfiguration {
   readonly apiKey: string;
@@ -17,16 +23,20 @@ export interface ApiServerConfiguration {
   readonly cookieSecure: boolean;
   readonly refreshCookieMaxAgeSeconds: number;
   readonly apiKeyPepper: string;
+  readonly iap?: IapServerConfiguration;
   readonly workos?: WorkOsServerConfiguration;
 }
 
 export function loadServerConfiguration(
   environment: NodeJS.ProcessEnv,
 ): ApiServerConfiguration {
-  const authProvider = parseAuthProvider(environment.AUTH_PROVIDER);
+  const nodeEnvironment = environment.NODE_ENV ?? "development";
+  const authProvider = parseAuthProvider(
+    environment.AUTH_PROVIDER,
+    nodeEnvironment,
+  );
   const databaseUrl = required(environment, "DATABASE_URL");
   const port = parsePort(environment.PORT);
-  const nodeEnvironment = environment.NODE_ENV ?? "development";
   const appOrigins = parseAppOrigins(required(environment, "APP_ORIGIN"));
   const appOrigin = appOrigins[0];
   if (!appOrigin) throw new Error("APP_ORIGIN must contain an origin");
@@ -72,6 +82,23 @@ export function loadServerConfiguration(
           )
         : 86_400,
     apiKeyPepper,
+    ...(authProvider === "iap"
+      ? {
+          iap: {
+            expectedAudience: validateIapAudience(
+              required(environment, "IAP_EXPECTED_AUDIENCE"),
+            ),
+            organizationId: validateUuid(
+              required(environment, "IAP_ORGANIZATION_ID"),
+              "IAP_ORGANIZATION_ID",
+            ),
+            projectId: validateUuid(
+              required(environment, "IAP_PROJECT_ID"),
+              "IAP_PROJECT_ID",
+            ),
+          },
+        }
+      : {}),
     ...(authProvider === "workos"
       ? {
           workos: {
@@ -89,11 +116,34 @@ export function loadServerConfiguration(
   };
 }
 
-function parseAuthProvider(value: string | undefined): AuthProvider {
+function parseAuthProvider(
+  value: string | undefined,
+  nodeEnvironment: string,
+): AuthProvider {
+  if (value === undefined && nodeEnvironment !== "development")
+    throw new Error("AUTH_PROVIDER is required outside local development");
   const provider = value ?? "development";
-  if (provider !== "development" && provider !== "workos")
-    throw new Error("AUTH_PROVIDER must be development or workos");
+  if (provider !== "development" && provider !== "iap" && provider !== "workos")
+    throw new Error("AUTH_PROVIDER must be development, iap, or workos");
   return provider;
+}
+
+function validateIapAudience(value: string): string {
+  if (
+    !/^\/projects\/\d+\/locations\/[a-z0-9-]+\/services\/[a-z0-9-]+$/u.test(
+      value,
+    )
+  )
+    throw new Error(
+      "IAP_EXPECTED_AUDIENCE must be a Cloud Run IAP resource audience",
+    );
+  return value;
+}
+
+function validateUuid(value: string, name: string): string {
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(value))
+    throw new Error(`${name} must be a UUID`);
+  return value.toLowerCase();
 }
 
 function parsePort(value: string | undefined): number {
