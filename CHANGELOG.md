@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.0](https://github.com/vectrix-ai/oao/compare/v0.6.0...v0.7.0) (2026-09-07)
+
+
+### Features
+
+* VEC-1399 add OAO GCP dev delivery ([7b8e67f](https://github.com/vectrix-ai/oao/commit/7b8e67f99e61bc342e565c7815627fbb96ee3f54))
+
+
+### Bug Fixes
+
+* **auth:** support non-superuser IAP migrations ([6f9a210](https://github.com/vectrix-ai/oao/commit/6f9a2109b86ac8229450c59fe3b2126167a9bf5a))
+* **ci:** bound runtime integration tests and preserve failures ([4587691](https://github.com/vectrix-ai/oao/commit/4587691e081f08f9d652ad11bd0783511554c7d4))
+* **db:** avoid approval deadlocks during tool publication replay ([45c3cf8](https://github.com/vectrix-ai/oao/commit/45c3cf8a88bf2e1e85717790edd48639c97eedce))
+* **test:** account for Flue recovery polling ([370ea90](https://github.com/vectrix-ai/oao/commit/370ea906cf7a95816f10940d99b91fd25f48cc11))
+
 ## [0.6.0](https://github.com/vectrix-ai/oao/compare/v0.5.0...v0.6.0) (2026-09-02)
 
 ### Features
