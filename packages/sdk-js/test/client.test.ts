@@ -976,3 +976,30 @@ test("model preset writes require an idempotency key", async () => {
     /idempotencyKey/u,
   );
 });
+
+test("live model catalog preserves discovery-only availability", async () => {
+  const entry = {
+    providerType: "openai",
+    model: "openai/gpt-7-future",
+    catalogId: "gpt-7-future",
+    name: "Future",
+    contextWindow: null,
+    maxOutputTokens: null,
+    reasoning: false,
+    runtimeSupported: false,
+  };
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async () =>
+      Response.json({
+        data: [entry],
+        providerId: "provider-1",
+        providerType: "openai",
+        pageInfo: { hasMore: false, nextCursor: null },
+      }),
+  });
+  const result = await client.listModelCatalog("project-1", {
+    providerId: "provider-1",
+  });
+  assert.deepEqual(result.data[0], entry);
+});

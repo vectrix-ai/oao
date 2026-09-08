@@ -87,7 +87,8 @@ archived presets fail with a provider-removed error.
 6. For OpenAI, review **Model settings**. New presets default to plain text,
    standard reasoning mode, medium reasoning effort, medium verbosity, and an
    automatic reasoning summary. GPT-5.6 presets can select standard or pro
-   mode and reasoning effort from none through max.
+   mode and reasoning effort from none through max. GPT-6 Astra supports low,
+   medium, high, xhigh, and max; reasoning cannot be disabled.
 7. For Anthropic, review **Claude settings**. Thinking can be disabled or set
    to adaptive when the model advertises that capability. `maxTokens` is the
    total output ceiling shared by thinking and the visible answer. Effort is
@@ -235,9 +236,17 @@ plus saved `/presets`, exposing saved presets as `openrouter/@preset/<slug>`
 options. For direct OpenAI and Anthropic connections, OAO decrypts the selected
 project key server-side and fetches the provider's live `/v1/models` catalog.
 For xAI, OAO fetches `/v1/language-models` and exposes text-output entries as
-`xai/<catalog-id>` without relying on a hard-coded Grok list. OpenAI and
-Anthropic responses are intersected with OAO's pinned runtime models so
-unsupported model types are not offered for agent presets. Anthropic entries also expose
+`xai/<catalog-id>` without relying on a hard-coded Grok list. OpenAI uses the
+live list for account membership and discovers new GPT-4.1, GPT-5-and-later, and
+o3-and-later family IDs without a pinned catalog update. Known
+non-Responses models and specialized audio, realtime, transcription, search,
+image, embedding, moderation, and deep-research variants are excluded.
+Models without verified runtime capabilities and pricing appear with
+`runtimeSupported: false`. The console shows them disabled with an explanation;
+the CLI setup only offers supported models. Preset creation rejects unsupported
+entries, so naming patterns cannot authorize execution or produce zero-cost usage.
+Anthropic responses are intersected with OAO's pinned runtime models.
+Anthropic entries also expose
 the model's adaptive-thinking, thinking-disable, and effort capabilities.
 Claude models whose live capabilities do not support effort are not offered,
 because every OAO Anthropic preset pins that setting.
@@ -354,9 +363,18 @@ Search `/model-catalog` with the intended provider connection. OpenRouter,
 OpenAI, Anthropic, and xAI use separate catalogs and prefixes. If an OpenRouter model
 or saved preset is missing, confirm the provider API key can read the OpenRouter
 catalog. If a direct OpenAI model is missing, confirm the selected key can list
-it through OpenAI's `/v1/models` endpoint. OAO also requires matching
-Responses-runtime metadata, so a newly released or non-text model remains
-unavailable until the pinned Pi catalog supports it.
+it through OpenAI's `/v1/models` endpoint and belongs to a supported text/reasoning
+family. Each catalog request fetches the current account list; OAO does not
+cache it or require a library release to discover new family members.
+
+Known OpenAI models retain their runtime metadata. GPT-6 Astra has documented
+metadata for its 1,050,000-token context window, 128,000-token output limit,
+image input, pricing, and reasoning levels, so it can be selected immediately
+when the connected key lists it. Models without verified metadata show unknown
+context/output limits and remain disabled until runtime support is added.
+Discovery is automatic; enabling a new model still requires verified endpoint,
+tool, reasoning, limit, and pricing metadata. This prevents failed runs and
+incorrect cost reporting.
 
 If a direct Anthropic model is missing, confirm the selected key can list it
 through Anthropic's `/v1/models` endpoint. OAO must also have matching native

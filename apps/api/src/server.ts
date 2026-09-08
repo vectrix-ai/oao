@@ -93,7 +93,9 @@ const app = createApiApp({
           apiKey,
           search: model,
         });
-        return catalog.some((entry) => entry.model === model);
+        return catalog.some(
+          (entry) => entry.model === model && entry.runtimeSupported !== false,
+        );
       }
       return isApprovedCatalogModel(model, providerType);
     },

@@ -2107,6 +2107,31 @@ describe("management console", () => {
     expect(preset.getByLabelText("Reasoning effort")).toHaveValue("medium");
     expect(preset.getByLabelText("Verbosity")).toHaveValue("medium");
     expect(preset.getByLabelText("Summary")).toHaveValue("auto");
+    await user.selectOptions(preset.getByLabelText("Reasoning effort"), "none");
+    await user.click(model);
+    await user.clear(model);
+    await user.type(model, "future");
+    const unsupportedModel = await preset.findByRole("option", {
+      name: /Future model/u,
+    });
+    expect(unsupportedModel).toHaveAttribute("aria-disabled", "true");
+    await user.click(unsupportedModel);
+    expect(preset.getByLabelText(/^Preset key/u)).toHaveValue(
+      "gpt-5-6-terra-v1",
+    );
+    await user.clear(model);
+    await user.type(model, "astra");
+    await user.click(
+      await preset.findByRole("option", { name: /GPT-6 Astra/u }),
+    );
+    expect(preset.getByLabelText(/^Preset key/u)).toHaveValue("gpt-6-astra-v1");
+    expect(preset.getByLabelText("Reasoning effort")).toHaveValue("medium");
+    expect(
+      within(preset.getByLabelText("Reasoning effort")).queryByRole("option", {
+        name: "none",
+      }),
+    ).not.toBeInTheDocument();
+
     await user.selectOptions(preset.getByLabelText("Reasoning mode"), "pro");
     await user.selectOptions(preset.getByLabelText("Reasoning effort"), "high");
     await user.selectOptions(preset.getByLabelText("Verbosity"), "low");
@@ -2120,6 +2145,9 @@ describe("management console", () => {
       preset.queryByText("Routing and data policy"),
     ).not.toBeInTheDocument();
     await user.click(preset.getByRole("button", { name: "Add model preset" }));
+    await waitFor(() =>
+      expect(api.lastPresetInput?.model).toBe("openai/gpt-6-astra"),
+    );
     await waitFor(() =>
       expect(api.lastPresetInput?.settings).toEqual({
         textFormat: "text",

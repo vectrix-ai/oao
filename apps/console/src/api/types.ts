@@ -70,6 +70,7 @@ export interface ModelPresetList {
   readonly credentialEncryptionConfigured: boolean;
 }
 
+/** Entries may be visible before runtime support is verified. */
 export interface ModelCatalogList {
   readonly data: readonly ModelCatalogEntry[];
   readonly providerId: string;

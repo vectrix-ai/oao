@@ -307,7 +307,10 @@ model preset linked to that connection. The model selector loads the live
 catalog available to the selected provider key; for direct providers it offers
 the returned models supported by OAO's runtimes. xAI uses its live
 language-model catalog so newly listed text-output Grok IDs can be selected
-without an OAO catalog update. No process restart is needed for later provider
+without an OAO catalog update. OpenAI also discovers new supported GPT and
+o-series text/reasoning models from its live account list, including GPT-6
+Astra, without a library update. See [model discovery limitations](/models/adding-models#a-model-is-not-in-the-catalog)
+for models with unknown metadata. No process restart is needed for later provider
 or preset additions. Direct OpenAI presets also pin
 plain-text output, reasoning mode and effort, verbosity, and reasoning-summary
 settings. Direct Anthropic presets pin adaptive or disabled thinking, a total

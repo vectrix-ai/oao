@@ -339,7 +339,7 @@ export class OaoClient {
     );
   }
 
-  /** Lists the pinned model catalog a project provider preset may be built on. */
+  /** Lists live models; entries with runtimeSupported === false cannot become presets yet. */
   listModelCatalog(
     projectId: string,
     query: {

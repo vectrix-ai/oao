@@ -820,7 +820,18 @@ describe("HTTP console adapter", () => {
       )
       .mockResolvedValueOnce(
         jsonResponse({
-          data: [],
+          data: [
+            {
+              providerType: "openai",
+              model: "openai/gpt-7-future",
+              catalogId: "gpt-7-future",
+              name: "Future",
+              contextWindow: null,
+              maxOutputTokens: null,
+              reasoning: false,
+              runtimeSupported: false,
+            },
+          ],
           providerId: preset.providerId,
           providerType: "openrouter",
         }),
@@ -837,7 +848,11 @@ describe("HTTP console adapter", () => {
       `/v1/projects/${PROJECT_ID}/model-presets?limit=200`,
     );
 
-    await api.listModelCatalog(preset.providerId, "sonnet 4.6");
+    const liveCatalog = await api.listModelCatalog(
+      preset.providerId,
+      "sonnet 4.6",
+    );
+    expect(liveCatalog.data[0]?.runtimeSupported).toBe(false);
     expect(fetchMock.mock.calls[2]?.[0]).toBe(
       `/v1/projects/${PROJECT_ID}/model-catalog?limit=200&providerId=${preset.providerId}&search=sonnet%204.6`,
     );

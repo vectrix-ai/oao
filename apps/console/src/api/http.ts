@@ -2255,6 +2255,7 @@ export class HttpConsoleApi implements ConsoleApi {
       `/model-catalog?limit=200&providerId=${encodeURIComponent(providerId)}${query}`,
     );
     return {
+      // Preserve runtimeSupported so discovery-only models remain disabled.
       data: response.data,
       providerId: response.providerId,
       providerType: response.providerType,
