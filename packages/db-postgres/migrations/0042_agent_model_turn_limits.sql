@@ -101,10 +101,16 @@ CREATE TABLE IF NOT EXISTS oao.run_model_turns (
   project_id uuid NOT NULL,
   run_id uuid NOT NULL,
   turn_id text NOT NULL,
-  PRIMARY KEY (organization_id, project_id, run_id, turn_id),
-  FOREIGN KEY (organization_id, project_id, run_id)
-    REFERENCES oao.runs (organization_id, project_id, id)
+  PRIMARY KEY (organization_id, project_id, run_id, turn_id)
 );
+-- Replace the preview's non-cascading foreign key too. Reservations belong to
+-- the run and must not block the existing project purge when it deletes runs.
+ALTER TABLE oao.run_model_turns
+  DROP CONSTRAINT IF EXISTS run_model_turns_organization_id_project_id_run_id_fkey;
+ALTER TABLE oao.run_model_turns
+  ADD CONSTRAINT run_model_turns_organization_id_project_id_run_id_fkey
+  FOREIGN KEY (organization_id, project_id, run_id)
+  REFERENCES oao.runs (organization_id, project_id, id) ON DELETE CASCADE;
 ALTER TABLE oao.run_model_turns ENABLE ROW LEVEL SECURITY;
 ALTER TABLE oao.run_model_turns FORCE ROW LEVEL SECURITY;
 -- A local preview of this migration used the name 0040_agent_model_turn_limits.
