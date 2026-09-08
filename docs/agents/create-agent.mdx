@@ -1075,7 +1075,19 @@ and delegate bindings reference its immutable versions:
 - Sessions never float to a newer version, and only one unsettled run is
   allowed per session.
 - The console exposes cancellation but not API run resume or branch replay.
-- `maxTurns` is fixed at `32`. The console caps `timeoutMs` at one hour, while
+- Maximum model turns is editable in agent configuration: a required integer from
+  `1` through `256`. New agents default to `32` to preserve existing behavior;
+  `128` is useful for longer bulk imports. The upper bound limits runaway work
+  and cost. Publishing creates an immutable version; existing sessions retain
+  their selected version and limit. Start a new session to use the new version.
+- Turns are reserved durably per run before model invocation, including scratch
+  model calls. Compaction does not reset the budget; concurrent calls share it.
+  Replaying the same Flue turn ID does not consume an additional reservation.
+  Provider-internal HTTP retries are not separate turns. Each new run has its own
+  budget, and delegated runs use their own agent version's limit.
+- Reaching the budget fails the run with `model_turn_limit_exceeded` and a safe
+  explanation. Raising the limit does not extend the timeout.
+- The console caps `timeoutMs` at one hour, while
   the API publication schema currently enforces only the 1,000 ms minimum. Stay
   within one hour for parity with the current Flue durability configuration.
 - Automated tests may inject deterministic provider doubles at adapter

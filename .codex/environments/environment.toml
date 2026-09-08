@@ -1,0 +1,82 @@
+version = 1
+name = "OAO"
+
+[setup]
+script = '''
+set -eu
+cd "${CODEX_WORKTREE_PATH:-$PWD}"
+
+python3 <<'PY'
+from pathlib import Path
+import os
+import re
+import socket
+import subprocess
+import tempfile
+
+root = Path(subprocess.check_output(
+    ['git', 'rev-parse', '--show-toplevel'], text=True
+).strip()).resolve()
+listing = subprocess.check_output(['git', 'worktree', 'list', '--porcelain'], text=True)
+main = next((Path(block.splitlines()[0].removeprefix('worktree '))
+             for block in listing.strip().split('\n\n')
+             if 'branch refs/heads/main' in block.splitlines()), None)
+if main is None:
+    raise SystemExit('No checkout of main was found. Check out main before setup.')
+
+if root == main.resolve():
+    print('Main checkout: keeping its existing environment and ports.')
+else:
+    destination = root / '.env'
+    source = destination if destination.exists() else main / '.env'
+    if not source.is_file():
+        raise SystemExit('The main checkout has no .env to copy.')
+    content = source.read_text()
+    held = []
+    def available_port(start):
+        for port in range(start, start + 1000):
+            sock = socket.socket()
+            try:
+                sock.bind(('127.0.0.1', port))
+            except OSError:
+                sock.close()
+                continue
+            held.append(sock)
+            return port
+        raise RuntimeError('No available local port found.')
+
+    try:
+        console, api, runtime = [available_port(p) for p in (8081, 3001, 8789)]
+        settings = {
+            'OAO_CONSOLE_PORT': str(console),
+            'OAO_API_PORT': str(api),
+            'OAO_RUNTIME_PORT': str(runtime),
+            'APP_ORIGIN': f'http://127.0.0.1:{console}',
+            'API_ORIGIN': f'http://127.0.0.1:{api}',
+            'VITE_OAO_API_PROXY_TARGET': f'http://127.0.0.1:{api}',
+        }
+        for key, value in settings.items():
+            content = re.sub(rf'^[ \t]*(?:export\s+)?{key}=.*$', '', content, flags=re.MULTILINE)
+            content += f'\n{key}={value}\n'
+        # mkstemp creates a private file before any credentials are written.
+        fd, temporary = tempfile.mkstemp(prefix='.env-setup-', dir=root)
+        try:
+            with os.fdopen(fd, 'w') as output:
+                output.write(content)
+            os.replace(temporary, destination)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        print(f'Console configured at http://127.0.0.1:{console}')
+    finally:
+        for sock in held:
+            sock.close()
+PY
+
+pnpm install --frozen-lockfile
+'''
+
+[[actions]]
+name = "Run"
+icon = "run"
+command = "pnpm dev:local"

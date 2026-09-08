@@ -622,7 +622,7 @@ test("client publishes the exact managed-agent configuration contract", async ()
       provider: "daytona-primary",
       network: "none" as const,
     },
-    limits: { maxTurns: 32 as const, timeoutMs: 60_000 },
+    limits: { maxTurns: 128, timeoutMs: 60_000 },
   };
 
   await client.publishAgentVersion("project-1", "agent-1", config, {

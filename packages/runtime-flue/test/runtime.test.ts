@@ -909,3 +909,26 @@ test("PostgreSQL Skill versions become verified immutable Flue definitions", asy
     1,
   );
 });
+
+test("model turn limit failures expose a specific bounded safe explanation", () => {
+  const diagnostics = runtimeTesting.modelInvocationDiagnostics(
+    { error: { message: "Model turn limit exceeded (128)" } },
+    true,
+  );
+  assert.equal(diagnostics.errorCode, "model_turn_limit_exceeded");
+  assert.match(
+    diagnostics.errorExplanation ?? "",
+    /maximum of 128 model turns/,
+  );
+  for (const message of [
+    "Model turn limit exceeded (999)",
+    "Model turn limit exceeded (128) secret-token",
+  ]) {
+    const safe = runtimeTesting.modelInvocationDiagnostics(
+      { error: { message } },
+      true,
+    );
+    assert.equal(safe.errorCode, undefined);
+    assert.ok(!JSON.stringify(safe).includes("secret-token"));
+  }
+});

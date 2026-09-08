@@ -36,6 +36,7 @@ import type {
 import { start } from "@flue/runtime/node";
 import type { Flue } from "@flue/runtime/node";
 import {
+  MAX_AGENT_MODEL_TURNS,
   ManagedAgentInstanceDataSchema,
   parseManagedAgentSnapshotForPublication,
   ManagedRunDeliverySchema,
@@ -1427,6 +1428,21 @@ function modelInvocationDiagnostics(
   },
   isError: boolean,
 ): Readonly<Record<string, string>> {
+  const limitMatch = /^Model turn limit exceeded \(([0-9]{1,3})\)$/.exec(
+    response.error?.message ?? "",
+  );
+  if (
+    isError &&
+    limitMatch &&
+    Number(limitMatch[1]) >= 1 &&
+    Number(limitMatch[1]) <= MAX_AGENT_MODEL_TURNS
+  ) {
+    return {
+      finishReason: "error",
+      errorCode: "model_turn_limit_exceeded",
+      errorExplanation: `The run reached its maximum of ${limitMatch[1]} model turns. ${Number(limitMatch[1]) < MAX_AGENT_MODEL_TURNS ? "Publish a new agent version with a higher limit and start a new session to continue." : "Split the work into smaller runs and start a new session."} The run timeout still applies.`,
+    };
+  }
   const finishReason =
     publicProviderFinishReason(response.finishReason) ?? "unknown";
   const standardizedReason =
@@ -3950,8 +3966,59 @@ export class RuntimeProjection {
   }
 }
 
+/** Reserve one durable model turn against the run's immutable agent version. */
+export async function reserveRunModelTurn(
+  pool: PgPool,
+  input: TenantContext & { readonly runId: RunId; readonly turnId: string },
+): Promise<void> {
+  const reservationId = eventUuid(`turn:${input.runId}:${input.turnId}`);
+  const limit = await withTenantTransaction(
+    pool,
+    input,
+    async (transaction) => {
+      const result = await transaction.query<{ max_turns: number }>(
+        `SELECT (v.config->'limits'->>'maxTurns')::integer AS max_turns
+       FROM oao.runs r JOIN oao.agent_versions v
+         ON v.organization_id=r.organization_id AND v.project_id=r.project_id AND v.id=r.agent_version_id
+       WHERE r.organization_id=$1 AND r.project_id=$2 AND r.id=$3 FOR UPDATE OF r`,
+        [input.organizationId, input.projectId, input.runId],
+      );
+      const maximum = result.rows[0]?.max_turns;
+      if (!maximum) throw new Error("Model turn budget is unavailable");
+      // Adopt invocations from before the budget ledger existed, within the
+      // same tenant transaction and run lock. Normal reservations deduplicate.
+      await transaction.query(
+        `INSERT INTO oao.run_model_turns (organization_id,project_id,run_id,turn_id)
+         SELECT organization_id,project_id,run_id,id::text FROM oao.model_invocations
+         WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+           AND safe_response->>'errorCode' IS DISTINCT FROM 'model_turn_limit_exceeded'
+         ON CONFLICT DO NOTHING`,
+        [input.organizationId, input.projectId, input.runId],
+      );
+      const turns = await transaction.query<{
+        count: string;
+        reserved: boolean;
+      }>(
+        `SELECT count(*)::text AS count, COALESCE(bool_or(turn_id=$4),false) AS reserved
+       FROM oao.run_model_turns WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
+        [input.organizationId, input.projectId, input.runId, reservationId],
+      );
+      if (turns.rows[0]?.reserved) return undefined;
+      if (Number(turns.rows[0]?.count) >= maximum) return maximum;
+      await transaction.query(
+        `INSERT INTO oao.run_model_turns (organization_id,project_id,run_id,turn_id) VALUES ($1,$2,$3,$4)`,
+        [input.organizationId, input.projectId, input.runId, reservationId],
+      );
+      return undefined;
+    },
+  );
+  if (limit !== undefined)
+    throw new Error(`Model turn limit exceeded (${limit})`);
+}
+
 export async function configureVendorNeutralTelemetry(
   input: {
+    readonly pool?: PgPool;
     readonly endpoint?: string;
     readonly serviceName?: string;
   } = {},
@@ -3966,9 +4033,30 @@ export async function configureVendorNeutralTelemetry(
     });
     sdk.start();
   }
-  const disposeInstrumentation = instrument(
-    createOpenTelemetryInstrumentation({ content: false }),
-  );
+  const telemetry = createOpenTelemetryInstrumentation({ content: false });
+  const disposeInstrumentation = instrument({
+    ...telemetry,
+    async interceptor(operation, context, next) {
+      if (operation.type === "model" && input.pool) {
+        // Flue model contexts expose the durable OAO instance ID separately
+        // from their internal conv_* ID, including inside scratch sessions.
+        const dispatches = await input.pool.query<DispatchRow>(
+          "SELECT * FROM oao.find_runtime_dispatch($1,$2)",
+          [context.submissionId ?? "", context.instanceId ?? ""],
+        );
+        const dispatch = dispatches.rows[0];
+        if (!dispatch || dispatch.state === "settled")
+          throw new Error("Model turn run identity is unavailable");
+        await reserveRunModelTurn(input.pool, {
+          organizationId: dispatch.organization_id,
+          projectId: dispatch.project_id,
+          runId: dispatch.run_id,
+          turnId: operation.turnId,
+        });
+      }
+      return telemetry.interceptor(operation, context, next);
+    },
+  });
   return async () => {
     await disposeInstrumentation();
     await sdk?.shutdown();

@@ -23,7 +23,10 @@ import {
   type FauxResponseStep,
 } from "@oao/models-openrouter";
 import { PostgresWakeQueue, type RuntimeWakeJob } from "@oao/queue-postgres";
-import type { PlatformToolHandler } from "@oao/runtime-flue";
+import {
+  reserveRunModelTurn,
+  type PlatformToolHandler,
+} from "@oao/runtime-flue";
 import { FakeSandboxProvider } from "@oao/sandbox-daytona";
 import { startRuntimeWorker, type RuntimeWorkerHandle } from "../src/main.js";
 import {
@@ -300,6 +303,7 @@ async function seedFixture(
   tools: readonly Record<string, unknown>[],
   options: {
     readonly existing?: Fixture;
+    readonly maxTurns?: number;
     readonly timeoutMs?: number;
     readonly sandboxEnabled?: boolean;
     readonly sandboxProvider?: string;
@@ -329,7 +333,10 @@ async function seedFixture(
         network: "none",
         capabilities: ["filesystem_read", "filesystem_write", "shell"],
       },
-      limits: { maxTurns: 32, timeoutMs: options.timeoutMs ?? 20_000 },
+      limits: {
+        maxTurns: options.maxTurns ?? 32,
+        timeoutMs: options.timeoutMs ?? 20_000,
+      },
     };
     const encoded = JSON.stringify(config);
     await pool.query(
@@ -574,6 +581,49 @@ async function runRuntimeScenario() {
   await withScenarioCleanup(async () => {
     worker = await start();
     await seedBase(admin);
+
+    // Two versions share the fake provider but reserve isolated durable budgets.
+    const low = await seedFixture(admin, "budget-low", "budget", [], {
+      maxTurns: 1,
+    });
+    const high = await seedFixture(admin, "budget-high", "budget", [], {
+      maxTurns: 128,
+    });
+    const reserve = (runId: RunId, turnId: string) =>
+      reserveRunModelTurn(admin, { ...tenant, runId, turnId });
+    const concurrent = await Promise.allSettled([
+      reserve(low.runId, "one"),
+      reserve(low.runId, "two"),
+    ]);
+    assert.equal(
+      concurrent.filter((result) => result.status === "fulfilled").length,
+      1,
+    );
+    const winner = concurrent[0]?.status === "fulfilled" ? "one" : "two";
+    await reserve(low.runId, winner); // Replayed reservation consumes no extra turn.
+    await assert.rejects(
+      reserve(low.runId, "three"),
+      /Model turn limit exceeded \(1\)/,
+    );
+    for (let index = 0; index < 128; index += 1)
+      await reserve(high.runId, `turn-${index}`);
+    await assert.rejects(
+      reserve(high.runId, "overflow"),
+      /Model turn limit exceeded \(128\)/,
+    );
+    // The worker must stop before invoking the provider and publish the safe error.
+    await enqueue(worker, low);
+    await waitRun(admin, low.runId, "failed");
+    const budgetError = await admin.query<{
+      public_payload: { errorCode?: string };
+    }>(
+      "SELECT public_payload FROM oao.product_events WHERE aggregate_id=$1 AND event_kind='model.invocation_failed'",
+      [low.runId],
+    );
+    assert.equal(
+      budgetError.rows[0]?.public_payload.errorCode,
+      "model_turn_limit_exceeded",
+    );
 
     const first = await seedFixture(
       admin,

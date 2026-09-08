@@ -244,7 +244,8 @@ export interface PublishAgentVersionInput {
   }[];
   readonly sandbox: SandboxPolicyInput;
   readonly limits: {
-    readonly maxTurns: 32;
+    /** Maximum model turns per run, an integer from 1 through 256. Default: 32. */
+    readonly maxTurns: number;
     readonly timeoutMs: number;
   };
 }

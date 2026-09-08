@@ -458,3 +458,19 @@ The launcher stops the stack if the API, runtime worker, or console does not bec
 
 Correct the provider configuration, restart `pnpm dev:local` if the platform
 encryption key changed, and rerun the health checks.
+
+## Codex worktrees
+
+The repository's `.codex/environments/environment.toml` defines the OAO local
+Codex environment. Its setup script copies `.env` from the checkout on `main`
+when a new worktree has no `.env`, chooses available Console, API, and runtime
+ports, updates their local URLs, and installs dependencies with the lockfile.
+Existing worktree credentials are preserved on reruns. The **Run** action starts
+`pnpm dev:local`. Setup requires Python 3.9+, pnpm, and a checkout of `main` with
+an existing `.env`.
+
+This changes application ports, not database isolation: worktrees retain the
+source database URL and workers consume the same run queue. Port availability
+is checked during setup; if another process takes a chosen port before startup,
+rerun setup or adjust the worktree's `.env`. Environment files remain untracked
+and are written with permissions restricted to the current user.

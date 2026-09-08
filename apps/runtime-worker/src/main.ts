@@ -19,7 +19,6 @@ import {
   ProjectModelPresetRegistry,
   createDeterministicModelProvider,
   loadModelPresetConfiguration,
-  withPlatformTurnLimit,
   type FauxResponseStep,
 } from "@oao/models-openrouter";
 import { McpRemoteClient, type McpRemotePort } from "@oao/mcp-remote";
@@ -76,6 +75,7 @@ export async function startRuntimeWorker(input: {
   const pool = createPool(input.databaseUrl);
   await migrate(pool);
   const telemetryStop = await configureVendorNeutralTelemetry({
+    pool,
     ...(env.OTEL_EXPORTER_OTLP_ENDPOINT
       ? { endpoint: env.OTEL_EXPORTER_OTLP_ENDPOINT }
       : {}),
@@ -112,13 +112,12 @@ export async function startRuntimeWorker(input: {
         hostedEnabled: false,
       })
     : modelConfiguration.registry;
-  const providers = fake ? [withPlatformTurnLimit(fake.provider)] : [];
+  const providers = fake ? [fake.provider] : [];
   // Durable project presets are registered lazily, one provider identity per
   // (organization, project, preset key), so routing policy stays isolated.
   const presets = new ProjectModelPresetRegistry({
     deployment: deploymentPresets,
-    registerProvider: (provider) =>
-      registerRuntimeModelProvider(withPlatformTurnLimit(provider)),
+    registerProvider: (provider) => registerRuntimeModelProvider(provider),
   });
   const credentialCipher = env.OAO_CREDENTIAL_ENCRYPTION_KEY
     ? ProviderCredentialCipher.fromBase64(env.OAO_CREDENTIAL_ENCRYPTION_KEY)

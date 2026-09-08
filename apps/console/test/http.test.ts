@@ -709,7 +709,7 @@ describe("HTTP console adapter", () => {
           network: "none",
           capabilities: ["filesystem_read", "filesystem_write", "shell"],
         },
-        limits: { maxTurns: 32, timeoutMs: 60_000 },
+        limits: { maxTurns: 128, timeoutMs: 60_000 },
       },
     });
 

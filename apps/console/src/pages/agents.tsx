@@ -1141,6 +1141,7 @@ function AgentEditor({
   const [sandboxCapabilities, setSandboxCapabilities] = useState(
     baseConfig.sandbox.capabilities,
   );
+  const [maxTurns, setMaxTurns] = useState(baseConfig.limits.maxTurns);
   const [timeout, setTimeoutValue] = useState(baseConfig.limits.timeoutMs);
   const [skillVersionIds, setSkillVersionIds] = useState(
     baseConfig.skillVersionIds ?? [],
@@ -1183,6 +1184,7 @@ function AgentEditor({
     setNetwork(next.config.sandbox.network);
     setSandboxCapabilities(next.config.sandbox.capabilities);
     setTimeoutValue(next.config.limits.timeoutMs);
+    setMaxTurns(next.config.limits.maxTurns);
     setSkillVersionIds(next.config.skillVersionIds ?? []);
     setMcpBindings(next.config.mcpBindings ?? []);
     setDelegates(next.config.delegates ?? []);
@@ -1205,7 +1207,7 @@ function AgentEditor({
       network,
       capabilities: sandboxCapabilities,
     },
-    limits: { maxTurns: 32, timeoutMs: timeout },
+    limits: { maxTurns, timeoutMs: timeout },
   };
   const incompatibleSelectedDelegates = delegates.flatMap((delegate) => {
     const candidate = availableAgents.find(
@@ -1282,6 +1284,10 @@ function AgentEditor({
   if (harnessOperations.length > 32)
     validation.push(
       "An Agent version can define at most 32 Harness Operations.",
+    );
+  if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 256)
+    validation.push(
+      "Maximum model turns must be an integer between 1 and 256.",
     );
   if (timeout < 1_000 || timeout > 3_600_000)
     validation.push("Run timeout must be between 1,000 and 3,600,000 ms.");
@@ -1991,21 +1997,6 @@ function AgentEditor({
                 <option value="restricted">Restricted</option>
               </Select>
             </Field>
-            <Field label="Run timeout (ms)">
-              <Input
-                type="number"
-                min={1000}
-                max={3600000}
-                value={timeout}
-                onChange={(event) =>
-                  setTimeoutValue(Number(event.target.value))
-                }
-                disabled={!isLatest}
-              />
-            </Field>
-            <Field label="Maximum turns">
-              <Input type="number" value={32} disabled readOnly />
-            </Field>
           </FieldRow>
           <div className="stack">
             <p className="muted">
@@ -2034,6 +2025,40 @@ function AgentEditor({
               )}
             </div>
           </div>
+        </Panel>
+        <Panel
+          title="Run limits"
+          description="Stored in each immutable agent version."
+        >
+          <FieldRow>
+            <Field label="Run timeout (ms)">
+              <Input
+                type="number"
+                min={1000}
+                max={3600000}
+                value={timeout}
+                onChange={(event) =>
+                  setTimeoutValue(Number(event.target.value))
+                }
+                disabled={!isLatest}
+              />
+            </Field>
+            <Field label="Maximum model turns">
+              <Input
+                type="number"
+                min={1}
+                max={256}
+                step={1}
+                value={maxTurns}
+                onChange={(event) => setMaxTurns(Number(event.target.value))}
+                disabled={!isLatest}
+              />
+              <p className="muted">
+                1–256 per run. Default 32; 128 can help with bulk imports. The
+                run timeout still applies.
+              </p>
+            </Field>
+          </FieldRow>
         </Panel>
         <ValidationPanel
           errors={validation}
