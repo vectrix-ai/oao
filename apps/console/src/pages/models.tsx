@@ -682,6 +682,13 @@ function CreateModelPresetDialog({
     const entry = catalog.find((candidate) => candidate.model === value);
     if (!entry) return;
     setModel(entry);
+    if (
+      entry.providerType === "openai" &&
+      entry.thinkingCanBeDisabled === false &&
+      reasoningEffort === "none"
+    ) {
+      setReasoningEffort("medium");
+    }
     if (entry.providerType === "anthropic") {
       const thinking = entry.adaptiveThinking ? "adaptive" : "disabled";
       setAnthropicThinking(thinking);
@@ -918,7 +925,9 @@ function CreateModelPresetDialog({
                     )
                   }
                 >
-                  <option value="none">none</option>
+                  {model?.thinkingCanBeDisabled !== false ? (
+                    <option value="none">none</option>
+                  ) : null}
                   <option value="low">low</option>
                   <option value="medium">medium</option>
                   <option value="high">high</option>

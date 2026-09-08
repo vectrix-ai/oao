@@ -35,6 +35,26 @@ const catalog: ModelCatalogPort = {
       reasoning: true,
     },
     {
+      providerType: "openai",
+      model: "openai/gpt-6-astra",
+      catalogId: "gpt-6-astra",
+      name: "GPT-6 Astra",
+      contextWindow: 1_050_000,
+      maxOutputTokens: 128_000,
+      reasoning: true,
+      thinkingCanBeDisabled: false,
+      effortLevels: ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+      providerType: "openai",
+      model: "openai/gpt-7-future",
+      catalogId: "gpt-7-future",
+      name: "gpt-7-future",
+      contextWindow: null,
+      maxOutputTokens: null,
+      reasoning: true,
+    },
+    {
       providerType: "anthropic",
       model: "anthropic/claude-sonnet-5",
       catalogId: "claude-sonnet-5",
@@ -562,57 +582,109 @@ test("a valid preset is inserted, audited, and returned without credentials", as
   );
 });
 
-test("OpenAI preset creation persists Responses API generation settings", async () => {
-  const settings = {
-    textFormat: "text" as const,
-    mode: "standard" as const,
-    effort: "medium" as const,
-    verbosity: "medium" as const,
-    summary: "auto" as const,
-  };
-  const input = {
-    key: "gpt-5-6-terra-v1",
-    displayName: "GPT-5.6 Terra",
-    providerId,
-    model: "openai/gpt-5.6-terra",
-    routing: {},
-    settings,
-  };
-  const created = {
-    id: "00000000-0000-4000-8000-000000000702",
-    organization_id: organizationId,
-    project_id: projectId,
-    key: input.key,
-    display_name: input.displayName,
-    origin: "project",
-    provider_id: providerId,
-    provider_type: "openai",
-    model: input.model,
-    routing: {},
-    settings,
-    hosted: true,
-    available: true,
-    created_by_principal_id: "00000000-0000-4000-8000-000000000003",
-    created_at: new Date("2026-08-27T09:00:00.000Z"),
-  };
-  const harness = app({
-    catalog,
-    rows: {
-      "FROM oao.project_model_providers": [openAIProviderRow],
-      "INSERT INTO oao.project_model_presets": [created],
-    },
+for (const modelId of ["gpt-5.6-terra", "gpt-6-astra", "gpt-7-future"]) {
+  test(`OpenAI ${modelId} preset creation persists live model and Responses settings`, async () => {
+    const settings = {
+      textFormat: "text" as const,
+      mode: "standard" as const,
+      effort: "medium" as const,
+      verbosity: "medium" as const,
+      summary: "auto" as const,
+    };
+    const input = {
+      key: "gpt-5-6-terra-v1",
+      displayName: "GPT-5.6 Terra",
+      providerId,
+      model: `openai/${modelId}`,
+      routing: {},
+      settings,
+    };
+    const created = {
+      id: "00000000-0000-4000-8000-000000000702",
+      organization_id: organizationId,
+      project_id: projectId,
+      key: input.key,
+      display_name: input.displayName,
+      origin: "project",
+      provider_id: providerId,
+      provider_type: "openai",
+      model: input.model,
+      routing: {},
+      settings,
+      hosted: true,
+      available: true,
+      created_by_principal_id: "00000000-0000-4000-8000-000000000003",
+      created_at: new Date("2026-08-27T09:00:00.000Z"),
+    };
+    const harness = app({
+      catalog,
+      rows: {
+        "FROM oao.project_model_providers": [openAIProviderRow],
+        "INSERT INTO oao.project_model_presets": [created],
+      },
+    });
+    const { cookie, projectId: actorProjectId } = await authenticate(
+      harness.app,
+    );
+    const response = await harness.app.request(
+      `/v1/projects/${actorProjectId}/model-presets`,
+      createRequest(cookie, input, "openai-terra-settings"),
+    );
+    assert.equal(response.status, 201);
+    assert.deepEqual((await response.json()).settings, settings);
+    const insert = harness.queries.find((query) =>
+      query.text.includes("INSERT INTO oao.project_model_presets"),
+    );
+    assert.deepEqual(insert?.values[8], settings);
   });
-  const { cookie, projectId: actorProjectId } = await authenticate(harness.app);
-  const response = await harness.app.request(
-    `/v1/projects/${actorProjectId}/model-presets`,
-    createRequest(cookie, input, "openai-terra-settings"),
-  );
-  assert.equal(response.status, 201);
-  assert.deepEqual((await response.json()).settings, settings);
-  const insert = harness.queries.find((query) =>
-    query.text.includes("INSERT INTO oao.project_model_presets"),
-  );
-  assert.deepEqual(insert?.values[8], settings);
+}
+
+test("OpenAI preset creation rejects unavailable models and disabled Astra reasoning", async () => {
+  for (const [model, effort, message] of [
+    ["openai/gpt-6-astra", "none", /requires reasoning effort/],
+    [
+      "openai/gpt-7-not-in-account",
+      "medium",
+      /not present in the provider catalog/,
+    ],
+  ] as const) {
+    const harness = app({
+      catalog,
+      rows: { "FROM oao.project_model_providers": [openAIProviderRow] },
+    });
+    const { cookie, projectId: actorProjectId } = await authenticate(
+      harness.app,
+    );
+    const response = await harness.app.request(
+      `/v1/projects/${actorProjectId}/model-presets`,
+      createRequest(
+        cookie,
+        {
+          key: "astra-v1",
+          displayName: "Astra",
+          providerId,
+          model,
+          routing: {},
+          settings: {
+            textFormat: "text",
+            mode: "standard",
+            effort,
+            verbosity: "medium",
+            summary: "auto",
+          },
+        },
+        "openai-invalid",
+      ),
+    );
+    assert.equal(response.status, 400);
+    assert.match(await response.text(), message);
+    assert.equal(
+      harness.queries.some((query) =>
+        query.text.includes("INSERT INTO oao.project_model_presets"),
+      ),
+      false,
+    );
+  }
 });
 
 test("Anthropic preset creation persists validated Claude settings", async () => {

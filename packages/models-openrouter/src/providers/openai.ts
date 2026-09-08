@@ -12,7 +12,6 @@ import {
   deepFreeze,
   positiveInteger,
   record,
-  requireModel,
   staticCatalogEntry,
   stringValue,
   type CreateProjectProviderInput,
@@ -27,11 +26,107 @@ type OpenAIModelSettings = Extract<
   { readonly mode: "standard" | "pro" }
 >;
 
-const OPENAI_MODEL_IDS = new Set(
+const PINNED_OPENAI_MODELS = new Map(
   openaiProvider()
     .getModels()
-    .map((model) => model.id),
+    .map((model) => [model.id, model] as const),
 );
+
+// /models reports account access, not endpoint or capability metadata. Restrict
+// fallbacks to modern text/reasoning families and exclude specialized variants.
+function isLiveResponsesModelId(id: string): boolean {
+  if (
+    !/^(?:gpt-(?:[5-9]|[1-9][0-9]+)(?:\.[0-9]+)?|gpt-4\.1|o(?:[3-9]|[1-9][0-9]+))(?:-[a-z0-9]+)*$/u.test(
+      id,
+    )
+  )
+    return false;
+  return true;
+}
+
+function isSpecializedModel(id: string): boolean {
+  return /(?:^|-)(?:audio|realtime|transcribe|tts|search|image|embedding|moderation|diarize)(?:-|$)|-deep-research(?:-|$)/u.test(
+    id,
+  );
+}
+
+function isAstra(id: string): boolean {
+  return /^gpt-6-astra(?:-\d{4}-\d{2}-\d{2})?$/u.test(id);
+}
+
+function openAIModel(id: string): Model<"openai-responses"> | undefined {
+  if (isSpecializedModel(id)) return undefined;
+  const pinned = PINNED_OPENAI_MODELS.get(id);
+  if (pinned)
+    return pinned.api === "openai-responses"
+      ? (pinned as Model<"openai-responses">)
+      : undefined;
+  if (!isLiveResponsesModelId(id)) return undefined;
+  const astra = isAstra(id);
+  return {
+    id,
+    name: astra ? `GPT-6 Astra${id.slice("gpt-6-astra".length)}` : id,
+    api: "openai-responses",
+    provider: "openai",
+    baseUrl: OPENAI_CATALOG_URL,
+    reasoning: !id.startsWith("gpt-4.1"),
+    input: astra ? ["text", "image"] : ["text"],
+    // Astra metadata: https://developers.openai.com/api/docs/models/gpt-6-astra
+    // Unknown metadata stays null in the public catalog. These are runtime
+    // budgets, not claims about the provider's context limits or free usage.
+    contextWindow: astra ? 1_050_000 : 32_768,
+    maxTokens: astra ? 128_000 : 4_096,
+    cost: astra
+      ? {
+          input: 10,
+          output: 50,
+          cacheRead: 1,
+          cacheWrite: 12.5,
+          tiers: [
+            {
+              inputTokensAbove: 272_000,
+              input: 20,
+              output: 75,
+              cacheRead: 2,
+              cacheWrite: 25,
+            },
+          ],
+        }
+      : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    ...(astra
+      ? {
+          thinkingLevelMap: {
+            off: null,
+            minimal: null,
+            low: "low",
+            medium: "medium",
+            high: "high",
+            xhigh: "xhigh",
+            max: "max",
+          },
+        }
+      : {}),
+  };
+}
+
+function openAICatalogEntry(
+  model: Model<"openai-responses">,
+): ModelCatalogEntry {
+  const hasMetadata = PINNED_OPENAI_MODELS.has(model.id) || isAstra(model.id);
+  return {
+    ...staticCatalogEntry({
+      providerType: "openai",
+      prefix: OPENAI_PREFIX,
+      model,
+    }),
+    contextWindow: hasMetadata ? positiveInteger(model.contextWindow) : null,
+    maxOutputTokens: hasMetadata ? positiveInteger(model.maxTokens) : null,
+    thinkingCanBeDisabled: model.thinkingLevelMap?.off !== null,
+    effortLevels: isAstra(model.id)
+      ? ["low", "medium", "high", "xhigh", "max"]
+      : [],
+  };
+}
 
 interface OpenAIModelResponse {
   readonly data?: readonly unknown[];
@@ -57,30 +152,11 @@ export async function listOpenAIModelCatalog(input: {
   if (!json || !Array.isArray(json.data))
     throw new Error("OpenAI catalog response was not a list");
 
-  const supported = new Map(
-    openaiProvider()
-      .getModels()
-      .map((model) => [model.id, model] as const),
-  );
   const entries = ((json as OpenAIModelResponse).data ?? [])
     .flatMap((item) => {
       const catalogId = stringValue(record(item)?.id);
-      const model = catalogId ? supported.get(catalogId) : undefined;
-      if (!catalogId || !model) return [];
-      return [
-        {
-          providerType: "openai" as const,
-          model: `${OPENAI_PREFIX}${catalogId}`,
-          catalogId,
-          name: model.name,
-          contextWindow: positiveInteger(model.contextWindow),
-          maxOutputTokens: positiveInteger(model.maxTokens),
-          reasoning: model.reasoning === true,
-          adaptiveThinking: false,
-          thinkingCanBeDisabled: true,
-          effortLevels: [],
-        },
-      ];
+      const model = catalogId ? openAIModel(catalogId) : undefined;
+      return model ? [openAICatalogEntry(model)] : [];
     })
     .filter((entry) => catalogMatches(entry, input.search))
     .sort((left, right) => left.catalogId.localeCompare(right.catalogId));
@@ -90,22 +166,19 @@ export async function listOpenAIModelCatalog(input: {
 }
 
 export function listOpenAIStaticCatalog(): readonly ModelCatalogEntry[] {
-  return openaiProvider()
-    .getModels()
-    .map((model) =>
-      staticCatalogEntry({
-        providerType: "openai",
-        prefix: OPENAI_PREFIX,
-        model,
-      }),
-    );
+  return [...new Set([...PINNED_OPENAI_MODELS.keys(), "gpt-6-astra"])].flatMap(
+    (id) => {
+      const model = openAIModel(id);
+      return model ? [openAICatalogEntry(model)] : [];
+    },
+  );
 }
 
 export function isApprovedOpenAIModel(model: string): boolean {
   const catalogId = model.startsWith(OPENAI_PREFIX)
     ? model.slice(OPENAI_PREFIX.length)
     : undefined;
-  return catalogId !== undefined && OPENAI_MODEL_IDS.has(catalogId);
+  return catalogId !== undefined && openAIModel(catalogId) !== undefined;
 }
 
 function withOpenAIModelGenerationSettings<T extends Provider>(
@@ -178,10 +251,10 @@ export function createOpenAIProjectProvider(
   input: CreateProjectProviderInput,
 ): Provider {
   const native = openaiProvider();
-  const nativeModel = requireModel(native, input.catalogId, "openai");
-  if (nativeModel.api !== "openai-responses")
+  const nativeModel = openAIModel(input.catalogId);
+  if (!nativeModel)
     throw new TypeError(
-      `Model is not a Responses model in the pinned OpenAI catalog: ${input.catalogId}`,
+      `Model is not supported by the OpenAI Responses runtime: ${input.catalogId}`,
     );
   const model = deepFreeze({ ...nativeModel, provider: input.providerId });
   const provider = createProvider({
@@ -195,5 +268,7 @@ export function createOpenAIProjectProvider(
   });
   if (!input.settings || !("mode" in input.settings))
     throw new TypeError("OpenAI model presets require OpenAI settings");
+  if (isAstra(input.catalogId) && input.settings.effort === "none")
+    throw new TypeError("GPT-6 Astra requires reasoning effort low or higher");
   return withOpenAIModelGenerationSettings(provider, input.settings);
 }

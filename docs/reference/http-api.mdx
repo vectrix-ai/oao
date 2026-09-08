@@ -201,8 +201,16 @@ The model must belong to the selected provider catalog. OpenRouter catalog
 responses include live OpenRouter models and saved presets as
 `openrouter/@preset/<slug>` entries. OpenRouter supports the routing policy
 below. OpenAI catalog responses include the live models available to the
-selected key that OAO's Responses runtime supports. OpenAI presets require an
-empty routing object and accept the immutable OpenAI `settings` object below.
+selected key in supported Responses text/reasoning families, including new
+GPT-4.1, GPT-5-and-later, and o3-and-later IDs absent from the pinned catalog.
+Specialized non-agent variants are excluded. Unknown context/output metadata
+is returned as `null`; catalog requests fetch the account list afresh.
+Runtime fallback budgets and discovery limitations are described in
+[Adding models](/models/adding-models#a-model-is-not-in-the-catalog).
+OpenAI presets require an empty routing object and accept the immutable OpenAI
+`settings` object below. GPT-6 Astra entries set `thinkingCanBeDisabled: false`
+and list `low`, `medium`, `high`, `xhigh`, and `max` in `effortLevels`; creating
+an Astra preset with `effort: "none"` returns `400`.
 Anthropic catalog responses likewise include the live models available to the
 selected key that OAO's native Messages runtime supports. Anthropic presets
 require empty routing and accept the immutable Claude settings below. If an

@@ -950,6 +950,18 @@ const modelCatalogSeed: readonly ModelCatalogEntry[] = [
   },
   {
     providerType: "openai",
+    model: "openai/gpt-6-astra",
+    catalogId: "gpt-6-astra",
+    name: "GPT-6 Astra",
+    contextWindow: 1_050_000,
+    maxOutputTokens: 128_000,
+    reasoning: true,
+    adaptiveThinking: false,
+    thinkingCanBeDisabled: false,
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
+  {
+    providerType: "openai",
     model: "openai/gpt-5.6-terra",
     catalogId: "gpt-5.6-terra",
     name: "GPT-5.6 Terra",
@@ -2515,6 +2527,19 @@ export class DemoConsoleApi implements ConsoleApi {
       throw new Error("Model preset key already exists in this project.");
     if (!modelCatalogSeed.some((entry) => entry.model === input.model))
       throw new Error("model is not present in the provider catalog.");
+    const catalogEntry = modelCatalogSeed.find(
+      (entry) => entry.model === input.model,
+    );
+    if (
+      catalogEntry?.providerType === "openai" &&
+      catalogEntry.thinkingCanBeDisabled === false &&
+      input.settings &&
+      "mode" in input.settings &&
+      input.settings.effort === "none"
+    )
+      throw new Error(
+        "Selected OpenAI model requires reasoning effort low or higher",
+      );
     this.#counter += 1;
     const created: ModelPreset = {
       id: `44444444-4444-4444-8444-${String(this.#counter).padStart(12, "0")}`,

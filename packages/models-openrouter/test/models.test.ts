@@ -376,6 +376,87 @@ test("OpenAI live catalog exposes account-available Responses models", async () 
   assert.equal(request?.url.includes("sk-openai-test"), false);
 });
 
+test("OpenAI live discovery includes new Responses models without a pinned catalog release", async () => {
+  const ids = [
+    "gpt-6-astra",
+    "gpt-6-astra",
+    "gpt-6-astra-2026-09-08",
+    "gpt-7-future",
+    "o8-mini",
+    "gpt-4.1-mini-2099-01-01",
+    "gpt-5.6-sol",
+    "gpt-7-audio-preview",
+    "gpt-7-realtime",
+    "gpt-realtime-2.1",
+    "gpt-7-transcribe",
+    "gpt-7-search-api",
+    "o8-deep-research",
+    "gpt-image-3",
+    "text-embedding-3-large",
+    "whisper-1",
+    "gpt-3.5-turbo-instruct",
+    "gpt-7/unsafe",
+    "other-model",
+  ];
+  const fetcher = async () =>
+    new Response(
+      JSON.stringify({ data: [...ids.map((id) => ({ id })), {}, { id: 42 }] }),
+    );
+  const entries = await listOpenAIModelCatalog({ apiKey: "mock-key", fetcher });
+  assert.deepEqual(
+    entries.map((entry) => entry.catalogId),
+    [
+      "gpt-4.1-mini-2099-01-01",
+      "gpt-5.6-sol",
+      "gpt-6-astra",
+      "gpt-6-astra-2026-09-08",
+      "gpt-7-future",
+      "o8-mini",
+    ],
+  );
+  const astra = entries.find((entry) => entry.catalogId === "gpt-6-astra");
+  assert.equal(astra?.contextWindow, 1_050_000);
+  assert.equal(astra?.maxOutputTokens, 128_000);
+  assert.equal(astra?.thinkingCanBeDisabled, false);
+  assert.deepEqual(astra?.effortLevels, [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ]);
+  const unknown = entries.find((entry) => entry.catalogId === "gpt-7-future");
+  assert.equal(unknown?.contextWindow, null);
+  assert.equal(unknown?.maxOutputTokens, null);
+  assert.deepEqual(
+    (
+      await listOpenAIModelCatalog({
+        apiKey: "mock-key",
+        fetcher,
+        search: "ASTRA",
+        limit: 1,
+      })
+    ).map((entry) => entry.catalogId),
+    ["gpt-6-astra"],
+  );
+  // Live account membership is authoritative, including removal on a later fetch.
+  assert.deepEqual(
+    await listOpenAIModelCatalog({
+      apiKey: "mock-key",
+      fetcher: async () => new Response(JSON.stringify({ data: [] })),
+    }),
+    [],
+  );
+  for (const id of ["gpt-6-astra", "gpt-7-future", "o8-mini"])
+    assert.equal(isApprovedCatalogModel(`openai/${id}`, "openai"), true);
+  for (const id of [
+    "gpt-7-audio-preview",
+    "gpt-7/unsafe",
+    "text-embedding-3-large",
+  ])
+    assert.equal(isApprovedCatalogModel(`openai/${id}`, "openai"), false);
+});
+
 test("OpenAI live catalog rejects provider errors and malformed responses", async () => {
   await assert.rejects(
     listOpenAIModelCatalog({
@@ -933,6 +1014,92 @@ test("OpenAI project preset settings reach the Responses API payload", async () 
     mode: "standard",
     summary: "auto",
   });
+});
+
+test("new OpenAI models activate and send their exact IDs and tool schemas through Responses", async () => {
+  for (const id of ["gpt-6-astra", "gpt-7-future"]) {
+    const providers: Provider[] = [];
+    const registry = new ProjectModelPresetRegistry({
+      deployment: new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
+        hostedEnabled: false,
+      }),
+      registerProvider: (provider) => providers.push(provider),
+    });
+    registry.activate({
+      ...tenantA,
+      providerType: "openai",
+      apiKey: "mock-key",
+      key: "live-v1",
+      model: `openai/${id}`,
+      routing: {},
+    });
+    const provider = providers[0]!;
+    const model = provider.getModels()[0]!;
+    assert.equal(model.id, id);
+    assert.equal(model.api, "openai-responses");
+    assert.equal(model.maxTokens, id === "gpt-6-astra" ? 128_000 : 4_096);
+    for (const method of ["stream", "streamSimple"] as const) {
+      let payload: Record<string, unknown> | undefined;
+      let url: string | undefined;
+      const response = await provider[method](
+        model,
+        {
+          messages: [{ role: "user", content: "Check status", timestamp: 1 }],
+          tools: [
+            {
+              name: "status",
+              description: "Read status",
+              parameters: { type: "object", properties: {} },
+            },
+          ],
+        },
+        {
+          apiKey: "mock-key",
+          maxRetries: 0,
+          reasoning: "medium",
+          reasoningEffort: "medium",
+          fetch: async (input, init) => {
+            url = String(input);
+            payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+            return new Response(
+              JSON.stringify({ error: { message: "expected test stop" } }),
+              { status: 503, headers: { "content-type": "application/json" } },
+            );
+          },
+        },
+      ).result();
+      assert.equal(response.stopReason, "error");
+      assert.equal(url, "https://api.openai.com/v1/responses");
+      assert.equal(payload?.model, id);
+      assert.equal(
+        (payload?.reasoning as Record<string, unknown>)?.effort,
+        "medium",
+      );
+      assert.equal(
+        (payload?.tools as Array<Record<string, unknown>>)?.[0]?.name,
+        "status",
+      );
+    }
+  }
+  const { registry } = projectRegistry();
+  assert.throws(
+    () =>
+      registry.activate({
+        ...tenantA,
+        providerType: "openai",
+        key: "astra-none-v1",
+        model: "openai/gpt-6-astra",
+        routing: {},
+        settings: {
+          textFormat: "text",
+          mode: "standard",
+          effort: "none",
+          verbosity: "medium",
+          summary: "auto",
+        },
+      }),
+    /requires reasoning effort/,
+  );
 });
 
 test("Anthropic project preset settings reach the Messages API payload", async () => {

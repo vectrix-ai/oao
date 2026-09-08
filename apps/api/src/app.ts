@@ -4330,7 +4330,9 @@ function registerModelPresetRoutes(
             const providerType = provider.provider_type;
             const apiKey = providerApiKey(actor, provider);
             const directCatalogEntry =
-              providerType === "anthropic" || providerType === "xai"
+              providerType === "openai" ||
+              providerType === "anthropic" ||
+              providerType === "xai"
                 ? (
                     await catalog.listCatalog({
                       providerType,
@@ -4340,7 +4342,9 @@ function registerModelPresetRoutes(
                   ).find((entry) => entry.model === input.model)
                 : undefined;
             const approved =
-              providerType === "anthropic" || providerType === "xai"
+              providerType === "openai" ||
+              providerType === "anthropic" ||
+              providerType === "xai"
                 ? directCatalogEntry !== undefined
                 : await catalog.isApprovedModel(input.model, providerType, {
                     ...(apiKey ? { apiKey } : {}),
@@ -4380,6 +4384,17 @@ function registerModelPresetRoutes(
               throw new HttpApiError(
                 "bad_request",
                 "OpenAI model presets require OpenAI generation settings",
+              );
+            if (
+              providerType === "openai" &&
+              settings !== null &&
+              "mode" in settings &&
+              settings.effort === "none" &&
+              directCatalogEntry?.thinkingCanBeDisabled === false
+            )
+              throw new HttpApiError(
+                "bad_request",
+                "Selected OpenAI model requires reasoning effort low or higher",
               );
             if (
               providerType === "anthropic" &&
