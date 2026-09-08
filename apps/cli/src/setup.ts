@@ -188,17 +188,23 @@ async function ensurePreset(
     io.write(`✓ Reusing model preset ${existing.displayName}.\n`);
     return existing;
   }
-  const choices = catalog.map((entry) => ({
-    label: `${entry.name} (${entry.model})`,
-    value: entry.model,
-  }));
+  const choices = catalog
+    .filter((entry) => entry.runtimeSupported !== false)
+    .map((entry) => ({
+      label: `${entry.name} (${entry.model})`,
+      value: entry.model,
+    }));
+  if (choices.length === 0)
+    throw new Error(
+      "No models have verified runtime support yet. Check the Models page for availability.",
+    );
   const model = await io.search(
     "Choose the model for your first agent",
     choices,
   );
   const entry = catalog.find((candidate) => candidate.model === model);
-  if (!entry)
-    throw new Error("Selected model is no longer in the provider catalog");
+  if (!entry || entry.runtimeSupported === false)
+    throw new Error("Selected model does not have verified runtime support");
   const preset = await api.createModelPreset(
     projectId,
     {

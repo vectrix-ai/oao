@@ -33,8 +33,8 @@ const PINNED_OPENAI_MODELS = new Map(
 );
 
 // /models reports account access, not endpoint or capability metadata. Restrict
-// fallbacks to modern text/reasoning families and exclude specialized variants.
-function isLiveResponsesModelId(id: string): boolean {
+// discovery to modern model families. Unverified entries cannot be activated.
+function isDiscoverableOpenAIModelId(id: string): boolean {
   if (
     !/^(?:gpt-(?:[5-9]|[1-9][0-9]+)(?:\.[0-9]+)?|gpt-4\.1|o(?:[3-9]|[1-9][0-9]+))(?:-[a-z0-9]+)*$/u.test(
       id,
@@ -51,7 +51,7 @@ function isSpecializedModel(id: string): boolean {
 }
 
 function isAstra(id: string): boolean {
-  return /^gpt-6-astra(?:-\d{4}-\d{2}-\d{2})?$/u.test(id);
+  return id === "gpt-6-astra";
 }
 
 function openAIModel(id: string): Model<"openai-responses"> | undefined {
@@ -61,66 +61,57 @@ function openAIModel(id: string): Model<"openai-responses"> | undefined {
     return pinned.api === "openai-responses"
       ? (pinned as Model<"openai-responses">)
       : undefined;
-  if (!isLiveResponsesModelId(id)) return undefined;
-  const astra = isAstra(id);
+  if (!isAstra(id)) return undefined;
   return {
     id,
-    name: astra ? `GPT-6 Astra${id.slice("gpt-6-astra".length)}` : id,
+    name: "GPT-6 Astra",
     api: "openai-responses",
     provider: "openai",
     baseUrl: OPENAI_CATALOG_URL,
-    reasoning: !id.startsWith("gpt-4.1"),
-    input: astra ? ["text", "image"] : ["text"],
+    reasoning: true,
+    input: ["text", "image"],
     // Astra metadata: https://developers.openai.com/api/docs/models/gpt-6-astra
-    // Unknown metadata stays null in the public catalog. These are runtime
-    // budgets, not claims about the provider's context limits or free usage.
-    contextWindow: astra ? 1_050_000 : 32_768,
-    maxTokens: astra ? 128_000 : 4_096,
-    cost: astra
-      ? {
-          input: 10,
-          output: 50,
-          cacheRead: 1,
-          cacheWrite: 12.5,
-          tiers: [
-            {
-              inputTokensAbove: 272_000,
-              input: 20,
-              output: 75,
-              cacheRead: 2,
-              cacheWrite: 25,
-            },
-          ],
-        }
-      : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    ...(astra
-      ? {
-          thinkingLevelMap: {
-            off: null,
-            minimal: null,
-            low: "low",
-            medium: "medium",
-            high: "high",
-            xhigh: "xhigh",
-            max: "max",
-          },
-        }
-      : {}),
+    contextWindow: 1_050_000,
+    maxTokens: 128_000,
+    cost: {
+      input: 10,
+      output: 50,
+      cacheRead: 1,
+      cacheWrite: 12.5,
+      tiers: [
+        {
+          inputTokensAbove: 272_000,
+          input: 20,
+          output: 75,
+          cacheRead: 2,
+          cacheWrite: 25,
+        },
+      ],
+    },
+    thinkingLevelMap: {
+      off: null,
+      minimal: null,
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
+    },
   };
 }
 
 function openAICatalogEntry(
   model: Model<"openai-responses">,
 ): ModelCatalogEntry {
-  const hasMetadata = PINNED_OPENAI_MODELS.has(model.id) || isAstra(model.id);
   return {
     ...staticCatalogEntry({
       providerType: "openai",
       prefix: OPENAI_PREFIX,
       model,
     }),
-    contextWindow: hasMetadata ? positiveInteger(model.contextWindow) : null,
-    maxOutputTokens: hasMetadata ? positiveInteger(model.maxTokens) : null,
+    contextWindow: positiveInteger(model.contextWindow),
+    maxOutputTokens: positiveInteger(model.maxTokens),
+    runtimeSupported: true,
     thinkingCanBeDisabled: model.thinkingLevelMap?.off !== null,
     effortLevels: isAstra(model.id)
       ? ["low", "medium", "high", "xhigh", "max"]
@@ -132,7 +123,7 @@ interface OpenAIModelResponse {
   readonly data?: readonly unknown[];
 }
 
-/** Account-aware projection of OpenAI's live Responses model catalog. */
+/** Live account discovery with explicit runtime support for each model. */
 export async function listOpenAIModelCatalog(input: {
   readonly apiKey: string;
   readonly search?: string;
@@ -156,7 +147,25 @@ export async function listOpenAIModelCatalog(input: {
     .flatMap((item) => {
       const catalogId = stringValue(record(item)?.id);
       const model = catalogId ? openAIModel(catalogId) : undefined;
-      return model ? [openAICatalogEntry(model)] : [];
+      if (model) return [openAICatalogEntry(model)];
+      if (
+        !catalogId ||
+        !isDiscoverableOpenAIModelId(catalogId) ||
+        isSpecializedModel(catalogId)
+      )
+        return [];
+      return [
+        {
+          providerType: "openai" as const,
+          model: `${OPENAI_PREFIX}${catalogId}`,
+          catalogId,
+          name: catalogId,
+          contextWindow: null,
+          maxOutputTokens: null,
+          reasoning: false,
+          runtimeSupported: false,
+        },
+      ];
     })
     .filter((entry) => catalogMatches(entry, input.search))
     .sort((left, right) => left.catalogId.localeCompare(right.catalogId));

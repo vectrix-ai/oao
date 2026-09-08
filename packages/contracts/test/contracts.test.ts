@@ -5,6 +5,7 @@ import {
   ApiErrorSchema,
   AuthLogoutResultSchema,
   MODEL_PRESET_KEY_PATTERN,
+  ModelCatalogEntrySchema,
   PLATFORM_MAX_TURNS,
   ProductEventSchema,
   ProjectMemberSchema,
@@ -819,5 +820,29 @@ test("MCP contracts require HTTPS, safe credential headers, and unique bindings"
         },
       ],
     }),
+  );
+});
+
+test("model catalog preserves discovery-only status and accepts legacy entries", () => {
+  const entry = {
+    providerType: "openai",
+    model: "openai/gpt-7-future",
+    catalogId: "gpt-7-future",
+    name: "Future",
+    contextWindow: null,
+    maxOutputTokens: null,
+    reasoning: false,
+  };
+  assert.equal(
+    v.parse(ModelCatalogEntrySchema, { ...entry, runtimeSupported: false })
+      .runtimeSupported,
+    false,
+  );
+  assert.equal(
+    v.parse(ModelCatalogEntrySchema, entry).runtimeSupported,
+    undefined,
+  );
+  assert.throws(() =>
+    v.parse(ModelCatalogEntrySchema, { ...entry, runtimeSupported: "false" }),
   );
 });

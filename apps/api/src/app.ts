@@ -4354,6 +4354,11 @@ function registerModelPresetRoutes(
                 "bad_request",
                 "model is not present in the provider catalog",
               );
+            if (directCatalogEntry?.runtimeSupported === false)
+              throw new HttpApiError(
+                "bad_request",
+                "Selected model requires verified runtime metadata before creating a preset",
+              );
             if (
               providerType !== "openrouter" &&
               Object.keys(input.routing).length > 0

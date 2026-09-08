@@ -665,7 +665,11 @@ function CreateModelPresetDialog({
         value: entry.model,
         label: entry.name,
         description: entry.model,
+        disabled: entry.runtimeSupported === false,
         hint: [
+          entry.runtimeSupported === false
+            ? "Awaiting verified capabilities and pricing"
+            : null,
           entry.contextWindow === null
             ? null
             : `${formatCompactNumber(entry.contextWindow)} ctx`,
@@ -680,7 +684,7 @@ function CreateModelPresetDialog({
   /** Picking a model fills the key and name until the operator edits them. */
   const chooseModel = (value: string) => {
     const entry = catalog.find((candidate) => candidate.model === value);
-    if (!entry) return;
+    if (!entry || entry.runtimeSupported === false) return;
     setModel(entry);
     if (
       entry.providerType === "openai" &&

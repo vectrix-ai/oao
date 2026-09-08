@@ -89,6 +89,7 @@ export function createRoutes(apiPrefix = "/v1") {
       `${project(projectId)}/storage-providers/${segment(providerId)}/default`,
     storageProviderObjects: (projectId: string, providerId: string) =>
       `${project(projectId)}/storage-providers/${segment(providerId)}/objects`,
+    /** Live discovery includes entries awaiting runtime metadata. */
     modelCatalog: (projectId: string) => `${project(projectId)}/model-catalog`,
     skills: (projectId: string) => `${project(projectId)}/skills`,
     skillDrafts: (projectId: string) => `${project(projectId)}/skill-drafts`,

@@ -2264,6 +2264,8 @@ export const ModelCatalogEntrySchema = v.object({
   reasoning: v.boolean(),
   adaptiveThinking: v.optional(v.boolean()),
   thinkingCanBeDisabled: v.optional(v.boolean()),
+  /** False for live-discovered models awaiting verified runtime metadata. Omitted means supported. */
+  runtimeSupported: v.optional(v.boolean()),
   effortLevels: v.optional(
     v.array(v.picklist(["low", "medium", "high", "xhigh", "max"])),
   ),

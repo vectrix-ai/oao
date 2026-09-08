@@ -428,6 +428,7 @@ test("OpenAI live discovery includes new Responses models without a pinned catal
   const unknown = entries.find((entry) => entry.catalogId === "gpt-7-future");
   assert.equal(unknown?.contextWindow, null);
   assert.equal(unknown?.maxOutputTokens, null);
+  assert.equal(unknown?.runtimeSupported, false);
   assert.deepEqual(
     (
       await listOpenAIModelCatalog({
@@ -447,9 +448,12 @@ test("OpenAI live discovery includes new Responses models without a pinned catal
     }),
     [],
   );
-  for (const id of ["gpt-6-astra", "gpt-7-future", "o8-mini"])
+  for (const id of ["gpt-6-astra"])
     assert.equal(isApprovedCatalogModel(`openai/${id}`, "openai"), true);
   for (const id of [
+    "gpt-6-astra-2026-09-08",
+    "gpt-7-future",
+    "o8-mini",
     "gpt-7-audio-preview",
     "gpt-7/unsafe",
     "text-embedding-3-large",
@@ -1016,8 +1020,8 @@ test("OpenAI project preset settings reach the Responses API payload", async () 
   });
 });
 
-test("new OpenAI models activate and send their exact IDs and tool schemas through Responses", async () => {
-  for (const id of ["gpt-6-astra", "gpt-7-future"]) {
+test("Astra activates and sends its exact ID and tool schemas through Responses", async () => {
+  for (const id of ["gpt-6-astra"]) {
     const providers: Provider[] = [];
     const registry = new ProjectModelPresetRegistry({
       deployment: new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
@@ -1037,7 +1041,9 @@ test("new OpenAI models activate and send their exact IDs and tool schemas throu
     const model = provider.getModels()[0]!;
     assert.equal(model.id, id);
     assert.equal(model.api, "openai-responses");
-    assert.equal(model.maxTokens, id === "gpt-6-astra" ? 128_000 : 4_096);
+    assert.equal(model.maxTokens, 128_000);
+    assert.equal(model.cost.input, 10);
+    assert.equal(model.cost.output, 50);
     for (const method of ["stream", "streamSimple"] as const) {
       let payload: Record<string, unknown> | undefined;
       let url: string | undefined;
@@ -1082,6 +1088,17 @@ test("new OpenAI models activate and send their exact IDs and tool schemas throu
     }
   }
   const { registry } = projectRegistry();
+  assert.throws(
+    () =>
+      registry.activate({
+        ...tenantA,
+        providerType: "openai",
+        key: "unknown-v1",
+        model: "openai/gpt-7-future",
+        routing: {},
+      }),
+    /not present/,
+  );
   assert.throws(
     () =>
       registry.activate({

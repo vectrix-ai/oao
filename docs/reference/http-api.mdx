@@ -205,7 +205,9 @@ selected key in supported Responses text/reasoning families, including new
 GPT-4.1, GPT-5-and-later, and o3-and-later IDs absent from the pinned catalog.
 Specialized non-agent variants are excluded. Unknown context/output metadata
 is returned as `null`; catalog requests fetch the account list afresh.
-Runtime fallback budgets and discovery limitations are described in
+Entries without verified capabilities and pricing set `runtimeSupported: false`
+and cannot be used to create presets (`400`). Omitted or `true` means supported.
+Discovery limitations are described in
 [Adding models](/models/adding-models#a-model-is-not-in-the-catalog).
 OpenAI presets require an empty routing object and accept the immutable OpenAI
 `settings` object below. GPT-6 Astra entries set `thinkingCanBeDisabled: false`

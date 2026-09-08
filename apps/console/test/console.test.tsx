@@ -2110,6 +2110,16 @@ describe("management console", () => {
     await user.selectOptions(preset.getByLabelText("Reasoning effort"), "none");
     await user.click(model);
     await user.clear(model);
+    await user.type(model, "future");
+    const unsupportedModel = await preset.findByRole("option", {
+      name: /Future model/u,
+    });
+    expect(unsupportedModel).toHaveAttribute("aria-disabled", "true");
+    await user.click(unsupportedModel);
+    expect(preset.getByLabelText(/^Preset key/u)).toHaveValue(
+      "gpt-5-6-terra-v1",
+    );
+    await user.clear(model);
     await user.type(model, "astra");
     await user.click(
       await preset.findByRole("option", { name: /GPT-6 Astra/u }),

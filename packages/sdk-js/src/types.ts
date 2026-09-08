@@ -379,6 +379,7 @@ export interface ModelPresetPage extends Page<ModelPreset> {
   readonly credentialEncryptionConfigured: boolean;
 }
 
+/** Keep runtimeSupported when displaying entries; false means discovery only. */
 export interface ModelCatalogPage extends Page<ModelCatalogEntry> {
   readonly providerId: string;
   readonly providerType: "openrouter" | "openai" | "anthropic" | "xai";

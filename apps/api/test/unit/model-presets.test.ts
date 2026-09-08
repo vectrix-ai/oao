@@ -50,6 +50,7 @@ const catalog: ModelCatalogPort = {
       model: "openai/gpt-7-future",
       catalogId: "gpt-7-future",
       name: "gpt-7-future",
+      runtimeSupported: false,
       contextWindow: null,
       maxOutputTokens: null,
       reasoning: true,
@@ -582,7 +583,7 @@ test("a valid preset is inserted, audited, and returned without credentials", as
   );
 });
 
-for (const modelId of ["gpt-5.6-terra", "gpt-6-astra", "gpt-7-future"]) {
+for (const modelId of ["gpt-5.6-terra", "gpt-6-astra"]) {
   test(`OpenAI ${modelId} preset creation persists live model and Responses settings`, async () => {
     const settings = {
       textFormat: "text" as const,
@@ -642,6 +643,7 @@ for (const modelId of ["gpt-5.6-terra", "gpt-6-astra", "gpt-7-future"]) {
 test("OpenAI preset creation rejects unavailable models and disabled Astra reasoning", async () => {
   for (const [model, effort, message] of [
     ["openai/gpt-6-astra", "none", /requires reasoning effort/],
+    ["openai/gpt-7-future", "medium", /requires verified runtime metadata/],
     [
       "openai/gpt-7-not-in-account",
       "medium",

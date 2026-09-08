@@ -950,6 +950,16 @@ const modelCatalogSeed: readonly ModelCatalogEntry[] = [
   },
   {
     providerType: "openai",
+    model: "openai/gpt-future-demo",
+    catalogId: "gpt-future-demo",
+    name: "Future model (demo)",
+    contextWindow: null,
+    maxOutputTokens: null,
+    reasoning: false,
+    runtimeSupported: false,
+  },
+  {
+    providerType: "openai",
     model: "openai/gpt-6-astra",
     catalogId: "gpt-6-astra",
     name: "GPT-6 Astra",
@@ -2539,6 +2549,10 @@ export class DemoConsoleApi implements ConsoleApi {
     )
       throw new Error(
         "Selected OpenAI model requires reasoning effort low or higher",
+      );
+    if (catalogEntry?.runtimeSupported === false)
+      throw new Error(
+        "Selected model requires verified runtime metadata before creating a preset",
       );
     this.#counter += 1;
     const created: ModelPreset = {

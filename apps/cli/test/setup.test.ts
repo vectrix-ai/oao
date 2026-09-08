@@ -97,7 +97,13 @@ class FakeIo implements SetupIo {
     return value;
   }
 
-  async search(prompt: string): Promise<string> {
+  async search(
+    prompt: string,
+    options: Parameters<SetupIo["search"]>[1],
+  ): Promise<string> {
+    assert.ok(
+      options.every((option) => option.value !== "openai/gpt-7-future"),
+    );
     this.searchPrompts.push(prompt);
     const value = this.selections.shift();
     if (!value) throw new Error("No fake selection remains");
@@ -152,6 +158,16 @@ class FakeApi implements SetupApi {
     this.catalogLimits.push(query.limit ?? 0);
     return {
       ...page<ModelCatalogEntry>([
+        {
+          providerType: "openai",
+          model: "openai/gpt-7-future",
+          catalogId: "gpt-7-future",
+          name: "Future",
+          contextWindow: null,
+          maxOutputTokens: null,
+          reasoning: false,
+          runtimeSupported: false,
+        },
         {
           providerType: "openrouter",
           model: "openrouter/anthropic/claude-sonnet-4.6",
