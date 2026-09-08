@@ -3107,6 +3107,31 @@ describe("management console", () => {
     expect(await screen.findByText("Version 4")).toBeInTheDocument();
   });
 
+  it("edits and publishes a bounded model turn limit without changing older versions", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const user = userEvent.setup();
+    const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    renderConsole(`/agents/${id}`, api);
+    const turns = await screen.findByRole("spinbutton", {
+      name: "Maximum model turns",
+    });
+    expect(turns).toHaveValue(32);
+    await user.clear(turns);
+    await user.type(turns, "257");
+    expect(
+      screen.getByRole("button", { name: "Publish new version" }),
+    ).toBeDisabled();
+    await user.clear(turns);
+    await user.type(turns, "128");
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 4")).toBeInTheDocument();
+    const agent = await api.getAgent(id);
+    expect(agent.versions[0]?.config.limits.maxTurns).toBe(128);
+    expect(agent.versions[1]?.config.limits.maxTurns).toBe(32);
+  });
+
   it("blocks publishing an agent version against an unapproved preset", async () => {
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     await expect(

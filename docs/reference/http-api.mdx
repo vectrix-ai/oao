@@ -834,3 +834,24 @@ Non-success responses use a redacted envelope and include the request ID:
 
 Log the request ID and safe error code. Do not log credentials or resend a
 failed write under a new idempotency key until you know whether it was accepted.
+
+### Agent model-turn limits
+
+Agent creation and version publication accept `config.limits.maxTurns` as a
+required integer from `1` through `256`, for example
+`"limits": { "maxTurns": 128, "timeoutMs": 300000 }`. Console and CLI creation
+default to `32`; existing configurations with `32` remain valid. The bound of
+256 limits runaway work while allowing longer imports. Invalid values return
+`400`; timeout validation and enforcement remain independent.
+
+The limit is stored in the immutable agent version and runtime snapshot. Existing
+sessions do not adopt newly published values. Model turns, including scratch
+calls, reserve a durable per-run budget before invoking the provider. Parallel
+calls share the budget; compaction and worker recovery cannot reset it. Replaying
+the same Flue turn ID reuses its reservation. Provider-internal retries do not
+reserve another turn. Delegated runs have their own version and budget.
+
+When exhausted, `model.invocation_failed` public payloads and model invocation
+`safeResponse` include `errorCode: "model_turn_limit_exceeded"` and a safe
+`errorExplanation` containing the configured maximum and next steps. No raw
+provider error or credentials are exposed. Historical failures are not backfilled.

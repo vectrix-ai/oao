@@ -1246,7 +1246,9 @@ export const ManagedMcpToolSnapshotSchema = v.strictObject({
   ),
 });
 
+/** Default for newly created agents; existing versions keep their stored value. */
 export const PLATFORM_MAX_TURNS = 32;
+export const MAX_AGENT_MODEL_TURNS = 256;
 
 /**
  * Names installed by Flue, OAO orchestration, Skills, or the shared sandbox.
@@ -1418,7 +1420,12 @@ export const ManagedAgentPublicationConfigSchema = v.pipe(
       ]),
     }),
     limits: v.strictObject({
-      maxTurns: v.literal(PLATFORM_MAX_TURNS),
+      maxTurns: v.pipe(
+        v.number(),
+        v.integer(),
+        v.minValue(1),
+        v.maxValue(MAX_AGENT_MODEL_TURNS),
+      ),
       timeoutMs: v.pipe(v.number(), v.integer(), v.minValue(1_000)),
     }),
   }),

@@ -188,7 +188,7 @@ test(
     try {
       await t.test("migration applies cleanly and is idempotent", async () => {
         const first = await migrate(pool);
-        assert.equal(first.applied.length + first.alreadyApplied.length, 40);
+        assert.equal(first.applied.length + first.alreadyApplied.length, 41);
         const second = await migrate(pool);
         assert.deepEqual(second.alreadyApplied, [
           "0001_foundation.sql",
@@ -231,6 +231,7 @@ test(
           "0039_cloud_sql_auth_role.sql",
           "0040_iap_auth.sql",
           "0041_tool_publication_lock.sql",
+          "0042_agent_model_turn_limits.sql",
         ]);
         await seed(pool);
       });
@@ -1605,6 +1606,28 @@ test(
             chain.rows[1]?.previous_hash,
             chain.rows[0]?.entry_hash,
           );
+        },
+      );
+      await t.test(
+        "deleting a run also removes its model turn reservations",
+        async () => {
+          const runId = uuid(99001) as RunId;
+          await insertRun(pool, runId, "turn-ledger-delete");
+          await withTenantTransaction(pool, tenant, async (transaction) => {
+            await transaction.query(
+              "INSERT INTO oao.run_model_turns (organization_id,project_id,run_id,turn_id) VALUES ($1,$2,$3,'reserved-turn')",
+              [ids.organization, ids.project, runId],
+            );
+          });
+          await pool.query(
+            "DELETE FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$3",
+            [ids.organization, ids.project, runId],
+          );
+          const remaining = await pool.query(
+            "SELECT 1 FROM oao.run_model_turns WHERE run_id=$1",
+            [runId],
+          );
+          assert.equal(remaining.rowCount, 0);
         },
       );
     } finally {

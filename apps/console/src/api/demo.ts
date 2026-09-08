@@ -1272,6 +1272,14 @@ export class DemoConsoleApi implements ConsoleApi {
   }
 
   async publishAgentVersion(id: string, config: AgentVersionConfig) {
+    if (
+      !Number.isInteger(config.limits.maxTurns) ||
+      config.limits.maxTurns < 1 ||
+      config.limits.maxTurns > 256
+    )
+      throw new Error(
+        "Maximum model turns must be an integer between 1 and 256.",
+      );
     const agent = this.#agents.find((item) => item.id === id);
     if (!agent) throw new Error("Agent not found");
     this.#assertApprovedPreset(config.modelPreset);

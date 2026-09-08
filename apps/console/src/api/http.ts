@@ -1109,6 +1109,9 @@ function sessionDetail(
             finishReason,
             ...(providerFinishReason ? { providerFinishReason } : {}),
             ...(errorExplanation ? { errorExplanation } : {}),
+            ...(text(publicPayload.errorCode)
+              ? { errorCode: text(publicPayload.errorCode) }
+              : {}),
             ...(harnessActionSummary ? { harnessActionSummary } : {}),
           }),
         });
@@ -1129,6 +1132,9 @@ function sessionDetail(
           finishReason: text(response.finishReason, "unknown"),
           ...(providerFinishReason ? { providerFinishReason } : {}),
           ...(errorExplanation ? { errorExplanation } : {}),
+          ...(text(response.errorCode)
+            ? { errorCode: text(response.errorCode) }
+            : {}),
           ...(request.harnessToolCallId !== undefined
             ? {
                 harnessToolCallId: text(request.harnessToolCallId),

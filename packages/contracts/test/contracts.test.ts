@@ -846,3 +846,35 @@ test("model catalog preserves discovery-only status and accepts legacy entries",
     v.parse(ModelCatalogEntrySchema, { ...entry, runtimeSupported: "false" }),
   );
 });
+
+test("agent model turn budgets accept bounded integers and preserve the configured value", () => {
+  const config = {
+    systemPrompt: "Answer carefully using the configured model.",
+    modelPreset: "project-model-v1",
+    tools: [],
+    sandbox: {
+      enabled: false,
+      provider: "daytona-primary",
+      network: "none",
+      capabilities: [],
+    },
+    limits: { maxTurns: 32, timeoutMs: 60_000 },
+  };
+  for (const maxTurns of [1, 32, 128, 256]) {
+    assert.equal(
+      parseManagedAgentSnapshotForPublication({
+        ...config,
+        limits: { ...config.limits, maxTurns },
+      }).limits.maxTurns,
+      maxTurns,
+    );
+  }
+  for (const maxTurns of [0, -1, 1.5, 257, Infinity, NaN, "128", undefined]) {
+    assert.throws(() =>
+      parseManagedAgentSnapshotForPublication({
+        ...config,
+        limits: { ...config.limits, maxTurns },
+      }),
+    );
+  }
+});

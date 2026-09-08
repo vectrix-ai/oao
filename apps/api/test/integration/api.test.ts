@@ -1730,6 +1730,41 @@ test(
     );
 
     await t.test(
+      "agent publication persists configurable model turn budgets",
+      async () => {
+        for (const maxTurns of [1, 128, 256]) {
+          const response = await app.request(
+            `${projectPath}/agents`,
+            jsonRequest(
+              {
+                key: `budget-${maxTurns}`,
+                name: `Budget ${maxTurns}`,
+                config: {
+                  systemPrompt: "Answer with safe public output.",
+                  modelPreset: baseModelPresetKey,
+                  tools: [],
+                  sandbox: disabledSandbox,
+                  limits: { maxTurns, timeoutMs: 60_000 },
+                },
+              },
+              `budget-create-${maxTurns}`,
+            ),
+          );
+          assert.equal(response.status, 201, await response.clone().text());
+          const created = (await response.json()) as {
+            latestVersionId: string;
+          };
+          const persisted = await pool.query<{
+            config: { limits: { maxTurns: number } };
+          }>("SELECT config FROM oao.agent_versions WHERE id=$1", [
+            created.latestVersionId,
+          ]);
+          assert.equal(persisted.rows[0]?.config.limits.maxTurns, maxTurns);
+        }
+      },
+    );
+
+    await t.test(
       "agent publication explains incompatible delegate sandboxes",
       async () => {
         const child = await app.request(
@@ -1840,6 +1875,10 @@ test(
           "tools[0].inputSchema.properties.query",
         );
         const invalid = [
+          ...[0, -1, 1.5, 257].map((maxTurns) => ({
+            ...valid,
+            limits: { maxTurns, timeoutMs: 60_000 },
+          })),
           { ...valid, limits: { timeoutMs: 60_000 } },
           { ...valid, limits: { maxTurns: 32 } },
           { ...valid, limits: { maxTurns: "32", timeoutMs: 60_000 } },
