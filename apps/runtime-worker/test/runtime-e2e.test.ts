@@ -496,6 +496,10 @@ async function waitRun(
     ) {
       const diagnostic = await pool.query(
         `SELECT r.input_public,
+          (SELECT jsonb_build_object('status',submission.status,'error',to_jsonb(submission)->'error','settlement',submission.settlement_record)
+           FROM oao.runtime_dispatches dispatch
+           JOIN public.flue_agent_submissions submission ON submission.submission_id=dispatch.flue_submission_id
+           WHERE dispatch.organization_id=r.organization_id AND dispatch.project_id=r.project_id AND dispatch.run_id=r.id) AS flue_settlement,
           (SELECT call.stage FROM oao.tool_calls call
             WHERE call.organization_id=r.organization_id
               AND call.project_id=r.project_id AND call.run_id=r.id

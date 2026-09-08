@@ -237,29 +237,6 @@ test(
       });
 
       await t.test(
-        "deleting a run also removes its model turn reservations",
-        async () => {
-          const runId = uuid(99001) as RunId;
-          await insertRun(pool, runId, "turn-ledger-delete");
-          await withTenantTransaction(pool, tenant, async (transaction) => {
-            await transaction.query(
-              "INSERT INTO oao.run_model_turns (organization_id,project_id,run_id,turn_id) VALUES ($1,$2,$3,'reserved-turn')",
-              [ids.organization, ids.project, runId],
-            );
-          });
-          await pool.query(
-            "DELETE FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$3",
-            [ids.organization, ids.project, runId],
-          );
-          const remaining = await pool.query(
-            "SELECT 1 FROM oao.run_model_turns WHERE run_id=$1",
-            [runId],
-          );
-          assert.equal(remaining.rowCount, 0);
-        },
-      );
-
-      await t.test(
         "delegate versions are normalized and child threads share the root workspace",
         async () => {
           await withTenantTransaction(pool, tenant, async (transaction) => {
@@ -1629,6 +1606,28 @@ test(
             chain.rows[1]?.previous_hash,
             chain.rows[0]?.entry_hash,
           );
+        },
+      );
+      await t.test(
+        "deleting a run also removes its model turn reservations",
+        async () => {
+          const runId = uuid(99001) as RunId;
+          await insertRun(pool, runId, "turn-ledger-delete");
+          await withTenantTransaction(pool, tenant, async (transaction) => {
+            await transaction.query(
+              "INSERT INTO oao.run_model_turns (organization_id,project_id,run_id,turn_id) VALUES ($1,$2,$3,'reserved-turn')",
+              [ids.organization, ids.project, runId],
+            );
+          });
+          await pool.query(
+            "DELETE FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$3",
+            [ids.organization, ids.project, runId],
+          );
+          const remaining = await pool.query(
+            "SELECT 1 FROM oao.run_model_turns WHERE run_id=$1",
+            [runId],
+          );
+          assert.equal(remaining.rowCount, 0);
         },
       );
     } finally {
