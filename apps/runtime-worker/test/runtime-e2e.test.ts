@@ -678,11 +678,19 @@ async function runRuntimeScenario() {
         retries.map((event) => event.public_payload.retry),
         marker === "model-auth-failure" ? [] : [1, 2, 3],
       );
-      assert.ok(
-        events.rows.some(
-          (event) => event.event_kind === "model.invocation_started",
-        ),
+      const starts = events.rows.filter(
+        (event) => event.event_kind === "model.invocation_started",
       );
+      assert.equal(starts.length, Number(reservedTurns.rows[0]?.count));
+      assert.equal(
+        new Set(starts.map((event) => event.public_payload.turnId)).size,
+        starts.length,
+      );
+      for (const event of starts) {
+        assert.equal(event.public_payload.timeoutMs, 300_000);
+        assert.equal(typeof event.public_payload.model, "string");
+        assert.equal(typeof event.public_payload.provider, "string");
+      }
     }
     assert.equal(
       retryToolEffects,
