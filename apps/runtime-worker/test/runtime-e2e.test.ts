@@ -664,6 +664,15 @@ async function runRuntimeScenario() {
             : 4,
         "each provider retry consumes a distinct durable model-turn reservation",
       );
+      // Settlement and observation projection run independently. Wait for the
+      // recorded start events before asserting the complete per-attempt payload.
+      await waitFor(
+        admin,
+        "SELECT count(*)::int AS count FROM oao.product_events WHERE organization_id=$1 AND project_id=$2 AND aggregate_id=$3 AND event_kind='model.invocation_started'",
+        [tenant.organizationId, tenant.projectId, fixture.runId],
+        (rows) =>
+          Number(rows[0]?.count) >= Number(reservedTurns.rows[0]?.count),
+      );
       const events = await admin.query<{
         event_kind: string;
         public_payload: Record<string, unknown>;
