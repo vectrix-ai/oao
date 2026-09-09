@@ -1,3 +1,5 @@
+import { AUTHORIZATION_SCOPE_CATALOG } from "@oao/contracts";
+import { AUTHORIZATION_ACTIONS } from "@oao/domain";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -444,5 +446,12 @@ test("WorkOS callback with stale state starts a fresh hosted login", async () =>
   assert.match(
     response.headers.get("set-cookie") ?? "",
     /oao_auth_state=[^;]+;[^,]*HttpOnly; Secure/u,
+  );
+});
+
+test("console permission catalog covers every domain action exactly once", () => {
+  assert.deepEqual(
+    AUTHORIZATION_SCOPE_CATALOG.map(([scope]) => scope).sort(),
+    [...AUTHORIZATION_ACTIONS].sort(),
   );
 });

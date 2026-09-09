@@ -149,7 +149,7 @@ function contextView(response: ContextResponse): ProjectContext {
       ...response.principal,
       displayName: displayName || fallbackDisplayName || "Authenticated user",
       role: response.principal.scopes.includes("*")
-        ? "Platform owner"
+        ? "All scopes"
         : response.principal.kind.replaceAll("_", " "),
     },
     organizations: response.organizations,

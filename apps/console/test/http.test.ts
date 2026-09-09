@@ -1,3 +1,4 @@
+import { AUTHORIZATION_SCOPE_CATALOG } from "@oao/contracts";
 import { waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpConsoleApi } from "../src/api/http";
@@ -47,6 +48,7 @@ describe("HTTP console adapter", () => {
       currentPrincipal: {
         id: CONTEXT.principal.id,
         scopes: ["*"],
+        role: "All scopes",
         displayName: "development user",
       },
     });
@@ -886,7 +888,7 @@ describe("HTTP console adapter", () => {
       id: "66666666-6666-4666-8666-666666666666",
       name: "Session integration",
       prefix: "a1b2c3d4e5f6",
-      scopes: ["session:read", "session:write", "run:create", "run:read"],
+      scopes: AUTHORIZATION_SCOPE_CATALOG.map(([scope]) => scope),
       shown: true,
       secret: "oao_a1b2c3d4e5f6_one-time-secret-value",
     };

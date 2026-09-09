@@ -1182,7 +1182,7 @@ export class DemoConsoleApi implements ConsoleApi {
         kind: "human" as const,
         subject: "demo.operator@example.test",
         displayName: "Demo Operator",
-        role: "Platform Owner",
+        role: "All scopes",
         scopes: ["*"],
       },
       organizations: [{ id: ORG_ID, name: "Example operations" }],

@@ -1,3 +1,4 @@
+import { AUTHORIZATION_SCOPE_CATALOG } from "@oao/contracts";
 import { QueryClient } from "@tanstack/react-query";
 import {
   act,
@@ -52,7 +53,7 @@ describe("management console", () => {
         kind: "human",
         subject: "development-user",
         displayName: "Ben Selleslagh",
-        role: "Platform owner",
+        role: "All scopes",
         scopes: ["*"],
       },
       organizations: [{ id: "org-1", name: "OAO" }],
@@ -150,7 +151,8 @@ describe("management console", () => {
 
   it("adds, changes, and removes project members", async () => {
     const user = userEvent.setup();
-    renderConsole("/members");
+    const { api } = renderConsole("/members");
+    const addMember = vi.spyOn(api, "addMember");
     expect(await screen.findByText("Demo Operator")).toBeInTheDocument();
     expect(screen.getByLabelText("Role for Demo Operator")).toBeDisabled();
 
@@ -158,6 +160,13 @@ describe("management console", () => {
     const add = within(
       screen.getByRole("dialog", { name: "Add project member" }),
     );
+    const scopeCheckboxes = add.getAllByRole("checkbox");
+    expect(scopeCheckboxes).toHaveLength(AUTHORIZATION_SCOPE_CATALOG.length);
+    for (const [index, [scope]] of AUTHORIZATION_SCOPE_CATALOG.entries()) {
+      const checkbox = scopeCheckboxes[index]!;
+      expect(checkbox).toHaveAccessibleName(new RegExp(`^${scope}\\b`, "u"));
+      if (!(checkbox as HTMLInputElement).checked) fireEvent.click(checkbox);
+    }
     await user.type(
       add.getByLabelText("Principal subject"),
       "new.reviewer@example.test",
@@ -165,6 +174,16 @@ describe("management console", () => {
     await user.selectOptions(add.getByLabelText("Project role"), "viewer");
     await user.click(add.getByRole("button", { name: "Add member" }));
 
+    expect(addMember).toHaveBeenCalledWith({
+      subject: "new.reviewer@example.test",
+      role: "viewer",
+      scopes: expect.arrayContaining(
+        AUTHORIZATION_SCOPE_CATALOG.map(([scope]) => scope),
+      ),
+    });
+    expect(addMember.mock.calls[0]?.[0].scopes).toHaveLength(
+      AUTHORIZATION_SCOPE_CATALOG.length,
+    );
     const memberName = await screen.findByText("new reviewer");
     const row = memberName.closest("tr");
     expect(row).not.toBeNull();
@@ -211,7 +230,7 @@ describe("management console", () => {
     ).toBeInTheDocument();
     expect(await screen.findByText("Support operator")).toBeInTheDocument();
     expect(await screen.findByText("Demo Operator")).toBeInTheDocument();
-    expect(screen.getByText("Platform Owner")).toBeInTheDocument();
+    expect(screen.getByText("All scopes")).toBeInTheDocument();
     await user.type(
       screen.getByRole("searchbox", { name: "Search agents" }),
       "not-a-real-agent",
@@ -2318,7 +2337,8 @@ describe("management console", () => {
 
   it("creates an API key and shows its secret only in the acknowledgement dialog", async () => {
     const user = userEvent.setup();
-    renderConsole("/api-keys");
+    const { api } = renderConsole("/api-keys");
+    const createKey = vi.spyOn(api, "createApiKey");
     await user.click(
       await screen.findByRole("button", { name: "Create API key" }),
     );
@@ -2332,7 +2352,23 @@ describe("management console", () => {
     expect(
       create.getByRole("checkbox", { name: /^session:write/u }),
     ).toBeChecked();
+    const scopeCheckboxes = create.getAllByRole("checkbox");
+    expect(scopeCheckboxes).toHaveLength(AUTHORIZATION_SCOPE_CATALOG.length);
+    for (const [index, [scope]] of AUTHORIZATION_SCOPE_CATALOG.entries()) {
+      const checkbox = scopeCheckboxes[index]!;
+      expect(checkbox).toHaveAccessibleName(new RegExp(`^${scope}\\b`, "u"));
+      if (!(checkbox as HTMLInputElement).checked) fireEvent.click(checkbox);
+    }
     await user.click(create.getByRole("button", { name: "Create API key" }));
+    expect(createKey).toHaveBeenCalledWith({
+      name: "Session integration",
+      scopes: expect.arrayContaining(
+        AUTHORIZATION_SCOPE_CATALOG.map(([scope]) => scope),
+      ),
+    });
+    expect(createKey.mock.calls[0]?.[0].scopes).toHaveLength(
+      AUTHORIZATION_SCOPE_CATALOG.length,
+    );
 
     const save = within(screen.getByRole("dialog", { name: "Save API key" }));
     expect(save.getByRole("alert")).toHaveTextContent("Shown only once");

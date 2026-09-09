@@ -1,3 +1,4 @@
+import { AUTHORIZATION_SCOPE_CATALOG } from "@oao/contracts";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import test from "node:test";
@@ -2861,6 +2862,183 @@ test(
           headers: { authorization: `Bearer ${createdBody.secret}` },
         });
         assert.equal(rejected.status, 401);
+      },
+    );
+
+    await t.test(
+      "wildcard human scopes do not bypass organization membership when creating keys",
+      async () => {
+        const membership = await pool.query<{ role: string }>(
+          "SELECT role FROM oao.organization_members WHERE organization_id=$1 AND principal_id=$2",
+          [integrationPrincipal.organizationId, integrationPrincipal.id],
+        );
+        assert.equal(membership.rows[0]?.role, "owner");
+        try {
+          await pool.query(
+            "UPDATE oao.organization_members SET role='member' WHERE organization_id=$1 AND principal_id=$2",
+            [integrationPrincipal.organizationId, integrationPrincipal.id],
+          );
+          const response = await app.request(
+            `${projectPath}/api-keys`,
+            jsonRequest(
+              { name: "Wildcard member", scopes: ["skill:read"] },
+              "wildcard-member-key",
+            ),
+          );
+          assert.equal(response.status, 403);
+          assert.match(
+            await response.text(),
+            /Organization owner or admin role is required/u,
+          );
+        } finally {
+          await pool.query(
+            "UPDATE oao.organization_members SET role=$3::oao.organization_role WHERE organization_id=$1 AND principal_id=$2",
+            [
+              integrationPrincipal.organizationId,
+              integrationPrincipal.id,
+              membership.rows[0]!.role,
+            ],
+          );
+        }
+      },
+    );
+
+    await t.test(
+      "explicit key scopes persist and enforce Skill operations without wildcard access",
+      async () => {
+        const scopes = AUTHORIZATION_SCOPE_CATALOG.map(([scope]) => scope);
+        async function issueKey(selected: readonly string[], suffix: string) {
+          const response = await app.request(
+            `${projectPath}/api-keys`,
+            jsonRequest(
+              { name: `Skill key ${suffix}`, scopes: selected },
+              `skill-key-${suffix}`,
+            ),
+          );
+          assert.equal(response.status, 201, await response.clone().text());
+          const body = (await response.json()) as {
+            id: string;
+            secret: string;
+            scopes: string[];
+          };
+          assert.deepEqual(body.scopes, selected);
+          const headers = { authorization: `Bearer ${body.secret}` };
+          const context = await app.request("/v1/context", { headers });
+          assert.equal(context.status, 200);
+          assert.deepEqual(
+            (
+              (await context.json()) as { principal: { scopes: string[] } }
+            ).principal.scopes.sort(),
+            [...selected].sort(),
+          );
+          return headers;
+        }
+        const headers = await issueKey(scopes, "complete");
+        const packageBody = {
+          key: "scoped-skill",
+          displayName: "Scoped Skill",
+          name: "scoped-skill",
+          description: "Test explicit permissions.",
+          instructions: "Use only the granted permissions.",
+          files: [],
+        };
+        const created = await app.request(
+          `${projectPath}/skills`,
+          jsonRequest(packageBody, "scoped-skill-create", headers),
+        );
+        assert.equal(created.status, 201, await created.clone().text());
+        const skill = (await created.json()) as {
+          id: string;
+          latestVersion: { id: string };
+        };
+        const versionPath = `${projectPath}/skills/${skill.id}/versions`;
+        const agentBody = {
+          key: "scoped-skill-agent",
+          name: "Scoped Skill agent",
+          config: {
+            systemPrompt: "Use the bound Skill.",
+            modelPreset: baseModelPresetKey,
+            tools: [],
+            skillVersionIds: [skill.latestVersion.id],
+            sandbox: disabledSandbox,
+            limits: { maxTurns: 32, timeoutMs: 60_000 },
+          },
+        };
+        const operations = [
+          {
+            scope: "skill:read",
+            path: `${projectPath}/skills`,
+            init: { headers },
+            status: 200,
+          },
+          {
+            scope: "skill:write",
+            path: versionPath,
+            init: jsonRequest(
+              {
+                ...packageBody,
+                instructions: "Version two uses only granted permissions.",
+              },
+              "scoped-skill-publish",
+              headers,
+            ),
+            status: 201,
+          },
+          {
+            scope: "skill:bind",
+            path: `${projectPath}/agents`,
+            init: jsonRequest(agentBody, "scoped-skill-bind", headers),
+            status: 201,
+          },
+          {
+            scope: "skill:revoke",
+            path: `${versionPath}/${skill.latestVersion.id}/lifecycle`,
+            init: {
+              ...jsonRequest(
+                { status: "deprecated" },
+                "scoped-skill-deprecate",
+                headers,
+              ),
+              method: "PATCH",
+            },
+            status: 200,
+          },
+        ];
+        for (const operation of operations) {
+          const deniedHeaders = await issueKey(
+            scopes.filter((scope) => scope !== operation.scope),
+            `without-${operation.scope}`,
+          );
+          const denied = await app.request(operation.path, {
+            ...operation.init,
+            headers: { ...operation.init.headers, ...deniedHeaders },
+          });
+          assert.equal(
+            denied.status,
+            403,
+            `${operation.scope}: ${await denied.text()}`,
+          );
+          const allowed = await app.request(operation.path, operation.init);
+          assert.equal(
+            allowed.status,
+            operation.status,
+            `${operation.scope}: ${await allowed.text()}`,
+          );
+        }
+        const limited = await issueKey(
+          ["project:admin", "skill:read"],
+          "limited-admin",
+        );
+        const escalation = await app.request(
+          `${projectPath}/api-keys`,
+          jsonRequest(
+            { name: "Too broad", scopes: ["skill:write"] },
+            "scoped-key-escalation",
+            limited,
+          ),
+        );
+        assert.equal(escalation.status, 403);
+        assert.match(await escalation.text(), /exceed the creator/u);
       },
     );
 

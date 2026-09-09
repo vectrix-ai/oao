@@ -1,5 +1,46 @@
 import * as v from "valibot";
 
+/** Explicit permissions offered by console key and member pickers. API tests enforce domain parity. */
+export const AUTHORIZATION_SCOPE_CATALOG = [
+  ["agent:read", "Read agents and immutable versions."],
+  ["agent:write", "Create agents and publish versions."],
+  ["skill:read", "Read Skills, versions, and package contents."],
+  ["skill:write", "Create Skill drafts and publish versions."],
+  [
+    "skill:bind",
+    "Bind exact Skill versions to agent versions. Also requires agent:write.",
+  ],
+  ["skill:revoke", "Deprecate or revoke Skill versions."],
+  ["delegation:read", "Read delegations and their messages."],
+  [
+    "delegation:message",
+    "Send messages to delegations. Also requires run:create.",
+  ],
+  [
+    "delegation:cancel",
+    "Request delegation cancellation. Also requires run:cancel.",
+  ],
+  ["session:read", "Read sessions and their public transcripts."],
+  ["session:write", "Create sessions."],
+  ["run:create", "Start initial and follow-up runs."],
+  ["run:read", "Read runs and connect to project events."],
+  ["run:cancel", "Request run cancellation."],
+  ["tool_call:claim", "Claim and renew caller-owned tool work."],
+  ["tool_call:submit", "Submit caller-owned tool results."],
+  ["approval:resolve", "Approve or deny pending approvals."],
+  ["mcp:read", "Read MCP server and toolset metadata."],
+  ["mcp:write", "Create MCP servers and toolsets."],
+  ["mcp:discover", "Connect to a server and snapshot its tools."],
+  ["mcp:bind", "Bind exact MCP resources to agent versions."],
+  ["mcp:execute", "Execute an agent's bound remote MCP tools."],
+  ["credential:read_metadata", "Read redacted credential metadata."],
+  ["credential:write", "Store new write-only MCP credentials."],
+  ["credential:rotate", "Rotate encrypted MCP credentials."],
+  ["credential:revoke", "Revoke MCP credentials."],
+  ["audit:read", "Read and export the project audit log."],
+  ["project:admin", "Manage members, providers, presets, and API keys."],
+] as const;
+
 const IdSchema = v.pipe(v.string(), v.uuid());
 const TimestampSchema = v.pipe(v.string(), v.isoTimestamp());
 const JsonObjectSchema = v.record(v.string(), v.unknown());
