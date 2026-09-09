@@ -27,6 +27,8 @@ import type {
   DispatchReceipt,
   DeliveredMessage,
   FlueObservation,
+  FlueExecutionContext,
+  FlueExecutionOperation,
   Sandbox,
   SandboxFactory,
   SkillDefinition,
@@ -3165,6 +3167,25 @@ export class ManagedRuntimeOrchestrator {
   }
 }
 
+/** Skip stream deltas before they enter the serialized database projection queue. */
+function shouldProjectObservation(event: FlueObservation): boolean {
+  switch (event.type) {
+    case "turn_request":
+    case "turn":
+    case "tool_start":
+    case "tool":
+    case "submission_recovery":
+    case "submission_settled":
+      return true;
+    case "log":
+      return (
+        event.message === "[flue:model-retry] Retrying transient model error"
+      );
+    default:
+      return false;
+  }
+}
+
 export class RuntimeProjection {
   #pending = Promise.resolve();
   #unsubscribe: (() => void) | undefined;
@@ -3205,7 +3226,7 @@ export class RuntimeProjection {
   start(): void {
     if (this.#unsubscribe) return;
     this.#unsubscribe = observe((event) => {
-      if (!event.conversationId) return;
+      if (!event.conversationId || !shouldProjectObservation(event)) return;
       const harnessCorrelation = harnessObservationCorrelation(event);
       this.#pending = this.#pending
         .then(() => this.project(event, harnessCorrelation))
@@ -4057,6 +4078,43 @@ export async function reserveRunModelTurn(
     throw new Error(`Model turn limit exceeded (${limit})`);
 }
 
+/**
+ * Flue reuses the model operation object when intercepting stream creation,
+ * every iterator read, and result(). Admit once, including concurrent readers.
+ * A new operation (retry or recovery) still checks the durable ledger. Weak
+ * keys let settled streams be collected without retaining run identities.
+ */
+function createModelTurnAdmission(pool: PgPool) {
+  const reservations = new WeakMap<object, Promise<void>>();
+  return (
+    operation: FlueExecutionOperation,
+    context: FlueExecutionContext,
+  ): Promise<void> => {
+    if (operation.type !== "model") return Promise.resolve();
+    let reservation = reservations.get(operation);
+    if (!reservation) {
+      reservation = (async () => {
+        const dispatches = await pool.query<DispatchRow>(
+          "SELECT * FROM oao.find_runtime_dispatch($1,$2)",
+          [context.submissionId ?? "", context.instanceId ?? ""],
+        );
+        const dispatch = dispatches.rows[0];
+        if (!dispatch || dispatch.state === "settled")
+          throw new Error("Model turn run identity is unavailable");
+        await reserveRunModelTurn(pool, {
+          organizationId: dispatch.organization_id,
+          projectId: dispatch.project_id,
+          runId: dispatch.run_id,
+          turnId: operation.turnId,
+        });
+      })();
+      // Keep failures too: later reads must not bypass a rejected admission.
+      reservations.set(operation, reservation);
+    }
+    return reservation;
+  };
+}
+
 export async function configureVendorNeutralTelemetry(
   input: {
     readonly pool?: PgPool;
@@ -4075,26 +4133,13 @@ export async function configureVendorNeutralTelemetry(
     sdk.start();
   }
   const telemetry = createOpenTelemetryInstrumentation({ content: false });
+  const admitModelTurn = input.pool
+    ? createModelTurnAdmission(input.pool)
+    : undefined;
   const disposeInstrumentation = instrument({
     ...telemetry,
     async interceptor(operation, context, next) {
-      if (operation.type === "model" && input.pool) {
-        // Flue model contexts expose the durable OAO instance ID separately
-        // from their internal conv_* ID, including inside scratch sessions.
-        const dispatches = await input.pool.query<DispatchRow>(
-          "SELECT * FROM oao.find_runtime_dispatch($1,$2)",
-          [context.submissionId ?? "", context.instanceId ?? ""],
-        );
-        const dispatch = dispatches.rows[0];
-        if (!dispatch || dispatch.state === "settled")
-          throw new Error("Model turn run identity is unavailable");
-        await reserveRunModelTurn(input.pool, {
-          organizationId: dispatch.organization_id,
-          projectId: dispatch.project_id,
-          runId: dispatch.run_id,
-          turnId: operation.turnId,
-        });
-      }
+      await admitModelTurn?.(operation, context);
       return telemetry.interceptor(operation, context, next);
     },
   });
@@ -4769,6 +4814,8 @@ export async function startManagedFlueRuntime(input: {
 }
 
 export const runtimeTesting = {
+  createModelTurnAdmission,
+  shouldProjectObservation,
   observe,
   eventUuid,
   safeArguments,
