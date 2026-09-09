@@ -8,6 +8,7 @@ import {
   createPool,
   withTenantTransaction,
   type PgPool,
+  type PgClient,
 } from "@oao/db-postgres";
 import type {
   OrganizationId,
@@ -25,6 +26,7 @@ import {
 import { PostgresWakeQueue, type RuntimeWakeJob } from "@oao/queue-postgres";
 import {
   reserveRunModelTurn,
+  runtimeTesting,
   type PlatformToolHandler,
 } from "@oao/runtime-flue";
 import { FakeSandboxProvider } from "@oao/sandbox-daytona";
@@ -122,6 +124,8 @@ const objectSchema = (properties: Record<string, Record<string, unknown>>) => ({
 const modelRetryCalls = new Map<string, number>();
 const fakeResponse: FauxResponseStep = (context, options) => {
   const transcript = JSON.stringify(context.messages);
+  if (transcript.includes("stream-admission-regression"))
+    return fauxAssistantMessage("stream fragment ".repeat(150));
   for (const marker of [
     "model-timeout-recover",
     "model-timeout-exhaust",
@@ -627,6 +631,51 @@ async function runRuntimeScenario() {
   await withScenarioCleanup(async () => {
     worker = await start();
     await seedBase(admin);
+
+    const streamed = await seedFixture(
+      admin,
+      "stream-admission",
+      "stream-admission-regression",
+      [],
+    );
+    let admissionLocks = 0;
+    let observedDeltas = 0;
+    const wrappedClients = new WeakSet<object>();
+    const countAdmissions = (client: PgClient) => {
+      if (wrappedClients.has(client)) return;
+      wrappedClients.add(client);
+      const query = client.query;
+      client.query = function (...args: unknown[]) {
+        if (
+          typeof args[0] === "string" &&
+          args[0].includes("FOR UPDATE OF r") &&
+          Array.isArray(args[1]) &&
+          args[1][2] === streamed.runId
+        )
+          admissionLocks++;
+        return Reflect.apply(query, client, args);
+      } as typeof client.query;
+    };
+    worker.pool.on("acquire", countAdmissions);
+    const stopObserving = runtimeTesting.observe((event) => {
+      if (event.type === "text_delta") observedDeltas++;
+    });
+    try {
+      await enqueue(worker, streamed);
+      await waitRun(admin, streamed.runId, "completed");
+      assert.ok(
+        observedDeltas > 25,
+        "exercise the actual Flue stream interception path",
+      );
+      assert.equal(
+        admissionLocks,
+        1,
+        "stream chunks must not repeat durable admission",
+      );
+    } finally {
+      stopObserving();
+      worker.pool.off("acquire", countAdmissions);
+    }
 
     for (const marker of [
       "model-timeout-recover",

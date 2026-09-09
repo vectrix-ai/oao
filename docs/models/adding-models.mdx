@@ -163,6 +163,18 @@ aborts an expired request and discards late results, including late tool calls.
 This deadline applies to all hosted providers and is fixed by the runtime;
 there is no per-preset timeout setting.
 
+The deadline bounds receiving the provider response. Database admission before
+that request, processing buffered output, and recording run progress are separate
+work, so elapsed run time can exceed a single attempt's deadline. A model-start
+event records the requested turn; it does not prove that the provider has received
+the request.
+
+OAO checks the durable model-turn budget once per model operation, including new
+retry and recovery operations. Reading additional response chunks does not repeat
+that database transaction or consume extra turns. The public progress recorder
+filters unused text, reasoning, and tool-argument deltas before database access;
+model outcomes, retries, tool results, and recovery events remain recorded.
+
 For agent model turns, timeouts and other transient provider failures use Flue's
 durable retry budget: **up to three retries after the initial attempt**, or four
 attempts total. Retries back off for approximately 2, 4, and 8 seconds with
