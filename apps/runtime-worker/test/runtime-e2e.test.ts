@@ -651,6 +651,19 @@ async function runRuntimeScenario() {
         modelRetryCalls.get(marker),
         marker === "model-auth-failure" ? 1 : 4,
       );
+      const reservedTurns = await admin.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM oao.run_model_turns WHERE organization_id=$1 AND project_id=$2 AND run_id=$3",
+        [tenant.organizationId, tenant.projectId, fixture.runId],
+      );
+      assert.equal(
+        Number(reservedTurns.rows[0]?.count),
+        marker === "model-timeout-recover"
+          ? 5
+          : marker === "model-auth-failure"
+            ? 1
+            : 4,
+        "each provider retry consumes a distinct durable model-turn reservation",
+      );
       const events = await admin.query<{
         event_kind: string;
         public_payload: Record<string, unknown>;
