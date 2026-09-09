@@ -86,8 +86,9 @@ caller-owned tools. Add `run:cancel` only when it should cancel runs.
 Skill administration requires explicit permissions: `skill:read` to list and export
 packages, `skill:write` to create drafts and publish versions, `skill:bind` together
 with `agent:write` to attach versions to agents, and `skill:revoke` to deprecate or
-revoke versions. Delegation inspection, messaging, and cancellation use
-`delegation:read`, `delegation:message`, and `delegation:cancel` respectively.
+revoke versions. Delegation inspection uses `delegation:read`. Messaging requires
+both `delegation:message` and `run:create`; cancellation requires both
+`delegation:cancel` and `run:cancel`.
 Both the API-key and member permission pickers include these scopes.
 
 If a key receives `403 Principal lacks the required scope`, inspect

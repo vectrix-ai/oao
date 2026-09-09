@@ -6,11 +6,20 @@ export const AUTHORIZATION_SCOPE_CATALOG = [
   ["agent:write", "Create agents and publish versions."],
   ["skill:read", "Read Skills, versions, and package contents."],
   ["skill:write", "Create Skill drafts and publish versions."],
-  ["skill:bind", "Bind exact Skill versions to agent versions."],
+  [
+    "skill:bind",
+    "Bind exact Skill versions to agent versions. Also requires agent:write.",
+  ],
   ["skill:revoke", "Deprecate or revoke Skill versions."],
   ["delegation:read", "Read delegations and their messages."],
-  ["delegation:message", "Send messages to delegations."],
-  ["delegation:cancel", "Request delegation cancellation."],
+  [
+    "delegation:message",
+    "Send messages to delegations. Also requires run:create.",
+  ],
+  [
+    "delegation:cancel",
+    "Request delegation cancellation. Also requires run:cancel.",
+  ],
   ["session:read", "Read sessions and their public transcripts."],
   ["session:write", "Create sessions."],
   ["run:create", "Start initial and follow-up runs."],

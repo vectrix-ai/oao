@@ -164,7 +164,7 @@ describe("management console", () => {
       const checkbox = add.getByRole("checkbox", {
         name: new RegExp(`^${scope}\\b`, "u"),
       });
-      if (!(checkbox as HTMLInputElement).checked) await user.click(checkbox);
+      if (!(checkbox as HTMLInputElement).checked) fireEvent.click(checkbox);
     }
     await user.type(
       add.getByLabelText("Principal subject"),
@@ -2355,7 +2355,7 @@ describe("management console", () => {
       const checkbox = create.getByRole("checkbox", {
         name: new RegExp(`^${scope}\\b`, "u"),
       });
-      if (!(checkbox as HTMLInputElement).checked) await user.click(checkbox);
+      if (!(checkbox as HTMLInputElement).checked) fireEvent.click(checkbox);
     }
     await user.click(create.getByRole("button", { name: "Create API key" }));
     expect(createKey).toHaveBeenCalledWith({

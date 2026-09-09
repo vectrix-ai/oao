@@ -2,20 +2,18 @@
 
 ## [0.7.0](https://github.com/vectrix-ai/oao/compare/v0.6.0...v0.7.0) (2026-09-08)
 
-
 ### Features
 
-* configure model turn limits per agent ([#21](https://github.com/vectrix-ai/oao/issues/21)) ([295c2cc](https://github.com/vectrix-ai/oao/commit/295c2cc0bfccac7daad85b663bc0f106a92af4f8))
-* VEC-1399 add OAO GCP dev delivery ([79bbb6b](https://github.com/vectrix-ai/oao/commit/79bbb6b675c4c77a39fc214e6ee132a969338625))
-
+- configure model turn limits per agent ([#21](https://github.com/vectrix-ai/oao/issues/21)) ([295c2cc](https://github.com/vectrix-ai/oao/commit/295c2cc0bfccac7daad85b663bc0f106a92af4f8))
+- VEC-1399 add OAO GCP dev delivery ([79bbb6b](https://github.com/vectrix-ai/oao/commit/79bbb6b675c4c77a39fc214e6ee132a969338625))
 
 ### Bug Fixes
 
-* **auth:** support non-superuser IAP migrations ([fe566ff](https://github.com/vectrix-ai/oao/commit/fe566ff2def06cfc4bed15858c12620b67bcdd50))
-* **ci:** bound runtime integration tests and preserve failures ([6beb01f](https://github.com/vectrix-ai/oao/commit/6beb01fc17d8994ecb3ba91fd8ff7a24eded9e3d))
-* **db:** avoid approval deadlocks during tool publication replay ([217eacb](https://github.com/vectrix-ai/oao/commit/217eacbe7ed6c6c6584822a3b2dc0eb8ccefea55))
-* discover new OpenAI models from the live catalog ([#20](https://github.com/vectrix-ai/oao/issues/20)) ([6d217bd](https://github.com/vectrix-ai/oao/commit/6d217bd908d191ef8ee04046c682a9906e336571))
-* **test:** account for Flue recovery polling ([ff635e8](https://github.com/vectrix-ai/oao/commit/ff635e854f2bcadb602ea5e78db25567f823fa2c))
+- **auth:** support non-superuser IAP migrations ([fe566ff](https://github.com/vectrix-ai/oao/commit/fe566ff2def06cfc4bed15858c12620b67bcdd50))
+- **ci:** bound runtime integration tests and preserve failures ([6beb01f](https://github.com/vectrix-ai/oao/commit/6beb01fc17d8994ecb3ba91fd8ff7a24eded9e3d))
+- **db:** avoid approval deadlocks during tool publication replay ([217eacb](https://github.com/vectrix-ai/oao/commit/217eacbe7ed6c6c6584822a3b2dc0eb8ccefea55))
+- discover new OpenAI models from the live catalog ([#20](https://github.com/vectrix-ai/oao/issues/20)) ([6d217bd](https://github.com/vectrix-ai/oao/commit/6d217bd908d191ef8ee04046c682a9906e336571))
+- **test:** account for Flue recovery polling ([ff635e8](https://github.com/vectrix-ai/oao/commit/ff635e854f2bcadb602ea5e78db25567f823fa2c))
 
 ## [0.6.0](https://github.com/vectrix-ai/oao/compare/v0.5.0...v0.6.0) (2026-09-02)
 
