@@ -158,6 +158,64 @@ test(
         value: { found: true },
       });
 
+      await pool.query(
+        "UPDATE oao.runs SET state='running' WHERE organization_id=$1 AND project_id=$2 AND id=$3",
+        [tenant.organizationId, tenant.projectId, runId],
+      );
+      for (const owner of ["caller", "platform"] as const) {
+        for (const resolution of ["denied", "expired"] as const) {
+          const gate = {
+            ...obligation,
+            flueToolCallId: `early-${owner}-${resolution}`,
+            toolName: `early.${owner}_${resolution}`,
+            approval: "always" as const,
+          };
+          const gateId =
+            owner === "caller"
+              ? await broker.publishCaller(gate)
+              : await broker.publishPlatform(gate);
+          if (resolution === "denied") {
+            await withTenantTransaction(pool, tenant, (transaction) =>
+              transaction.query(
+                "SELECT oao.resolve_approval($1,$2,id,'denied',$4,'early denial') FROM oao.approvals WHERE organization_id=$1 AND project_id=$2 AND tool_call_id=$3",
+                [tenant.organizationId, tenant.projectId, gateId, principal],
+              ),
+            );
+          } else {
+            await pool.query(
+              "UPDATE oao.approvals SET expires_at=clock_timestamp()-interval '1 second' WHERE organization_id=$1 AND project_id=$2 AND tool_call_id=$3",
+              [tenant.organizationId, tenant.projectId, gateId],
+            );
+            await pool.query("SELECT oao.expire_approvals(clock_timestamp())");
+          }
+          // Force the race: the gate resolves before either admission or waiting.
+          assert.equal(await broker.retryAdmission(gate), undefined);
+          const outcome =
+            owner === "caller"
+              ? await broker.waitForCaller(gate)
+              : await broker.executePlatform(gate, async () => {
+                  assert.fail(
+                    "denied or expired platform tools must never execute",
+                  );
+                });
+          assert.equal(outcome.status, "failure");
+          if (outcome.status === "failure")
+            assert.equal(outcome.error.code, `approval_${resolution}`);
+          const resumed = await pool.query(
+            "SELECT state FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$3",
+            [tenant.organizationId, tenant.projectId, runId],
+          );
+          assert.equal(resumed.rows[0]?.state, "running");
+          const retry = await broker.retryAdmission({
+            ...gate,
+            flueToolCallId: `${gate.flueToolCallId}-new`,
+          });
+          assert.equal(retry?.status, "failure");
+          if (retry?.status === "failure")
+            assert.equal(retry.error.code, "tool_retry_exhausted");
+        }
+      }
+
       const retryOutcomes = [];
       for (let attempt = 1; attempt <= 3; attempt += 1) {
         const retryObligation = {
