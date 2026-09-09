@@ -40,16 +40,22 @@ service-account key.
 
 ## Create an integration key
 
-A human principal with `project:admin` can create a key from **API keys** in the
-console. Enter a descriptive name, select the least-privilege scopes, and save
-the secret from the acknowledgement dialog. The console removes the plaintext
+A human principal needs both `project:admin` (or `*`) and an organization
+`owner` or `admin` membership to create a key from **API keys** in the console.
+Project membership and wildcard scopes alone do not grant that organization role.
+The console label **All scopes** describes permissions, not organization ownership.
+
+Enter a descriptive name, select the least-privilege scopes, and save the secret
+from the acknowledgement dialog. The console removes the plaintext
 when that dialog closes and cannot reveal it later.
 
 API keys are stored per organization. The key list and revocation act on the
 same organization-wide pool from any project.
 
-For automated setup, an authenticated human or service principal with
-`project:admin` can use the project API. In local development, first create a
+For automated setup, humans and services need the same organization membership
+and `project:admin` (or `*`). An existing API key qualifies through `project:admin`
+or `*`. Every creator can grant only scopes they already hold; `*` permits any
+scope. Use the project API. In local development, first create a
 cookie session and read the seeded project ID:
 
 ```bash
@@ -76,6 +82,24 @@ run:read
 
 Add `tool_call:claim` and `tool_call:submit` only when the integration executes
 caller-owned tools. Add `run:cancel` only when it should cancel runs.
+
+Skill administration requires explicit permissions: `skill:read` to list and export
+packages, `skill:write` to create drafts and publish versions, `skill:bind` together
+with `agent:write` to attach versions to agents, and `skill:revoke` to deprecate or
+revoke versions. Delegation inspection, messaging, and cancellation use
+`delegation:read`, `delegation:message`, and `delegation:cancel` respectively.
+Both the API-key and member permission pickers include these scopes.
+
+If a key receives `403 Principal lacks the required scope`, inspect
+`GET /v1/context` with that key and compare `principal.scopes` with the operation's
+requirements. Keys created before these picker options were available keep their
+original permissions. Create a replacement with the needed scopes, update the
+integration, verify access, then revoke the old key. Selecting all listed scopes
+creates an explicit list; it does not grant `*` or future permissions.
+
+If creation returns `Organization owner or admin role is required`, ask an
+organization owner to check your organization membership. A project admin role
+or the **All scopes** label does not satisfy that membership check.
 
 MCP administration uses separate least-privilege scopes: `mcp:read`,
 `mcp:write`, `mcp:discover`, and `mcp:bind`. Credential metadata, creation,

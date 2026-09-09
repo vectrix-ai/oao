@@ -1,3 +1,4 @@
+import { AUTHORIZATION_SCOPE_CATALOG } from "@oao/contracts";
 import {
   Boxes,
   CircleGauge,
@@ -1479,30 +1480,6 @@ function StorageConnectionDialog({
   );
 }
 
-const API_KEY_SCOPES = [
-  ["agent:read", "Read agents and immutable versions."],
-  ["agent:write", "Create agents and publish versions."],
-  ["session:read", "Read sessions and their public transcripts."],
-  ["session:write", "Create sessions."],
-  ["run:create", "Start initial and follow-up runs."],
-  ["run:read", "Read runs and connect to project events."],
-  ["run:cancel", "Request run cancellation."],
-  ["tool_call:claim", "Claim and renew caller-owned tool work."],
-  ["tool_call:submit", "Submit caller-owned tool results."],
-  ["approval:resolve", "Approve or deny pending approvals."],
-  ["mcp:read", "Read MCP server and toolset metadata."],
-  ["mcp:write", "Create MCP servers and toolsets."],
-  ["mcp:discover", "Connect to a server and snapshot its tools."],
-  ["mcp:bind", "Bind exact MCP resources to agent versions."],
-  ["mcp:execute", "Execute an agent's bound remote MCP tools."],
-  ["credential:read_metadata", "Read redacted credential metadata."],
-  ["credential:write", "Store new write-only MCP credentials."],
-  ["credential:rotate", "Rotate encrypted MCP credentials."],
-  ["credential:revoke", "Revoke MCP credentials."],
-  ["audit:read", "Read and export the project audit log."],
-  ["project:admin", "Manage members, providers, presets, and API keys."],
-] as const;
-
 const DEFAULT_API_KEY_SCOPES = new Set([
   "agent:read",
   "session:read",
@@ -1602,7 +1579,7 @@ function AddMemberDialog({
           Select only the API capabilities this principal needs.
         </span>
         <div className="scope-picker-grid">
-          {API_KEY_SCOPES.map(([scope, description]) => (
+          {AUTHORIZATION_SCOPE_CATALOG.map(([scope, description]) => (
             <CheckboxRow
               key={scope}
               label={scope}
@@ -1864,10 +1841,12 @@ function CreateApiKeyDialog({
       <fieldset className="scope-picker">
         <legend>Project scopes</legend>
         <span className="hint">
-          Scopes can be narrowed by replacing the key.
+          Keys apply across the organization. Select only scopes you hold.
+          Humans and services also need organization owner or admin membership
+          to create keys. Replace an existing key to change its scopes.
         </span>
         <div className="scope-picker-grid">
-          {API_KEY_SCOPES.map(([scope, description]) => (
+          {AUTHORIZATION_SCOPE_CATALOG.map(([scope, description]) => (
             <CheckboxRow
               key={scope}
               label={scope}
