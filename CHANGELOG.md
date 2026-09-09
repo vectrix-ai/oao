@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.7.1](https://github.com/vectrix-ai/oao/compare/v0.7.0...v0.7.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* avoid per-chunk model admission transactions ([#25](https://github.com/vectrix-ai/oao/issues/25)) ([4dc3a54](https://github.com/vectrix-ai/oao/commit/4dc3a54e9a0860859e2815fdfa2dca5e445758e7))
+* bound model calls and show session timing ([#24](https://github.com/vectrix-ai/oao/issues/24)) ([665ae17](https://github.com/vectrix-ai/oao/commit/665ae17f7308c35bd8d76de12c7d0cca0041b7df))
+* restore Skill and delegation permissions in console ([#22](https://github.com/vectrix-ai/oao/issues/22)) ([ba6082d](https://github.com/vectrix-ai/oao/commit/ba6082d91a8bb57875f1e179c49db43a251f62ab))
+
 ## [0.7.0](https://github.com/vectrix-ai/oao/compare/v0.6.0...v0.7.0) (2026-09-08)
 
 ### Features
