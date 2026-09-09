@@ -2157,6 +2157,24 @@ function Transcript({
   );
 }
 
+function EventTimestamp({
+  value,
+  className = "activity-time",
+}: {
+  readonly value: string;
+  readonly className?: string;
+}) {
+  return (
+    <time
+      className={className}
+      dateTime={value}
+      title={`${formatTimestamp(value)} · ${new Date(value).toISOString()} (UTC)`}
+    >
+      {formatTime(value)}
+    </time>
+  );
+}
+
 function UserMessage({
   event,
   flashed,
@@ -2174,13 +2192,7 @@ function UserMessage({
           <User size={13} />
         </span>
         <span className="msg-author">You</span>
-        <time
-          className="msg-time"
-          dateTime={event.createdAt}
-          title={formatDate(event.createdAt)}
-        >
-          {formatTime(event.createdAt)}
-        </time>
+        <EventTimestamp value={event.createdAt} className="msg-time" />
       </header>
       <MarkdownContent>{event.summary}</MarkdownContent>
       {event.files?.length ? (
@@ -2226,13 +2238,7 @@ function AssistantMessage({
           <Sparkles size={13} />
         </span>
         <span className="msg-author">{agentName}</span>
-        <time
-          className="msg-time"
-          dateTime={event.createdAt}
-          title={formatDate(event.createdAt)}
-        >
-          {formatTime(event.createdAt)}
-        </time>
+        <EventTimestamp value={event.createdAt} className="msg-time" />
       </header>
       <MarkdownContent>{event.summary}</MarkdownContent>
       {meta.length > 0 ? (
@@ -2302,6 +2308,7 @@ function ActivityRow({
               Pending
             </span>
           ) : null}
+          <EventTimestamp value={event.createdAt} />
           <span className="activity-duration">
             {formatCompactDuration(event.durationMs)}
           </span>
@@ -2332,6 +2339,7 @@ function ActivityRow({
         ) : event.status === "pending" ? (
           <span className="activity-flag activity-flag--pending">Pending</span>
         ) : null}
+        <EventTimestamp value={event.createdAt} />
         <span className="activity-duration">
           {formatCompactDuration(event.durationMs)}
         </span>
@@ -2400,6 +2408,7 @@ function HarnessActivity({
         ) : event.status === "pending" ? (
           <span className="activity-flag activity-flag--pending">Running</span>
         ) : null}
+        <EventTimestamp value={event.createdAt} />
         <span className="activity-duration">
           {formatCompactDuration(event.durationMs)}
         </span>
@@ -2508,6 +2517,11 @@ function HarnessActivity({
                       <p>{step.summary}</p>
                     </div>
                     <small>
+                      <EventTimestamp
+                        value={step.createdAt}
+                        className="step-time"
+                      />
+                      {" · "}
                       {step.tokens
                         ? `${formatNumber(step.tokens.input)} in / ${formatNumber(step.tokens.output)} out · `
                         : ""}
@@ -2569,8 +2583,9 @@ function ReasoningActivity({
         <span className="activity-icon" aria-hidden="true">
           <EventIcon kind={event.kind} />
         </span>
-        <span className="activity-name">Reasoning</span>
+        <span className="activity-name">{event.title}</span>
         <span className="activity-summary" />
+        <EventTimestamp value={event.createdAt} />
         <span className="activity-duration">
           {formatCompactDuration(event.durationMs)}
         </span>
@@ -2714,6 +2729,7 @@ function ToolActivity({
               Pending
             </span>
           ) : null}
+          <EventTimestamp value={event.createdAt} />
           <span className="activity-duration">
             {formatCompactDuration(event.durationMs)}
           </span>
@@ -2734,6 +2750,7 @@ function ToolActivity({
               Pending
             </span>
           ) : null}
+          <EventTimestamp value={event.createdAt} />
           <span className="activity-duration">
             {formatCompactDuration(event.durationMs)}
           </span>
@@ -3143,6 +3160,7 @@ function DebugTimeline({
                     style={{ width: `${width}%` }}
                   />
                 </span>
+                <EventTimestamp value={event.createdAt} className="wf-time" />
                 <span className="wf-ms">
                   {event.durationMs === null
                     ? "waiting"

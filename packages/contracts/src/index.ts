@@ -1223,6 +1223,8 @@ export const ProductEventKindSchema = v.picklist([
   "sandbox.stopped",
   "sandbox.failed",
   "model.invocation_completed",
+  "model.invocation_started",
+  "model.retry_scheduled",
   "model.invocation_failed",
   "sandbox.command_started",
   "sandbox.command_completed",

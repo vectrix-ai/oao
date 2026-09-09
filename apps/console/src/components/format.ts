@@ -46,11 +46,15 @@ export function formatTimestamp(value: string): string {
   }).format(new Date(value));
 }
 
-/** Clock-only stamp for transcript rows, where the date is already implied. */
+/** Local clock with milliseconds so adjacent activity can be distinguished. */
 export function formatTime(value: string): string {
-  return new Intl.DateTimeFormat("en-BE", { timeStyle: "medium" }).format(
-    new Date(value),
-  );
+  return new Intl.DateTimeFormat("en-BE", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    fractionalSecondDigits: 3,
+    hourCycle: "h23",
+  }).format(new Date(value));
 }
 
 /**

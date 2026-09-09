@@ -188,7 +188,7 @@ test(
     try {
       await t.test("migration applies cleanly and is idempotent", async () => {
         const first = await migrate(pool);
-        assert.equal(first.applied.length + first.alreadyApplied.length, 41);
+        assert.equal(first.applied.length + first.alreadyApplied.length, 42);
         const second = await migrate(pool);
         assert.deepEqual(second.alreadyApplied, [
           "0001_foundation.sql",
@@ -232,6 +232,7 @@ test(
           "0040_iap_auth.sql",
           "0041_tool_publication_lock.sql",
           "0042_agent_model_turn_limits.sql",
+          "0043_model_call_progress.sql",
         ]);
         await seed(pool);
       });

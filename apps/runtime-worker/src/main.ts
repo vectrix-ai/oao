@@ -19,6 +19,7 @@ import {
   ProjectModelPresetRegistry,
   createDeterministicModelProvider,
   loadModelPresetConfiguration,
+  withModelCallTimeout,
   type FauxResponseStep,
 } from "@oao/models-openrouter";
 import { McpRemoteClient, type McpRemotePort } from "@oao/mcp-remote";
@@ -66,6 +67,8 @@ export async function startRuntimeWorker(input: {
   readonly port?: number;
   readonly daytonaProvider?: FlueSandboxProviderPort;
   readonly fakeResponses?: readonly FauxResponseStep[];
+  /** Short deadlines for deterministic timeout tests; never applied to hosted providers. */
+  readonly fakeModelCallTimeoutMs?: number;
   readonly platformTools?: ReadonlyMap<string, PlatformToolHandler>;
   readonly mcpRemote?: McpRemotePort;
   /** Tests may admit one explicit run without claiming unrelated queued work. */
@@ -112,7 +115,9 @@ export async function startRuntimeWorker(input: {
         hostedEnabled: false,
       })
     : modelConfiguration.registry;
-  const providers = fake ? [fake.provider] : [];
+  const providers = fake
+    ? [withModelCallTimeout(fake.provider, input.fakeModelCallTimeoutMs)]
+    : [];
   // Durable project presets are registered lazily, one provider identity per
   // (organization, project, preset key), so routing policy stays isolated.
   const presets = new ProjectModelPresetRegistry({
