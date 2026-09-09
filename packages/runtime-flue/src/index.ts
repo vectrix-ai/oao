@@ -77,6 +77,10 @@ import type {
   ModelPresetTenant,
   ResolvedModelPreset,
 } from "@oao/models-openrouter";
+import {
+  MODEL_CALL_TIMEOUT_MS,
+  withModelCallTimeout,
+} from "@oao/models-openrouter";
 import type { PostgresWakeQueue, RuntimeWakeJob } from "@oao/queue-postgres";
 import type { PostgresToolBroker, ToolObligationInput } from "@oao/tool-broker";
 import { resourceFromAttributes } from "@opentelemetry/resources";
@@ -187,7 +191,7 @@ export interface McpToolExecutionPort {
  * package preserves the single Flue seam: the worker never imports Flue.
  */
 export function registerRuntimeModelProvider(provider: Provider): void {
-  setProvider(provider);
+  setProvider(withModelCallTimeout(provider));
 }
 
 interface ManagedAgentRuntimeConfig {
@@ -1456,13 +1460,15 @@ function modelInvocationDiagnostics(
     publicProviderFinishReason(standardizedReason);
   const errorExplanation = !isError
     ? undefined
-    : providerFinishReason === "content_filter"
-      ? "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run."
-      : providerFinishReason === "network_error"
-        ? "The provider reported a network error before producing a complete response, so OAO failed the run."
-        : providerFinishReason
-          ? `The provider ended the response with "${providerFinishReason}", which OAO treats as an incomplete model response and a failed run.`
-          : "The model invocation ended before a complete response was returned, so OAO failed the run.";
+    : /^Model call timed out after \d+ms$/u.test(response.error?.message ?? "")
+      ? "The model attempt exceeded its deadline and was aborted. OAO retries it when the retry budget and run deadline permit."
+      : providerFinishReason === "content_filter"
+        ? "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run."
+        : providerFinishReason === "network_error"
+          ? "The provider reported a network error before producing a complete response, so OAO failed the run."
+          : providerFinishReason
+            ? `The provider ended the response with "${providerFinishReason}", which OAO treats as an incomplete model response and a failed run.`
+            : "The model invocation ended before a complete response was returned, so OAO failed the run.";
   return {
     finishReason,
     ...(providerFinishReason ? { providerFinishReason } : {}),
@@ -3241,6 +3247,41 @@ export class RuntimeProjection {
     );
     const runtimeDispatch = dispatchResult.rows[0];
     if (!runtimeDispatch) return;
+    if (event.type === "turn_request") {
+      await this.appendPublicEvent(
+        runtimeDispatch,
+        event,
+        "model.invocation_started",
+        {
+          turnId: event.turnId,
+          model: event.request.requestedModel,
+          provider: event.request.providerId,
+          timeoutMs: MODEL_CALL_TIMEOUT_MS,
+        },
+        `model:${event.turnId}:started`,
+      );
+      return;
+    }
+    if (
+      event.type === "log" &&
+      event.message === "[flue:model-retry] Retrying transient model error"
+    ) {
+      const attempt = event.attributes?.attempt;
+      const delayMs = event.attributes?.delayMs;
+      if (typeof attempt === "number" && typeof delayMs === "number")
+        await this.appendPublicEvent(
+          runtimeDispatch,
+          event,
+          "model.retry_scheduled",
+          {
+            retry: attempt,
+            maximumRetries: 3,
+            delayMs,
+            timeoutMs: MODEL_CALL_TIMEOUT_MS,
+          },
+        );
+      return;
+    }
     if (event.type === "tool_start" && harnessCorrelation) {
       this.#harnessStepToolStarts.set(
         `${harnessCorrelation.harnessToolCallId}:${event.toolCallId}`,
@@ -4721,7 +4762,9 @@ export async function startManagedFlueRuntime(input: {
   return start({
     agents: [ManagedAgent],
     db: createFluePostgresAdapter(input.pool),
-    providers: input.providers,
+    providers: input.providers.map((provider) =>
+      withModelCallTimeout(provider),
+    ),
   });
 }
 

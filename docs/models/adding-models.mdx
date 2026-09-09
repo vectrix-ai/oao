@@ -155,6 +155,35 @@ and the agents that currently pin the key.
   preset picker. Agents that pin the key keep running on it, but must move to
   another preset before they can publish a new version. The key stays reserved.
 
+## Model timeouts and retries
+
+Each model attempt has a **five-minute deadline**, including connection setup
+and the entire response stream. Partial output does not reset the clock. OAO
+aborts an expired request and discards late results, including late tool calls.
+This deadline applies to all hosted providers and is fixed by the runtime;
+there is no per-preset timeout setting.
+
+For agent model turns, timeouts and other transient provider failures use Flue's
+durable retry budget: **up to three retries after the initial attempt**, or four
+attempts total. Retries back off for approximately 2, 4, and 8 seconds with
+jitter. Provider SDK retries are disabled so they cannot multiply this budget.
+Completed tools remain committed and are not executed again by a model retry.
+Cancellation, authentication failures, and the platform model-turn guard do not
+trigger these retries. Retry attempts still consume the agent's model-turn
+budget, and a run or Harness Operation deadline can stop execution sooner.
+
+Four consecutive five-minute timeouts can therefore take about **20 minutes
+plus retry delays**. Reduce reasoning effort or requested output size when a
+model repeatedly exceeds the deadline; retrying the same large generation can
+time out again. Internal context-compaction requests share the five-minute
+deadline but do not use the agent-turn retry loop.
+
+The session event inspector shows **Model call started** and **Model retry
+scheduled** entries while an agent turn is pending. These events contain safe
+timing and retry metadata, never provider credentials or raw error bodies.
+Timed-out attempts may still incur provider charges; without final provider
+usage, OAO cannot report their complete token usage or cost.
+
 ## Prompt caching
 
 OAO passes each Flue conversation's stable session identity to OpenRouter as

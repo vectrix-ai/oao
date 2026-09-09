@@ -1070,6 +1070,28 @@ function sessionDetail(
       }
       if (
         collection === "productEvents" &&
+        (productEventKind === "model.invocation_started" ||
+          productEventKind === "model.retry_scheduled")
+      ) {
+        const publicPayload = record(detail.publicPayload);
+        const retrying = productEventKind === "model.retry_scheduled";
+        debugEvents.push({
+          id: `debug:${collection}:${text(detail.id, String(index))}`,
+          kind: "reasoning",
+          source: "runtime",
+          title: retrying ? "Model retry scheduled" : "Model call started",
+          summary: retrying
+            ? `Retry ${numeric(publicPayload.retry)} of ${numeric(publicPayload.maximumRetries)} scheduled after ${Math.ceil(numeric(publicPayload.delayMs) / 1000)} seconds.`
+            : `Waiting for the model response; this attempt has a ${numeric(publicPayload.timeoutMs) / 60000}-minute timeout.`,
+          createdAt: text(detail.occurredAt, summary.createdAt),
+          durationMs: null,
+          status: "info",
+          payload: safePayload(publicPayload),
+        });
+        return;
+      }
+      if (
+        collection === "productEvents" &&
         productEventKind.startsWith("model.invocation_")
       ) {
         const publicPayload = record(detail.publicPayload);

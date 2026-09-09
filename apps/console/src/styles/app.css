@@ -1571,7 +1571,7 @@
   display: grid;
   grid-template-columns:
     13px 18px minmax(70px, 0.65fr) minmax(0, 1.35fr)
-    auto auto;
+    auto auto auto;
   align-items: center;
   gap: var(--sp-2);
   width: 100%;
@@ -1586,7 +1586,7 @@
   background: var(--surface-2);
 }
 .activity-row--compact {
-  grid-template-columns: 18px auto minmax(0, 1fr) auto auto;
+  grid-template-columns: 18px minmax(0, auto) minmax(0, 1fr) auto auto auto;
   padding-block: 3px;
 }
 .activity-row--compact:hover {
@@ -1620,12 +1620,23 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.activity-time,
+.wf-time,
+.step-time,
 .activity-duration {
-  grid-column: -1;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-3);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.activity-time {
+  grid-column: -3;
+}
+.activity-duration {
+  grid-column: -2;
+  min-width: 5ch;
+  text-align: right;
 }
 .activity-flag {
   grid-column: 5;
@@ -1661,7 +1672,7 @@
 .activity-row--harness {
   grid-template-columns:
     13px 18px minmax(70px, 0.65fr) minmax(0, 1.35fr)
-    auto auto auto;
+    auto auto auto auto;
 }
 .activity-row--harness .caret {
   transform: none;
@@ -2320,7 +2331,7 @@
 }
 .waterfall > li > button {
   display: grid;
-  grid-template-columns: minmax(120px, 210px) minmax(0, 1fr) 68px;
+  grid-template-columns: minmax(120px, 210px) minmax(0, 1fr) auto 68px;
   align-items: center;
   gap: var(--sp-3);
   width: 100%;
@@ -2836,7 +2847,25 @@
     flex-wrap: wrap;
   }
   .waterfall > li > button {
-    grid-template-columns: minmax(0, 1fr) 60px;
+    grid-template-columns: minmax(0, 1fr) auto 60px;
+  }
+  .activity-row,
+  .activity-row--harness {
+    grid-template-columns: 13px 18px minmax(0, 1fr) auto auto auto;
+    gap: 4px;
+  }
+  .activity-row--compact {
+    grid-template-columns: 18px minmax(0, 1fr) auto auto auto;
+  }
+  .activity-row .activity-summary,
+  .activity-row .activity-parallel-badge {
+    display: none;
+  }
+  .activity-row .activity-flag {
+    grid-column: 4;
+  }
+  .activity-row--compact .activity-flag {
+    grid-column: 3;
   }
   .wf-track {
     display: none;

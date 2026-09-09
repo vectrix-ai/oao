@@ -195,3 +195,12 @@ Through the API, `GET /projects/{projectId}/tool-calls?runId={runId}` and
 `GET /projects/{projectId}/pending-work` return the durable tool ledger, and
 retryable tool failures are surfaced to the model automatically (three total
 attempts per tool per run).
+
+### Approval resolution before tool resumption
+
+If an approval is denied or expires before its tool waiter resumes, the existing
+durable tool call returns `approval_denied` or `approval_expired` and the run
+returns to `running` so the agent can explain the outcome and finish. Resuming
+that same call is not a new retry and never executes a denied platform tool. A
+new call attempting to repeat the denied or expired operation remains blocked
+by the tool retry policy.

@@ -119,8 +119,41 @@ const objectSchema = (properties: Record<string, Record<string, unknown>>) => ({
   additionalProperties: false as const,
 });
 
-const fakeResponse: FauxResponseStep = (context) => {
+const modelRetryCalls = new Map<string, number>();
+const fakeResponse: FauxResponseStep = (context, options) => {
   const transcript = JSON.stringify(context.messages);
+  for (const marker of [
+    "model-timeout-recover",
+    "model-timeout-exhaust",
+    "model-auth-failure",
+  ]) {
+    if (!transcript.includes(marker)) continue;
+    if (
+      marker === "model-timeout-recover" &&
+      !context.messages.some((message) => message.role === "toolResult")
+    )
+      return fauxAssistantMessage(
+        [fauxToolCall("platform.retry_marker", { query: marker })],
+        { stopReason: "toolUse" },
+      );
+    const calls = (modelRetryCalls.get(marker) ?? 0) + 1;
+    modelRetryCalls.set(marker, calls);
+    if (marker === "model-auth-failure")
+      return fauxAssistantMessage("", {
+        stopReason: "error",
+        errorMessage: "401 Unauthorized",
+      });
+    if (marker === "model-timeout-recover" && calls === 4)
+      return fauxAssistantMessage("timeout-recovered");
+    return new Promise((resolve) => {
+      const finish = () =>
+        resolve(
+          fauxAssistantMessage("late response", { stopReason: "aborted" }),
+        );
+      if (options?.signal?.aborted) finish();
+      else options?.signal?.addEventListener("abort", finish, { once: true });
+    });
+  }
   if (transcript.includes("harness-sequence exact")) {
     if (transcript.includes("Execute the Harness Operation")) {
       if (!transcript.includes("SKILL-ACTIVATED-TOKEN"))
@@ -558,8 +591,16 @@ async function runRuntimeScenario() {
   let worker: RuntimeWorkerHandle | undefined;
   let runtimeChild: ChildProcess | undefined;
   let platformEffects = 0;
+  let retryToolEffects = 0;
   let releasePlatform: (() => void) | undefined;
   const platformTools = new Map<string, PlatformToolHandler>([
+    [
+      "platform.retry_marker",
+      async () => {
+        retryToolEffects++;
+        return { found: true };
+      },
+    ],
     [
       "platform.echo",
       async () => {
@@ -580,11 +621,91 @@ async function runRuntimeScenario() {
         OAO_RUNTIME_SERVICE_PRINCIPAL_ID: service,
       },
       fakeResponses,
+      fakeModelCallTimeoutMs: 100,
       platformTools,
     });
   await withScenarioCleanup(async () => {
     worker = await start();
     await seedBase(admin);
+
+    for (const marker of [
+      "model-timeout-recover",
+      "model-timeout-exhaust",
+      "model-auth-failure",
+    ]) {
+      const fixture = await seedFixture(
+        admin,
+        marker,
+        marker,
+        marker === "model-timeout-recover"
+          ? [{ ...platformTool, name: "platform.retry_marker" }]
+          : [],
+      );
+      await enqueue(worker, fixture);
+      await waitRun(
+        admin,
+        fixture.runId,
+        marker === "model-timeout-recover" ? "completed" : "failed",
+      );
+      assert.equal(
+        modelRetryCalls.get(marker),
+        marker === "model-auth-failure" ? 1 : 4,
+      );
+      const reservedTurns = await admin.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM oao.run_model_turns WHERE organization_id=$1 AND project_id=$2 AND run_id=$3",
+        [tenant.organizationId, tenant.projectId, fixture.runId],
+      );
+      assert.equal(
+        Number(reservedTurns.rows[0]?.count),
+        marker === "model-timeout-recover"
+          ? 5
+          : marker === "model-auth-failure"
+            ? 1
+            : 4,
+        "each provider retry consumes a distinct durable model-turn reservation",
+      );
+      // Settlement and observation projection run independently. Wait for the
+      // recorded start events before asserting the complete per-attempt payload.
+      await waitFor(
+        admin,
+        "SELECT count(*)::int AS count FROM oao.product_events WHERE organization_id=$1 AND project_id=$2 AND aggregate_id=$3 AND event_kind='model.invocation_started'",
+        [tenant.organizationId, tenant.projectId, fixture.runId],
+        (rows) =>
+          Number(rows[0]?.count) >= Number(reservedTurns.rows[0]?.count),
+      );
+      const events = await admin.query<{
+        event_kind: string;
+        public_payload: Record<string, unknown>;
+      }>(
+        "SELECT event_kind,public_payload FROM oao.product_events WHERE organization_id=$1 AND project_id=$2 AND aggregate_id=$3 AND event_kind IN ('model.invocation_started','model.retry_scheduled') ORDER BY aggregate_sequence",
+        [tenant.organizationId, tenant.projectId, fixture.runId],
+      );
+      const retries = events.rows.filter(
+        (event) => event.event_kind === "model.retry_scheduled",
+      );
+      assert.deepEqual(
+        retries.map((event) => event.public_payload.retry),
+        marker === "model-auth-failure" ? [] : [1, 2, 3],
+      );
+      const starts = events.rows.filter(
+        (event) => event.event_kind === "model.invocation_started",
+      );
+      assert.equal(starts.length, Number(reservedTurns.rows[0]?.count));
+      assert.equal(
+        new Set(starts.map((event) => event.public_payload.turnId)).size,
+        starts.length,
+      );
+      for (const event of starts) {
+        assert.equal(event.public_payload.timeoutMs, 300_000);
+        assert.equal(typeof event.public_payload.model, "string");
+        assert.equal(typeof event.public_payload.provider, "string");
+      }
+    }
+    assert.equal(
+      retryToolEffects,
+      1,
+      "completed tool must not be replayed by model retries",
+    );
 
     // Two versions share the fake provider but reserve isolated durable budgets.
     const low = await seedFixture(admin, "budget-low", "budget", [], {

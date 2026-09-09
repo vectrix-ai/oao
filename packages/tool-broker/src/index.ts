@@ -772,6 +772,24 @@ export class PostgresToolBroker {
   private async retryAdmissionFailure(
     input: ToolObligationInput,
   ): Promise<ToolOutcome | undefined> {
+    // Resuming an existing durable obligation is not a new retry. Its terminal
+    // result (including a denial before the waiter starts) must flow through
+    // waitForResult/executePlatformSafely so the run leaves its waiting state.
+    const existing = await withTenantTransaction(
+      this.pool,
+      input,
+      (transaction) =>
+        transaction.query(
+          "SELECT 1 FROM oao.tool_calls WHERE organization_id=$1 AND project_id=$2 AND run_id=$3 AND flue_tool_call_ref=$4",
+          [
+            input.organizationId,
+            input.projectId,
+            input.runId,
+            input.flueToolCallId,
+          ],
+        ),
+    );
+    if (existing.rowCount) return undefined;
     const state = await this.retryState(input);
     if (state.blockedBy)
       return failure(

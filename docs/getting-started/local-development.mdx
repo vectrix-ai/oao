@@ -228,7 +228,8 @@ and verifies conflicting publication requests are still rejected. Migration
 `0041_tool_publication_lock.sql` narrows the replay lock without changing the
 approval policy or claim/result fencing.
 
-`test:postgres:fresh` creates a PostgreSQL container on a random host port,
+`test:postgres:fresh` waits for TCP readiness so the temporary initialization
+server cannot trigger a premature test start. It creates a PostgreSQL container on a random host port,
 applies migrations twice, and runs the database and runtime integration suites.
 Automated tests use explicit provider doubles at adapter boundaries; those
 doubles are never selectable in the runnable API or console. Both fresh checks

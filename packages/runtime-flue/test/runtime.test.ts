@@ -377,6 +377,20 @@ test("runtime projections explain exact provider finish errors safely", () => {
     runtimeTesting.modelInvocationDiagnostics(
       {
         finishReason: "error",
+        error: { message: "Model call timed out after 300000ms" },
+      },
+      true,
+    ),
+    {
+      finishReason: "error",
+      errorExplanation:
+        "The model attempt exceeded its deadline and was aborted. OAO retries it when the retry budget and run deadline permit.",
+    },
+  );
+  assert.deepEqual(
+    runtimeTesting.modelInvocationDiagnostics(
+      {
+        finishReason: "error",
         error: { message: "Provider finish_reason: content_filter" },
       },
       true,

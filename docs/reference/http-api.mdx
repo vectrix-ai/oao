@@ -728,6 +728,22 @@ and without the input or output schemas. The console session sidebar lists
 these next to the bound Skills and marks how many times each tool was called
 during the session.
 
+`debug.productEvents` and the project event stream include model progress before
+the response completes:
+
+| Event kind                 | Public payload                                                       |
+| -------------------------- | -------------------------------------------------------------------- |
+| `model.invocation_started` | `turnId`, `model`, `provider`, `timeoutMs` (300000)                  |
+| `model.retry_scheduled`    | `retry` (1–3), `maximumRetries` (3), `delayMs`, `timeoutMs` (300000) |
+
+Each agent model attempt has a five-minute deadline. Timeouts and transient
+provider failures are retried up to three times after the initial attempt,
+subject to the run deadline and model-turn budget. These progress events do not
+indicate completion; use invocation outcomes and the run state for that. The
+Console labels them **Model call started** and **Model retry scheduled**. See
+[Model timeouts and retries](/models/adding-models#model-timeouts-and-retries)
+for cancellation, compaction, and usage limitations.
+
 `debug.modelInvocations` includes each invocation's actual start/completion
 window, OAO's normalized `finishReason`, and any provider thinking text returned
 with the response. A failed invocation also includes the provider's exact
@@ -743,6 +759,12 @@ records created before these diagnostics were projected can omit
 `providerFinishReason` and `errorExplanation`. Older invocations whose runtime
 projection recorded a zero-length window use the preceding message or tool
 completion to reconstruct their visible duration.
+
+Every transcript message and activity row, including tool calls, displays its
+recorded event time in the browser's local timezone with millisecond precision.
+Durations remain separate. Hover over a timestamp to see the full local date
+and the exact UTC timestamp for comparison with server logs. The Debug timeline
+and Harness Operation internal steps display the same timestamps.
 
 ## Delegations
 

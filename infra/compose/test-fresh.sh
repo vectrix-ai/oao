@@ -9,7 +9,7 @@ trap cleanup EXIT INT TERM
 
 docker run -d --name "$container_name" \
   -e POSTGRES_DB=oao -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
-  -P --health-cmd='pg_isready -U postgres -d oao' --health-interval=1s --health-timeout=3s --health-retries=60 \
+  -P --health-cmd='pg_isready -h 127.0.0.1 -U postgres -d oao' --health-interval=1s --health-timeout=3s --health-retries=60 \
   postgres:17-alpine >/dev/null
 
 attempt=0

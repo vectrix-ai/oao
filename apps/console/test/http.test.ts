@@ -963,6 +963,30 @@ describe("HTTP console adapter", () => {
       debug: {
         productEvents: [
           {
+            id: "model-started",
+            aggregateId: "88888888-8888-4888-8888-888888888888",
+            eventKind: "model.invocation_started",
+            publicPayload: {
+              turnId: "turn-1",
+              model: "openrouter/test",
+              provider: "openrouter",
+              timeoutMs: 300000,
+            },
+            occurredAt: "2026-08-20T19:21:41.000Z",
+          },
+          {
+            id: "model-retry",
+            aggregateId: "88888888-8888-4888-8888-888888888888",
+            eventKind: "model.retry_scheduled",
+            publicPayload: {
+              retry: 1,
+              maximumRetries: 3,
+              delayMs: 1800,
+              timeoutMs: 300000,
+            },
+            occurredAt: "2026-08-20T19:21:42.000Z",
+          },
+          {
             id: "harness-event-1",
             aggregateId: "88888888-8888-4888-8888-888888888888",
             eventKind: "harness.operation_completed",
@@ -1176,6 +1200,23 @@ describe("HTTP console adapter", () => {
               "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run.",
           },
         }),
+      }),
+    );
+    expect(detail.events).toContainEqual(
+      expect.objectContaining({
+        id: "debug:productEvents:model-started",
+        title: "Model call started",
+        status: "info",
+        summary:
+          "Waiting for the model response; this attempt has a 5-minute timeout.",
+      }),
+    );
+    expect(detail.events).toContainEqual(
+      expect.objectContaining({
+        id: "debug:productEvents:model-retry",
+        title: "Model retry scheduled",
+        status: "info",
+        summary: "Retry 1 of 3 scheduled after 2 seconds.",
       }),
     );
     expect(detail.events).toContainEqual(
