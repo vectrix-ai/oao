@@ -1842,8 +1842,9 @@ function CreateApiKeyDialog({
         <legend>Project scopes</legend>
         <span className="hint">
           Keys apply across the organization. Select only scopes you hold.
-          Humans and services also need organization owner or admin membership
-          to create keys. Replace an existing key to change its scopes.
+          Creating keys requires project:admin or *. Signed-in users also need
+          organization owner or admin membership. API-key callers qualify
+          through their scopes. Replace an existing key to change its scopes.
         </span>
         <div className="scope-picker-grid">
           {AUTHORIZATION_SCOPE_CATALOG.map(([scope, description]) => (

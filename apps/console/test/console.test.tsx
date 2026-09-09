@@ -160,10 +160,11 @@ describe("management console", () => {
     const add = within(
       screen.getByRole("dialog", { name: "Add project member" }),
     );
-    for (const [scope] of AUTHORIZATION_SCOPE_CATALOG) {
-      const checkbox = add.getByRole("checkbox", {
-        name: new RegExp(`^${scope}\\b`, "u"),
-      });
+    const scopeCheckboxes = add.getAllByRole("checkbox");
+    expect(scopeCheckboxes).toHaveLength(AUTHORIZATION_SCOPE_CATALOG.length);
+    for (const [index, [scope]] of AUTHORIZATION_SCOPE_CATALOG.entries()) {
+      const checkbox = scopeCheckboxes[index]!;
+      expect(checkbox).toHaveAccessibleName(new RegExp(`^${scope}\\b`, "u"));
       if (!(checkbox as HTMLInputElement).checked) fireEvent.click(checkbox);
     }
     await user.type(
@@ -2351,10 +2352,11 @@ describe("management console", () => {
     expect(
       create.getByRole("checkbox", { name: /^session:write/u }),
     ).toBeChecked();
-    for (const [scope] of AUTHORIZATION_SCOPE_CATALOG) {
-      const checkbox = create.getByRole("checkbox", {
-        name: new RegExp(`^${scope}\\b`, "u"),
-      });
+    const scopeCheckboxes = create.getAllByRole("checkbox");
+    expect(scopeCheckboxes).toHaveLength(AUTHORIZATION_SCOPE_CATALOG.length);
+    for (const [index, [scope]] of AUTHORIZATION_SCOPE_CATALOG.entries()) {
+      const checkbox = scopeCheckboxes[index]!;
+      expect(checkbox).toHaveAccessibleName(new RegExp(`^${scope}\\b`, "u"));
       if (!(checkbox as HTMLInputElement).checked) fireEvent.click(checkbox);
     }
     await user.click(create.getByRole("button", { name: "Create API key" }));

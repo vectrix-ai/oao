@@ -52,9 +52,10 @@ when that dialog closes and cannot reveal it later.
 API keys are stored per organization. The key list and revocation act on the
 same organization-wide pool from any project.
 
-For automated setup, humans and services need the same organization membership
-and `project:admin` (or `*`). An existing API key qualifies through `project:admin`
-or `*`. Every creator can grant only scopes they already hold; `*` permits any
+For automated setup, a caller authenticated with an API key has principal kind
+`api_key` and qualifies through `project:admin` or `*`, without an organization
+membership check. Callers with principal kind `human` or the internal `service`
+kind need both organization owner/admin membership and `project:admin` (or `*`). Every creator can grant only scopes they already hold; `*` permits any
 scope. Use the project API. In local development, first create a
 cookie session and read the seeded project ID:
 
