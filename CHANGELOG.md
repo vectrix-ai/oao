@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.2](https://github.com/vectrix-ai/oao/compare/v0.7.1...v0.7.2) (2026-09-10)
+
+
+### Bug Fixes
+
+* allow 24-hour approval waits without consuming execution budgets ([4b43146](https://github.com/vectrix-ai/oao/commit/4b431468b9147c0ed3c665589d4917eea1181aa3))
+* allow 24-hour approval waits without consuming execution budgets ([f564179](https://github.com/vectrix-ai/oao/commit/f564179f6e9b0f0c11f3e73dfe6a2acc92275bfb))
+
 ## [0.7.1](https://github.com/vectrix-ai/oao/compare/v0.7.0...v0.7.1) (2026-09-09)
 
 ### Bug Fixes
