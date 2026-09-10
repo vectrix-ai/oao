@@ -225,9 +225,22 @@ const fakeResponse: FauxResponseStep = (context, options) => {
   const toolResult = context.messages.some(
     (message) => message.role === "toolResult",
   );
+  for (const [marker, prompt] of [
+    ["approval-parent exact", "approval-middle exact"],
+    ["approval-middle exact", "approval-24h exact"],
+  ] as const) {
+    if (!transcript.includes(marker)) continue;
+    return toolResult
+      ? fauxAssistantMessage(`finished:${marker}`)
+      : fauxAssistantMessage(
+          [fauxToolCall("delegate_agent", { agent: "reviewer", prompt })],
+          { stopReason: "toolUse" },
+        );
+  }
   const scenarios = [
     ["caller-tool exact", "caller.lookup"],
     ["approval-deny exact", "caller.approved"],
+    ["approval-24h exact", "caller.approved"],
     ["approval-expire exact", "caller.approved"],
     ["platform-tool exact", "platform.echo"],
     ["deadline exact", "caller.lookup"],
@@ -346,6 +359,7 @@ async function seedFixture(
     readonly sandboxProvider?: string;
     readonly harnessOperations?: readonly Record<string, unknown>[];
     readonly skillVersionIds?: readonly string[];
+    readonly delegates?: readonly Record<string, unknown>[];
   } = {},
 ): Promise<Fixture> {
   const runId = uuid(`${label}:run`) as RunId;
@@ -361,6 +375,7 @@ async function seedFixture(
       tools,
       harnessOperations: options.harnessOperations ?? [],
       skillVersionIds: options.skillVersionIds ?? [],
+      delegates: options.delegates ?? [],
       sandbox: {
         enabled: options.sandboxEnabled ?? false,
         provider: options.sandboxProvider ?? "test-daytona",
@@ -1133,6 +1148,185 @@ async function runRuntimeScenario() {
         resolution === "denied" ? "approval_denied" : "approval_expired",
       );
     }
+
+    for (const delegated of [false, true]) {
+      const label = delegated
+        ? "approval-delegated-24h"
+        : "approval-direct-24h";
+      const leaf = await seedFixture(
+        admin,
+        `${label}-leaf`,
+        "approval-24h exact",
+        [approvedTool],
+        { timeoutMs: 60_000 },
+      );
+      let root = leaf;
+      if (delegated) {
+        const delegate = (versionId: string) => [
+          {
+            key: "reviewer",
+            description: "Review the request",
+            agentVersionId: versionId,
+          },
+        ];
+        const middle = await seedFixture(
+          admin,
+          `${label}-middle`,
+          "approval-middle exact",
+          [],
+          { timeoutMs: 60_000, delegates: delegate(leaf.versionId) },
+        );
+        root = await seedFixture(
+          admin,
+          `${label}-parent`,
+          "approval-parent exact",
+          [],
+          { timeoutMs: 60_000, delegates: delegate(middle.versionId) },
+        );
+      }
+      await enqueue(worker, root);
+      const gates = await waitFor(
+        admin,
+        `WITH RECURSIVE tree(run_id) AS (
+           SELECT $3::uuid UNION SELECT link.child_run_id FROM oao.delegation_runs link
+           JOIN tree ON tree.run_id=link.requested_by_run_id WHERE link.organization_id=$1 AND link.project_id=$2
+         ) SELECT a.id,a.run_id,a.tool_call_id,a.status,EXTRACT(EPOCH FROM (a.expires_at-a.created_at)) AS ttl
+           FROM oao.approvals a JOIN tree USING (run_id) WHERE a.organization_id=$1 AND a.project_id=$2`,
+        [tenant.organizationId, tenant.projectId, root.runId],
+        (rows) => rows[0]?.status === "pending",
+      );
+      assert.ok(Math.abs(Number(gates[0]?.ttl) - 86400) < 1);
+      const tree = await admin.query<{ run_id: RunId }>(
+        `WITH RECURSIVE tree(run_id) AS (
+           SELECT $3::uuid UNION SELECT link.child_run_id FROM oao.delegation_runs link
+           JOIN tree ON tree.run_id=link.requested_by_run_id WHERE link.organization_id=$1 AND link.project_id=$2
+         ) SELECT run_id FROM tree`,
+        [tenant.organizationId, tenant.projectId, root.runId],
+      );
+      assert.equal(tree.rowCount, delegated ? 3 : 1);
+      const runIds = tree.rows.map((row) => row.run_id);
+      // Advance only this disposable tree by 23 hours, without a real-day sleep.
+      await admin.query(
+        "UPDATE oao.approvals SET created_at=created_at-interval '23 hours',expires_at=expires_at-interval '23 hours' WHERE organization_id=$1 AND project_id=$2 AND id=$3",
+        [tenant.organizationId, tenant.projectId, gates[0]?.id],
+      );
+      await admin.query(
+        "UPDATE oao.runtime_dispatches SET deadline_at=deadline_at-interval '23 hours' WHERE organization_id=$1 AND project_id=$2 AND run_id=ANY($3::uuid[])",
+        [tenant.organizationId, tenant.projectId, runIds],
+      );
+      for (const runId of runIds) {
+        await worker.orchestrator.handleWake({
+          ...tenant,
+          id: uuid(`delayed:${runId}`),
+          runId,
+          dispatchKey: `deadline:${runId}`,
+          kind: "deadline",
+          payload: {},
+          attempts: 1,
+          fence: 1n,
+        });
+      }
+      const paused = await admin.query(
+        "SELECT timeout_requested_at FROM oao.runtime_dispatches WHERE organization_id=$1 AND project_id=$2 AND run_id=ANY($3::uuid[])",
+        [tenant.organizationId, tenant.projectId, runIds],
+      );
+      assert.ok(paused.rows.every((row) => row.timeout_requested_at === null));
+      await withTenantTransaction(admin, tenant, async (tx) => {
+        await tx.query(
+          "SELECT oao.resolve_approval($1,$2,$3,'approved',$4,'accepted after 23 hours')",
+          [tenant.organizationId, tenant.projectId, gates[0]?.id, human],
+        );
+        // Visible inside the resolution transaction: no worker or result is needed.
+        const wakes = await tx.query(
+          "SELECT run_id FROM oao.runtime_wake_jobs WHERE organization_id=$1 AND project_id=$2 AND dispatch_key LIKE $3",
+          [
+            tenant.organizationId,
+            tenant.projectId,
+            `approval-resolved:${gates[0]?.id}:%`,
+          ],
+        );
+        assert.deepEqual(
+          wakes.rows.map((row) => row.run_id).sort(),
+          [...runIds].sort(),
+        );
+      });
+      await waitFor(
+        admin,
+        "SELECT DISTINCT run_id FROM oao.runtime_wake_jobs WHERE organization_id=$1 AND project_id=$2 AND run_id=ANY($3::uuid[]) AND dispatch_key LIKE 'approval-deadline:%' AND available_at < clock_timestamp()+interval '2 minutes'",
+        [tenant.organizationId, tenant.projectId, runIds],
+        (rows) => rows.length === runIds.length,
+      );
+      const toolId = gates[0]?.tool_call_id;
+      const fence = await withTenantTransaction(admin, tenant, (tx) =>
+        tx.query(
+          "SELECT oao.claim_tool_call($1,$2,$3,$4,interval '1 minute') AS fence",
+          [tenant.organizationId, tenant.projectId, toolId, human],
+        ),
+      );
+      await withTenantTransaction(admin, tenant, (tx) =>
+        tx.query("SELECT oao.submit_tool_result($1,$2,$3,$4,$5,$6,$7,$8)", [
+          tenant.organizationId,
+          tenant.projectId,
+          toolId,
+          human,
+          fence.rows[0]?.fence,
+          `result:${root.runId}`,
+          createHash("sha256").update(JSON.stringify(safeResult)).digest(),
+          safeResult,
+        ]),
+      );
+      for (const runId of runIds) await waitRun(admin, runId, "completed");
+      const gateCount = await admin.query(
+        "SELECT COUNT(*) AS count FROM oao.approvals WHERE organization_id=$1 AND project_id=$2 AND run_id=ANY($3::uuid[])",
+        [tenant.organizationId, tenant.projectId, runIds],
+      );
+      assert.equal(gateCount.rows[0]?.count, "1");
+    }
+
+    const unanswered = await seedFixture(
+      admin,
+      "approval-no-result",
+      "approval-24h exact",
+      [approvedTool],
+      { timeoutMs: 5_000 },
+    );
+    await enqueue(worker, unanswered);
+    const unansweredGates = await waitFor(
+      admin,
+      "SELECT id,status FROM oao.approvals WHERE organization_id=$1 AND project_id=$2 AND run_id=$3",
+      [tenant.organizationId, tenant.projectId, unanswered.runId],
+      (rows) => rows[0]?.status === "pending",
+    );
+    await admin.query(
+      "UPDATE oao.approvals SET created_at=created_at-interval '23 hours',expires_at=expires_at-interval '23 hours' WHERE organization_id=$1 AND project_id=$2 AND run_id=$3",
+      [tenant.organizationId, tenant.projectId, unanswered.runId],
+    );
+    await admin.query(
+      "UPDATE oao.runtime_dispatches SET deadline_at=deadline_at-interval '23 hours' WHERE organization_id=$1 AND project_id=$2 AND run_id=$3",
+      [tenant.organizationId, tenant.projectId, unanswered.runId],
+    );
+    await worker.orchestrator.handleWake({
+      ...tenant,
+      id: uuid("unanswered:deadline"),
+      runId: unanswered.runId,
+      dispatchKey: `deadline:${unanswered.runId}`,
+      kind: "deadline",
+      payload: {},
+      attempts: 1,
+      fence: 1n,
+    });
+    await withTenantTransaction(admin, tenant, (tx) =>
+      tx.query(
+        "SELECT oao.resolve_approval($1,$2,$3,'approved',$4,'caller never returns')",
+        [
+          tenant.organizationId,
+          tenant.projectId,
+          unansweredGates[0]?.id,
+          human,
+        ],
+      ),
+    );
+    await waitRun(admin, unanswered.runId, "timed_out");
 
     const platform = await seedFixture(
       admin,

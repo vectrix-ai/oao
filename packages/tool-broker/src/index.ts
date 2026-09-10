@@ -6,7 +6,11 @@ import {
   type ToolResultEnvelope,
 } from "@oao/contracts";
 import type { PgPool, Queryable, TenantContext } from "@oao/db-postgres";
-import { withTenantTransaction } from "@oao/db-postgres";
+import {
+  withTenantTransaction,
+  DEFAULT_APPROVAL_TTL_MS,
+  lockApprovalDeadlines,
+} from "@oao/db-postgres";
 import type { PrincipalId, PublicValue, RunId } from "@oao/domain";
 import { assertPublicPayload } from "@oao/domain";
 import * as v from "valibot";
@@ -264,6 +268,9 @@ export class PostgresToolBroker {
     const approvalId = stableUuid(`approval:${requestKey}`);
     const hash = requestHash(input);
     await withTenantTransaction(this.pool, input, async (transaction) => {
+      // A child gate also pauses the runs that requested its delegation.
+      if (input.approval === "always")
+        await lockApprovalDeadlines(transaction, input);
       await transaction.query(
         "SELECT oao.publish_runtime_tool_call($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         [
@@ -306,7 +313,7 @@ export class PostgresToolBroker {
             input.runId,
             toolCallId,
             `Approve ${input.toolName}`,
-            this.options.approvalTtlMilliseconds ?? 3_600_000,
+            this.options.approvalTtlMilliseconds ?? DEFAULT_APPROVAL_TTL_MS,
           ],
         );
         await appendEventOnce(transaction, {
