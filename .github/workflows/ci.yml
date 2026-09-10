@@ -2,8 +2,12 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
+  workflow_call:
+    inputs:
+      build_image:
+        description: Build a disposable image for validation (delivery builds its own image).
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -34,4 +38,5 @@ jobs:
         run: pnpm test:postgres:fresh
 
       - name: Build delivery image
+        if: ${{ github.event_name == 'pull_request' || inputs.build_image }}
         run: docker build --tag oao:ci .

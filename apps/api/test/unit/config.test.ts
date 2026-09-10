@@ -67,7 +67,7 @@ test("WorkOS configuration requires an allowed fixed callback and secrets", () =
   );
 });
 
-test("IAP configuration requires an exact Cloud Run audience and tenant", () => {
+test("IAP configuration requires an exact Cloud Run audience, not tenant variables", () => {
   const configuration = loadServerConfiguration({
     AUTH_PROVIDER: "iap",
     APP_ORIGIN: "https://oao.example.test",
@@ -76,13 +76,23 @@ test("IAP configuration requires an exact Cloud Run audience and tenant", () => 
     API_KEY_PEPPER: "pepper",
     IAP_EXPECTED_AUDIENCE:
       "/projects/123456789/locations/europe-west1/services/oao-api",
-    IAP_ORGANIZATION_ID: "00000000-0000-4000-8000-000000000001",
-    IAP_PROJECT_ID: "00000000-0000-4000-8000-000000000002",
   });
   assert.equal(
     configuration.iap?.expectedAudience,
     "/projects/123456789/locations/europe-west1/services/oao-api",
   );
+  assert.deepEqual(Object.keys(configuration.iap ?? {}), ["expectedAudience"]);
+  const legacy = loadServerConfiguration({
+    AUTH_PROVIDER: "iap",
+    APP_ORIGIN: "https://oao.example.test",
+    DATABASE_URL: databaseUrl,
+    NODE_ENV: "production",
+    API_KEY_PEPPER: "pepper",
+    IAP_EXPECTED_AUDIENCE: configuration.iap?.expectedAudience,
+    IAP_ORGANIZATION_ID: "obsolete-value-must-not-select-a-tenant",
+    IAP_PROJECT_ID: "obsolete-value-must-not-select-a-project",
+  });
+  assert.deepEqual(legacy.iap, configuration.iap);
   assert.throws(
     () =>
       loadServerConfiguration({
@@ -112,12 +122,17 @@ test("hosted configuration fails closed without an explicit auth provider", () =
   );
 });
 
-test("server composition seeds only local development", async () => {
+test("composition seeds development or resolves database-owned IAP defaults", async () => {
   const calls: string[] = [];
   const pool = {
     async query(text: string) {
       calls.push(text);
-      return { rowCount: 0, rows: [] };
+      return {
+        rowCount: 1,
+        rows: [
+          { organization_id: "org-from-db", project_id: "project-from-db" },
+        ],
+      };
     },
   } as unknown as PgPool;
   const development = loadServerConfiguration({
@@ -140,12 +155,11 @@ test("server composition seeds only local development", async () => {
     API_KEY_PEPPER: "pepper",
     IAP_EXPECTED_AUDIENCE:
       "/projects/123456789/locations/europe-west1/services/oao-api",
-    IAP_ORGANIZATION_ID: "00000000-0000-4000-8000-000000000001",
-    IAP_PROJECT_ID: "00000000-0000-4000-8000-000000000002",
   });
   const iapComposition = await composeAuthentication(iap, pool);
   assert.equal(iapComposition.webhookAuth, undefined);
-  assert.equal(calls.length, 0);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0] ?? "", /ensure_iap_default_tenant/u);
 
   calls.length = 0;
   const workos = loadServerConfiguration({

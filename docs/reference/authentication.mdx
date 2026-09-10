@@ -7,8 +7,8 @@ OAO supports three authentication modes behind the same application boundary:
 
 - **Development auth** is the credential-free local default. The console signs
   in to the seeded development tenant through an HTTP-only session cookie.
-- **Google IAP** verifies the signed assertion injected at the application edge
-  and maps its immutable subject to an explicitly provisioned OAO principal.
+- **Google IAP** verifies the signed assertion injected at the application edge,
+  then resolves the principal or onboards a human through the application policy.
 - **WorkOS AuthKit** is the hosted human-auth adapter. OAO still requires a
   matching PostgreSQL principal and project membership; a valid WorkOS identity
   alone does not grant tenant access.
@@ -20,14 +20,22 @@ after the key.
 ## Google IAP
 
 IAP and OAO enforce separate gates: IAP decides who may reach the service, then
-OAO maps the signed `sub` to an existing principal, membership, and scopes. A
-valid Google identity alone never creates a tenant or grants OAO access.
+OAO verifies the signed `sub` and applies its initial-owner/member policy.
+Set `AUTH_PROVIDER=iap` with the exact Cloud Run resource audience. The default
+organization/project are initialized by the app with names defined in code and
+IDs stored in PostgreSQL; no tenant or onboarding-domain environment variables
+are required.
 
-Set `AUTH_PROVIDER=iap` with the exact Cloud Run resource audience and default
-OAO tenant. Before first login, run `provision:iap` as documented in
-`apps/api/README.md`. The command may pre-authorize the signed email when the
-IAP `sub` is not known yet; the first matching assertion binds that immutable
-subject without creating or promoting a principal.
+On a fresh installation, the first verified human login becomes owner;
+subsequent IAP-authorized humans join as members with explicit developer scopes.
+IAP's human allowlist is the set of possible initial owners—restrict it to
+trusted people. Service accounts and API keys cannot claim ownership.
+
+The existing login path handles this without a setup screen or separate API.
+Membership and audit writes are atomic; concurrent logins produce one owner.
+Existing users retain their roles. Restarts and removed owners never reopen the
+ownership claim. Removed memberships stay revoked while identity records remain.
+See [GCP deployment](/getting-started/gcp) for scope restrictions and rollout.
 
 The console discovers the configured application provider from
 `GET /v1/auth/provider`. This keeps a promoted container image independent of
