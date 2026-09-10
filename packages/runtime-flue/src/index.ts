@@ -1,3 +1,7 @@
+import {
+  readApprovalAwareDeadline,
+  scheduleApprovalDeadline,
+} from "@oao/db-postgres";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Provider } from "@earendil-works/pi-ai";
@@ -1217,7 +1221,9 @@ export function ManagedAgent(): string {
 
 ManagedAgent.agentName = "ManagedAgent";
 ManagedAgent.initialData = ManagedAgentInstanceDataSchema;
-ManagedAgent.durability = { maxAttempts: 10, timeoutMs: 3_600_000 };
+// Flue supervises total wall time independently of OAO's execution budget.
+// Leave room for a full 24-hour approval pause and subsequent execution.
+ManagedAgent.durability = { maxAttempts: 10, timeoutMs: 48 * 60 * 60 * 1000 };
 
 export function createFluePostgresAdapter(pool: PgPool) {
   return postgres({
@@ -2571,18 +2577,23 @@ export class ManagedRuntimeOrchestrator {
   }
 
   private async deadline(job: RuntimeWakeJob): Promise<void> {
-    await this.cascadeDelegations(job);
     const run = await this.loadRun(job);
     const dispatchResult = await withTenantTransaction(
       this.pool,
       run,
       async (transaction) => {
+        const deadline = await readApprovalAwareDeadline(transaction, run);
+        if (!deadline) return undefined;
+        if (!deadline.expired) {
+          await scheduleApprovalDeadline(transaction, run, deadline.checkAt);
+          return undefined;
+        }
         const result = await transaction.query<DispatchRow>(
           `UPDATE oao.runtime_dispatches SET timeout_requested_at=COALESCE(timeout_requested_at,clock_timestamp()),
              state=CASE WHEN state='settled' THEN state ELSE 'aborting'::oao.runtime_dispatch_state END,
              updated_at=clock_timestamp()
            WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
-             AND state <> 'settled' AND deadline_at <= clock_timestamp()
+             AND state <> 'settled'
            RETURNING *`,
           [run.organizationId, run.projectId, run.runId],
         );
@@ -2605,8 +2616,9 @@ export class ManagedRuntimeOrchestrator {
         return result;
       },
     );
-    const runtimeDispatch = dispatchResult.rows[0];
+    const runtimeDispatch = dispatchResult?.rows[0];
     if (!runtimeDispatch) return;
+    await this.cascadeDelegations(job);
     await this.abortFlueIncarnation(runtimeDispatch);
     this.trackAdmission?.(run);
   }

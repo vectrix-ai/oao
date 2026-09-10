@@ -493,3 +493,11 @@ export class PostgresWakeNotifier implements WakeOnlyNotifier {
     };
   }
 }
+
+export {
+  DEFAULT_APPROVAL_TTL_MS,
+  approvalAwareDeadline,
+  lockApprovalDeadlines,
+  readApprovalAwareDeadline,
+  scheduleApprovalDeadline,
+} from "./approval-deadline.js";

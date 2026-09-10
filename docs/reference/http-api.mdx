@@ -791,6 +791,15 @@ events, audit detail, or tool-call safe arguments. See
 
 ## Caller tools and approvals
 
+New approval requests expire 24 hours after creation. The returned `expiresAt`
+remains authoritative; existing and replayed gates retain their original expiry.
+Approval waiting pauses the configured run execution deadline, including across
+worker recovery, for the gated run and its requesting delegation ancestors.
+Concurrent approval waits count once. Acceptance resumes the remaining budget
+even when a caller has not yet submitted its tool result. See
+[Approval waiting window](/agents/add-tools#approval-waiting-window) for the
+independent submission ceiling.
+
 | Method | Path                                             | Purpose                                 |
 | ------ | ------------------------------------------------ | --------------------------------------- |
 | `GET`  | `/projects/{projectId}/tool-calls?runId={runId}` | List tool work, optionally for one run. |

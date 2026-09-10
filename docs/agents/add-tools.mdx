@@ -204,3 +204,27 @@ returns to `running` so the agent can explain the outcome and finish. Resuming
 that same call is not a new retry and never executes a denied platform tool. A
 new call attempting to repeat the denied or expired operation remains blocked
 by the tool retry policy.
+
+## Approval waiting window
+
+New approval gates expire **24 hours after creation**. Replaying the same tool
+request retains its original gate and expiry; it does not restart the clock.
+Existing approvals keep their recorded expiry. Approval, denial, and cancellation
+still apply to the exact tool call and remain subject to project permissions.
+
+Time spent waiting for approval does not consume the run's configured execution
+budget, including approvals in children delegated by that run (and their
+descendants). Follow-up delegations pause the run that requested that follow-up.
+OAO persists the approval timestamps, counts overlapping waits once, and
+reschedules its deadline after acceptance, denial, or expiry. A worker restart
+reconstructs the remaining budget from those records. Resolving an approval
+durably wakes the affected deadlines even if the worker is offline or a caller
+has not returned a tool result. Expired gates remain closed;
+no tool executes automatically when the 24-hour window ends.
+
+Flue also has an independent **48-hour total wall-clock ceiling per submission**.
+This allows a full-day review pause and subsequent execution while retaining a
+last-resort bound. Multiple long approval pauses in one submission share that
+ceiling. Submissions that already started before this change retain their stored
+Flue wall-clock deadline. Normal model-call timeouts and execution limits still
+apply outside approval waiting.
