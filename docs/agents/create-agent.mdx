@@ -1087,9 +1087,12 @@ and delegate bindings reference its immutable versions:
   budget, and delegated runs use their own agent version's limit.
 - Reaching the budget fails the run with `model_turn_limit_exceeded` and a safe
   explanation. Raising the limit does not extend the timeout.
-- The console caps `timeoutMs` at one hour, while
-  the API publication schema currently enforces only the 1,000 ms minimum. Stay
-  within one hour for parity with the current Flue durability configuration.
+- The console caps the execution budget `timeoutMs` at one hour, while the API
+  publication schema currently enforces only the 1,000 ms minimum. Approval
+  waiting pauses that budget. Flue separately caps each new submission at 48 hours
+  of total wall time, shared across all approval waits and execution; submissions
+  that already started retain their stored ceiling. See
+  [Approval waiting window](/agents/add-tools#approval-waiting-window).
 - Automated tests may inject deterministic provider doubles at adapter
   boundaries, but those providers cannot be selected through the API or
   console and are not runtime deployment options.
