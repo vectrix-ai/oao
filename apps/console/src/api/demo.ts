@@ -1173,6 +1173,7 @@ export class DemoConsoleApi implements ConsoleApi {
     const current =
       this.#projects.find((project) => project.current) ?? this.#projects[0];
     return {
+      authProvider: "development",
       organization: { id: ORG_ID, name: "Example operations" },
       project: current
         ? { id: current.id, name: current.name }
@@ -1182,7 +1183,9 @@ export class DemoConsoleApi implements ConsoleApi {
         kind: "human" as const,
         subject: "demo.operator@example.test",
         displayName: "Demo Operator",
-        role: "All scopes",
+        role: "owner",
+        organizationRole: "owner",
+        projectRole: "owner",
         scopes: ["*"],
       },
       organizations: [{ id: ORG_ID, name: "Example operations" }],
@@ -2586,10 +2589,13 @@ export class DemoConsoleApi implements ConsoleApi {
     return structuredClone(created);
   }
 
-  async getSettings() {
+  async getSettings(): Promise<SettingsData> {
     this.#guard();
     return structuredClone({
       ...settingsSeed,
+      authProvider: "development" as const,
+      canManageIapMembers: false,
+      canGrantIapOwner: false,
       projects: this.#projects,
       members: this.#members,
       apiKeys: this.#apiKeys,

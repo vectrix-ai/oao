@@ -268,6 +268,7 @@ export class OaoClient {
     return this.#write(this.routes.members(projectId), "POST", input, options);
   }
 
+  /** IAP: set organization access and scopes; only owners may grant or change Owner access. */
   updateMember(
     projectId: string,
     memberId: string,

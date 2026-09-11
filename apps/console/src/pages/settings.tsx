@@ -174,7 +174,8 @@ export function SettingsPage() {
       void queryClient.invalidateQueries({ queryKey: ["settings"] });
       notify("Member role updated.");
     },
-    onError: () => notify("Member role could not be updated.", "danger"),
+    onError: (error) =>
+      notify(error.message || "Member role could not be updated.", "danger"),
   });
   const removeMember = useMutation({
     mutationFn: (memberId: string) => api.removeMember(memberId),
@@ -238,7 +239,8 @@ export function SettingsPage() {
             }
           : {})}
         actions={
-          action ? (
+          action &&
+          !(route === "members" && query.data.authProvider === "iap") ? (
             <Button
               variant="primary"
               icon={
@@ -301,6 +303,7 @@ export function SettingsPage() {
       ) : null}
       {removingMember ? (
         <RemoveMemberDialog
+          organizationWide={query.data.authProvider === "iap"}
           member={removingMember}
           pending={removeMember.isPending}
           error={removeMember.error}
@@ -470,13 +473,23 @@ function SettingsBody({
         description="Add a principal with the least project access it needs."
       />
     ) : (
-      <TableCard label="Members table" caption="Members of the current project">
+      <TableCard
+        label="Members table"
+        caption={
+          data.authProvider === "iap"
+            ? "IAP organization access. Owners can grant Owner or Admin access; admins can grant Admin access. Changes apply to existing project memberships; lowering access also revokes keys created by that user."
+            : "Members of the current project"
+        }
+      >
         <thead>
           <tr>
             <th>Member</th>
             <th>Email</th>
             <th>Scopes</th>
-            <th>Role</th>
+            <th>
+              {data.authProvider === "iap" ? "Organization role" : "Role"}
+            </th>
+            {data.authProvider === "iap" ? <th>Project role</th> : null}
             <th>
               <span className="sr-only">Actions</span>
             </th>
@@ -507,8 +520,19 @@ function SettingsBody({
               <td>
                 <Select
                   aria-label={`Role for ${member.name}`}
-                  value={member.role}
-                  disabled={member.current || updatingMemberId === member.id}
+                  value={
+                    data.authProvider === "iap"
+                      ? (member.organizationRole ?? "")
+                      : member.role
+                  }
+                  disabled={
+                    member.current ||
+                    updatingMemberId === member.id ||
+                    (data.authProvider === "iap" &&
+                      (!data.canManageIapMembers ||
+                        (member.organizationRole === "owner" &&
+                          !data.canGrantIapOwner)))
+                  }
                   onChange={(event) =>
                     onUpdateMemberRole(
                       member.id,
@@ -516,16 +540,33 @@ function SettingsBody({
                     )
                   }
                 >
-                  <option value="owner">Owner</option>
+                  {data.authProvider !== "iap" ||
+                  data.canGrantIapOwner ||
+                  member.organizationRole === "owner" ? (
+                    <option value="owner">Owner</option>
+                  ) : null}
+                  {data.authProvider === "iap" && !member.organizationRole ? (
+                    <option value="" disabled>
+                      No organization role
+                    </option>
+                  ) : null}
                   <option value="admin">Admin</option>
                   <option value="member">Member</option>
                   <option value="viewer">Viewer</option>
                 </Select>
               </td>
+              {data.authProvider === "iap" ? (
+                <td>
+                  <StatusChip value={member.role} />
+                </td>
+              ) : null}
               <td className="cell-actions">
                 {member.current ? (
                   <StatusChip value="you" />
-                ) : (
+                ) : data.authProvider === "iap" &&
+                  (!data.canManageIapMembers ||
+                    (member.organizationRole === "owner" &&
+                      !data.canGrantIapOwner)) ? null : (
                   <Button
                     size="sm"
                     variant="ghost"
@@ -1604,12 +1645,14 @@ function AddMemberDialog({
 }
 
 function RemoveMemberDialog({
+  organizationWide,
   member,
   pending,
   error,
   onClose,
   onConfirm,
 }: {
+  readonly organizationWide: boolean;
   readonly member: SettingsMember;
   readonly pending: boolean;
   readonly error: Error | null;
@@ -1619,7 +1662,11 @@ function RemoveMemberDialog({
   return (
     <Dialog
       title={`Remove ${member.name}`}
-      description="This removes the principal's membership from the current project. It does not delete the WorkOS user."
+      description={
+        organizationWide
+          ? "This removes organization access across existing projects and revokes API keys created by this user. Their IAP identity remains blocked from automatic rejoining."
+          : "This removes the principal's membership from the current project. It does not delete the WorkOS user."
+      }
       onClose={onClose}
       footer={
         <>
@@ -1632,8 +1679,19 @@ function RemoveMemberDialog({
         </>
       }
     >
-      <Alert tone="warning" title="Project access will be revoked">
-        {member.subject} will no longer resolve as a member of this project.
+      <Alert
+        tone="warning"
+        title={
+          organizationWide
+            ? "Organization access will be revoked"
+            : "Project access will be revoked"
+        }
+      >
+        {member.subject} will lose{" "}
+        {organizationWide
+          ? "access to this organization"
+          : "membership of this project"}
+        .
       </Alert>
       {error ? <FormError>{error.message}</FormError> : null}
     </Dialog>

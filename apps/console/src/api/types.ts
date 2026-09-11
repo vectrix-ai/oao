@@ -525,6 +525,8 @@ export interface ProjectContext {
     readonly subject: string;
     readonly displayName: string;
     readonly role: string;
+    readonly organizationRole?: "owner" | "admin" | "member" | "viewer" | null;
+    readonly projectRole?: "owner" | "admin" | "member" | "viewer" | null;
     readonly scopes: readonly string[];
   };
   readonly organizations: readonly {
@@ -558,6 +560,9 @@ export type CreatedApiKey = ApiKeySummary &
   );
 
 export interface SettingsData {
+  readonly authProvider?: "development" | "iap" | "workos";
+  readonly canManageIapMembers?: boolean;
+  readonly canGrantIapOwner?: boolean;
   readonly organization: {
     readonly id: string;
     readonly name: string;
@@ -577,6 +582,7 @@ export interface SettingsData {
     readonly subject: string;
     readonly email?: string;
     readonly role: "owner" | "admin" | "member" | "viewer";
+    readonly organizationRole?: "owner" | "admin" | "member" | "viewer" | null;
     readonly scopes: readonly string[];
     readonly current: boolean;
   }[];

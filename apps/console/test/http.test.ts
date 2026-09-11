@@ -38,6 +38,33 @@ function jsonResponse(body: unknown, status = 200): Response {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("HTTP console adapter", () => {
+  it.each(["owner", "admin", "member", "viewer"])(
+    "displays the persisted %s organization role independently of scopes",
+    async (role) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          jsonResponse({
+            ...CONTEXT,
+            authProvider: "iap",
+            principal: {
+              ...CONTEXT.principal,
+              organizationRole: role,
+              projectRole: "owner",
+              scopes: ["*"],
+            },
+          }),
+        ),
+      );
+      const result = await new HttpConsoleApi().getContext();
+      expect(result.currentPrincipal).toMatchObject({
+        role,
+        organizationRole: role,
+        projectRole: "owner",
+      });
+    },
+  );
+
   it("maps authenticated context and includes cookie credentials", async () => {
     const fetchMock = vi.fn(async () => jsonResponse(CONTEXT));
     vi.stubGlobal("fetch", fetchMock);
@@ -48,7 +75,7 @@ describe("HTTP console adapter", () => {
       currentPrincipal: {
         id: CONTEXT.principal.id,
         scopes: ["*"],
-        role: "All scopes",
+        role: "human",
         displayName: "development user",
       },
     });

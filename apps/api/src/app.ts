@@ -225,6 +225,24 @@ function decryptProviderCredential<T>(decrypt: () => T): T {
   }
 }
 
+function rethrowIapMembershipError(error: unknown): never {
+  const pgError = error as {
+    readonly code?: string;
+    readonly message?: string;
+  };
+  if (pgError.code === "42501")
+    throw new HttpApiError(
+      "forbidden",
+      "IAP organization admin access is required; Owner access is protected",
+    );
+  if (pgError.code === "22023")
+    throw new HttpApiError(
+      "bad_request",
+      pgError.message ?? "Invalid IAP role change",
+    );
+  throw error;
+}
+
 function rethrowProjectLifecycleError(error: unknown): never {
   const pgError = error as {
     readonly code?: string;
@@ -1784,6 +1802,7 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       authenticated.organizationId,
       requested,
       authenticated.subject,
+      authConfiguration.provider === "iap" ? authenticated : undefined,
     );
     if (!resolved) return authenticated;
     return authenticated.displayName === undefined
@@ -1988,6 +2007,7 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       actor.organizationId,
       projectId,
       actor.subject,
+      authConfiguration.provider === "iap" ? actor : undefined,
     );
     if (!resolved)
       throw new HttpApiError(
@@ -2032,7 +2052,17 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       if (!organization || !project)
         throw new HttpApiError("not_found", "Authenticated project not found");
       return c.json({
-        principal: publicPrincipal(actor),
+        principal: {
+          ...publicPrincipal(actor),
+          ...(publicValue(
+            (
+              await tx.query(
+                "SELECT * FROM oao.principal_membership_roles($1,$2,$3)",
+                [actor.organizationId, actor.projectId, actor.id],
+              )
+            ).rows[0],
+          ) as Record<string, unknown>),
+        },
         organization,
         project,
         organizations: [organization],
@@ -2134,6 +2164,31 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           hash: requestHash(body),
           status: 201,
           execute: async () => {
+            if (authConfiguration.provider === "iap") {
+              await tx.query(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                [`iap-members/${actor.organizationId}`],
+              );
+              const current =
+                actor.kind === "api_key"
+                  ? await tx.query<{ scopes: string[] }>(
+                      "SELECT scopes FROM oao.api_keys WHERE organization_id=$1 AND 'api-key:' || id::text=$2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp())",
+                      [actor.organizationId, actor.subject],
+                    )
+                  : await tx.query<{ scopes: string[] }>(
+                      "SELECT p.scopes FROM oao.principals p JOIN oao.project_members pm ON pm.organization_id=p.organization_id AND pm.project_id=p.project_id AND pm.principal_id=p.id WHERE p.organization_id=$1 AND p.project_id=$2 AND p.id=$3",
+                      [actor.organizationId, actor.projectId, actor.id],
+                    );
+              if (
+                !current.rows[0]?.scopes.some(
+                  (scope) => scope === "*" || scope === "project:admin",
+                )
+              )
+                throw new HttpApiError(
+                  "forbidden",
+                  "Current permissions do not allow project creation",
+                );
+            }
             const projectId = randomUUID();
             const result = await tx
               .query(
@@ -2232,7 +2287,8 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
         const result = await tx.query(
           `SELECT p.id,pm.organization_id,pm.project_id,pm.principal_id,
                   p.kind,p.subject,p.scopes,identity.display_name,identity.email,
-                  pm.role,pm.created_at
+                  pm.role,pm.created_at,
+                  (SELECT organization_role FROM oao.principal_membership_roles(pm.organization_id,pm.project_id,p.id)) AS organization_role
          FROM oao.project_members pm JOIN oao.principals p
            ON p.organization_id=pm.organization_id AND p.project_id=pm.project_id AND p.id=pm.principal_id
          LEFT JOIN LATERAL (
@@ -2260,6 +2316,11 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
 
   app.post("/v1/projects/:projectId/members", async (c) => {
     const actor = assertProject(c);
+    if (authConfiguration.provider === "iap")
+      throw new HttpApiError(
+        "forbidden",
+        "IAP users join by signing in; change their organization role from Members",
+      );
     const body = await readJsonObject(c.req.raw);
     const key = idempotencyKey(c.req.raw);
     const subject = requiredString(body.subject, "subject", 500);
@@ -2293,7 +2354,8 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
              )
              SELECT p.id,pm.organization_id,pm.project_id,pm.principal_id,
                     p.kind,p.subject,p.scopes,identity.display_name,identity.email,
-                    pm.role,pm.created_at
+                    pm.role,pm.created_at,
+                  (SELECT organization_role FROM oao.principal_membership_roles(pm.organization_id,pm.project_id,p.id)) AS organization_role
              FROM membership pm JOIN principal p ON p.id=pm.principal_id
              LEFT JOIN LATERAL (
                SELECT ai.display_name,ai.email
@@ -2348,15 +2410,32 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           hash: requestHash(body),
           status: 200,
           execute: async () => {
+            const iap = authConfiguration.provider === "iap";
+            if (iap)
+              await tx
+                .query("SELECT oao.change_iap_member_role($1,$2,$3,$4,$5)", [
+                  actor.organizationId,
+                  actor.projectId,
+                  actor.id,
+                  c.req.param("memberId"),
+                  role,
+                ])
+                .catch(rethrowIapMembershipError);
             const result = await tx.query(
               `WITH membership AS (
-               UPDATE oao.project_members SET role=$4,updated_at=clock_timestamp()
-               WHERE organization_id=$1 AND project_id=$2 AND principal_id=$3
-               RETURNING organization_id,project_id,principal_id,role,created_at
+               ${
+                 iap
+                   ? `SELECT organization_id,project_id,principal_id,role,created_at FROM oao.project_members
+                    WHERE organization_id=$1 AND project_id=$2 AND principal_id=$3 AND role=$4::oao.project_role`
+                   : `UPDATE oao.project_members SET role=$4,updated_at=clock_timestamp()
+                    WHERE organization_id=$1 AND project_id=$2 AND principal_id=$3
+                    RETURNING organization_id,project_id,principal_id,role,created_at`
+               }
              )
              SELECT p.id,pm.organization_id,pm.project_id,pm.principal_id,
                     p.kind,p.subject,p.scopes,identity.display_name,identity.email,
-                    pm.role,pm.created_at
+                    pm.role,pm.created_at,
+                  (SELECT organization_role FROM oao.principal_membership_roles(pm.organization_id,pm.project_id,p.id)) AS organization_role
              FROM membership pm JOIN oao.principals p
                ON p.organization_id=pm.organization_id
               AND p.project_id=pm.project_id
@@ -2381,10 +2460,18 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
             if (!member)
               throw new HttpApiError("not_found", "Member not found");
             await dependencies.store.appendAudit(tx, actor, {
-              action: "member.role_changed",
+              action:
+                authConfiguration.provider === "iap"
+                  ? "member.organization_role_changed"
+                  : "member.role_changed",
               resourceType: "member",
               resourceId: c.req.param("memberId"),
-              detail: { role },
+              detail: {
+                role,
+                ...(iap
+                  ? { scope: "organization", permissionsUpdated: true }
+                  : {}),
+              },
             });
             return member as Readonly<Record<string, unknown>>;
           },
@@ -2414,11 +2501,28 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           hash: requestHash({ memberId: c.req.param("memberId") }),
           status: 200,
           execute: async () => {
-            const result = await tx.query(
-              `DELETE FROM oao.project_members
-             WHERE organization_id=$1 AND project_id=$2 AND principal_id=$3 RETURNING principal_id`,
-              [actor.organizationId, actor.projectId, c.req.param("memberId")],
-            );
+            const result =
+              authConfiguration.provider === "iap"
+                ? await tx
+                    .query(
+                      "SELECT oao.change_iap_member_role($1,$2,$3,$4,'removed')",
+                      [
+                        actor.organizationId,
+                        actor.projectId,
+                        actor.id,
+                        c.req.param("memberId"),
+                      ],
+                    )
+                    .catch(rethrowIapMembershipError)
+                : await tx.query(
+                    `DELETE FROM oao.project_members
+                   WHERE organization_id=$1 AND project_id=$2 AND principal_id=$3 RETURNING principal_id`,
+                    [
+                      actor.organizationId,
+                      actor.projectId,
+                      c.req.param("memberId"),
+                    ],
+                  );
             if (!result.rowCount)
               throw new HttpApiError("not_found", "Member not found");
             await dependencies.store.appendAudit(tx, actor, {
@@ -2486,6 +2590,35 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       actor,
       "project:admin",
       async (tx) => {
+        if (authConfiguration.provider === "iap") {
+          // Serialize issuance with role changes, then re-read authorization:
+          // an in-flight request must not mint a key after its creator is demoted.
+          await tx.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            [`iap-members/${actor.organizationId}`],
+          );
+          const current =
+            actor.kind === "api_key"
+              ? await tx.query<{ scopes: string[] }>(
+                  "SELECT scopes FROM oao.api_keys WHERE organization_id=$1 AND 'api-key:' || id::text=$2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp())",
+                  [actor.organizationId, actor.subject],
+                )
+              : await tx.query<{ scopes: string[] }>(
+                  "SELECT p.scopes FROM oao.principals p JOIN oao.project_members pm ON pm.organization_id=p.organization_id AND pm.project_id=p.project_id AND pm.principal_id=p.id WHERE p.organization_id=$1 AND p.project_id=$2 AND p.id=$3",
+                  [actor.organizationId, actor.projectId, actor.id],
+                );
+          const currentScopes = current.rows[0]?.scopes;
+          if (
+            !currentScopes ||
+            (!currentScopes.includes("*") &&
+              (!currentScopes.includes("project:admin") ||
+                scopes.some((scope) => !currentScopes.includes(scope))))
+          )
+            throw new HttpApiError(
+              "forbidden",
+              "Current permissions do not allow creating this API key",
+            );
+        }
         if (actor.kind === "api_key") {
           if (!actor.scopes.has("*") && !actor.scopes.has("project:admin"))
             throw new HttpApiError(
@@ -2494,8 +2627,12 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
             );
         } else {
           const membership = await tx.query<{ role: string | null }>(
-            "SELECT oao.organization_role_for_subject($1,$2,$3) AS role",
-            [actor.organizationId, actor.kind, actor.subject],
+            authConfiguration.provider === "iap"
+              ? "SELECT organization_role AS role FROM oao.principal_membership_roles($1,$2::uuid,$3::uuid)"
+              : "SELECT oao.organization_role_for_subject($1,$2,$3) AS role",
+            authConfiguration.provider === "iap"
+              ? [actor.organizationId, actor.projectId, actor.id]
+              : [actor.organizationId, actor.kind, actor.subject],
           );
           const role = membership.rows[0]?.role;
           if (role !== "owner" && role !== "admin")

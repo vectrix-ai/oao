@@ -1003,3 +1003,27 @@ test("live model catalog preserves discovery-only availability", async () => {
   });
   assert.deepEqual(result.data[0], entry);
 });
+
+test("IAP role updates retain organization role and effective scopes in the response", async () => {
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (_input, init) => {
+      assert.equal(init?.method, "PATCH");
+      assert.deepEqual(JSON.parse(String(init?.body)), { role: "admin" });
+      return Response.json({
+        id: "member-1",
+        role: "admin",
+        organizationRole: "admin",
+        scopes: ["project:admin"],
+      });
+    },
+  });
+  const member = await client.updateMember(
+    "project-1",
+    "member-1",
+    { role: "admin" },
+    { idempotencyKey: "iap-admin" },
+  );
+  assert.equal(member.organizationRole, "admin");
+  assert.deepEqual(member.scopes, ["project:admin"]);
+});

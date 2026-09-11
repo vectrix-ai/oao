@@ -93,6 +93,23 @@ switches its active project with `POST /auth/switch-project`.
 | `PATCH`  | `/projects/{projectId}/members/{memberId}` | Change a project member's role.                      |
 | `DELETE` | `/projects/{projectId}/members/{memberId}` | Remove project membership.                           |
 
+Member responses additionally include the persisted `organizationRole`;
+`role` remains the project role. `GET /context` includes `principal.organizationRole`
+and `principal.projectRole` (nullable when membership does not exist), independently
+of scopes. The SDK preserves these fields.
+
+For IAP, `PATCH /projects/{projectId}/members/{memberId}` with `{ role }` changes
+the person's **organization role**, scopes, and existing IAP project memberships
+in one audited transaction. Owner grants use `*`; Admin uses a fixed explicit
+profile, not `*`. Owners can appoint/change other Owners; Owners/Admins can grant
+Admin/Member/Viewer access. Admins cannot change Owners. Self changes and loss of
+the last Owner are rejected. Only authenticated IAP humans qualify; API keys do
+not. Lowering access revokes keys created by the target identity and any keys derived from them. Key issuance is serialized with role changes so an in-flight request cannot retain revoked authority. `DELETE` removes
+organization and existing project memberships and revokes those keys, retaining
+identity records as the rejoining guard. `POST /members` is disabled in IAP mode;
+users join through verified IAP login. Other authentication modes retain the
+existing project-role and explicitly supplied scope behavior.
+
 All routes require `project:admin`. Member and project writes also require an
 `Idempotency-Key`. Member create input is `{ subject, role, scopes }`; roles
 are `owner`, `admin`, `member`, or `viewer`. A member response includes the

@@ -42,6 +42,45 @@ function renderConsole(
 }
 
 describe("management console", () => {
+  it.each(["owner", "admin"] as const)(
+    "lets an IAP organization %s grant only the allowed roles through Members",
+    async (role) => {
+      const user = userEvent.setup();
+      const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+      const settings = await api.getSettings();
+      vi.spyOn(api, "getSettings").mockResolvedValue({
+        ...settings,
+        authProvider: "iap",
+        canManageIapMembers: true,
+        canGrantIapOwner: role === "owner",
+        members: settings.members.map((member) => ({
+          ...member,
+          organizationRole: member.current ? role : "member",
+        })),
+      });
+      const update = vi.spyOn(api, "updateMemberRole").mockResolvedValue();
+      renderConsole("/members", api);
+      const select = await screen.findByLabelText("Role for Review Operator");
+      expect(
+        screen.getByRole("columnheader", { name: "Organization role" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Add member" }),
+      ).not.toBeInTheDocument();
+      expect(
+        within(select).queryByRole("option", { name: "Owner" }) !== null,
+      ).toBe(role === "owner");
+      await user.selectOptions(select, role === "owner" ? "owner" : "admin");
+      await waitFor(() =>
+        expect(update).toHaveBeenCalledWith(
+          "34343434-3434-4343-8343-343434343434",
+          role === "owner" ? "owner" : "admin",
+        ),
+      );
+      expect(screen.getByLabelText("Role for Demo Operator")).toBeDisabled();
+    },
+  );
+
   it("shows WorkOS display metadata and provides logout", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
@@ -230,7 +269,7 @@ describe("management console", () => {
     ).toBeInTheDocument();
     expect(await screen.findByText("Support operator")).toBeInTheDocument();
     expect(await screen.findByText("Demo Operator")).toBeInTheDocument();
-    expect(screen.getByText("All scopes")).toBeInTheDocument();
+    expect(screen.getByText("owner")).toBeInTheDocument();
     await user.type(
       screen.getByRole("searchbox", { name: "Search agents" }),
       "not-a-real-agent",

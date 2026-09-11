@@ -37,6 +37,51 @@ Existing users retain their roles. Restarts and removed owners never reopen the
 ownership claim. Removed memberships stay revoked while identity records remain.
 See [GCP deployment](/getting-started/gcp) for scope restrictions and rollout.
 
+### Organization roles for IAP users
+
+Open **Members** to manage a signed-in IAP user's **Organization role**. The
+separate **Project role** column shows their membership in the selected project.
+IAP identity matching uses the immutable Google subject, including older internal
+principal aliases. Switching projects requires an identity-linked membership;
+unlinked same-name principals cannot retain access after demotion.
+Roles shown in the console come from stored memberships, never from a wildcard
+scope or a shared display-name fallback.
+
+- **Owner** has full platform access (`*`). An existing organization Owner can
+  appoint additional Owners and can change another Owner's access.
+- **Admin** has the explicit current administration permissions, including
+  provider/MCP configuration, audit access, API-key creation and organization
+  project management. Owners and Admins can grant other users Admin access.
+  Admins cannot grant Owner access or change/remove an Owner, and receive no wildcard.
+- **Member** retains the automatic developer permissions for agents, skills,
+  sessions and runs. **Viewer** has only the explicit read permissions.
+
+Selecting a role updates organization membership, effective scopes, and all
+existing IAP project memberships for that person atomically. It grants no
+membership in an additional project. Refresh the user's console to display the
+new role; subsequent authenticated requests resolve current permissions.
+Lowering access revokes API keys created by that person and their derived keys, including keys created
+through their other project identities. Rotate any affected integrations before
+relying on them again. **Remove** revokes their organization/project memberships
+and their keys while retaining identity records to prevent automatic rejoining.
+Also remove their Google IAP access as part of offboarding.
+
+You cannot change or remove your own access; the last Owner must remain.
+Only IAP-authenticated humans with the required organization role can manage
+these grants. API keys cannot grant human access. Users first appear after
+signing in through IAP; arbitrary subject/scope entry is disabled in this mode.
+
+Existing stored roles are preserved during rollout. If an existing person really
+has Owner membership, they will still display as Owner until another Owner
+explicitly changes it. This feature does not rewrite existing users or repair
+operator-created/shared identity mappings automatically. First-installation
+ownership still comes from the first verified human IAP login; project creation
+is unchanged and does not promote a member's organization role. On older
+installations where one person has differently named internal records across
+projects, create/delete projects from that person's original project; those
+legacy records are not migrated by this change. Their IAP role changes and
+revocations still apply across identity-linked project records.
+
 The console discovers the configured application provider from
 `GET /v1/auth/provider`. This keeps a promoted container image independent of
 the hosted authentication provider.

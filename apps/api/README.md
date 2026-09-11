@@ -39,7 +39,11 @@ Service accounts and API keys cannot become owners through onboarding.
 
 Existing linked tenants, users and roles are preserved. Ownership is claimed
 once, atomically with membership and audit writes; restarts and removed owners
-never reopen it. See the GCP guide for scope restrictions and rollout ordering.
+never reopen it. IAP organization Owners can appoint additional Owners from
+Members; Owners and Admins can grant Admin access. Role changes update effective
+permissions and existing project memberships together. Admin grants have explicit
+scopes, while Owner grants use `*`. Demotion/removal revokes user-created API keys.
+See the authentication reference and GCP guide for safeguards and rollout ordering.
 
 ## WorkOS AuthKit
 

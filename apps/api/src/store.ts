@@ -85,7 +85,27 @@ export class PostgresApiStore {
     organizationId: Principal["organizationId"],
     projectId: string,
     subject: string,
+    iapSource?: Principal,
   ): Promise<Principal | undefined> {
+    if (iapSource) {
+      const result = await withTenantTransaction(this.pool, iapSource, (tx) =>
+        tx.query<{ id: string; subject: string; scopes: string[] }>(
+          "SELECT * FROM oao.resolve_iap_project_member($1,$2,$3,$4)",
+          [organizationId, iapSource.projectId, iapSource.id, projectId],
+        ),
+      );
+      const row = result.rows[0];
+      return row
+        ? {
+            id: brandedId<PrincipalId>(row.id),
+            organizationId,
+            projectId: projectId as Principal["projectId"],
+            kind: "human",
+            subject: row.subject,
+            scopes: new Set(row.scopes as AuthorizationScope[]),
+          }
+        : undefined;
+    }
     const result = await withTenantTransaction(
       this.pool,
       {

@@ -878,3 +878,31 @@ test("agent model turn budgets accept bounded integers and preserve the configur
     );
   }
 });
+
+test("public principal role metadata comes from persisted membership and remains optional", () => {
+  const principal = {
+    id,
+    organizationId: id,
+    projectId: id,
+    kind: "human",
+    subject: "iap:accounts.google.com:123",
+    scopes: ["*"],
+  };
+  const parsed = v.parse(PublicPrincipalSchema, {
+    ...principal,
+    organizationRole: "member",
+    projectRole: "admin",
+  });
+  assert.equal(parsed.organizationRole, "member");
+  assert.equal(parsed.projectRole, "admin");
+  assert.equal(
+    v.parse(PublicPrincipalSchema, principal).organizationRole,
+    undefined,
+  );
+  assert.throws(() =>
+    v.parse(PublicPrincipalSchema, {
+      ...principal,
+      organizationRole: "superadmin",
+    }),
+  );
+});

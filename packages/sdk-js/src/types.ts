@@ -125,6 +125,7 @@ export interface AuthSession {
 }
 
 export interface ProjectContext {
+  /** Persisted organizationRole/projectRole are included when membership exists. */
   readonly principal: PublicPrincipal;
   readonly organization: Organization;
   readonly project: Project;
