@@ -78,7 +78,11 @@ import type {
   RunId,
   ThreadId,
 } from "@oao/domain";
-import { redactForPublic, serializeSkillPackageForHash } from "@oao/domain";
+import {
+  redactForPublic,
+  serializeSkillPackageForHash,
+  serializeLegacySkillPackageForHash,
+} from "@oao/domain";
 import type {
   ModelPresetTenant,
   ResolvedModelPreset,
@@ -1250,6 +1254,7 @@ export function createFluePostgresAdapter(pool: PgPool) {
 }
 
 interface RunContext extends TenantContext {
+  readonly hasRevokedSkills: boolean;
   readonly runId: RunId;
   readonly threadId: ThreadId;
   readonly sessionId: string;
@@ -2217,6 +2222,10 @@ export class ManagedRuntimeOrchestrator {
 
   async admit(job: RuntimeWakeJob): Promise<void> {
     const run = await this.loadRun(job);
+    if (run.hasRevokedSkills) {
+      await this.failBeforeDispatch(run, new SkillPackageUnavailableError());
+      return;
+    }
     // Flue resolves `useModel` synchronously during the agent render, so a
     // durable project preset must be loaded and registered before dispatch.
     try {
@@ -2973,8 +2982,9 @@ export class ManagedRuntimeOrchestrator {
       // Skill-level disable/remove gates publication only: the thread
       // incarnation pins this snapshot's hash, so the bound Skill set must
       // stay byte-identical across every run of the thread.
-      if (skillResult.rows.some((binding) => binding.status === "revoked"))
-        throw new Error("A bound Skill version has been revoked");
+      const hasRevokedSkills = skillResult.rows.some(
+        (binding) => binding.status === "revoked",
+      );
       const skills = skillResult.rows.map(
         (binding) =>
           ({
@@ -3159,6 +3169,7 @@ export class ManagedRuntimeOrchestrator {
       return {
         ...tenant,
         runId: row.id as RunId,
+        hasRevokedSkills,
         threadId: row.thread_id as ThreadId,
         sessionId: row.session_id as string,
         agentVersionId: row.agent_version_id as string,
@@ -4757,7 +4768,6 @@ export class PostgresSkillRegistry
       if (totalBytes !== loaded.version.total_bytes)
         throw new SkillPackageUnavailableError();
       const canonical = {
-        schemaVersion: 1,
         name: loaded.version.skill_name,
         description: loaded.version.description,
         instructions: loaded.version.instructions,
@@ -4774,8 +4784,13 @@ export class PostgresSkillRegistry
       const computedHash = createHash("sha256")
         .update(serializeSkillPackageForHash(canonical))
         .digest("hex");
-      if (computedHash !== binding.contentHash)
-        throw new SkillPackageUnavailableError();
+      if (computedHash !== binding.contentHash) {
+        const legacyHash = createHash("sha256")
+          .update(serializeLegacySkillPackageForHash(canonical))
+          .digest("hex");
+        if (legacyHash !== binding.contentHash)
+          throw new SkillPackageUnavailableError();
+      }
       // Flue 2.0.3 serializes an empty metadata object as a bare YAML key,
       // which reloads as null and fails its own frontmatter validation.
       const definition = defineSkill({

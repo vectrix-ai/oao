@@ -966,7 +966,6 @@ function parseSkillVersionInput(
   }
   files.sort((left, right) => left.path.localeCompare(right.path));
   const canonical = {
-    schemaVersion: 1,
     name,
     description,
     instructions,

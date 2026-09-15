@@ -481,4 +481,7 @@ export function assertPublicPayload(value: PublicValue): void {
   assertPublicPayloadAt(value, "$");
 }
 
-export { serializeSkillPackageForHash } from "./skill-package.js";
+export {
+  serializeSkillPackageForHash,
+  serializeLegacySkillPackageForHash,
+} from "./skill-package.js";

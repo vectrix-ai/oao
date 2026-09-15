@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import type { PgPool } from "@oao/db-postgres";
 import type { OrganizationId, ProjectId, RunId } from "@oao/domain";
+import { serializeSkillPackageForHash } from "@oao/domain";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { toJsonSchema } from "@valibot/to-json-schema";
 import * as v from "valibot";
@@ -821,130 +822,137 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-test("PostgreSQL Skill versions become verified immutable Flue definitions", async () => {
-  const skillId = "00000000-0000-4000-8000-000000000021";
-  const skillVersionId = "00000000-0000-4000-8000-000000000022";
-  const instructions = "Read the reference only when this procedure applies.";
-  const referencePath = "references/intake-flow.md";
-  const referenceBytes = Buffer.from(
-    "# Intake flow\n\nFollow the approved sequence.",
-    "utf8",
-  );
-  // SQL collation differs from JS publication ordering for these paths.
-  const resources = [
-    { path: referencePath, bytes: referenceBytes },
-    { path: "scripts/import-audit.schema.json", bytes: Buffer.from("{}") },
-    { path: "scripts/import_contract.py", bytes: Buffer.from("# helper") },
-    { path: "scripts/__pycache__/import.pyc", bytes: Buffer.from([0, 1, 2]) },
-  ];
-  let corrupt = false;
-  let databaseError = false;
-  const canonical = {
-    schemaVersion: 1,
-    name: "shipment-intake",
-    description: "Process shipment documents using the approved flow.",
-    instructions,
-    metadata: {},
-    files: resources
-      .map(({ path, bytes }) => ({
-        path,
-        contentType: "text/markdown",
-        sizeBytes: bytes.byteLength,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-      }))
-      .sort((a, b) => a.path.localeCompare(b.path)),
-  };
-  const contentHash = createHash("sha256")
-    .update(stableJson(canonical))
-    .digest("hex");
-  const queries: string[] = [];
-  const pool = {
-    connect: async () => ({
-      query: async (text: string) => {
-        queries.push(text);
-        if (databaseError) throw new Error("temporary database outage");
-        if (text.includes("FROM oao.skill_versions version"))
-          return {
-            rowCount: 1,
-            rows: [
-              {
-                skill_id: skillId,
-                id: skillVersionId,
-                version: 1,
-                skill_name: canonical.name,
-                description: canonical.description,
-                instructions,
-                license: null,
-                compatibility: null,
-                metadata: {},
-                allowed_tools: null,
-                content_hash: Buffer.from(contentHash, "hex"),
-                total_bytes:
-                  Buffer.byteLength(instructions) +
-                  resources.reduce((n, f) => n + f.bytes.byteLength, 0),
-                status: "active",
-              },
-            ],
-          };
-        if (text.includes("FROM oao.skill_version_files"))
-          return {
-            rowCount: resources.length,
-            rows: resources.map(({ path, bytes }) => ({
-              file_path: path,
-              content_type: "text/markdown",
-              size_bytes: bytes.byteLength,
-              content_sha256: createHash("sha256").update(bytes).digest(),
-              content_bytes: corrupt ? Buffer.from("tampered") : bytes,
-            })),
-          };
-        return { rowCount: 0, rows: [] };
-      },
-      release: () => undefined,
-    }),
-  } as unknown as PgPool;
-  const registry = new PostgresSkillRegistry(pool);
-  const binding = {
-    skillId,
-    skillVersionId,
-    version: 1,
-    name: canonical.name,
-    description: canonical.description,
-    contentHash,
-  };
-  await registry.activate(tenant, [binding]);
-  const definition = registry.resolve(tenant, binding);
-  assert.equal(definition.name, "shipment-intake");
-  assert.equal(definition.description, canonical.description);
-  assert.equal(definition.instructions, instructions);
-  assert.equal(
-    definition.metadata,
-    undefined,
-    "empty PostgreSQL metadata must be omitted for Flue 2.0.3 frontmatter compatibility",
-  );
-  assert.deepEqual(definition.files?.[referencePath], referenceBytes);
-  assert.equal(
-    queries.filter((query) => query.includes("skill_versions version")).length,
-    1,
-  );
-  await registry.activate(tenant, [binding]);
-  assert.equal(
-    queries.filter((query) => query.includes("skill_versions version")).length,
-    1,
-  );
-  corrupt = true;
-  await assert.rejects(
-    new PostgresSkillRegistry(pool).activate(tenant, [binding]),
-    SkillPackageUnavailableError,
-  );
-  databaseError = true;
-  await assert.rejects(
-    new PostgresSkillRegistry(pool).activate(tenant, [binding]),
-    (error: unknown) =>
-      error instanceof Error &&
-      !(error instanceof SkillPackageUnavailableError) &&
-      error.message === "temporary database outage",
-  );
-});
+for (const hashVersion of [1, 2])
+  test(`PostgreSQL Skill v${hashVersion} hashes become verified immutable Flue definitions`, async () => {
+    const skillId = "00000000-0000-4000-8000-000000000021";
+    const skillVersionId = "00000000-0000-4000-8000-000000000022";
+    const instructions = "Read the reference only when this procedure applies.";
+    const referencePath = "references/intake-flow.md";
+    const referenceBytes = Buffer.from(
+      "# Intake flow\n\nFollow the approved sequence.",
+      "utf8",
+    );
+    // SQL collation differs from JS publication ordering for these paths.
+    const resources = [
+      { path: referencePath, bytes: referenceBytes },
+      { path: "scripts/import-audit.schema.json", bytes: Buffer.from("{}") },
+      { path: "scripts/import_contract.py", bytes: Buffer.from("# helper") },
+      { path: "scripts/__pycache__/import.pyc", bytes: Buffer.from([0, 1, 2]) },
+    ];
+    let corrupt = false;
+    let databaseError = false;
+    const canonical = {
+      schemaVersion: 1,
+      name: "shipment-intake",
+      description: "Process shipment documents using the approved flow.",
+      instructions,
+      metadata: {},
+      files: resources
+        .map(({ path, bytes }) => ({
+          path,
+          contentType: "text/markdown",
+          sizeBytes: bytes.byteLength,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+        }))
+        .sort((a, b) => a.path.localeCompare(b.path)),
+    };
+    const contentHash = createHash("sha256")
+      .update(
+        hashVersion === 1
+          ? stableJson(canonical)
+          : serializeSkillPackageForHash(canonical),
+      )
+      .digest("hex");
+    const queries: string[] = [];
+    const pool = {
+      connect: async () => ({
+        query: async (text: string) => {
+          queries.push(text);
+          if (databaseError) throw new Error("temporary database outage");
+          if (text.includes("FROM oao.skill_versions version"))
+            return {
+              rowCount: 1,
+              rows: [
+                {
+                  skill_id: skillId,
+                  id: skillVersionId,
+                  version: 1,
+                  skill_name: canonical.name,
+                  description: canonical.description,
+                  instructions,
+                  license: null,
+                  compatibility: null,
+                  metadata: {},
+                  allowed_tools: null,
+                  content_hash: Buffer.from(contentHash, "hex"),
+                  total_bytes:
+                    Buffer.byteLength(instructions) +
+                    resources.reduce((n, f) => n + f.bytes.byteLength, 0),
+                  status: "active",
+                },
+              ],
+            };
+          if (text.includes("FROM oao.skill_version_files"))
+            return {
+              rowCount: resources.length,
+              rows: resources.map(({ path, bytes }) => ({
+                file_path: path,
+                content_type: "text/markdown",
+                size_bytes: bytes.byteLength,
+                content_sha256: createHash("sha256").update(bytes).digest(),
+                content_bytes: corrupt ? Buffer.from("tampered") : bytes,
+              })),
+            };
+          return { rowCount: 0, rows: [] };
+        },
+        release: () => undefined,
+      }),
+    } as unknown as PgPool;
+    const registry = new PostgresSkillRegistry(pool);
+    const binding = {
+      skillId,
+      skillVersionId,
+      version: 1,
+      name: canonical.name,
+      description: canonical.description,
+      contentHash,
+    };
+    await registry.activate(tenant, [binding]);
+    const definition = registry.resolve(tenant, binding);
+    assert.equal(definition.name, "shipment-intake");
+    assert.equal(definition.description, canonical.description);
+    assert.equal(definition.instructions, instructions);
+    assert.equal(
+      definition.metadata,
+      undefined,
+      "empty PostgreSQL metadata must be omitted for Flue 2.0.3 frontmatter compatibility",
+    );
+    assert.deepEqual(definition.files?.[referencePath], referenceBytes);
+    assert.equal(
+      queries.filter((query) => query.includes("skill_versions version"))
+        .length,
+      1,
+    );
+    await registry.activate(tenant, [binding]);
+    assert.equal(
+      queries.filter((query) => query.includes("skill_versions version"))
+        .length,
+      1,
+    );
+    corrupt = true;
+    await assert.rejects(
+      new PostgresSkillRegistry(pool).activate(tenant, [binding]),
+      SkillPackageUnavailableError,
+    );
+    databaseError = true;
+    await assert.rejects(
+      new PostgresSkillRegistry(pool).activate(tenant, [binding]),
+      (error: unknown) =>
+        error instanceof Error &&
+        !(error instanceof SkillPackageUnavailableError) &&
+        error.message === "temporary database outage",
+    );
+  });
 test("model turn limit failures expose a specific bounded safe explanation", () => {
   const diagnostics = runtimeTesting.modelInvocationDiagnostics(
     { error: { message: "Model turn limit exceeded (128)" } },
@@ -971,6 +979,8 @@ test("model turn limit failures expose a specific bounded safe explanation", () 
 test("permanent Skill activation errors settle admission; transient errors retry", async () => {
   const runId = "00000000-0000-4000-8000-000000000031" as RunId;
   const id = "00000000-0000-4000-8000-000000000032";
+  let revoked = false;
+  let activations = 0;
   const queries: { text: string; values?: unknown[] }[] = [];
   const pool = {
     connect: async () => ({
@@ -993,6 +1003,7 @@ test("permanent Skill activation errors settle admission; transient errors retry
                   systemPrompt: "Test",
                   modelPreset: "local-default",
                   tools: [],
+                  skillVersionIds: [id],
                   sandbox: {
                     enabled: false,
                     provider: "daytona",
@@ -1005,6 +1016,21 @@ test("permanent Skill activation errors settle admission; transient errors retry
                 owner_thread_id: id,
                 owner_session_id: id,
                 owner_run_id: runId,
+              },
+            ],
+          };
+        if (text.includes("FROM oao.session_skill_bindings binding"))
+          return {
+            rowCount: 1,
+            rows: [
+              {
+                skill_id: id,
+                skill_version_id: id,
+                version: 1,
+                skill_name: "test-skill",
+                description: "Test",
+                content_hash: Buffer.alloc(32, 1),
+                status: revoked ? "revoked" : "active",
               },
             ],
           };
@@ -1026,6 +1052,7 @@ test("permanent Skill activation errors settle admission; transient errors retry
     undefined,
     {
       activate: async () => {
+        activations++;
         throw failure;
       },
     },
@@ -1044,6 +1071,24 @@ test("permanent Skill activation errors settle admission; transient errors retry
     !queries.some((q) => q.text.includes("INSERT INTO oao.runtime_dispatches")),
   );
   queries.length = 0;
+  revoked = true;
+  const previousActivations = activations;
+  await orchestrator.admit(job);
+  assert.equal(
+    activations,
+    previousActivations,
+    "revocation must fail even if the Skill was cached",
+  );
+  assert.ok(
+    queries.some((q) => q.text.includes("UPDATE oao.runs SET state='failed'")),
+  );
+  assert.ok(
+    queries.some((q) =>
+      JSON.stringify(q.values ?? []).includes("skill_package_unavailable"),
+    ),
+  );
+  queries.length = 0;
+  revoked = false;
   failure = new Error("temporary database outage");
   await assert.rejects(orchestrator.admit(job), (error) => error === failure);
   assert.ok(

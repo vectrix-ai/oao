@@ -340,17 +340,24 @@ the Skill versions inherited by a session.
 ## Package integrity and startup failures
 
 Publication and runtime activation use the same canonical file ordering when
-calculating a Skill package hash. Database collation and resource enumeration
-order do not change that hash. Existing immutable package hashes are preserved;
-no Skill migration or republication is needed for the ordering fix.
+calculating a Skill package hash. New hashes use version 2 serialization with
+locale-independent UTF-16 code-unit ordering for file paths and object keys.
+Database collation, ICU settings and resource enumeration order do not change
+that hash. Activation also accepts version 1 hashes from the original en-US
+publication runtime using its explicitly pinned legacy ordering; existing
+immutable packages from that runtime need no migration or republication.
 
 Publish only intended source resources. Exclude generated caches such as
 `__pycache__`, compiled files and local development artifacts. Verify a published
 package by starting an isolated session, in addition to comparing exported bytes.
 
-If a bound Skill fails its package integrity validation during activation, admission
+If a bound Skill is revoked or fails its package integrity validation during activation, admission
 marks the run **failed** with `skill_package_unavailable` and a safe explanation.
 It does not leave the run queued until wake retries are exhausted. Temporary
 database failures remain retryable. Genuine corrupt packages require a corrected
 Skill and agent version followed by a new session; existing sessions keep their
 original version bindings.
+
+Deploy the upgraded worker before the API so it accepts both hash formats before
+new version 2 packages can be published. After version 2 packages exist, do not
+roll back to a worker that only understands version 1.
