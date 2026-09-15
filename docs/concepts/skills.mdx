@@ -353,7 +353,7 @@ package by starting an isolated session, in addition to comparing exported bytes
 
 For a run that has not reserved an admission, if a bound Skill is revoked or fails its package integrity validation during activation, admission
 marks the run **failed** with `skill_package_unavailable` and a safe explanation.
-Cancellation of an already admitted run still reconciles and aborts its Flue incarnation, even if its Skill was revoked. The startup failure path never removes an existing admission or settles a running agent.
+Cancellation of a run with a durable admission receipt still reconciles and aborts its Flue incarnation, even if its Skill was revoked. An ambiguous dispatch without a receipt still requires activation so a replacement worker can finish admission recovery before aborting. The startup failure path never removes an existing admission or settles a running agent.
 It does not leave a new run queued until wake retries are exhausted. Temporary
 database failures remain retryable. Genuine corrupt packages require a corrected
 Skill and agent version followed by a new session; existing sessions keep their

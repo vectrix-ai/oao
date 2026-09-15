@@ -1255,6 +1255,7 @@ export function createFluePostgresAdapter(pool: PgPool) {
 
 interface RunContext extends TenantContext {
   readonly hasRevokedSkills: boolean;
+  readonly hasAdmissionReceipt: boolean;
   readonly runId: RunId;
   readonly threadId: ThreadId;
   readonly sessionId: string;
@@ -2222,9 +2223,10 @@ export class ManagedRuntimeOrchestrator {
 
   async admit(job: RuntimeWakeJob): Promise<void> {
     const run = await this.loadRun(job);
-    // Cancellation must reconcile the existing Flue incarnation and abort it,
-    // even when its previously admitted configuration has since been revoked.
-    if (!run.cancellationRequested) {
+    // A durable receipt lets cancellation abort without rendering again. An
+    // ambiguous dispatch still needs activation on a fresh worker so recovery
+    // can render and obtain its receipt before aborting the incarnation.
+    if (!run.cancellationRequested || !run.hasAdmissionReceipt) {
       if (run.hasRevokedSkills) {
         await this.failBeforeDispatch(run, new SkillPackageUnavailableError());
         return;
@@ -2956,6 +2958,9 @@ export class ManagedRuntimeOrchestrator {
     return withTenantTransaction(this.pool, tenant, async (transaction) => {
       const result = await transaction.query(
         `SELECT r.id,r.thread_id,r.session_id,r.state,r.input_public,r.cancellation_requested_at,
+          EXISTS (SELECT 1 FROM oao.runtime_dispatches dispatch
+            WHERE dispatch.organization_id=r.organization_id AND dispatch.project_id=r.project_id
+              AND dispatch.run_id=r.id AND dispatch.flue_submission_id IS NOT NULL) AS has_admission_receipt,
           v.id AS agent_version_id,v.config,encode(v.content_hash,'hex') AS content_hash,
           workspace.id AS workspace_id,workspace.owner_thread_id,
           COALESCE(workspace.owner_session_id,r.session_id) AS owner_session_id,
@@ -3202,6 +3207,7 @@ export class ManagedRuntimeOrchestrator {
         ...tenant,
         runId: row.id as RunId,
         hasRevokedSkills,
+        hasAdmissionReceipt: row.has_admission_receipt === true,
         threadId: row.thread_id as ThreadId,
         sessionId: row.session_id as string,
         agentVersionId: row.agent_version_id as string,

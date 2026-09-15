@@ -983,6 +983,7 @@ test("permanent Skill activation errors settle admission; transient errors retry
   let state = "queued";
   let cancellationRequested = false;
   let reserved = false;
+  let hasAdmissionReceipt = false;
   const recoveryReached = new Error("existing admission recovery reached");
   let activations = 0;
   const queries: { text: string; values?: unknown[] }[] = [];
@@ -999,6 +1000,7 @@ test("permanent Skill activation errors settle admission; transient errors retry
                 thread_id: id,
                 session_id: id,
                 state,
+                has_admission_receipt: hasAdmissionReceipt,
                 cancellation_requested_at: cancellationRequested
                   ? new Date()
                   : null,
@@ -1071,7 +1073,7 @@ test("permanent Skill activation errors settle admission; transient errors retry
   const queue = {
     enqueue: async () => undefined,
   } as unknown as PostgresWakeQueue;
-  let failure: Error = new SkillPackageUnavailableError();
+  let failure: Error | undefined = new SkillPackageUnavailableError();
   const orchestrator = new ManagedRuntimeOrchestrator(
     pool,
     queue,
@@ -1080,7 +1082,7 @@ test("permanent Skill activation errors settle admission; transient errors retry
     {
       activate: async () => {
         activations++;
-        throw failure;
+        if (failure) throw failure;
       },
     },
   );
@@ -1125,7 +1127,13 @@ test("permanent Skill activation errors settle admission; transient errors retry
   // Cancellation must reach dispatch reconciliation, even for a revoked Skill.
   revoked = true;
   cancellationRequested = true;
-  for (state of ["running", "waiting_approval", "queued"]) {
+  hasAdmissionReceipt = true;
+  for (state of [
+    "running",
+    "waiting_for_approval",
+    "waiting_for_tool",
+    "queued",
+  ]) {
     queries.length = 0;
     const before = activations;
     await assert.rejects(
@@ -1144,7 +1152,23 @@ test("permanent Skill activation errors settle admission; transient errors retry
       ),
     );
   }
+  // After a restart, an ambiguous dispatch needs activation before rendering.
+  queries.length = 0;
+  revoked = false;
+  state = "queued";
+  hasAdmissionReceipt = false;
+  failure = undefined;
+  const beforeRecoveryActivation = activations;
+  await assert.rejects(
+    orchestrator.admit(job),
+    (error) => error === recoveryReached,
+  );
+  assert.equal(activations, beforeRecoveryActivation + 1);
+  assert.ok(
+    !queries.some((q) => q.text.includes("UPDATE oao.runs SET state='failed'")),
+  );
   cancellationRequested = false;
+  revoked = true;
   // A dispatch may still be ambiguous while the product run remains queued.
   // Neither that reservation nor an active run may be settled as pre-dispatch.
   for (const current of [
