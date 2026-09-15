@@ -980,6 +980,10 @@ test("permanent Skill activation errors settle admission; transient errors retry
   const runId = "00000000-0000-4000-8000-000000000031" as RunId;
   const id = "00000000-0000-4000-8000-000000000032";
   let revoked = false;
+  let state = "queued";
+  let cancellationRequested = false;
+  let reserved = false;
+  const recoveryReached = new Error("existing admission recovery reached");
   let activations = 0;
   const queries: { text: string; values?: unknown[] }[] = [];
   const pool = {
@@ -994,8 +998,10 @@ test("permanent Skill activation errors settle admission; transient errors retry
                 id: runId,
                 thread_id: id,
                 session_id: id,
-                state: "queued",
-                cancellation_requested_at: null,
+                state,
+                cancellation_requested_at: cancellationRequested
+                  ? new Date()
+                  : null,
                 agent_version_id: id,
                 content_hash: "a".repeat(64),
                 input_public: { message: "test" },
@@ -1034,6 +1040,27 @@ test("permanent Skill activation errors settle admission; transient errors retry
               },
             ],
           };
+        if (
+          text.includes("SELECT state,cancellation_requested_at FROM oao.runs")
+        )
+          return {
+            rowCount: 1,
+            rows: [
+              {
+                state,
+                cancellation_requested_at: cancellationRequested
+                  ? new Date()
+                  : null,
+              },
+            ],
+          };
+        if (
+          text.includes("SELECT EXISTS (") &&
+          text.includes("oao.runtime_dispatches")
+        )
+          return { rowCount: 1, rows: [{ exists: reserved }] };
+        if (text.includes("INSERT INTO oao.runtime_thread_instances"))
+          throw recoveryReached;
         if (text.includes("UPDATE oao.runs SET state='failed'"))
           return { rowCount: 1, rows: [] };
         return { rowCount: 0, rows: [] };
@@ -1094,4 +1121,49 @@ test("permanent Skill activation errors settle admission; transient errors retry
   assert.ok(
     !queries.some((q) => q.text.includes("UPDATE oao.runs SET state='failed'")),
   );
+
+  // Cancellation must reach dispatch reconciliation, even for a revoked Skill.
+  revoked = true;
+  cancellationRequested = true;
+  for (state of ["running", "waiting_approval", "queued"]) {
+    queries.length = 0;
+    const before = activations;
+    await assert.rejects(
+      orchestrator.admit(job),
+      (error) => error === recoveryReached,
+    );
+    assert.equal(activations, before);
+    assert.ok(
+      !queries.some((q) =>
+        q.text.includes("UPDATE oao.runs SET state='failed'"),
+      ),
+    );
+    assert.ok(
+      !queries.some((q) =>
+        q.text.includes("DELETE FROM oao.thread_admission_heads"),
+      ),
+    );
+  }
+  cancellationRequested = false;
+  // A dispatch may still be ambiguous while the product run remains queued.
+  // Neither that reservation nor an active run may be settled as pre-dispatch.
+  for (const current of [
+    { state: "running", reserved: false },
+    { state: "queued", reserved: true },
+  ]) {
+    state = current.state;
+    reserved = current.reserved;
+    queries.length = 0;
+    await assert.rejects(orchestrator.admit(job), SkillPackageUnavailableError);
+    assert.ok(
+      !queries.some((q) =>
+        q.text.includes("UPDATE oao.runs SET state='failed'"),
+      ),
+    );
+    assert.ok(
+      !queries.some((q) =>
+        q.text.includes("DELETE FROM oao.thread_admission_heads"),
+      ),
+    );
+  }
 });

@@ -351,9 +351,10 @@ Publish only intended source resources. Exclude generated caches such as
 `__pycache__`, compiled files and local development artifacts. Verify a published
 package by starting an isolated session, in addition to comparing exported bytes.
 
-If a bound Skill is revoked or fails its package integrity validation during activation, admission
+For a run that has not reserved an admission, if a bound Skill is revoked or fails its package integrity validation during activation, admission
 marks the run **failed** with `skill_package_unavailable` and a safe explanation.
-It does not leave the run queued until wake retries are exhausted. Temporary
+Cancellation of an already admitted run still reconciles and aborts its Flue incarnation, even if its Skill was revoked. The startup failure path never removes an existing admission or settles a running agent.
+It does not leave a new run queued until wake retries are exhausted. Temporary
 database failures remain retryable. Genuine corrupt packages require a corrected
 Skill and agent version followed by a new session; existing sessions keep their
 original version bindings.

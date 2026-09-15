@@ -2222,25 +2222,29 @@ export class ManagedRuntimeOrchestrator {
 
   async admit(job: RuntimeWakeJob): Promise<void> {
     const run = await this.loadRun(job);
-    if (run.hasRevokedSkills) {
-      await this.failBeforeDispatch(run, new SkillPackageUnavailableError());
-      return;
-    }
-    // Flue resolves `useModel` synchronously during the agent render, so a
-    // durable project preset must be loaded and registered before dispatch.
-    try {
-      await this.modelPresets?.activate(run, run.snapshot.modelPreset);
-    } catch (error) {
-      if (!(error instanceof ModelPresetUnavailableError)) throw error;
-      await this.failBeforeDispatch(run, error);
-      return;
-    }
-    try {
-      await this.skills?.activate(run, run.snapshot.skills);
-    } catch (error) {
-      if (!(error instanceof SkillPackageUnavailableError)) throw error;
-      await this.failBeforeDispatch(run, error);
-      return;
+    // Cancellation must reconcile the existing Flue incarnation and abort it,
+    // even when its previously admitted configuration has since been revoked.
+    if (!run.cancellationRequested) {
+      if (run.hasRevokedSkills) {
+        await this.failBeforeDispatch(run, new SkillPackageUnavailableError());
+        return;
+      }
+      // Flue resolves `useModel` synchronously during the agent render, so a
+      // durable project preset must be loaded and registered before dispatch.
+      try {
+        await this.modelPresets?.activate(run, run.snapshot.modelPreset);
+      } catch (error) {
+        if (!(error instanceof ModelPresetUnavailableError)) throw error;
+        await this.failBeforeDispatch(run, error);
+        return;
+      }
+      try {
+        await this.skills?.activate(run, run.snapshot.skills);
+      } catch (error) {
+        if (!(error instanceof SkillPackageUnavailableError)) throw error;
+        await this.failBeforeDispatch(run, error);
+        return;
+      }
     }
     const admissionKey = `run:${run.runId}`;
     const snapshotHash = digestJson(run.snapshot);
@@ -2752,11 +2756,43 @@ export class ManagedRuntimeOrchestrator {
     error: ModelPresetUnavailableError | SkillPackageUnavailableError,
   ): Promise<void> {
     await withTenantTransaction(this.pool, run, async (transaction) => {
+      // Admission reservation and cancellation also lock this run. Recheck
+      // after taking that lock so a concurrent admission cannot be orphaned.
+      const current = await transaction.query<{
+        state: string;
+        cancellation_requested_at: Date | null;
+      }>(
+        `SELECT state,cancellation_requested_at FROM oao.runs
+         WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
+        [run.organizationId, run.projectId, run.runId],
+      );
+      const row = current.rows[0];
+      if (
+        !row ||
+        ["completed", "failed", "cancelled", "timed_out"].includes(row.state)
+      )
+        return;
+      if (
+        !["queued", "retry_scheduled"].includes(row.state) ||
+        row.cancellation_requested_at
+      )
+        throw error;
+      const reserved = await transaction.query<{ exists: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM oao.thread_admission_heads
+           WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+           UNION ALL
+           SELECT 1 FROM oao.runtime_dispatches
+           WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+         ) AS exists`,
+        [run.organizationId, run.projectId, run.runId],
+      );
+      if (reserved.rows[0]?.exists) throw error;
       const updated = await transaction.query(
         `UPDATE oao.runs SET state='failed',settled_at=COALESCE(settled_at,clock_timestamp()),
            updated_at=clock_timestamp()
          WHERE organization_id=$1 AND project_id=$2 AND id=$3
-           AND state NOT IN ('completed','failed','cancelled','timed_out')`,
+           AND state IN ('queued','retry_scheduled')`,
         [run.organizationId, run.projectId, run.runId],
       );
       if (!updated.rowCount) return;
@@ -2798,10 +2834,6 @@ export class ManagedRuntimeOrchestrator {
         payload: { runId: run.runId, state: "failed" },
       });
       await closeRunObligations(transaction, run, "failed");
-      await transaction.query(
-        "DELETE FROM oao.thread_admission_heads WHERE organization_id=$1 AND project_id=$2 AND run_id=$3",
-        [run.organizationId, run.projectId, run.runId],
-      );
       const successor = await transaction.query<{ id: RunId }>(
         `SELECT id FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3
           AND state IN ('queued','retry_scheduled') AND cancellation_requested_at IS NULL
