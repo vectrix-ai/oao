@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.2](https://github.com/vectrix-ai/oao/compare/v0.7.1...v0.7.2) (2026-09-15)
+
+
+### Bug Fixes
+
+* activate skills for ambiguous cancellation recovery ([cb35ee1](https://github.com/vectrix-ai/oao/commit/cb35ee128f503c54057fb6fdc84774019a122517))
+* allow 24-hour approval waits without consuming execution budgets ([4b43146](https://github.com/vectrix-ai/oao/commit/4b431468b9147c0ed3c665589d4917eea1181aa3))
+* allow 24-hour approval waits without consuming execution budgets ([f564179](https://github.com/vectrix-ai/oao/commit/f564179f6e9b0f0c11f3e73dfe6a2acc92275bfb))
+* canonicalize Skill package hashes and fail invalid startup ([c178ae0](https://github.com/vectrix-ai/oao/commit/c178ae059e75d66399a5cdf81fa2ce54ce330e1e))
+* canonicalize Skill package hashes during activation ([1f5bdc5](https://github.com/vectrix-ai/oao/commit/1f5bdc5b1fdfb063df26dd976dfc429357326e87))
+* preserve admitted runs during skill revocation ([d5e704e](https://github.com/vectrix-ai/oao/commit/d5e704ef7861d35a6c8d2a9826de3aff8c90c52c))
+* version canonical hashes and terminalize revoked Skills ([312f222](https://github.com/vectrix-ai/oao/commit/312f222b10abf98e7a894b30f9c6f8ac8a2b4158))
+
 ## [0.7.1](https://github.com/vectrix-ai/oao/compare/v0.7.0...v0.7.1) (2026-09-09)
 
 ### Bug Fixes
