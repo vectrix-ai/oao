@@ -480,3 +480,8 @@ function assertPublicPayloadAt(value: PublicValue, path: string): void {
 export function assertPublicPayload(value: PublicValue): void {
   assertPublicPayloadAt(value, "$");
 }
+
+export {
+  serializeSkillPackageForHash,
+  serializeLegacySkillPackageForHash,
+} from "./skill-package.js";

@@ -336,3 +336,29 @@ The console provides API parity for listing and creating Skills, publishing
 new versions, deprecating or revoking versions, disabling, enabling, and
 removing Skills, selecting exact versions on a new agent version, and viewing
 the Skill versions inherited by a session.
+
+## Package integrity and startup failures
+
+Publication and runtime activation use the same canonical file ordering when
+calculating a Skill package hash. New hashes use version 2 serialization with
+locale-independent UTF-16 code-unit ordering for file paths and object keys.
+Database collation, ICU settings and resource enumeration order do not change
+that hash. Activation also accepts version 1 hashes from the original en-US
+publication runtime using its explicitly pinned legacy ordering; existing
+immutable packages from that runtime need no migration or republication.
+
+Publish only intended source resources. Exclude generated caches such as
+`__pycache__`, compiled files and local development artifacts. Verify a published
+package by starting an isolated session, in addition to comparing exported bytes.
+
+For a run that has not reserved an admission, if a bound Skill is revoked or fails its package integrity validation during activation, admission
+marks the run **failed** with `skill_package_unavailable` and a safe explanation.
+Cancellation of a run with a durable admission receipt still reconciles and aborts its Flue incarnation, even if its Skill was revoked. An ambiguous dispatch without a receipt still requires activation so a replacement worker can finish admission recovery before aborting. The startup failure path never removes an existing admission or settles a running agent.
+It does not leave a new run queued until wake retries are exhausted. Temporary
+database failures remain retryable. Genuine corrupt packages require a corrected
+Skill and agent version followed by a new session; existing sessions keep their
+original version bindings.
+
+Deploy the upgraded worker before the API so it accepts both hash formats before
+new version 2 packages can be published. After version 2 packages exist, do not
+roll back to a worker that only understands version 1.

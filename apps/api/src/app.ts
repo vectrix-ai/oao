@@ -49,7 +49,11 @@ import type {
   ProjectArtifactStoreResolverPort,
   PublicValue,
 } from "@oao/domain";
-import { assertPublicPayload, AUTHORIZATION_ACTIONS } from "@oao/domain";
+import {
+  assertPublicPayload,
+  AUTHORIZATION_ACTIONS,
+  serializeSkillPackageForHash,
+} from "@oao/domain";
 import { decodeEventCursor, encodeEventCursor } from "@oao/events";
 import type { WakeOnlyNotifier } from "@oao/events";
 import { Hono } from "hono";
@@ -962,7 +966,6 @@ function parseSkillVersionInput(
   }
   files.sort((left, right) => left.path.localeCompare(right.path));
   const canonical = {
-    schemaVersion: 1,
     name,
     description,
     instructions,
@@ -987,7 +990,9 @@ function parseSkillVersionInput(
     ...(allowedTools ? { allowedTools } : {}),
     files,
     totalBytes,
-    contentHash: Buffer.from(requestHash(canonical)).toString("hex"),
+    contentHash: createHash("sha256")
+      .update(serializeSkillPackageForHash(canonical))
+      .digest("hex"),
   };
 }
 
