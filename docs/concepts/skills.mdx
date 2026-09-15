@@ -336,3 +336,21 @@ The console provides API parity for listing and creating Skills, publishing
 new versions, deprecating or revoking versions, disabling, enabling, and
 removing Skills, selecting exact versions on a new agent version, and viewing
 the Skill versions inherited by a session.
+
+## Package integrity and startup failures
+
+Publication and runtime activation use the same canonical file ordering when
+calculating a Skill package hash. Database collation and resource enumeration
+order do not change that hash. Existing immutable package hashes are preserved;
+no Skill migration or republication is needed for the ordering fix.
+
+Publish only intended source resources. Exclude generated caches such as
+`__pycache__`, compiled files and local development artifacts. Verify a published
+package by starting an isolated session, in addition to comparing exported bytes.
+
+If a bound Skill fails its package integrity validation during activation, admission
+marks the run **failed** with `skill_package_unavailable` and a safe explanation.
+It does not leave the run queued until wake retries are exhausted. Temporary
+database failures remain retryable. Genuine corrupt packages require a corrected
+Skill and agent version followed by a new session; existing sessions keep their
+original version bindings.

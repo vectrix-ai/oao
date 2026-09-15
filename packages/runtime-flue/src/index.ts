@@ -78,7 +78,7 @@ import type {
   RunId,
   ThreadId,
 } from "@oao/domain";
-import { redactForPublic } from "@oao/domain";
+import { redactForPublic, serializeSkillPackageForHash } from "@oao/domain";
 import type {
   ModelPresetTenant,
   ResolvedModelPreset,
@@ -1302,6 +1302,17 @@ interface ThreadInstanceRow {
 
 class FlueIncarnationCorruptionError extends Error {}
 
+/** Only permanent, locally verified Skill errors use this safe public failure. */
+export class SkillPackageUnavailableError extends Error {
+  readonly code = "skill_package_unavailable";
+  constructor() {
+    super(
+      "A bound Skill package is missing, revoked, or failed integrity validation. Publish a corrected Skill and agent version, then start a new session.",
+    );
+    this.name = "SkillPackageUnavailableError";
+  }
+}
+
 /**
  * The run can never start: its preset was never approved for the project or
  * the provider connection behind it was removed. Retrying the wake cannot
@@ -2215,7 +2226,13 @@ export class ManagedRuntimeOrchestrator {
       await this.failBeforeDispatch(run, error);
       return;
     }
-    await this.skills?.activate(run, run.snapshot.skills);
+    try {
+      await this.skills?.activate(run, run.snapshot.skills);
+    } catch (error) {
+      if (!(error instanceof SkillPackageUnavailableError)) throw error;
+      await this.failBeforeDispatch(run, error);
+      return;
+    }
     const admissionKey = `run:${run.runId}`;
     const snapshotHash = digestJson(run.snapshot);
     const deliveredMessage = this.deliveredMessage(run);
@@ -2723,7 +2740,7 @@ export class ManagedRuntimeOrchestrator {
    */
   private async failBeforeDispatch(
     run: RunContext,
-    error: ModelPresetUnavailableError,
+    error: ModelPresetUnavailableError | SkillPackageUnavailableError,
   ): Promise<void> {
     await withTenantTransaction(this.pool, run, async (transaction) => {
       const updated = await transaction.query(
@@ -4687,9 +4704,9 @@ export class PostgresSkillRegistry
             [tenant.organizationId, tenant.projectId, binding.skillVersionId],
           );
           const version = versionResult.rows[0];
-          if (!version) throw new Error("Bound Skill version is missing");
+          if (!version) throw new SkillPackageUnavailableError();
           if (version.status === "revoked")
-            throw new Error(`Bound Skill version is revoked: ${binding.name}`);
+            throw new SkillPackageUnavailableError();
           const storedHash = Buffer.from(version.content_hash).toString("hex");
           if (
             version.skill_id !== binding.skillId ||
@@ -4698,7 +4715,7 @@ export class PostgresSkillRegistry
             version.description !== binding.description ||
             storedHash !== binding.contentHash
           )
-            throw new Error("Bound Skill metadata failed integrity validation");
+            throw new SkillPackageUnavailableError();
           const fileResult = await transaction.query<StoredSkillFileRow>(
             `SELECT file_path,content_type,size_bytes,content_sha256,content_bytes
              FROM oao.skill_version_files
@@ -4717,7 +4734,7 @@ export class PostgresSkillRegistry
         Array.isArray(metadata) ||
         Object.values(metadata).some((value) => typeof value !== "string")
       )
-        throw new Error("Stored Skill metadata is invalid");
+        throw new SkillPackageUnavailableError();
       const files: Record<string, Uint8Array> = {};
       let totalBytes = Buffer.byteLength(loaded.version.instructions, "utf8");
       const manifest = loaded.files.map((file) => {
@@ -4727,7 +4744,7 @@ export class PostgresSkillRegistry
           bytes.byteLength !== file.size_bytes ||
           Buffer.from(file.content_sha256).toString("hex") !== digest
         )
-          throw new Error("Stored Skill file failed integrity validation");
+          throw new SkillPackageUnavailableError();
         totalBytes += bytes.byteLength;
         files[file.file_path] = bytes;
         return {
@@ -4738,9 +4755,7 @@ export class PostgresSkillRegistry
         };
       });
       if (totalBytes !== loaded.version.total_bytes)
-        throw new Error(
-          "Stored Skill package size failed integrity validation",
-        );
+        throw new SkillPackageUnavailableError();
       const canonical = {
         schemaVersion: 1,
         name: loaded.version.skill_name,
@@ -4757,12 +4772,10 @@ export class PostgresSkillRegistry
         files: manifest,
       };
       const computedHash = createHash("sha256")
-        .update(stableJson(canonical))
+        .update(serializeSkillPackageForHash(canonical))
         .digest("hex");
       if (computedHash !== binding.contentHash)
-        throw new Error(
-          "Stored Skill package hash failed integrity validation",
-        );
+        throw new SkillPackageUnavailableError();
       // Flue 2.0.3 serializes an empty metadata object as a bare YAML key,
       // which reloads as null and fails its own frontmatter validation.
       const definition = defineSkill({
