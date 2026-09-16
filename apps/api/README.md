@@ -43,6 +43,10 @@ never reopen it. IAP organization Owners can appoint additional Owners from
 Members; Owners and Admins can grant Admin access. Role changes update effective
 permissions and existing project memberships together. Admin grants have explicit
 scopes, while Owner grants use `*`. Demotion/removal revokes user-created API keys.
+From a project's **Members** page, an Owner/Admin can grant that project access
+to a verified IAP organization user by email. The user must sign in once first;
+the new project membership inherits their organization role and scope profile.
+Project-only removal does not change organization access or other projects.
 See the authentication reference and GCP guide for safeguards and rollout ordering.
 
 ## WorkOS AuthKit

@@ -11,6 +11,7 @@ import {
   DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS,
   DEFAULT_XAI_MODEL_GENERATION_SETTINGS,
   parseCreateProjectInput,
+  parseCreateProjectMemberInput,
   parseCreateProjectSandboxProviderInput,
   parseCreateProjectStorageProviderInput,
   parseCreateProjectModelProviderInput,
@@ -239,6 +240,11 @@ function rethrowIapMembershipError(error: unknown): never {
     throw new HttpApiError(
       "bad_request",
       pgError.message ?? "Invalid IAP role change",
+    );
+  if (pgError.code === "P0002")
+    throw new HttpApiError(
+      "not_found",
+      pgError.message ?? "IAP project member not found",
     );
   throw error;
 }
@@ -2316,16 +2322,29 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
 
   app.post("/v1/projects/:projectId/members", async (c) => {
     const actor = assertProject(c);
-    if (authConfiguration.provider === "iap")
-      throw new HttpApiError(
-        "forbidden",
-        "IAP users join by signing in; change their organization role from Members",
-      );
     const body = await readJsonObject(c.req.raw);
     const key = idempotencyKey(c.req.raw);
-    const subject = requiredString(body.subject, "subject", 500);
-    const role = parseRole(body.role);
-    const scopes = parseScopes(body.scopes);
+    const iap = authConfiguration.provider === "iap";
+    let email: string | undefined;
+    let subject: string | undefined;
+    let role: ReturnType<typeof parseRole> | undefined;
+    let scopes: readonly string[] | undefined;
+    if (iap) {
+      try {
+        const input = parseCreateProjectMemberInput(body);
+        if (!("email" in input)) throw new TypeError("email is required");
+        email = input.email;
+      } catch {
+        throw new HttpApiError(
+          "bad_request",
+          "IAP project access requires the verified user's email",
+        );
+      }
+    } else {
+      subject = requiredString(body.subject, "subject", 500);
+      role = parseRole(body.role);
+      scopes = parseScopes(body.scopes);
+    }
     return dependencies.store.transaction(
       actor,
       "project:admin",
@@ -2336,9 +2355,35 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           hash: requestHash(body),
           status: 201,
           execute: async () => {
-            const id = randomUUID();
-            const result = await tx.query(
-              `WITH principal AS (
+            let result;
+            if (iap) {
+              const created = await tx
+                .query<{ id: string }>(
+                  "SELECT oao.add_iap_project_member($1,$2,$3,$4) AS id",
+                  [actor.organizationId, actor.projectId, actor.id, email],
+                )
+                .catch(rethrowIapMembershipError);
+              result = await tx.query(
+                `SELECT p.id,pm.organization_id,pm.project_id,pm.principal_id,
+                        p.kind,p.subject,p.scopes,identity.display_name,identity.email,
+                        pm.role,pm.created_at,
+                        (SELECT organization_role FROM oao.principal_membership_roles(pm.organization_id,pm.project_id,p.id)) AS organization_role
+                 FROM oao.project_members pm JOIN oao.principals p
+                   ON p.organization_id=pm.organization_id
+                  AND p.project_id=pm.project_id AND p.id=pm.principal_id
+                 LEFT JOIN LATERAL (
+                   SELECT ai.display_name,ai.email FROM oao.auth_identities ai
+                   WHERE ai.organization_id=pm.organization_id
+                     AND ai.project_id=pm.project_id AND ai.principal_id=pm.principal_id
+                   ORDER BY ai.updated_at DESC LIMIT 1
+                 ) identity ON true
+                 WHERE pm.organization_id=$1 AND pm.project_id=$2 AND pm.principal_id=$3`,
+                [actor.organizationId, actor.projectId, created.rows[0]?.id],
+              );
+            } else {
+              const id = randomUUID();
+              result = await tx.query(
+                `WITH principal AS (
                INSERT INTO oao.principals (organization_id,project_id,id,kind,subject,scopes)
                VALUES ($1,$2,$3,'human',$4,$5)
                ON CONFLICT (organization_id,project_id,kind,subject)
@@ -2366,24 +2411,27 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
                ORDER BY (ai.provider='workos') DESC,ai.updated_at DESC
                LIMIT 1
              ) identity ON true`,
-              [
-                actor.organizationId,
-                actor.projectId,
-                id,
-                subject,
-                scopes,
-                role,
-                actor.id,
-              ],
-            );
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  id,
+                  subject!,
+                  scopes!,
+                  role!,
+                  actor.id,
+                ],
+              );
+            }
             const member = publicValue(result.rows[0]) as Readonly<
               Record<string, unknown>
             >;
             await dependencies.store.appendAudit(tx, actor, {
-              action: "member.upserted",
+              action: iap ? "member.project_access_granted" : "member.upserted",
               resourceType: "member",
               resourceId: String(member.id),
-              detail: { role },
+              detail: iap
+                ? { email: email!, role: String(member.role) }
+                : { role: role! },
             });
             return member;
           },
@@ -2393,6 +2441,56 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       },
     );
   });
+
+  app.delete(
+    "/v1/projects/:projectId/members/:memberId/project-access",
+    async (c) => {
+      const actor = assertProject(c);
+      if (authConfiguration.provider !== "iap")
+        throw new HttpApiError(
+          "bad_request",
+          "Project-only membership removal is available only with IAP",
+        );
+      const memberId = c.req.param("memberId");
+      if (actor.id === memberId)
+        throw new HttpApiError(
+          "conflict",
+          "The active principal cannot remove its own project access",
+        );
+      const idem = idempotencyKey(c.req.raw);
+      return dependencies.store.transaction(
+        actor,
+        "project:admin",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `DELETE:/members/${memberId}/project-access`,
+            method: "DELETE",
+            key: idem,
+            hash: requestHash({ memberId, scope: "project" }),
+            status: 200,
+            execute: async () => {
+              await tx
+                .query("SELECT oao.remove_iap_project_member($1,$2,$3,$4)", [
+                  actor.organizationId,
+                  actor.projectId,
+                  actor.id,
+                  memberId,
+                ])
+                .catch(rethrowIapMembershipError);
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "member.project_access_removed",
+                resourceType: "member",
+                resourceId: memberId,
+              });
+              return { id: memberId, removed: true, scope: "project" };
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body);
+        },
+      );
+    },
+  );
 
   app.patch("/v1/projects/:projectId/members/:memberId", async (c) => {
     const actor = assertProject(c);

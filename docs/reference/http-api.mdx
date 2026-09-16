@@ -80,18 +80,19 @@ Organization and project reads expose the PostgreSQL-authoritative tenant.
 projects can be created and deleted through the API, and a signed-in session
 switches its active project with `POST /auth/switch-project`.
 
-| Method   | Path                                       | Purpose                                              |
-| -------- | ------------------------------------------ | ---------------------------------------------------- |
-| `GET`    | `/organizations`                           | List the active principal's organization.            |
-| `GET`    | `/organizations/{organizationId}`          | Read organization identity and creation time.        |
-| `GET`    | `/projects`                                | List every project of the organization.              |
-| `POST`   | `/projects`                                | Create a project in the organization.                |
-| `DELETE` | `/projects/{projectId}`                    | Hard-delete a project and all of its data.           |
-| `GET`    | `/projects/{projectId}`                    | Read the active project and organization metadata.   |
-| `GET`    | `/projects/{projectId}/members`            | List project principals, roles, and scopes.          |
-| `POST`   | `/projects/{projectId}/members`            | Create or update a project principal and membership. |
-| `PATCH`  | `/projects/{projectId}/members/{memberId}` | Change a project member's role.                      |
-| `DELETE` | `/projects/{projectId}/members/{memberId}` | Remove project membership.                           |
+| Method   | Path                                                      | Purpose                                                                      |
+| -------- | --------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `GET`    | `/organizations`                                          | List the active principal's organization.                                    |
+| `GET`    | `/organizations/{organizationId}`                         | Read organization identity and creation time.                                |
+| `GET`    | `/projects`                                               | List every project of the organization.                                      |
+| `POST`   | `/projects`                                               | Create a project in the organization.                                        |
+| `DELETE` | `/projects/{projectId}`                                   | Hard-delete a project and all of its data.                                   |
+| `GET`    | `/projects/{projectId}`                                   | Read the active project and organization metadata.                           |
+| `GET`    | `/projects/{projectId}/members`                           | List project principals, roles, and scopes.                                  |
+| `POST`   | `/projects/{projectId}/members`                           | Create or update a project principal and membership.                         |
+| `PATCH`  | `/projects/{projectId}/members/{memberId}`                | Change a project member's role.                                              |
+| `DELETE` | `/projects/{projectId}/members/{memberId}`                | Remove project membership.                                                   |
+| `DELETE` | `/projects/{projectId}/members/{memberId}/project-access` | IAP only: remove access to this project while retaining organization access. |
 
 Member responses additionally include the persisted `organizationRole`;
 `role` remains the project role. `GET /context` includes `principal.organizationRole`
@@ -106,13 +107,19 @@ Admin/Member/Viewer access. Admins cannot change Owners. Self changes and loss o
 the last Owner are rejected. Only authenticated IAP humans qualify; API keys do
 not. Lowering access revokes keys created by the target identity and any keys derived from them. Key issuance is serialized with role changes so an in-flight request cannot retain revoked authority. `DELETE` removes
 organization and existing project memberships and revokes those keys, retaining
-identity records as the rejoining guard. `POST /members` is disabled in IAP mode;
-users join through verified IAP login. Other authentication modes retain the
-existing project-role and explicitly supplied scope behavior.
+identity records as the rejoining guard. In IAP mode, `POST /members` accepts
+`{ email }` for a user who has already completed a verified IAP login. It copies
+that immutable identity into the current project and inherits the person's
+stored organization role and scope profile. It never invites a new Google user
+or changes their organization role. `DELETE .../project-access` removes only the
+current project membership; the organization membership, other projects, and
+organization-scoped API keys remain unchanged. Other authentication modes retain
+the existing project-role and explicitly supplied scope behavior.
 
 All routes require `project:admin`. Member and project writes also require an
-`Idempotency-Key`. Member create input is `{ subject, role, scopes }`; roles
-are `owner`, `admin`, `member`, or `viewer`. A member response includes the
+`Idempotency-Key`. Non-IAP member create input is `{ subject, role, scopes }`;
+IAP member create input is `{ email }`. Roles are `owner`, `admin`, `member`, or
+`viewer`. A member response includes the
 stable principal `subject`, safe scopes, role, and optional identity-provider
 `displayName` and `email`. Provider metadata is presentational and does not
 grant access.

@@ -84,13 +84,18 @@ test("project member contracts preserve safe identity metadata and roles", () =>
     createdAt: timestamp,
   });
   assert.equal(member.displayName, "Ben Selleslagh");
+  const explicitMember = v.parse(CreateProjectMemberInputSchema, {
+    subject: "reviewer@example.test",
+    role: "viewer",
+    scopes: ["agent:read"],
+  });
+  assert.ok("scopes" in explicitMember);
+  assert.deepEqual(explicitMember.scopes, ["agent:read"]);
   assert.deepEqual(
     v.parse(CreateProjectMemberInputSchema, {
-      subject: "reviewer@example.test",
-      role: "viewer",
-      scopes: ["agent:read"],
-    }).scopes,
-    ["agent:read"],
+      email: "verified@example.test",
+    }),
+    { email: "verified@example.test" },
   );
   assert.equal(
     v.parse(UpdateProjectMemberInputSchema, { role: "admin" }).role,

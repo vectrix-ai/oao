@@ -58,15 +58,28 @@ describe("management console", () => {
           organizationRole: member.current ? role : "member",
         })),
       });
+      const add = vi.spyOn(api, "addMember").mockResolvedValue();
       const update = vi.spyOn(api, "updateMemberRole").mockResolvedValue();
+      const removeFromProject = vi
+        .spyOn(api, "removeMemberFromProject")
+        .mockResolvedValue();
       renderConsole("/members", api);
       const select = await screen.findByLabelText("Role for Review Operator");
       expect(
         screen.getByRole("columnheader", { name: "Organization role" }),
       ).toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: "Add member" }),
-      ).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Add member" }));
+      const addDialog = within(
+        screen.getByRole("dialog", { name: "Add project member" }),
+      );
+      await user.type(
+        addDialog.getByLabelText("User email"),
+        "new.user@example.test",
+      );
+      await user.click(addDialog.getByRole("button", { name: "Add member" }));
+      await waitFor(() =>
+        expect(add).toHaveBeenCalledWith({ email: "new.user@example.test" }),
+      );
       expect(
         within(select).queryByRole("option", { name: "Owner" }) !== null,
       ).toBe(role === "owner");
@@ -75,6 +88,23 @@ describe("management console", () => {
         expect(update).toHaveBeenCalledWith(
           "34343434-3434-4343-8343-343434343434",
           role === "owner" ? "owner" : "admin",
+        ),
+      );
+      const reviewRow = screen.getByText("Review Operator").closest("tr");
+      expect(reviewRow).not.toBeNull();
+      if (!reviewRow) throw new Error("Review Operator row was not rendered");
+      await user.click(
+        within(reviewRow).getByRole("button", { name: "Remove from project" }),
+      );
+      const removeDialog = within(
+        screen.getByRole("dialog", { name: "Remove Review Operator" }),
+      );
+      await user.click(
+        removeDialog.getByRole("button", { name: "Remove from project" }),
+      );
+      await waitFor(() =>
+        expect(removeFromProject).toHaveBeenCalledWith(
+          "34343434-3434-4343-8343-343434343434",
         ),
       );
       expect(screen.getByLabelText("Role for Demo Operator")).toBeDisabled();
@@ -220,7 +250,11 @@ describe("management console", () => {
         AUTHORIZATION_SCOPE_CATALOG.map(([scope]) => scope),
       ),
     });
-    expect(addMember.mock.calls[0]?.[0].scopes).toHaveLength(
+    const explicitInput = addMember.mock.calls[0]?.[0];
+    expect(explicitInput && "scopes" in explicitInput).toBe(true);
+    if (!explicitInput || !("scopes" in explicitInput))
+      throw new Error("Explicit member input was not submitted");
+    expect(explicitInput.scopes).toHaveLength(
       AUTHORIZATION_SCOPE_CATALOG.length,
     );
     const memberName = await screen.findByText("new reviewer");
@@ -241,7 +275,9 @@ describe("management console", () => {
     const remove = within(
       screen.getByRole("dialog", { name: "Remove new reviewer" }),
     );
-    await user.click(remove.getByRole("button", { name: "Remove member" }));
+    await user.click(
+      remove.getByRole("button", { name: "Remove from project" }),
+    );
     await waitFor(() =>
       expect(screen.queryByText("new reviewer")).not.toBeInTheDocument(),
     );

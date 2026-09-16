@@ -844,11 +844,20 @@ export const ProjectMemberSchema = v.object({
   createdAt: TimestampSchema,
 });
 
-export const CreateProjectMemberInputSchema = v.strictObject({
+export const CreateExplicitProjectMemberInputSchema = v.strictObject({
   subject: v.pipe(v.string(), v.minLength(1), v.maxLength(500)),
   role: ProjectMemberRoleSchema,
   scopes: v.pipe(v.array(v.string()), v.minLength(1)),
 });
+
+export const CreateIapProjectMemberInputSchema = v.strictObject({
+  email: v.pipe(v.string(), v.email(), v.maxLength(320)),
+});
+
+export const CreateProjectMemberInputSchema = v.union([
+  CreateExplicitProjectMemberInputSchema,
+  CreateIapProjectMemberInputSchema,
+]);
 
 /** In IAP mode, role updates organization membership and effective
  * scopes across existing project memberships. Only owners may grant or change Owner access. */
@@ -1680,6 +1689,9 @@ export type ProjectMember = v.InferOutput<typeof ProjectMemberSchema>;
 export type CreateProjectMemberInput = v.InferOutput<
   typeof CreateProjectMemberInputSchema
 >;
+export type CreateIapProjectMemberInput = v.InferOutput<
+  typeof CreateIapProjectMemberInputSchema
+>;
 export type UpdateProjectMemberInput = v.InferOutput<
   typeof UpdateProjectMemberInputSchema
 >;
@@ -2335,6 +2347,12 @@ export const ModelCatalogEntrySchema = v.object({
 
 export function parseCreateProjectInput(input: unknown): CreateProjectInput {
   return v.parse(CreateProjectInputSchema, input);
+}
+
+export function parseCreateProjectMemberInput(
+  input: unknown,
+): CreateProjectMemberInput {
+  return v.parse(CreateProjectMemberInputSchema, input);
 }
 
 export function parseCreateModelPresetInput(

@@ -299,8 +299,94 @@ test(
             scopes: ["*"],
           })
         ).status,
+        400,
+        "Generic member upsert cannot bypass IAP project-access input",
+      );
+
+      const projectResponse = await request(0, "/projects", "POST", {
+        slug: "shared-project",
+        name: "Shared project",
+      });
+      assert.equal(
+        projectResponse.status,
+        201,
+        await projectResponse.clone().text(),
+      );
+      const sharedProjectId = (await projectResponse.json()).id as string;
+      assert.equal(
+        (
+          await request(1, "/auth/switch-project", "POST", {
+            projectId: sharedProjectId,
+          })
+        ).status,
         403,
-        "Generic member upsert cannot bypass the role policy",
+        "IAP sign-in does not grant access to every project",
+      );
+      const grantProjectAccess = await request(
+        0,
+        `/projects/${sharedProjectId}/members`,
+        "POST",
+        { email: identities[1]!.email },
+      );
+      assert.equal(
+        grantProjectAccess.status,
+        201,
+        await grantProjectAccess.clone().text(),
+      );
+      const sharedAlice = await grantProjectAccess.json();
+      assert.equal(sharedAlice.organizationRole, "admin");
+      assert.equal(sharedAlice.role, "admin");
+      assert.equal(
+        (
+          await request(1, "/auth/switch-project", "POST", {
+            projectId: sharedProjectId,
+          })
+        ).status,
+        200,
+        "An owner can grant an existing IAP user project access",
+      );
+      assert.equal(
+        (
+          await request(
+            0,
+            `/projects/${sharedProjectId}/members/${sharedAlice.id}/project-access`,
+            "DELETE",
+          )
+        ).status,
+        200,
+      );
+      assert.equal(
+        (
+          await request(1, "/auth/switch-project", "POST", {
+            projectId: sharedProjectId,
+          })
+        ).status,
+        403,
+        "Project-only removal leaves no switchable membership",
+      );
+      assert.equal(
+        (await (await request(1, "/context")).json()).principal
+          .organizationRole,
+        "admin",
+        "Project-only removal preserves organization access",
+      );
+      assert.equal(
+        (
+          await request(0, `/projects/${sharedProjectId}/members`, "POST", {
+            email: identities[1]!.email,
+          })
+        ).status,
+        201,
+        "A removed project membership can be restored safely",
+      );
+      assert.equal(
+        (
+          await request(0, `/projects/${sharedProjectId}/members`, "POST", {
+            email: "never-signed-in@example.test",
+          })
+        ).status,
+        404,
+        "Only verified IAP organization users can be added",
       );
       assert.equal(
         (await request(1, `${path}/members/${owner.id}`, "DELETE")).status,

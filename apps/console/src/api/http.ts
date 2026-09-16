@@ -2412,6 +2412,13 @@ export class HttpConsoleApi implements ConsoleApi {
     });
   };
 
+  removeMemberFromProject = async (memberId: string): Promise<void> => {
+    await this.#projectRequest(
+      `/members/${encodeURIComponent(memberId)}/project-access`,
+      { method: "DELETE" },
+    );
+  };
+
   createProject = async (
     input: Parameters<ConsoleApi["createProject"]>[0],
   ): Promise<void> => {

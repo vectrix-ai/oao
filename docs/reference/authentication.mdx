@@ -57,8 +57,10 @@ scope or a shared display-name fallback.
   sessions and runs. **Viewer** has only the explicit read permissions.
 
 Selecting a role updates organization membership, effective scopes, and all
-existing IAP project memberships for that person atomically. It grants no
-membership in an additional project. Refresh the user's console to display the
+existing IAP project memberships for that person atomically. Use **Add member**
+inside a project to grant an existing verified IAP organization user access to
+that project; their project role and scopes inherit their current organization
+profile. Refresh the user's console to display the
 new role; subsequent authenticated requests resolve current permissions.
 Lowering access revokes API keys created by that person and their derived keys, including keys created
 through their other project identities. Rotate any affected integrations before
@@ -70,6 +72,10 @@ You cannot change or remove your own access; the last Owner must remain.
 Only IAP-authenticated humans with the required organization role can manage
 these grants. API keys cannot grant human access. Users first appear after
 signing in through IAP; arbitrary subject/scope entry is disabled in this mode.
+**Remove from project** revokes only the selected project membership and keeps
+the organization role, other project memberships, and organization-scoped keys.
+**Remove organization access** retains the existing organization-wide offboarding
+behavior described above.
 
 Existing stored roles are preserved during rollout. If an existing person really
 has Owner membership, they will still display as Owner until another Owner

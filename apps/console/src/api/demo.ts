@@ -2606,6 +2606,13 @@ export class DemoConsoleApi implements ConsoleApi {
     input: Parameters<ConsoleApi["addMember"]>[0],
   ): Promise<void> {
     this.#guard();
+    if ("email" in input) {
+      const existing = this.#members.find(
+        (member) => member.email?.toLowerCase() === input.email.toLowerCase(),
+      );
+      if (!existing) throw new Error("The user must sign in through IAP first");
+      return;
+    }
     const existing = this.#members.find(
       (member) => member.subject === input.subject,
     );
@@ -2655,6 +2662,10 @@ export class DemoConsoleApi implements ConsoleApi {
     if (member.current)
       throw new Error("The active principal cannot remove itself");
     this.#members = this.#members.filter((entry) => entry.id !== memberId);
+  }
+
+  async removeMemberFromProject(memberId: string): Promise<void> {
+    return this.removeMember(memberId);
   }
 
   async createProject(

@@ -189,11 +189,13 @@ describe("HTTP console adapter", () => {
     });
     await api.updateMemberRole("member/one", "member");
     await api.removeMember("member/one");
+    await api.removeMemberFromProject("member/one");
 
     expect(fetchMock.mock.calls.slice(1).map(([url]) => url)).toEqual([
       `/v1/projects/${PROJECT_ID}/members`,
       `/v1/projects/${PROJECT_ID}/members/member%2Fone`,
       `/v1/projects/${PROJECT_ID}/members/member%2Fone`,
+      `/v1/projects/${PROJECT_ID}/members/member%2Fone/project-access`,
     ]);
     expect(
       (fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.method,
@@ -203,6 +205,9 @@ describe("HTTP console adapter", () => {
     ).toBe("PATCH");
     expect(
       (fetchMock.mock.calls[3]?.[1] as RequestInit | undefined)?.method,
+    ).toBe("DELETE");
+    expect(
+      (fetchMock.mock.calls[4]?.[1] as RequestInit | undefined)?.method,
     ).toBe("DELETE");
   });
 

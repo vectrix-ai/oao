@@ -296,6 +296,20 @@ export class OaoClient {
     );
   }
 
+  /** IAP: remove only this project membership; organization access is retained. */
+  removeMemberFromProject(
+    projectId: string,
+    memberId: string,
+    options: WriteOptions,
+  ): Promise<void> {
+    return this.#write(
+      this.routes.memberProjectAccess(projectId, memberId),
+      "DELETE",
+      undefined,
+      options,
+    );
+  }
+
   listApiKeys(
     projectId: string,
     pagination: PaginationOptions = {},

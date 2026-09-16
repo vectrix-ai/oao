@@ -773,16 +773,23 @@ export interface ConsoleApi {
   ): Promise<ModelCatalogList>;
   createModelPreset(input: CreateModelPresetInput): Promise<ModelPreset>;
   getSettings(): Promise<SettingsData>;
-  addMember(input: {
-    readonly subject: string;
-    readonly role: SettingsData["members"][number]["role"];
-    readonly scopes: readonly string[];
-  }): Promise<void>;
+  addMember(
+    input:
+      | {
+          readonly subject: string;
+          readonly role: SettingsData["members"][number]["role"];
+          readonly scopes: readonly string[];
+        }
+      | {
+          readonly email: string;
+        },
+  ): Promise<void>;
   updateMemberRole(
     memberId: string,
     role: SettingsData["members"][number]["role"],
   ): Promise<void>;
   removeMember(memberId: string): Promise<void>;
+  removeMemberFromProject(memberId: string): Promise<void>;
   createApiKey(input: CreateApiKeyInput): Promise<CreatedApiKey>;
   createProject(input: CreateProjectInput): Promise<void>;
   /** Permanently deletes a project and every run, agent, and event in it. */
