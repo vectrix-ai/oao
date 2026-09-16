@@ -10,6 +10,27 @@ CREATE TABLE oao.iap_default_tenant (
   FOREIGN KEY (organization_id, project_id)
     REFERENCES oao.projects(organization_id, id)
 );
+
+CREATE FUNCTION oao.protect_iap_default_project_delete() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, oao
+AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM oao.iap_default_tenant defaults
+    WHERE defaults.organization_id=OLD.organization_id
+      AND defaults.project_id=OLD.id
+  ) THEN
+    RAISE EXCEPTION 'The IAP default project cannot be deleted because it anchors console authentication'
+      USING ERRCODE='22023';
+  END IF;
+  RETURN OLD;
+END;
+$$;
+CREATE TRIGGER protect_iap_default_project_delete
+BEFORE DELETE ON oao.projects
+FOR EACH ROW EXECUTE FUNCTION oao.protect_iap_default_project_delete();
+
 ALTER TABLE oao.iap_default_tenant ENABLE ROW LEVEL SECURITY;
 ALTER TABLE oao.iap_default_tenant FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON oao.iap_default_tenant FROM PUBLIC, oao_app;
@@ -70,18 +91,31 @@ BEGIN
     -- owner from the previous provisioning contract remains adoptable.
     IF NOT EXISTS (
       SELECT 1 FROM oao.organization_members om
-      JOIN oao.principals p
-        ON p.organization_id=om.organization_id AND p.id=om.principal_id
-      WHERE om.organization_id=selected_organization_id
-        AND om.role='owner' AND p.kind='human'
-    ) OR NOT EXISTS (
-      SELECT 1 FROM oao.project_members pm
-      JOIN oao.principals p
-        ON p.organization_id=pm.organization_id AND p.project_id=pm.project_id
-       AND p.id=pm.principal_id
-      WHERE pm.organization_id=selected_organization_id
-        AND pm.project_id=selected_project_id
-        AND pm.role='owner' AND p.kind='human'
+      JOIN oao.principals organization_owner
+        ON organization_owner.organization_id=om.organization_id
+       AND organization_owner.id=om.principal_id
+       AND organization_owner.kind='human'
+      JOIN oao.auth_identities organization_identity
+        ON organization_identity.organization_id=organization_owner.organization_id
+       AND organization_identity.project_id=organization_owner.project_id
+       AND organization_identity.principal_id=organization_owner.id
+       AND organization_identity.provider='iap'
+      JOIN oao.auth_identities project_identity
+        ON project_identity.organization_id=organization_identity.organization_id
+       AND project_identity.project_id=selected_project_id
+       AND project_identity.provider='iap'
+       AND project_identity.provider_subject=organization_identity.provider_subject
+      JOIN oao.principals project_owner
+        ON project_owner.organization_id=project_identity.organization_id
+       AND project_owner.project_id=project_identity.project_id
+       AND project_owner.id=project_identity.principal_id
+       AND project_owner.kind='human'
+      JOIN oao.project_members pm
+        ON pm.organization_id=project_owner.organization_id
+       AND pm.project_id=project_owner.project_id
+       AND pm.principal_id=project_owner.id
+       AND pm.role='owner'
+      WHERE om.organization_id=selected_organization_id AND om.role='owner'
     ) THEN
       RAISE EXCEPTION 'Existing IAP tenant has no owner; operator review required';
     END IF;

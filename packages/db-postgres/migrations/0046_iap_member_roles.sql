@@ -24,18 +24,6 @@ WHERE creator.organization_id=key.organization_id
   AND creator.kind='api_key'
   AND creator.subject ~ '^api-key:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$';
 
--- Historical keys whose creator principal was already deleted have no safe
--- identity attribution left. Fail closed instead of allowing stale authority.
-UPDATE oao.api_keys key
-SET revoked_at=COALESCE(key.revoked_at,clock_timestamp())
-WHERE key.created_by_iap_subject IS NULL
-  AND key.created_by_api_key_id IS NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM oao.principals creator
-    WHERE creator.organization_id=key.organization_id
-      AND creator.id=key.created_by_principal_id
-  );
-
 -- The immutable IAP subject joins legacy per-project principal aliases safely.
 CREATE FUNCTION oao.iap_identity_role(p_organization_id uuid, p_subject text) RETURNS text
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, oao

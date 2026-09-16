@@ -141,9 +141,10 @@ project object.
 it owns: agents, Skills, toolsets, presets, sessions, runs, events, and the
 audit trail, plus the Flue conversation state of its threads. Two rules apply:
 the project the caller is acting in cannot delete itself, and the last
-remaining project of an organization cannot be deleted. Organization-shared
-resources (API keys, model, storage, sandbox, and MCP connections) are
-untouched.
+remaining project of an organization cannot be deleted. In IAP deployments,
+the configured default project also cannot be deleted because it anchors
+console authentication. Organization-shared resources (API keys, model,
+storage, sandbox, and MCP connections) are untouched.
 Workspace archives and run files in object storage are not removed
 automatically; operators clean the project's `workspace-backups/` and
 `run-files/` prefixes separately.

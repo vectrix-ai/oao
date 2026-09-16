@@ -35,12 +35,21 @@ async function seed(client: PgClient, linked: boolean) {
     "SELECT oao.bootstrap_project($1,$2,'Existing organization',$3,'existing','Existing project',$4,$5,'development')",
     [organizationId, organizationId, projectId, principalId, principalId],
   );
-  if (linked)
+  if (linked) {
+    await client.query(
+      "INSERT INTO oao.auth_identities (organization_id,project_id,principal_id,provider,provider_subject,email) VALUES ($1,$2,$3,'iap','accounts.google.com:bootstrap-owner','owner@example.test')",
+      [organizationId, projectId, principalId],
+    );
     await client.query(
       "INSERT INTO oao.auth_tenant_links (organization_id,project_id,provider,provider_tenant_id) VALUES ($1,$2,'iap',$3)",
       [organizationId, projectId, audience],
     );
-  return { organization_id: organizationId, project_id: projectId };
+  }
+  return {
+    organization_id: organizationId,
+    project_id: projectId,
+    principal_id: principalId,
+  };
 }
 
 test(
@@ -95,16 +104,16 @@ test(
           const selected = await seed(client, true);
           await seed(client, false); // Never choose an arbitrary existing tenant.
           await client.query("SET LOCAL ROLE oao_app");
-          assert.deepEqual(
-            (await client.query(ensure, [audience])).rows[0],
-            selected,
-          );
+          assert.deepEqual((await client.query(ensure, [audience])).rows[0], {
+            organization_id: selected.organization_id,
+            project_id: selected.project_id,
+          });
           await client.query("RESET ROLE");
           await seed(client, true); // Later projects cannot change the saved default.
-          assert.deepEqual(
-            (await client.query(ensure, [audience])).rows[0],
-            selected,
-          );
+          assert.deepEqual((await client.query(ensure, [audience])).rows[0], {
+            organization_id: selected.organization_id,
+            project_id: selected.project_id,
+          });
           assert.equal(
             (
               await client.query(
@@ -128,12 +137,39 @@ test(
     );
 
     await t.test(
+      "protects the configured default project from deletion",
+      async () => {
+        await fixture(async (client) => {
+          const selected = await seed(client, true);
+          await client.query("SET LOCAL ROLE oao_app");
+          await client.query(ensure, [audience]);
+          await client.query("RESET ROLE");
+          await assert.rejects(
+            client.query(
+              "DELETE FROM oao.projects WHERE organization_id=$1 AND id=$2",
+              [selected.organization_id, selected.project_id],
+            ),
+            /IAP default project cannot be deleted/u,
+          );
+        });
+      },
+    );
+
+    await t.test(
       "adopts a project whose owner is a copied organization identity",
       async () => {
         await fixture(async (client) => {
           const existing = await seed(client, false);
           const projectId = randomUUID();
           const principalId = randomUUID();
+          await client.query(
+            "INSERT INTO oao.auth_identities (organization_id,project_id,principal_id,provider,provider_subject,email) VALUES ($1,$2,$3,'iap','accounts.google.com:copied-owner','copied-owner@example.test')",
+            [
+              existing.organization_id,
+              existing.project_id,
+              existing.principal_id,
+            ],
+          );
           await client.query(
             "INSERT INTO oao.projects (organization_id,id,slug,name) VALUES ($1,$2,'copied-owner','Copied owner project')",
             [existing.organization_id, projectId],
@@ -147,6 +183,10 @@ test(
             [existing.organization_id, projectId, principalId],
           );
           await client.query(
+            "INSERT INTO oao.auth_identities (organization_id,project_id,principal_id,provider,provider_subject,email) VALUES ($1,$2,$3,'iap','accounts.google.com:copied-owner','copied-owner@example.test')",
+            [existing.organization_id, projectId, principalId],
+          );
+          await client.query(
             "INSERT INTO oao.auth_tenant_links (organization_id,project_id,provider,provider_tenant_id) VALUES ($1,$2,'iap',$3)",
             [existing.organization_id, projectId, audience],
           );
@@ -155,6 +195,47 @@ test(
             organization_id: existing.organization_id,
             project_id: projectId,
           });
+        });
+      },
+    );
+
+    await t.test(
+      "rejects owners that do not share the same IAP identity",
+      async () => {
+        await fixture(async (client) => {
+          const existing = await seed(client, false);
+          const projectId = randomUUID();
+          const principalId = randomUUID();
+          await client.query(
+            "INSERT INTO oao.auth_identities (organization_id,project_id,principal_id,provider,provider_subject,email) VALUES ($1,$2,$3,'iap','accounts.google.com:organization-owner','organization-owner@example.test')",
+            [
+              existing.organization_id,
+              existing.project_id,
+              existing.principal_id,
+            ],
+          );
+          await client.query(
+            "INSERT INTO oao.projects (organization_id,id,slug,name) VALUES ($1,$2,'mismatched-owner','Mismatched owner project')",
+            [existing.organization_id, projectId],
+          );
+          await client.query(
+            "INSERT INTO oao.principals (organization_id,project_id,id,kind,subject,scopes) VALUES ($1,$2,$3,'human','different-owner',ARRAY['*'])",
+            [existing.organization_id, projectId, principalId],
+          );
+          await client.query(
+            "INSERT INTO oao.project_members (organization_id,project_id,principal_id,role) VALUES ($1,$2,$3,'owner')",
+            [existing.organization_id, projectId, principalId],
+          );
+          await client.query(
+            "INSERT INTO oao.auth_identities (organization_id,project_id,principal_id,provider,provider_subject,email) VALUES ($1,$2,$3,'iap','accounts.google.com:project-owner','project-owner@example.test')",
+            [existing.organization_id, projectId, principalId],
+          );
+          await client.query(
+            "INSERT INTO oao.auth_tenant_links (organization_id,project_id,provider,provider_tenant_id) VALUES ($1,$2,'iap',$3)",
+            [existing.organization_id, projectId, audience],
+          );
+          await client.query("SET LOCAL ROLE oao_app");
+          await assert.rejects(client.query(ensure, [audience]), /no owner/u);
         });
       },
     );
