@@ -313,8 +313,17 @@ export class PostgresApiStore {
     const token = `oao_${prefix}_${randomBytes(32).toString("base64url")}`;
     const created = await transaction.query<{ created_at: Date }>(
       `INSERT INTO oao.api_keys
-         (organization_id,id,name,key_prefix,key_hash,scopes,created_by_principal_id,expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         (organization_id,id,name,key_prefix,key_hash,scopes,created_by_principal_id,
+          created_by_iap_subject,created_by_api_key_id,expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,
+         (SELECT identity.provider_subject FROM oao.auth_identities identity
+          WHERE identity.organization_id=$1 AND identity.project_id=$9
+            AND identity.principal_id=$7 AND identity.provider='iap'),
+         (SELECT substring(creator.subject FROM 9)::uuid FROM oao.principals creator
+          WHERE creator.organization_id=$1 AND creator.project_id=$9
+            AND creator.id=$7 AND creator.kind='api_key'
+            AND creator.subject ~ '^api-key:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
+         $8)
        RETURNING created_at`,
       [
         principal.organizationId,
@@ -325,6 +334,7 @@ export class PostgresApiStore {
         input.scopes,
         principal.id,
         input.expiresAt ?? null,
+        principal.projectId,
       ],
     );
     return {

@@ -313,6 +313,54 @@ test(
         await projectResponse.clone().text(),
       );
       const sharedProjectId = (await projectResponse.json()).id as string;
+      const pendingPrincipal = randomUUID();
+      await inspect.query(
+        "INSERT INTO oao.principals (organization_id,project_id,id,kind,subject,scopes) VALUES ($1,$2,$3,'human','pending-project-user',$4)",
+        [
+          tenant.organizationId,
+          tenant.projectId,
+          pendingPrincipal,
+          [...IAP_MEMBER_SCOPES],
+        ],
+      );
+      await inspect.query(
+        "INSERT INTO oao.organization_members (organization_id,principal_id,role) VALUES ($1,$2,'member')",
+        [tenant.organizationId, pendingPrincipal],
+      );
+      await inspect.query(
+        "INSERT INTO oao.project_members (organization_id,project_id,principal_id,role) VALUES ($1,$2,$3,'member')",
+        [tenant.organizationId, tenant.projectId, pendingPrincipal],
+      );
+      await provisionIapIdentity(pool, {
+        ...tenant,
+        principalId: pendingPrincipal,
+        expectedAudience,
+        email: "pending-project-user@example.test",
+      });
+      assert.equal(
+        (
+          await request(0, `/projects/${sharedProjectId}/members`, "POST", {
+            email: "pending-project-user@example.test",
+          })
+        ).status,
+        404,
+        "Provisioned users must complete IAP sign-in before project access is copied",
+      );
+      const legacySharedAlice = randomUUID();
+      await inspect.query(
+        "INSERT INTO oao.principals (organization_id,project_id,id,kind,subject,scopes) VALUES ($1,$2,$3,'human',$4,$5)",
+        [
+          tenant.organizationId,
+          sharedProjectId,
+          legacySharedAlice,
+          alice.subject,
+          [...IAP_MEMBER_SCOPES],
+        ],
+      );
+      await inspect.query(
+        "INSERT INTO oao.project_members (organization_id,project_id,principal_id,role) VALUES ($1,$2,$3,'viewer')",
+        [tenant.organizationId, sharedProjectId, legacySharedAlice],
+      );
       assert.equal(
         (
           await request(1, "/auth/switch-project", "POST", {
@@ -334,6 +382,11 @@ test(
         await grantProjectAccess.clone().text(),
       );
       const sharedAlice = await grantProjectAccess.json();
+      assert.equal(
+        sharedAlice.id,
+        legacySharedAlice,
+        "Granting access links a safe unlinked legacy principal instead of duplicating it",
+      );
       assert.equal(sharedAlice.organizationRole, "admin");
       assert.equal(sharedAlice.role, "admin");
       assert.equal(
@@ -344,6 +397,22 @@ test(
         ).status,
         200,
         "An owner can grant an existing IAP user project access",
+      );
+      assert.equal(
+        (
+          await request(
+            0,
+            `${path}/members/${alice.id}/project-access`,
+            "DELETE",
+          )
+        ).status,
+        400,
+        "Default-project membership cannot be removed while it anchors IAP authentication",
+      );
+      assert.equal(
+        (await request(1, "/context")).status,
+        200,
+        "Rejected default-project removal preserves console authentication",
       );
       assert.equal(
         (
@@ -450,6 +519,30 @@ test(
         ).status,
         403,
       );
+      const deletedCreatorId = randomUUID();
+      await inspect.query(
+        "UPDATE oao.api_keys SET created_by_principal_id=$2 WHERE organization_id=$1 AND id=$3",
+        [tenant.organizationId, deletedCreatorId, key.id],
+      );
+      assert.equal(
+        (
+          await inspect.query("SELECT 1 FROM oao.principals WHERE id=$1", [
+            deletedCreatorId,
+          ])
+        ).rowCount,
+        0,
+        "Project deletion can leave organization keys with a deleted creator UUID",
+      );
+      assert.equal(
+        (
+          await inspect.query(
+            "SELECT created_by_iap_subject FROM oao.api_keys WHERE id=$1",
+            [key.id],
+          )
+        ).rows[0].created_by_iap_subject,
+        identities[1]!.subject,
+        "API keys retain durable IAP creator provenance after their principal is deleted",
+      );
 
       assert.equal(
         (await change(2, alice.id, "member")).status,
@@ -460,20 +553,12 @@ test(
         (await resolver.resolvePrincipal(identities[1]!))?.scopes,
         new Set(IAP_MEMBER_SCOPES),
       );
-      assert.deepEqual(
-        (
-          await inspect.query("SELECT scopes FROM oao.principals WHERE id=$1", [
-            otherAlice,
-          ])
-        ).rows[0].scopes,
-        IAP_MEMBER_SCOPES,
-      );
       assert.equal((await change(1, bob.id, "member")).status, 403);
       assert.equal(
         (await request(1, `${path}/members`, "GET", undefined, key.secret))
           .status,
         401,
-        "Demotion revokes keys minted by that identity",
+        "Demotion revokes keys even after their creator project was deleted",
       );
       assert.equal(
         (await request(1, `${path}/members`, "GET", undefined, childKey.secret))

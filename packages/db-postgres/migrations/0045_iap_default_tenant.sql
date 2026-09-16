@@ -65,12 +65,23 @@ BEGIN
       INTO selected_organization_id, selected_project_id
       FROM oao.auth_tenant_links AS link
      WHERE link.provider = 'iap' AND link.provider_tenant_id = p_expected_audience;
+    -- A human is copied to a new project with a fresh principal UUID. Verify
+    -- organization and project ownership independently so a valid copied
+    -- owner from the previous provisioning contract remains adoptable.
     IF NOT EXISTS (
       SELECT 1 FROM oao.organization_members om
-      JOIN oao.project_members pm ON pm.organization_id=om.organization_id AND pm.principal_id=om.principal_id
-      JOIN oao.principals p ON p.organization_id=pm.organization_id AND p.project_id=pm.project_id AND p.id=pm.principal_id
-      WHERE om.organization_id=selected_organization_id AND pm.project_id=selected_project_id
-        AND om.role='owner' AND pm.role='owner' AND p.kind='human'
+      JOIN oao.principals p
+        ON p.organization_id=om.organization_id AND p.id=om.principal_id
+      WHERE om.organization_id=selected_organization_id
+        AND om.role='owner' AND p.kind='human'
+    ) OR NOT EXISTS (
+      SELECT 1 FROM oao.project_members pm
+      JOIN oao.principals p
+        ON p.organization_id=pm.organization_id AND p.project_id=pm.project_id
+       AND p.id=pm.principal_id
+      WHERE pm.organization_id=selected_organization_id
+        AND pm.project_id=selected_project_id
+        AND pm.role='owner' AND p.kind='human'
     ) THEN
       RAISE EXCEPTION 'Existing IAP tenant has no owner; operator review required';
     END IF;

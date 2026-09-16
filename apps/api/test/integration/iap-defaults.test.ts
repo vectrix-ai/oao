@@ -127,6 +127,38 @@ test(
       },
     );
 
+    await t.test(
+      "adopts a project whose owner is a copied organization identity",
+      async () => {
+        await fixture(async (client) => {
+          const existing = await seed(client, false);
+          const projectId = randomUUID();
+          const principalId = randomUUID();
+          await client.query(
+            "INSERT INTO oao.projects (organization_id,id,slug,name) VALUES ($1,$2,'copied-owner','Copied owner project')",
+            [existing.organization_id, projectId],
+          );
+          await client.query(
+            "INSERT INTO oao.principals (organization_id,project_id,id,kind,subject,scopes) VALUES ($1,$2,$3,'human','copied-owner',ARRAY['*'])",
+            [existing.organization_id, projectId, principalId],
+          );
+          await client.query(
+            "INSERT INTO oao.project_members (organization_id,project_id,principal_id,role) VALUES ($1,$2,$3,'owner')",
+            [existing.organization_id, projectId, principalId],
+          );
+          await client.query(
+            "INSERT INTO oao.auth_tenant_links (organization_id,project_id,provider,provider_tenant_id) VALUES ($1,$2,'iap',$3)",
+            [existing.organization_id, projectId, audience],
+          );
+          await client.query("SET LOCAL ROLE oao_app");
+          assert.deepEqual((await client.query(ensure, [audience])).rows[0], {
+            organization_id: existing.organization_id,
+            project_id: projectId,
+          });
+        });
+      },
+    );
+
     for (const scenario of [
       "unlinked",
       "ownerless",

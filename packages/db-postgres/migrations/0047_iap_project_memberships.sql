@@ -24,6 +24,7 @@ DECLARE
   target_role text;
   target_scopes text[];
   target_principal_id uuid;
+  existing_target_identity text;
   matching_subjects integer;
 BEGIN
   IF p_organization_id IS DISTINCT FROM oao.current_organization_id()
@@ -60,6 +61,7 @@ BEGIN
     ON p.organization_id=ai.organization_id AND p.project_id=ai.project_id
    AND p.id=ai.principal_id AND p.kind='human'
   WHERE ai.organization_id=p_organization_id AND ai.provider='iap'
+    AND ai.provider_subject NOT LIKE 'pending-email:%'
     AND lower(ai.email)=p_email;
   IF matching_subjects=0 THEN
     RAISE EXCEPTION 'The user must sign in through IAP before project access can be granted'
@@ -76,6 +78,7 @@ BEGIN
     ON p.organization_id=ai.organization_id AND p.project_id=ai.project_id
    AND p.id=ai.principal_id AND p.kind='human'
   WHERE ai.organization_id=p_organization_id AND ai.provider='iap'
+    AND ai.provider_subject NOT LIKE 'pending-email:%'
     AND lower(ai.email)=p_email
   ORDER BY ai.updated_at DESC,ai.project_id,ai.principal_id LIMIT 1;
   IF target_subject=actor_identity THEN
@@ -95,10 +98,27 @@ BEGIN
   WHERE ai.organization_id=p_organization_id AND ai.project_id=p_project_id
     AND ai.provider='iap' AND ai.provider_subject=target_subject;
   IF target_principal_id IS NULL THEN
-    target_principal_id := gen_random_uuid();
-    INSERT INTO oao.principals (organization_id,project_id,id,kind,subject,scopes)
-      VALUES (p_organization_id,p_project_id,target_principal_id,'human',
-        target_internal_subject,target_scopes);
+    SELECT p.id,ai.provider_subject INTO target_principal_id,existing_target_identity
+    FROM oao.principals p
+    LEFT JOIN oao.auth_identities ai
+      ON ai.organization_id=p.organization_id AND ai.project_id=p.project_id
+     AND ai.principal_id=p.id AND ai.provider='iap'
+    WHERE p.organization_id=p_organization_id AND p.project_id=p_project_id
+      AND p.kind='human' AND p.subject=target_internal_subject;
+    IF existing_target_identity IS NOT NULL THEN
+      RAISE EXCEPTION 'An existing project principal is linked to another IAP identity; operator review is required'
+        USING ERRCODE='22023';
+    END IF;
+    IF target_principal_id IS NULL THEN
+      target_principal_id := gen_random_uuid();
+      INSERT INTO oao.principals (organization_id,project_id,id,kind,subject,scopes)
+        VALUES (p_organization_id,p_project_id,target_principal_id,'human',
+          target_internal_subject,target_scopes);
+    ELSE
+      UPDATE oao.principals SET scopes=target_scopes
+      WHERE organization_id=p_organization_id AND project_id=p_project_id
+        AND id=target_principal_id;
+    END IF;
     INSERT INTO oao.auth_identities (
       organization_id,project_id,principal_id,provider,provider_subject,email,
       display_name,last_reconciled_at
@@ -148,6 +168,14 @@ BEGIN
   IF p_organization_id IS DISTINCT FROM oao.current_organization_id()
      OR p_project_id IS DISTINCT FROM oao.current_project_id() THEN
     RAISE EXCEPTION 'Tenant context mismatch' USING ERRCODE='42501';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM oao.iap_default_tenant defaults
+    WHERE defaults.organization_id=p_organization_id
+      AND defaults.project_id=p_project_id
+  ) THEN
+    RAISE EXCEPTION 'The IAP default project membership cannot be removed; remove organization access instead'
+      USING ERRCODE='22023';
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('iap-members/' || p_organization_id::text,0));
   SELECT * INTO actor FROM oao.principals p

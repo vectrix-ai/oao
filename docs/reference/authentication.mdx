@@ -74,6 +74,9 @@ these grants. API keys cannot grant human access. Users first appear after
 signing in through IAP; arbitrary subject/scope entry is disabled in this mode.
 **Remove from project** revokes only the selected project membership and keeps
 the organization role, other project memberships, and organization-scoped keys.
+The IAP default project's membership cannot be removed because it anchors
+console authentication; use **Remove organization access** to offboard that
+user instead.
 **Remove organization access** retains the existing organization-wide offboarding
 behavior described above.
 
