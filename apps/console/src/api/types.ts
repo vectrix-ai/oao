@@ -525,6 +525,8 @@ export interface ProjectContext {
     readonly subject: string;
     readonly displayName: string;
     readonly role: string;
+    readonly organizationRole?: "owner" | "admin" | "member" | "viewer" | null;
+    readonly projectRole?: "owner" | "admin" | "member" | "viewer" | null;
     readonly scopes: readonly string[];
   };
   readonly organizations: readonly {
@@ -558,6 +560,9 @@ export type CreatedApiKey = ApiKeySummary &
   );
 
 export interface SettingsData {
+  readonly authProvider?: "development" | "iap" | "workos";
+  readonly canManageIapMembers?: boolean;
+  readonly canGrantIapOwner?: boolean;
   readonly organization: {
     readonly id: string;
     readonly name: string;
@@ -577,6 +582,7 @@ export interface SettingsData {
     readonly subject: string;
     readonly email?: string;
     readonly role: "owner" | "admin" | "member" | "viewer";
+    readonly organizationRole?: "owner" | "admin" | "member" | "viewer" | null;
     readonly scopes: readonly string[];
     readonly current: boolean;
   }[];
@@ -767,16 +773,23 @@ export interface ConsoleApi {
   ): Promise<ModelCatalogList>;
   createModelPreset(input: CreateModelPresetInput): Promise<ModelPreset>;
   getSettings(): Promise<SettingsData>;
-  addMember(input: {
-    readonly subject: string;
-    readonly role: SettingsData["members"][number]["role"];
-    readonly scopes: readonly string[];
-  }): Promise<void>;
+  addMember(
+    input:
+      | {
+          readonly subject: string;
+          readonly role: SettingsData["members"][number]["role"];
+          readonly scopes: readonly string[];
+        }
+      | {
+          readonly email: string;
+        },
+  ): Promise<void>;
   updateMemberRole(
     memberId: string,
     role: SettingsData["members"][number]["role"],
   ): Promise<void>;
   removeMember(memberId: string): Promise<void>;
+  removeMemberFromProject(memberId: string): Promise<void>;
   createApiKey(input: CreateApiKeyInput): Promise<CreatedApiKey>;
   createProject(input: CreateProjectInput): Promise<void>;
   /** Permanently deletes a project and every run, agent, and event in it. */

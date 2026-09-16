@@ -84,13 +84,18 @@ test("project member contracts preserve safe identity metadata and roles", () =>
     createdAt: timestamp,
   });
   assert.equal(member.displayName, "Ben Selleslagh");
+  const explicitMember = v.parse(CreateProjectMemberInputSchema, {
+    subject: "reviewer@example.test",
+    role: "viewer",
+    scopes: ["agent:read"],
+  });
+  assert.ok("scopes" in explicitMember);
+  assert.deepEqual(explicitMember.scopes, ["agent:read"]);
   assert.deepEqual(
     v.parse(CreateProjectMemberInputSchema, {
-      subject: "reviewer@example.test",
-      role: "viewer",
-      scopes: ["agent:read"],
-    }).scopes,
-    ["agent:read"],
+      email: "verified@example.test",
+    }),
+    { email: "verified@example.test" },
   );
   assert.equal(
     v.parse(UpdateProjectMemberInputSchema, { role: "admin" }).role,
@@ -877,4 +882,32 @@ test("agent model turn budgets accept bounded integers and preserve the configur
       }),
     );
   }
+});
+
+test("public principal role metadata comes from persisted membership and remains optional", () => {
+  const principal = {
+    id,
+    organizationId: id,
+    projectId: id,
+    kind: "human",
+    subject: "iap:accounts.google.com:123",
+    scopes: ["*"],
+  };
+  const parsed = v.parse(PublicPrincipalSchema, {
+    ...principal,
+    organizationRole: "member",
+    projectRole: "admin",
+  });
+  assert.equal(parsed.organizationRole, "member");
+  assert.equal(parsed.projectRole, "admin");
+  assert.equal(
+    v.parse(PublicPrincipalSchema, principal).organizationRole,
+    undefined,
+  );
+  assert.throws(() =>
+    v.parse(PublicPrincipalSchema, {
+      ...principal,
+      organizationRole: "superadmin",
+    }),
+  );
 });

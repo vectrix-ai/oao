@@ -135,6 +135,8 @@ export function SettingsPage() {
   const [removingMember, setRemovingMember] = useState<SettingsMember | null>(
     null,
   );
+  const [removingProjectMember, setRemovingProjectMember] =
+    useState<SettingsMember | null>(null);
   const [creatingProject, setCreatingProject] = useState(false);
   const [deletingProject, setDeletingProject] =
     useState<SettingsProject | null>(null);
@@ -174,7 +176,8 @@ export function SettingsPage() {
       void queryClient.invalidateQueries({ queryKey: ["settings"] });
       notify("Member role updated.");
     },
-    onError: () => notify("Member role could not be updated.", "danger"),
+    onError: (error) =>
+      notify(error.message || "Member role could not be updated.", "danger"),
   });
   const removeMember = useMutation({
     mutationFn: (memberId: string) => api.removeMember(memberId),
@@ -182,6 +185,14 @@ export function SettingsPage() {
       setRemovingMember(null);
       void queryClient.invalidateQueries({ queryKey: ["settings"] });
       notify("Project member removed.");
+    },
+  });
+  const removeMemberFromProject = useMutation({
+    mutationFn: (memberId: string) => api.removeMemberFromProject(memberId),
+    onSuccess: () => {
+      setRemovingProjectMember(null);
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      notify("Project access removed.");
     },
   });
   const createProject = useMutation({
@@ -238,7 +249,12 @@ export function SettingsPage() {
             }
           : {})}
         actions={
-          action ? (
+          action &&
+          !(
+            route === "members" &&
+            query.data.authProvider === "iap" &&
+            !query.data.canManageIapMembers
+          ) ? (
             <Button
               variant="primary"
               icon={
@@ -282,6 +298,7 @@ export function SettingsPage() {
           updateMemberRole.mutate({ memberId, role })
         }
         onRemoveMember={setRemovingMember}
+        onRemoveMemberFromProject={setRemovingProjectMember}
         onDeleteProject={setDeletingProject}
         onOpenProject={(project) => openProject.mutate(project)}
         {...(openProject.isPending && openProject.variables
@@ -290,6 +307,7 @@ export function SettingsPage() {
       />
       {addingMember ? (
         <AddMemberDialog
+          iap={query.data.authProvider === "iap"}
           pending={addMember.isPending}
           error={addMember.error}
           onClose={() => {
@@ -299,8 +317,24 @@ export function SettingsPage() {
           onSubmit={(input) => addMember.mutate(input)}
         />
       ) : null}
+      {removingProjectMember ? (
+        <RemoveMemberDialog
+          organizationWide={false}
+          member={removingProjectMember}
+          pending={removeMemberFromProject.isPending}
+          error={removeMemberFromProject.error}
+          onClose={() => {
+            removeMemberFromProject.reset();
+            setRemovingProjectMember(null);
+          }}
+          onConfirm={() =>
+            removeMemberFromProject.mutate(removingProjectMember.id)
+          }
+        />
+      ) : null}
       {removingMember ? (
         <RemoveMemberDialog
+          organizationWide={query.data.authProvider === "iap"}
           member={removingMember}
           pending={removeMember.isPending}
           error={removeMember.error}
@@ -364,6 +398,7 @@ function SettingsBody({
   updatingMemberId,
   onUpdateMemberRole,
   onRemoveMember,
+  onRemoveMemberFromProject,
   onDeleteProject,
   onOpenProject,
   openingProjectId,
@@ -373,6 +408,7 @@ function SettingsBody({
   readonly updatingMemberId?: string;
   readonly onUpdateMemberRole: (memberId: string, role: MemberRole) => void;
   readonly onRemoveMember: (member: SettingsMember) => void;
+  readonly onRemoveMemberFromProject: (member: SettingsMember) => void;
   readonly onDeleteProject: (project: SettingsProject) => void;
   readonly onOpenProject: (project: SettingsProject) => void;
   readonly openingProjectId?: string;
@@ -470,13 +506,23 @@ function SettingsBody({
         description="Add a principal with the least project access it needs."
       />
     ) : (
-      <TableCard label="Members table" caption="Members of the current project">
+      <TableCard
+        label="Members table"
+        caption={
+          data.authProvider === "iap"
+            ? "IAP organization access. Owners can grant Owner or Admin access; admins can grant Admin access. Changes apply to existing project memberships; lowering access also revokes keys created by that user."
+            : "Members of the current project"
+        }
+      >
         <thead>
           <tr>
             <th>Member</th>
             <th>Email</th>
             <th>Scopes</th>
-            <th>Role</th>
+            <th>
+              {data.authProvider === "iap" ? "Organization role" : "Role"}
+            </th>
+            {data.authProvider === "iap" ? <th>Project role</th> : null}
             <th>
               <span className="sr-only">Actions</span>
             </th>
@@ -507,8 +553,19 @@ function SettingsBody({
               <td>
                 <Select
                   aria-label={`Role for ${member.name}`}
-                  value={member.role}
-                  disabled={member.current || updatingMemberId === member.id}
+                  value={
+                    data.authProvider === "iap"
+                      ? (member.organizationRole ?? "")
+                      : member.role
+                  }
+                  disabled={
+                    member.current ||
+                    updatingMemberId === member.id ||
+                    (data.authProvider === "iap" &&
+                      (!data.canManageIapMembers ||
+                        (member.organizationRole === "owner" &&
+                          !data.canGrantIapOwner)))
+                  }
                   onChange={(event) =>
                     onUpdateMemberRole(
                       member.id,
@@ -516,15 +573,51 @@ function SettingsBody({
                     )
                   }
                 >
-                  <option value="owner">Owner</option>
+                  {data.authProvider !== "iap" ||
+                  data.canGrantIapOwner ||
+                  member.organizationRole === "owner" ? (
+                    <option value="owner">Owner</option>
+                  ) : null}
+                  {data.authProvider === "iap" && !member.organizationRole ? (
+                    <option value="" disabled>
+                      No organization role
+                    </option>
+                  ) : null}
                   <option value="admin">Admin</option>
                   <option value="member">Member</option>
                   <option value="viewer">Viewer</option>
                 </Select>
               </td>
+              {data.authProvider === "iap" ? (
+                <td>
+                  <StatusChip value={member.role} />
+                </td>
+              ) : null}
               <td className="cell-actions">
                 {member.current ? (
                   <StatusChip value="you" />
+                ) : data.authProvider === "iap" &&
+                  (!data.canManageIapMembers ||
+                    (member.organizationRole === "owner" &&
+                      !data.canGrantIapOwner)) ? null : data.authProvider ===
+                  "iap" ? (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onRemoveMemberFromProject(member)}
+                    >
+                      Remove from project
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      icon={<Trash2 size={14} />}
+                      onClick={() => onRemoveMember(member)}
+                    >
+                      Remove organization access
+                    </Button>
+                  </>
                 ) : (
                   <Button
                     size="sm"
@@ -1495,19 +1588,25 @@ const DEFAULT_MEMBER_SCOPES = new Set([
 ]);
 
 function AddMemberDialog({
+  iap,
   pending,
   error,
   onClose,
   onSubmit,
 }: {
+  readonly iap: boolean;
   readonly pending: boolean;
   readonly error: Error | null;
   readonly onClose: () => void;
-  readonly onSubmit: (input: {
-    readonly subject: string;
-    readonly role: MemberRole;
-    readonly scopes: readonly string[];
-  }) => void;
+  readonly onSubmit: (
+    input:
+      | {
+          readonly subject: string;
+          readonly role: MemberRole;
+          readonly scopes: readonly string[];
+        }
+      | { readonly email: string },
+  ) => void;
 }) {
   const [subject, setSubject] = useState("");
   const [role, setRole] = useState<MemberRole>("member");
@@ -1516,22 +1615,38 @@ function AddMemberDialog({
   );
   const subjectError =
     subject.trim().length === 0
-      ? "Principal subject is required."
-      : subject.trim().length > 500
-        ? "Principal subject must contain at most 500 characters."
-        : undefined;
+      ? iap
+        ? "User email is required."
+        : "Principal subject is required."
+      : iap && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/u.test(subject.trim())
+        ? "Enter a valid email address."
+        : subject.trim().length > (iap ? 320 : 500)
+          ? iap
+            ? "User email must contain at most 320 characters."
+            : "Principal subject must contain at most 500 characters."
+          : undefined;
   const scopesError =
-    scopes.size === 0 ? "Select at least one project scope." : undefined;
+    !iap && scopes.size === 0
+      ? "Select at least one project scope."
+      : undefined;
   return (
     <Dialog
       title="Add project member"
-      description="Create or update an OAO principal in the current project. WorkOS users must also be provisioned to this project before they can sign in."
-      wide
+      description={
+        iap
+          ? "Grant an existing IAP organization user access to the current project. The user must have signed in to OAO at least once."
+          : "Create or update an OAO principal in the current project. WorkOS users must also be provisioned to this project before they can sign in."
+      }
+      wide={!iap}
       onClose={onClose}
       onSubmit={(event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
         if (!subjectError && !scopesError)
-          onSubmit({ subject: subject.trim(), role, scopes: [...scopes] });
+          onSubmit(
+            iap
+              ? { email: subject.trim().toLowerCase() }
+              : { subject: subject.trim(), role, scopes: [...scopes] },
+          );
       }}
       footer={
         <>
@@ -1550,66 +1665,76 @@ function AddMemberDialog({
       }
     >
       <Field
-        label="Principal subject"
-        hint="Use a stable internal subject or email. This value is not a WorkOS invitation."
+        label={iap ? "User email" : "Principal subject"}
+        hint={
+          iap
+            ? "Use the verified email the user signed in with through Google IAP."
+            : "Use a stable internal subject or email. This value is not a WorkOS invitation."
+        }
         {...(subject.length > 0 && subjectError ? { error: subjectError } : {})}
       >
         <Input
           autoFocus
           value={subject}
-          maxLength={500}
+          maxLength={iap ? 320 : 500}
           placeholder="operator@example.com"
           onChange={(event) => setSubject(event.target.value)}
         />
       </Field>
-      <Field label="Project role">
-        <Select
-          value={role}
-          onChange={(event) => setRole(event.target.value as MemberRole)}
-        >
-          <option value="owner">Owner</option>
-          <option value="admin">Admin</option>
-          <option value="member">Member</option>
-          <option value="viewer">Viewer</option>
-        </Select>
-      </Field>
-      <fieldset className="scope-picker">
-        <legend>Project scopes</legend>
-        <span className="hint">
-          Select only the API capabilities this principal needs.
-        </span>
-        <div className="scope-picker-grid">
-          {AUTHORIZATION_SCOPE_CATALOG.map(([scope, description]) => (
-            <CheckboxRow
-              key={scope}
-              label={scope}
-              description={description}
-              checked={scopes.has(scope)}
-              onChange={(event) => {
-                setScopes((current) => {
-                  const next = new Set(current);
-                  if (event.target.checked) next.add(scope);
-                  else next.delete(scope);
-                  return next;
-                });
-              }}
-            />
-          ))}
-        </div>
-        {scopesError ? <FormError>{scopesError}</FormError> : null}
-      </fieldset>
+      {iap ? null : (
+        <>
+          <Field label="Project role">
+            <Select
+              value={role}
+              onChange={(event) => setRole(event.target.value as MemberRole)}
+            >
+              <option value="owner">Owner</option>
+              <option value="admin">Admin</option>
+              <option value="member">Member</option>
+              <option value="viewer">Viewer</option>
+            </Select>
+          </Field>
+          <fieldset className="scope-picker">
+            <legend>Project scopes</legend>
+            <span className="hint">
+              Select only the API capabilities this principal needs.
+            </span>
+            <div className="scope-picker-grid">
+              {AUTHORIZATION_SCOPE_CATALOG.map(([scope, description]) => (
+                <CheckboxRow
+                  key={scope}
+                  label={scope}
+                  description={description}
+                  checked={scopes.has(scope)}
+                  onChange={(event) => {
+                    setScopes((current) => {
+                      const next = new Set(current);
+                      if (event.target.checked) next.add(scope);
+                      else next.delete(scope);
+                      return next;
+                    });
+                  }}
+                />
+              ))}
+            </div>
+            {scopesError ? <FormError>{scopesError}</FormError> : null}
+          </fieldset>
+        </>
+      )}
       {error ? <FormError>{error.message}</FormError> : null}
     </Dialog>
   );
 }
 
 function RemoveMemberDialog({
+  organizationWide,
   member,
   pending,
   error,
   onClose,
   onConfirm,
 }: {
+  readonly organizationWide: boolean;
   readonly member: SettingsMember;
   readonly pending: boolean;
   readonly error: Error | null;
@@ -1619,7 +1744,11 @@ function RemoveMemberDialog({
   return (
     <Dialog
       title={`Remove ${member.name}`}
-      description="This removes the principal's membership from the current project. It does not delete the WorkOS user."
+      description={
+        organizationWide
+          ? "This removes organization access across existing projects and revokes API keys created by this user. Their IAP identity remains blocked from automatic rejoining."
+          : "This removes the user's membership from the current project without changing their organization role or access to other projects."
+      }
       onClose={onClose}
       footer={
         <>
@@ -1627,13 +1756,28 @@ function RemoveMemberDialog({
             Cancel
           </Button>
           <Button variant="danger" loading={pending} onClick={onConfirm}>
-            {pending ? "Removing…" : "Remove member"}
+            {pending
+              ? "Removing…"
+              : organizationWide
+                ? "Remove organization access"
+                : "Remove from project"}
           </Button>
         </>
       }
     >
-      <Alert tone="warning" title="Project access will be revoked">
-        {member.subject} will no longer resolve as a member of this project.
+      <Alert
+        tone="warning"
+        title={
+          organizationWide
+            ? "Organization access will be revoked"
+            : "Project access will be revoked"
+        }
+      >
+        {member.subject} will lose{" "}
+        {organizationWide
+          ? "access to this organization"
+          : "membership of this project"}
+        .
       </Alert>
       {error ? <FormError>{error.message}</FormError> : null}
     </Dialog>

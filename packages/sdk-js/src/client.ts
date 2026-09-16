@@ -268,6 +268,7 @@ export class OaoClient {
     return this.#write(this.routes.members(projectId), "POST", input, options);
   }
 
+  /** IAP: set organization access and scopes; only owners may grant or change Owner access. */
   updateMember(
     projectId: string,
     memberId: string,
@@ -289,6 +290,20 @@ export class OaoClient {
   ): Promise<void> {
     return this.#write(
       this.routes.member(projectId, memberId),
+      "DELETE",
+      undefined,
+      options,
+    );
+  }
+
+  /** IAP: remove only this project membership; organization access is retained. */
+  removeMemberFromProject(
+    projectId: string,
+    memberId: string,
+    options: WriteOptions,
+  ): Promise<void> {
+    return this.#write(
+      this.routes.memberProjectAccess(projectId, memberId),
       "DELETE",
       undefined,
       options,

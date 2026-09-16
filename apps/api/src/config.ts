@@ -2,8 +2,6 @@ export type AuthProvider = "development" | "iap" | "workos";
 
 export interface IapServerConfiguration {
   readonly expectedAudience: string;
-  readonly organizationId: string;
-  readonly projectId: string;
 }
 
 export interface WorkOsServerConfiguration {
@@ -88,14 +86,6 @@ export function loadServerConfiguration(
             expectedAudience: validateIapAudience(
               required(environment, "IAP_EXPECTED_AUDIENCE"),
             ),
-            organizationId: validateUuid(
-              required(environment, "IAP_ORGANIZATION_ID"),
-              "IAP_ORGANIZATION_ID",
-            ),
-            projectId: validateUuid(
-              required(environment, "IAP_PROJECT_ID"),
-              "IAP_PROJECT_ID",
-            ),
           },
         }
       : {}),
@@ -138,12 +128,6 @@ function validateIapAudience(value: string): string {
       "IAP_EXPECTED_AUDIENCE must be a Cloud Run IAP resource audience",
     );
   return value;
-}
-
-function validateUuid(value: string, name: string): string {
-  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(value))
-    throw new Error(`${name} must be a UUID`);
-  return value.toLowerCase();
 }
 
 function parsePort(value: string | undefined): number {

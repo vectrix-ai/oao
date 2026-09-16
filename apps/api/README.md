@@ -27,27 +27,27 @@ development authentication when `NODE_ENV` is not `development`.
 
 ## Google IAP
 
-Set `AUTH_PROVIDER=iap`, `IAP_EXPECTED_AUDIENCE`, `IAP_ORGANIZATION_ID`, and
-`IAP_PROJECT_ID`. OAO verifies Google's signed `x-goog-iap-jwt-assertion`
-against the exact Cloud Run audience and maps its immutable subject to a
-pre-provisioned OAO principal. Unsigned identity headers are ignored.
+Set `AUTH_PROVIDER=iap` and the exact `IAP_EXPECTED_AUDIENCE`. The app verifies
+Google's signed assertion; unsigned identity headers are ignored.
 
-Provision an existing principal and membership before its first IAP request:
+On an empty database, startup creates **Default organization** and **Default
+project**. Names are code constants; generated IDs live in PostgreSQL.
+The first verified human login becomes owner; later users join as members.
+No setup screen, bootstrap command or tenant configuration variables are needed.
+Only trusted people should have IAP access before the first login.
+Service accounts and API keys cannot become owners through onboarding.
 
-```sh
-DATABASE_URL=postgresql://... \
-OAO_ORGANIZATION_ID=00000000-0000-4000-8000-000000000001 \
-OAO_PROJECT_ID=00000000-0000-4000-8000-000000000002 \
-OAO_PRINCIPAL_ID=00000000-0000-4000-8000-000000000003 \
-IAP_EXPECTED_AUDIENCE=/projects/123456789/locations/europe-west1/services/oao-api \
-IAP_USER_EMAIL=user@example.com \
-pnpm --filter @oao/api provision:iap
-```
-
-The first signed assertion for that email binds its immutable IAP `sub` to the
-existing principal. Operators that already know the `sub` may additionally set
-`IAP_SUBJECT`. The command never creates a principal or grants membership and
-refuses remapping an audience or identity to a different target.
+Existing linked tenants, users and roles are preserved. Ownership is claimed
+once, atomically with membership and audit writes; restarts and removed owners
+never reopen it. IAP organization Owners can appoint additional Owners from
+Members; Owners and Admins can grant Admin access. Role changes update effective
+permissions and existing project memberships together. Admin grants have explicit
+scopes, while Owner grants use `*`. Demotion/removal revokes user-created API keys.
+From a project's **Members** page, an Owner/Admin can grant that project access
+to a verified IAP organization user by email. The user must sign in once first;
+the new project membership inherits their organization role and scope profile.
+Project-only removal does not change organization access or other projects.
+See the authentication reference and GCP guide for safeguards and rollout ordering.
 
 ## WorkOS AuthKit
 
@@ -76,8 +76,8 @@ Environment contract:
 - `DATABASE_URL`: PostgreSQL connection string.
 - `PORT`: optional, defaults to `3000`.
 - `API_KEY_PEPPER`: required outside local development.
-- `IAP_EXPECTED_AUDIENCE`, `IAP_ORGANIZATION_ID`, `IAP_PROJECT_ID`: required
-  only for IAP.
+- `IAP_EXPECTED_AUDIENCE`: required only for IAP. Tenant IDs are database-owned;
+  the retired `IAP_ORGANIZATION_ID` and `IAP_PROJECT_ID` variables are ignored.
 - `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_COOKIE_PASSWORD` (at least 32
   characters), `WORKOS_WEBHOOK_SECRET`: required only for WorkOS.
 - `WORKOS_COOKIE_MAX_AGE`: optional refresh-cookie lifetime in seconds;

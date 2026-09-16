@@ -116,15 +116,18 @@ audience:
 
 ```dotenv
 IAP_EXPECTED_AUDIENCE=/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<CLOUD_RUN_SERVICE>
-IAP_ORGANIZATION_ID=<OAO_ORGANIZATION_UUID>
-IAP_PROJECT_ID=<OAO_PROJECT_UUID>
 ```
 
-IAP controls access at the edge; OAO still requires a provisioned principal,
-membership, and scopes. Keep the worker private and do not use service-account
-keys. The [Authentication reference](/reference/authentication) documents the
-WorkOS and IAP settings, provisioning commands, and service-to-service
-credentials.
+IAP controls admission at the edge. On a fresh installation, the first verified
+human becomes the organization owner; later verified humans join the default
+project as members. New projects initially include only their creator. An Owner
+or Admin can use the project's **Members** page to add an existing IAP user by
+their verified email after that user has signed in once. **Remove from project**
+keeps the user's organization access, while **Remove organization access** is
+the organization-wide offboarding action. The default project's membership
+cannot be removed because it anchors IAP console authentication. Keep the
+worker private and do not use service-account keys. The [Authentication reference](/reference/authentication)
+documents organization roles, project access, and service-to-service credentials.
 
 ## Verify
 

@@ -64,6 +64,8 @@ interface ContextResponse {
     readonly subject: string;
     readonly displayName?: string;
     readonly scopes: readonly string[];
+    readonly organizationRole?: "owner" | "admin" | "member" | "viewer" | null;
+    readonly projectRole?: "owner" | "admin" | "member" | "viewer" | null;
   };
   readonly organization: { readonly id: string; readonly name: string };
   readonly project: { readonly id: string; readonly name: string };
@@ -148,9 +150,10 @@ function contextView(response: ContextResponse): ProjectContext {
     currentPrincipal: {
       ...response.principal,
       displayName: displayName || fallbackDisplayName || "Authenticated user",
-      role: response.principal.scopes.includes("*")
-        ? "All scopes"
-        : response.principal.kind.replaceAll("_", " "),
+      role:
+        response.principal.organizationRole ??
+        response.principal.projectRole ??
+        response.principal.kind.replaceAll("_", " "),
     },
     organizations: response.organizations,
     projects: response.projects,
@@ -2334,6 +2337,15 @@ export class HttpConsoleApi implements ConsoleApi {
       ),
     ]);
     return {
+      ...(context.authProvider ? { authProvider: context.authProvider } : {}),
+      canGrantIapOwner:
+        context.currentPrincipal?.kind === "human" &&
+        context.currentPrincipal.organizationRole === "owner",
+      canManageIapMembers:
+        context.currentPrincipal?.kind === "human" &&
+        ["owner", "admin"].includes(
+          context.currentPrincipal.organizationRole ?? "",
+        ),
       organization: {
         id: String(organization.id ?? context.organization.id),
         name: String(organization.name ?? context.organization.name),
@@ -2353,6 +2365,12 @@ export class HttpConsoleApi implements ConsoleApi {
         subject: String(member.subject ?? ""),
         ...(member.email ? { email: String(member.email) } : {}),
         role: String(member.role) as SettingsData["members"][number]["role"],
+        organizationRole:
+          member.organizationRole == null
+            ? null
+            : (String(
+                member.organizationRole,
+              ) as SettingsData["members"][number]["role"]),
         scopes: Array.isArray(member.scopes) ? member.scopes.map(String) : [],
         current:
           String(member.id ?? member.principalId) ===
@@ -2392,6 +2410,13 @@ export class HttpConsoleApi implements ConsoleApi {
     await this.#projectRequest(`/members/${encodeURIComponent(memberId)}`, {
       method: "DELETE",
     });
+  };
+
+  removeMemberFromProject = async (memberId: string): Promise<void> => {
+    await this.#projectRequest(
+      `/members/${encodeURIComponent(memberId)}/project-access`,
+      { method: "DELETE" },
+    );
   };
 
   createProject = async (

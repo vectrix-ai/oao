@@ -38,6 +38,33 @@ function jsonResponse(body: unknown, status = 200): Response {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("HTTP console adapter", () => {
+  it.each(["owner", "admin", "member", "viewer"])(
+    "displays the persisted %s organization role independently of scopes",
+    async (role) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          jsonResponse({
+            ...CONTEXT,
+            authProvider: "iap",
+            principal: {
+              ...CONTEXT.principal,
+              organizationRole: role,
+              projectRole: "owner",
+              scopes: ["*"],
+            },
+          }),
+        ),
+      );
+      const result = await new HttpConsoleApi().getContext();
+      expect(result.currentPrincipal).toMatchObject({
+        role,
+        organizationRole: role,
+        projectRole: "owner",
+      });
+    },
+  );
+
   it("maps authenticated context and includes cookie credentials", async () => {
     const fetchMock = vi.fn(async () => jsonResponse(CONTEXT));
     vi.stubGlobal("fetch", fetchMock);
@@ -48,7 +75,7 @@ describe("HTTP console adapter", () => {
       currentPrincipal: {
         id: CONTEXT.principal.id,
         scopes: ["*"],
-        role: "All scopes",
+        role: "human",
         displayName: "development user",
       },
     });
@@ -162,11 +189,13 @@ describe("HTTP console adapter", () => {
     });
     await api.updateMemberRole("member/one", "member");
     await api.removeMember("member/one");
+    await api.removeMemberFromProject("member/one");
 
     expect(fetchMock.mock.calls.slice(1).map(([url]) => url)).toEqual([
       `/v1/projects/${PROJECT_ID}/members`,
       `/v1/projects/${PROJECT_ID}/members/member%2Fone`,
       `/v1/projects/${PROJECT_ID}/members/member%2Fone`,
+      `/v1/projects/${PROJECT_ID}/members/member%2Fone/project-access`,
     ]);
     expect(
       (fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.method,
@@ -176,6 +205,9 @@ describe("HTTP console adapter", () => {
     ).toBe("PATCH");
     expect(
       (fetchMock.mock.calls[3]?.[1] as RequestInit | undefined)?.method,
+    ).toBe("DELETE");
+    expect(
+      (fetchMock.mock.calls[4]?.[1] as RequestInit | undefined)?.method,
     ).toBe("DELETE");
   });
 

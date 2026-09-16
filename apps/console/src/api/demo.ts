@@ -1173,6 +1173,7 @@ export class DemoConsoleApi implements ConsoleApi {
     const current =
       this.#projects.find((project) => project.current) ?? this.#projects[0];
     return {
+      authProvider: "development",
       organization: { id: ORG_ID, name: "Example operations" },
       project: current
         ? { id: current.id, name: current.name }
@@ -1182,7 +1183,9 @@ export class DemoConsoleApi implements ConsoleApi {
         kind: "human" as const,
         subject: "demo.operator@example.test",
         displayName: "Demo Operator",
-        role: "All scopes",
+        role: "owner",
+        organizationRole: "owner",
+        projectRole: "owner",
         scopes: ["*"],
       },
       organizations: [{ id: ORG_ID, name: "Example operations" }],
@@ -2586,10 +2589,13 @@ export class DemoConsoleApi implements ConsoleApi {
     return structuredClone(created);
   }
 
-  async getSettings() {
+  async getSettings(): Promise<SettingsData> {
     this.#guard();
     return structuredClone({
       ...settingsSeed,
+      authProvider: "development" as const,
+      canManageIapMembers: false,
+      canGrantIapOwner: false,
       projects: this.#projects,
       members: this.#members,
       apiKeys: this.#apiKeys,
@@ -2600,6 +2606,13 @@ export class DemoConsoleApi implements ConsoleApi {
     input: Parameters<ConsoleApi["addMember"]>[0],
   ): Promise<void> {
     this.#guard();
+    if ("email" in input) {
+      const existing = this.#members.find(
+        (member) => member.email?.toLowerCase() === input.email.toLowerCase(),
+      );
+      if (!existing) throw new Error("The user must sign in through IAP first");
+      return;
+    }
     const existing = this.#members.find(
       (member) => member.subject === input.subject,
     );
@@ -2649,6 +2662,10 @@ export class DemoConsoleApi implements ConsoleApi {
     if (member.current)
       throw new Error("The active principal cannot remove itself");
     this.#members = this.#members.filter((entry) => entry.id !== memberId);
+  }
+
+  async removeMemberFromProject(memberId: string): Promise<void> {
+    return this.removeMember(memberId);
   }
 
   async createProject(

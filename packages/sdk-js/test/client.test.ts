@@ -227,6 +227,11 @@ test("client manages project membership with exact project-scoped writes", async
     },
     { idempotencyKey: "member-create-1" },
   );
+  await client.addMember(
+    "project-1",
+    { email: "verified@example.test" },
+    { idempotencyKey: "member-iap-create-1" },
+  );
   await client.updateMember(
     "project-1",
     "member-1",
@@ -235,6 +240,9 @@ test("client manages project membership with exact project-scoped writes", async
   );
   await client.removeMember("project-1", "member-1", {
     idempotencyKey: "member-remove-1",
+  });
+  await client.removeMemberFromProject("project-1", "member-1", {
+    idempotencyKey: "member-project-remove-1",
   });
 
   assert.equal(
@@ -247,10 +255,21 @@ test("client manages project membership with exact project-scoped writes", async
     role: "viewer",
     scopes: ["agent:read"],
   });
-  assert.equal(requests[1]?.method, "PATCH");
-  assert.deepEqual(await requests[1]?.json(), { role: "member" });
-  assert.equal(requests[2]?.method, "DELETE");
-  assert.equal(requests[2]?.headers.get("idempotency-key"), "member-remove-1");
+  assert.deepEqual(await requests[1]?.json(), {
+    email: "verified@example.test",
+  });
+  assert.equal(requests[2]?.method, "PATCH");
+  assert.deepEqual(await requests[2]?.json(), { role: "member" });
+  assert.equal(requests[3]?.method, "DELETE");
+  assert.equal(requests[3]?.headers.get("idempotency-key"), "member-remove-1");
+  assert.equal(
+    requests[4]?.url,
+    "https://api.example.test/v1/projects/project-1/members/member-1/project-access",
+  );
+  assert.equal(
+    requests[4]?.headers.get("idempotency-key"),
+    "member-project-remove-1",
+  );
 });
 
 test("client manages redacted MCP resources", async () => {
@@ -1002,4 +1021,28 @@ test("live model catalog preserves discovery-only availability", async () => {
     providerId: "provider-1",
   });
   assert.deepEqual(result.data[0], entry);
+});
+
+test("IAP role updates retain organization role and effective scopes in the response", async () => {
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (_input, init) => {
+      assert.equal(init?.method, "PATCH");
+      assert.deepEqual(JSON.parse(String(init?.body)), { role: "admin" });
+      return Response.json({
+        id: "member-1",
+        role: "admin",
+        organizationRole: "admin",
+        scopes: ["project:admin"],
+      });
+    },
+  });
+  const member = await client.updateMember(
+    "project-1",
+    "member-1",
+    { role: "admin" },
+    { idempotencyKey: "iap-admin" },
+  );
+  assert.equal(member.organizationRole, "admin");
+  assert.deepEqual(member.scopes, ["project:admin"]);
 });

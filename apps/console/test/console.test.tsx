@@ -42,6 +42,75 @@ function renderConsole(
 }
 
 describe("management console", () => {
+  it.each(["owner", "admin"] as const)(
+    "lets an IAP organization %s grant only the allowed roles through Members",
+    async (role) => {
+      const user = userEvent.setup();
+      const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+      const settings = await api.getSettings();
+      vi.spyOn(api, "getSettings").mockResolvedValue({
+        ...settings,
+        authProvider: "iap",
+        canManageIapMembers: true,
+        canGrantIapOwner: role === "owner",
+        members: settings.members.map((member) => ({
+          ...member,
+          organizationRole: member.current ? role : "member",
+        })),
+      });
+      const add = vi.spyOn(api, "addMember").mockResolvedValue();
+      const update = vi.spyOn(api, "updateMemberRole").mockResolvedValue();
+      const removeFromProject = vi
+        .spyOn(api, "removeMemberFromProject")
+        .mockResolvedValue();
+      renderConsole("/members", api);
+      const select = await screen.findByLabelText("Role for Review Operator");
+      expect(
+        screen.getByRole("columnheader", { name: "Organization role" }),
+      ).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Add member" }));
+      const addDialog = within(
+        screen.getByRole("dialog", { name: "Add project member" }),
+      );
+      await user.type(
+        addDialog.getByLabelText("User email"),
+        "new.user@example.test",
+      );
+      await user.click(addDialog.getByRole("button", { name: "Add member" }));
+      await waitFor(() =>
+        expect(add).toHaveBeenCalledWith({ email: "new.user@example.test" }),
+      );
+      expect(
+        within(select).queryByRole("option", { name: "Owner" }) !== null,
+      ).toBe(role === "owner");
+      await user.selectOptions(select, role === "owner" ? "owner" : "admin");
+      await waitFor(() =>
+        expect(update).toHaveBeenCalledWith(
+          "34343434-3434-4343-8343-343434343434",
+          role === "owner" ? "owner" : "admin",
+        ),
+      );
+      const reviewRow = screen.getByText("Review Operator").closest("tr");
+      expect(reviewRow).not.toBeNull();
+      if (!reviewRow) throw new Error("Review Operator row was not rendered");
+      await user.click(
+        within(reviewRow).getByRole("button", { name: "Remove from project" }),
+      );
+      const removeDialog = within(
+        screen.getByRole("dialog", { name: "Remove Review Operator" }),
+      );
+      await user.click(
+        removeDialog.getByRole("button", { name: "Remove from project" }),
+      );
+      await waitFor(() =>
+        expect(removeFromProject).toHaveBeenCalledWith(
+          "34343434-3434-4343-8343-343434343434",
+        ),
+      );
+      expect(screen.getByLabelText("Role for Demo Operator")).toBeDisabled();
+    },
+  );
+
   it("shows WorkOS display metadata and provides logout", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
@@ -181,7 +250,11 @@ describe("management console", () => {
         AUTHORIZATION_SCOPE_CATALOG.map(([scope]) => scope),
       ),
     });
-    expect(addMember.mock.calls[0]?.[0].scopes).toHaveLength(
+    const explicitInput = addMember.mock.calls[0]?.[0];
+    expect(explicitInput && "scopes" in explicitInput).toBe(true);
+    if (!explicitInput || !("scopes" in explicitInput))
+      throw new Error("Explicit member input was not submitted");
+    expect(explicitInput.scopes).toHaveLength(
       AUTHORIZATION_SCOPE_CATALOG.length,
     );
     const memberName = await screen.findByText("new reviewer");
@@ -202,7 +275,9 @@ describe("management console", () => {
     const remove = within(
       screen.getByRole("dialog", { name: "Remove new reviewer" }),
     );
-    await user.click(remove.getByRole("button", { name: "Remove member" }));
+    await user.click(
+      remove.getByRole("button", { name: "Remove from project" }),
+    );
     await waitFor(() =>
       expect(screen.queryByText("new reviewer")).not.toBeInTheDocument(),
     );
@@ -230,7 +305,7 @@ describe("management console", () => {
     ).toBeInTheDocument();
     expect(await screen.findByText("Support operator")).toBeInTheDocument();
     expect(await screen.findByText("Demo Operator")).toBeInTheDocument();
-    expect(screen.getByText("All scopes")).toBeInTheDocument();
+    expect(screen.getByText("owner")).toBeInTheDocument();
     await user.type(
       screen.getByRole("searchbox", { name: "Search agents" }),
       "not-a-real-agent",

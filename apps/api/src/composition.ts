@@ -10,6 +10,7 @@ import type { WebhookAuthenticationAdapter } from "./app.js";
 import { seedDevelopment } from "./bootstrap.js";
 import type { ApiServerConfiguration } from "./config.js";
 import { PostgresIapTenantResolver } from "./iap-postgres.js";
+import { ensureIapDefaultTenant } from "./iap-defaults.js";
 import {
   PostgresWorkOsReconciler,
   PostgresWorkOsTenantResolver,
@@ -33,6 +34,7 @@ export async function composeAuthentication(
   if (configuration.authProvider === "iap") {
     const iap = configuration.iap;
     if (!iap) throw new Error("IAP configuration is required");
+    const tenant = await ensureIapDefaultTenant(pool, iap.expectedAudience);
     return {
       auth: new IapAuthAdapter({
         verifier: new GoogleIapAssertionVerifier({
@@ -41,8 +43,7 @@ export async function composeAuthentication(
         tenants: new PostgresIapTenantResolver({
           pool,
           expectedAudience: iap.expectedAudience,
-          organizationId: iap.organizationId,
-          projectId: iap.projectId,
+          ...tenant,
         }),
       }),
     };
