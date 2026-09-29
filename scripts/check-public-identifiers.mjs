@@ -6,6 +6,8 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+// SHA-256 of single lowercase tokens: runs of letters, digits, "-" and "_".
+// Hash a repository's name without its owner; "owner/name" never matches.
 export const DENIED_TOKEN_DIGESTS = new Set([
   // Google Cloud project of a private deployment.
   "5bccce2206ac6594e65f2ebe7bd3d6a0cf9463cdd8b64d5b7f8f254647677b75",

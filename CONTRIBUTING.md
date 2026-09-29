@@ -143,8 +143,9 @@ projects, registries, service accounts, and repositories in code, docs, tests,
 and fixtures. The **Public identifiers** workflow fails when a tracked file
 names a known private deployment, or a Google service account or Artifact
 Registry path outside a placeholder project. Its denied names are stored as
-SHA-256 digests in `scripts/check-public-identifiers.mjs`; add a digest there
-rather than the name itself.
+SHA-256 digests in `scripts/check-public-identifiers.mjs`; add the digest of
+a single lowercase token there (a repository's name without its owner) rather
+than the name itself.
 
 ## Downstream distributions
 

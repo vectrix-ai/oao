@@ -48,18 +48,24 @@ commits that are not in \`$base_branch\`; delete it if they are not needed."
   exit 0
 fi
 
-# Rebuild unless the branch already merges this upstream commit into the
-# current base, so a conflicting pull request is retried once the base changes.
-if [ -n "$pr" ] && [ -n "$head" ] &&
-  git merge-base --is-ancestor "$upstream" "$head" &&
-  git merge-base --is-ancestor "$base" "$head"; then
-  echo "Pull request #$pr already merges $upstream_repository@$short."
-  exit 0
-fi
-
 # Keep manual commits and merge upstream on top instead of rebuilding.
 manual=
 if [ -n "$(manual_committers "$base" "$upstream")" ]; then manual=1; fi
+
+if [ -n "$head" ] && git merge-base --is-ancestor "$upstream" "$head"; then
+  # A manual branch that already has this commit is left to its authors;
+  # GitHub reports any conflicts with a newer base on the pull request, and a
+  # closed pull request stays closed until upstream moves again. A bot branch
+  # is rebuilt when the base moved, so a conflicting sync is retried.
+  if [ -n "$manual" ]; then
+    echo "$sync_branch already contains $upstream_repository@$short."
+    exit 0
+  fi
+  if [ -n "$pr" ] && git merge-base --is-ancestor "$base" "$head"; then
+    echo "Pull request #$pr already merges $upstream_repository@$short."
+    exit 0
+  fi
+fi
 
 version=$( (git show "$upstream:package.json" 2>/dev/null || true) |
   sed -nE 's/^  "version": "([^"]+)",?$/\1/p')
@@ -159,8 +165,8 @@ fi
 
 # Pull requests opened with GITHUB_TOKEN do not start workflows. Open the pull
 # request first, then push the merge so the deploy-key push runs CI. A manual
-# branch is reused as it is; otherwise the pull request opens on the upstream
-# commit.
+# branch is reused as it is (it lacks this upstream commit, so a merge or a
+# conflict follows); otherwise the pull request opens on the upstream commit.
 if [ -n "$manual" ]; then
   opened_at=$head
 else

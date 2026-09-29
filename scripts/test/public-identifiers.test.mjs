@@ -14,6 +14,13 @@ test("flags denied tokens by digest, case-insensitively", () => {
   );
 });
 
+test("finds a denied repository name inside owner/name references", () => {
+  assert.deepEqual(
+    findPrivateIdentifiers("see github.com/acme/acme-internal.git", denied),
+    [{ line: 1, reason: "private deployment name" }],
+  );
+});
+
 test("matches whole tokens only", () => {
   assert.deepEqual(
     findPrivateIdentifiers("acme-internal-docs and acme_internal", denied),

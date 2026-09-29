@@ -362,6 +362,31 @@ test("reopens from a closed pull request's manual resolution instead of replacin
   assert.equal(fixture.parents(head), `${head} ${resolution} ${later}`);
 });
 
+test("leaves a manual branch that has the upstream commit to its authors", () => {
+  const fixture = createFixture();
+  const { conflicting, resolution } = resolveConflictManually(fixture);
+  fixture.downstreamCommit("feat: unrelated downstream work", {
+    "other.txt": "other\n",
+  });
+  const callsBefore = fixture.ghState().calls.length;
+
+  fixture.sync(conflicting);
+
+  const { calls } = fixture.ghState();
+  assert.deepEqual(calls.slice(callsBefore), ["pr list"]);
+  assert.equal(fixture.syncBranch(), resolution);
+});
+
+test("keeps a closed pull request closed until upstream moves again", () => {
+  const fixture = createFixture();
+  const { conflicting } = resolveConflictManually(fixture);
+  fixture.closePullRequest();
+
+  fixture.sync(conflicting);
+
+  assert.equal(fixture.ghState().pr, null);
+});
+
 test("closes the pull request once the base branch contains upstream", () => {
   const fixture = createFixture();
   const upstream = fixture.upstreamCommit("feat: first", {
