@@ -16,6 +16,9 @@ permissions:
 
 jobs:
   check:
+    # A distribution whose delivery workflow calls this one on every push sets
+    # DELIVERY_RUNS_CI so its pushes are not checked twice.
+    if: ${{ !(vars.DELIVERY_RUNS_CI == 'true' && github.event_name == 'push' && github.workflow == 'CI') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 

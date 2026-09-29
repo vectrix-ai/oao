@@ -11,7 +11,7 @@
   },
   "scripts": {
     "build": "turbo run build",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:scripts && pnpm build",
     "dev": "turbo run dev --parallel",
     "dev:local": "infra/compose/dev-local.sh",
     "format": "prettier --write .",
@@ -26,6 +26,7 @@
     "test:harness:fresh": "infra/compose/test-harness-fresh.sh",
     "test:stack:fresh": "node --env-file-if-exists=.env infra/compose/test-stack-fresh.mjs",
     "test:postgres:fresh": "infra/compose/test-fresh.sh",
+    "test:scripts": "node --test \"scripts/test/*.test.mjs\"",
     "typecheck": "turbo run typecheck"
   },
   "devDependencies": {

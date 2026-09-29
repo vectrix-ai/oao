@@ -1,0 +1,42 @@
+name: Downstream mirror
+
+# Mirrors main to the downstream distribution's upstream-main branch; its
+# Upstream sync workflow then opens the merge pull request. See
+# CONTRIBUTING.md#downstream-distributions.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: downstream-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    if: ${{ github.repository == 'vectrix-ai/oao' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Push main to upstream-main
+        env:
+          DEPLOY_KEY: ${{ secrets.DOWNSTREAM_DEPLOY_KEY }}
+          DOWNSTREAM_REPOSITORY: ${{ secrets.DOWNSTREAM_REPOSITORY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DEPLOY_KEY" ] || [ -z "$DOWNSTREAM_REPOSITORY" ]; then
+            echo "::notice::No downstream repository is configured."
+            exit 0
+          fi
+          MIRROR_COMMIT=$GITHUB_SHA \
+            DOWNSTREAM_URL="git@github.com:${DOWNSTREAM_REPOSITORY}.git" \
+            bash scripts/with-deploy-key.sh bash scripts/downstream-mirror.sh

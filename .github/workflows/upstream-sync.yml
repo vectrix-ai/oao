@@ -1,0 +1,66 @@
+name: Upstream sync
+
+# Runs in downstream distributions of OAO. A push to upstream-main (mirrored
+# from upstream main) opens or refreshes the pull request that merges it. See
+# CONTRIBUTING.md#downstream-distributions.
+on:
+  push:
+    branches: [upstream-main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: ${{ vars.UPSTREAM_SYNC_BASE_BRANCH != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # A push runs upstream's copy of this job, so the distribution trusts
+    # upstream main here as its CI does on the sync pull request. The deploy key
+    # lives in an environment limited to upstream-main and the default branch,
+    # out of reach of pull request CI and other branches.
+    environment: upstream-sync
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      UPSTREAM_REPOSITORY: ${{ vars.UPSTREAM_REPOSITORY || 'vectrix-ai/oao' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the upstream commit
+        id: upstream
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            commit=$GITHUB_SHA
+          else
+            git fetch --quiet --no-tags \
+              "https://github.com/${UPSTREAM_REPOSITORY}.git" main
+            commit=$(git rev-parse FETCH_HEAD)
+          fi
+          echo "commit=$commit" >>"$GITHUB_OUTPUT"
+
+      - name: Open or refresh the sync pull request
+        env:
+          DEPLOY_KEY: ${{ secrets.UPSTREAM_SYNC_DEPLOY_KEY }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SYNC_BASE_BRANCH: ${{ vars.UPSTREAM_SYNC_BASE_BRANCH }}
+          UPSTREAM_SYNC_COMMIT: ${{ steps.upstream.outputs.commit }}
+          UPSTREAM_SYNC_PUSH_URL: git@github.com:${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::Set UPSTREAM_SYNC_DEPLOY_KEY to a write deploy key for this repository."
+            exit 1
+          fi
+          # The scripts come from the triggering commit, which for pushes is
+          # the upstream commit being merged.
+          bash scripts/with-deploy-key.sh bash scripts/upstream-sync.sh

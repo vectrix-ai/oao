@@ -13,6 +13,8 @@
 - Integration suites require `DATABASE_URL` and skip silently without it. Run them through the disposable harnesses (`pnpm test:postgres:fresh`, `pnpm test:stack:fresh`), never against the persistent local development database — its volume holds real local data.
 - Before committing, run `greptile review --agent`, review every finding, and fix findings that are correct.
 - Do not commit generated secrets or local `.env` files.
+- This repository is public: never add private deployment identifiers such as cloud projects, registries, service accounts, or private repository names; use placeholders. The Public identifiers workflow enforces this.
+- Shared behavior lands here first and reaches private distributions through the upstream sync pull request (`CONTRIBUTING.md#downstream-distributions`). Never edit a released migration; the migrator rejects changed checksums, so add a new migration instead.
 
 ## Package ownership
 
