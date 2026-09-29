@@ -37,6 +37,8 @@ jobs:
             echo "::notice::No downstream repository is configured."
             exit 0
           fi
-          bash scripts/with-deploy-key.sh git push --quiet \
+          # A mirror: main only moves forward and this workflow's concurrency
+          # group keeps runs in order, so force past anything else pushed there.
+          bash scripts/with-deploy-key.sh git push --quiet --force \
             "git@github.com:${DOWNSTREAM_REPOSITORY}.git" \
             "${GITHUB_SHA}:refs/heads/upstream-main"
