@@ -48,9 +48,12 @@ commits that are not in \`$base_branch\`; delete it if they are not needed."
   exit 0
 fi
 
+# Rebuild unless the branch already merges this upstream commit into the
+# current base, so a conflicting pull request is retried once the base changes.
 if [ -n "$pr" ] && [ -n "$head" ] &&
-  git merge-base --is-ancestor "$upstream" "$head"; then
-  echo "Pull request #$pr already contains $upstream_repository@$short."
+  git merge-base --is-ancestor "$upstream" "$head" &&
+  git merge-base --is-ancestor "$base" "$head"; then
+  echo "Pull request #$pr already merges $upstream_repository@$short."
   exit 0
 fi
 
@@ -144,14 +147,12 @@ if [ -n "$pr" ]; then
       "$push_url" "$result:refs/heads/$sync_branch"
   fi
   gh pr edit "$pr" --title "$title" --body-file "$body"
-  if [ -n "$manual" ]; then
-    if [ -n "$conflicts" ]; then
-      gh pr comment "$pr" --body "$upstream_repository@$short conflicts with \
+  if [ -n "$manual" ] && [ -n "$conflicts" ]; then
+    gh pr comment "$pr" --body "$upstream_repository@$short conflicts with \
 the manual resolution on this branch; see the updated description."
-    else
-      gh pr comment "$pr" \
-        --body "Merged $upstream_repository@$short into the manually resolved branch."
-    fi
+  elif [ -n "$manual" ] && [ "$result" != "$head" ]; then
+    gh pr comment "$pr" \
+      --body "Merged $upstream_repository@$short into the manually resolved branch."
   fi
   exit 0
 fi

@@ -242,6 +242,46 @@ test("rebuilds a bot-owned pull request when upstream advances", () => {
   );
 });
 
+test("leaves an up-to-date pull request alone", () => {
+  const fixture = createFixture();
+  const upstream = fixture.upstreamCommit("feat: first", {
+    "first.txt": "first\n",
+  });
+  fixture.sync(upstream);
+  const head = fixture.syncBranch();
+
+  fixture.sync(upstream);
+
+  assert.deepEqual(fixture.ghState().calls, [
+    "pr list",
+    "pr create",
+    "pr list",
+  ]);
+  assert.equal(fixture.syncBranch(), head);
+});
+
+test("retries a conflicting pull request once the base branch changes", () => {
+  const fixture = createFixture();
+  fixture.downstreamCommit("fix: downstream wording", {
+    "shared.txt": "downstream\n",
+  });
+  const upstream = fixture.upstreamCommit("fix: upstream wording", {
+    "shared.txt": "upstream\n",
+  });
+  fixture.sync(upstream);
+  const dev = fixture.downstreamCommit("fix: adopt upstream wording", {
+    "shared.txt": "upstream\n",
+  });
+
+  fixture.sync(upstream);
+
+  const { pr, calls } = fixture.ghState();
+  const head = fixture.syncBranch();
+  assert.deepEqual(calls.slice(2), ["pr list", "pr edit"]);
+  assert.equal(fixture.parents(head), `${head} ${dev} ${upstream}`);
+  assert.doesNotMatch(pr.body, /### Conflicts/);
+});
+
 /** Opens a conflicting sync and resolves it on its branch as a maintainer. */
 function resolveConflictManually(fixture) {
   fixture.downstreamCommit("fix: downstream wording", {
