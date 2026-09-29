@@ -3347,18 +3347,7 @@ export class RuntimeProjection {
     const runtimeDispatch = dispatchResult.rows[0];
     if (!runtimeDispatch) return;
     if (event.type === "turn_request") {
-      await this.appendPublicEvent(
-        runtimeDispatch,
-        event,
-        "model.invocation_started",
-        {
-          turnId: event.turnId,
-          model: event.request.requestedModel,
-          provider: event.request.providerId,
-          timeoutMs: MODEL_CALL_TIMEOUT_MS,
-        },
-        `model:${event.turnId}:started`,
-      );
+      await this.appendModelStart(runtimeDispatch, event);
       return;
     }
     if (
@@ -3685,11 +3674,35 @@ export class RuntimeProjection {
     );
   }
 
+  private appendModelStart(
+    runtimeDispatch: DispatchRow,
+    event: Extract<FlueObservation, { type: "turn_request" | "turn" }>,
+  ): Promise<void> {
+    return this.appendPublicEvent(
+      runtimeDispatch,
+      event.type === "turn"
+        ? { ...event, timestamp: turnWindow(event).startedAt.toISOString() }
+        : event,
+      "model.invocation_started",
+      {
+        turnId: event.turnId,
+        model: event.request.requestedModel,
+        provider: event.request.providerId,
+        timeoutMs: MODEL_CALL_TIMEOUT_MS,
+      },
+      `model:${event.turnId}:started`,
+    );
+  }
+
   private async projectTurn(
     runtimeDispatch: DispatchRow,
     event: Extract<FlueObservation, { type: "turn" }>,
     harnessCorrelation?: HarnessObservationCorrelation,
   ): Promise<void> {
+    // A request observation can precede the committed dispatch correlation.
+    // Repair a missing start from its outcome; the stable turn key deduplicates
+    // normal requests, delayed observations and replayed outcomes.
+    await this.appendModelStart(runtimeDispatch, event);
     const usage = event.response.usage;
     const timing = turnWindow(event);
     const thinking = turnThinking(event.response.output);
