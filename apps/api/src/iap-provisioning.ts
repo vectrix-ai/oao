@@ -36,6 +36,16 @@ export async function provisionIapIdentity(
       input.organizationId,
       input.projectId,
     ]);
+    if (iapSubject)
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+        [
+          `iap-onboarding/${input.organizationId}/${input.projectId}/${iapSubject}`,
+        ],
+      );
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+      `${input.organizationId}/${input.projectId}/${email}`,
+    ]);
     const existing = await client.query(
       `SELECT 1
        FROM oao.projects project
@@ -68,6 +78,28 @@ export async function provisionIapIdentity(
     if (tenant.rows[0]?.provider_tenant_id !== input.expectedAudience)
       throw new Error("IAP audience is already linked to a different tenant");
 
+    const mappings = await client.query<{
+      principal_id: string;
+      provider_subject: string;
+    }>(
+      `SELECT principal_id,provider_subject FROM oao.auth_identities
+       WHERE organization_id=$1 AND project_id=$2 AND provider='iap'
+         AND (provider_subject=$3 OR lower(email)=$4 OR principal_id=$5)`,
+      [
+        input.organizationId,
+        input.projectId,
+        providerSubject,
+        email,
+        input.principalId,
+      ],
+    );
+    if (mappings.rows.some((row) => row.principal_id !== input.principalId))
+      throw new Error(
+        "IAP identity or email is already linked to another principal",
+      );
+    const linkedSubject = mappings.rows[0]?.provider_subject;
+    if (iapSubject && linkedSubject && linkedSubject !== iapSubject)
+      throw new Error("IAP principal already has a different identity");
     const identity = await client.query(
       `INSERT INTO oao.auth_identities (
          organization_id,project_id,principal_id,provider,provider_subject,
@@ -83,7 +115,7 @@ export async function provisionIapIdentity(
         input.organizationId,
         input.projectId,
         input.principalId,
-        providerSubject,
+        linkedSubject ?? providerSubject,
         email,
         input.displayName ?? email,
       ],

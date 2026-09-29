@@ -61,6 +61,8 @@ export function createRoutes(apiPrefix = "/v1") {
     members: (projectId: string) => `${project(projectId)}/members`,
     member: (projectId: string, memberId: string) =>
       `${project(projectId)}/members/${segment(memberId)}`,
+    memberProjectAccess: (projectId: string, memberId: string) =>
+      `${project(projectId)}/members/${segment(memberId)}/project-access`,
     apiKeys: (projectId: string) => `${project(projectId)}/api-keys`,
     apiKey: (projectId: string, apiKeyId: string) =>
       `${project(projectId)}/api-keys/${segment(apiKeyId)}`,

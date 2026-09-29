@@ -116,15 +116,68 @@ audience:
 
 ```dotenv
 IAP_EXPECTED_AUDIENCE=/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<CLOUD_RUN_SERVICE>
-IAP_ORGANIZATION_ID=<OAO_ORGANIZATION_UUID>
-IAP_PROJECT_ID=<OAO_PROJECT_UUID>
 ```
 
-IAP controls access at the edge; OAO still requires a provisioned principal,
-membership, and scopes. Keep the worker private and do not use service-account
-keys. The [Authentication reference](/reference/authentication) documents the
-WorkOS and IAP settings, provisioning commands, and service-to-service
+IAP controls who reaches the service; OAO verifies the signed assertion again
+and ignores unsigned identity headers. Keep the worker private and do not use
+service-account keys. The [Authentication reference](/reference/authentication)
+documents organization roles, project access, and service-to-service
 credentials.
+
+### IAP first-login onboarding
+
+When the API starts with `AUTH_PROVIDER=iap` against an empty database, it
+creates **Default organization** and **Default project** with generated IDs;
+PostgreSQL stores the default selection and a one-time ownership marker. Other
+authentication providers never create these defaults. No setup screen,
+bootstrap command, or tenant environment variable is needed.
+
+The first verified human login becomes the organization owner. Later verified
+humans join the default project as members with explicit developer scopes and
+no wildcard, tenant-administration, audit, MCP-configuration, or
+credential-write permissions. IAP is the admission allowlist, so restrict it to
+trusted people before the first login. Service accounts use scoped API keys and
+cannot claim ownership. Membership, identity, ownership claim, and audit entry
+commit together, so concurrent first logins create exactly one owner. Removing
+an owner or restarting never reopens the claim.
+
+New projects initially include only their creator. An Owner or Admin can use
+the project's **Members** page to add an existing IAP user by their verified
+email after that user has signed in once. **Remove from project** keeps the
+user's organization access, while **Remove organization access** is the
+organization-wide offboarding action. The default project's membership cannot
+be removed, and the default project cannot be deleted, because it anchors IAP
+console authentication.
+
+The default image discovers the authentication provider from the API at
+runtime; an unset or empty build-time `AUTH_PROVIDER` does not select
+development login. A console bundle built for a different provider cannot be
+repaired by changing the runtime environment: rebuild and release the image.
+
+The IAP migrations support a non-superuser database owner with `CREATEROLE`.
+They temporarily grant schema `CREATE` to the `oao_auth` function-owner role
+during ownership transfer and revoke it in the same migration transaction.
+
+### Upgrading from IAP tenant variables
+
+Earlier releases required `IAP_ORGANIZATION_ID` and `IAP_PROJECT_ID`. Both are
+now ignored. An existing installation reuses its single IAP tenant link for
+the configured audience and keeps its IDs, names, users, and roles.
+
+Deploy the new release while the old variables are still set, verify that
+existing owners, members, and API-key callers resolve to the same tenant, then
+remove the variables. Rolling back to an older release requires restoring them;
+keep the database defaults and ownership marker.
+
+If startup reports that operator review is required, the installation has a
+missing or ambiguous tenant link, or an ownerless tenant. Use a reviewed
+migration credential to inspect `oao.iap_default_tenant`,
+`oao.auth_tenant_links`, and the organization and project memberships. Match the
+tenant link to the exact IAP audience and restore an authorized owner's
+membership; never reset the ownership marker to let an arbitrary login become
+owner. The `provision:iap` command can still link a reviewed existing principal
+to its IAP identity. It does not grant membership, replace a bound identity, or
+override a conflicting email.
 
 ## Verify
 

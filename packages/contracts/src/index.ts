@@ -45,6 +45,13 @@ const IdSchema = v.pipe(v.string(), v.uuid());
 const TimestampSchema = v.pipe(v.string(), v.isoTimestamp());
 const JsonObjectSchema = v.record(v.string(), v.unknown());
 
+export const MembershipRoleSchema = v.picklist([
+  "owner",
+  "admin",
+  "member",
+  "viewer",
+]);
+
 export const PublicPrincipalSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
@@ -53,6 +60,8 @@ export const PublicPrincipalSchema = v.object({
   subject: v.pipe(v.string(), v.minLength(1), v.maxLength(500)),
   displayName: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(200))),
   scopes: v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(120))),
+  organizationRole: v.optional(v.nullable(MembershipRoleSchema)),
+  projectRole: v.optional(v.nullable(MembershipRoleSchema)),
 });
 
 export const AuthLogoutResultSchema = v.object({
@@ -831,15 +840,27 @@ export const ProjectMemberSchema = v.object({
   email: v.optional(v.pipe(v.string(), v.email(), v.maxLength(320))),
   scopes: v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(120))),
   role: ProjectMemberRoleSchema,
+  organizationRole: v.optional(v.nullable(MembershipRoleSchema)),
   createdAt: TimestampSchema,
 });
 
-export const CreateProjectMemberInputSchema = v.strictObject({
+export const CreateExplicitProjectMemberInputSchema = v.strictObject({
   subject: v.pipe(v.string(), v.minLength(1), v.maxLength(500)),
   role: ProjectMemberRoleSchema,
   scopes: v.pipe(v.array(v.string()), v.minLength(1)),
 });
 
+export const CreateIapProjectMemberInputSchema = v.strictObject({
+  email: v.pipe(v.string(), v.email(), v.maxLength(320)),
+});
+
+export const CreateProjectMemberInputSchema = v.union([
+  CreateExplicitProjectMemberInputSchema,
+  CreateIapProjectMemberInputSchema,
+]);
+
+/** In IAP mode, role updates organization membership and effective
+ * scopes across existing project memberships. Only owners may grant or change Owner access. */
 export const UpdateProjectMemberInputSchema = v.strictObject({
   role: ProjectMemberRoleSchema,
 });
@@ -1668,6 +1689,9 @@ export type ProjectMember = v.InferOutput<typeof ProjectMemberSchema>;
 export type CreateProjectMemberInput = v.InferOutput<
   typeof CreateProjectMemberInputSchema
 >;
+export type CreateIapProjectMemberInput = v.InferOutput<
+  typeof CreateIapProjectMemberInputSchema
+>;
 export type UpdateProjectMemberInput = v.InferOutput<
   typeof UpdateProjectMemberInputSchema
 >;
@@ -2323,6 +2347,12 @@ export const ModelCatalogEntrySchema = v.object({
 
 export function parseCreateProjectInput(input: unknown): CreateProjectInput {
   return v.parse(CreateProjectInputSchema, input);
+}
+
+export function parseCreateProjectMemberInput(
+  input: unknown,
+): CreateProjectMemberInput {
+  return v.parse(CreateProjectMemberInputSchema, input);
 }
 
 export function parseCreateModelPresetInput(

@@ -125,6 +125,7 @@ export interface AuthSession {
 }
 
 export interface ProjectContext {
+  /** Persisted organizationRole/projectRole are included when membership exists. */
   readonly principal: PublicPrincipal;
   readonly organization: Organization;
   readonly project: Project;
@@ -132,6 +133,7 @@ export interface ProjectContext {
   readonly projects: readonly Project[];
   readonly activeModelPresets: readonly string[];
   readonly authProvider: "development" | "iap" | "workos";
+  readonly isIapDefaultProject?: boolean;
 }
 
 export interface WaitForRunOptions extends RequestOptions {

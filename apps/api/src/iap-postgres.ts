@@ -6,6 +6,7 @@ import {
   type PrincipalId,
 } from "@oao/domain";
 import type { PgPool } from "@oao/db-postgres";
+import { onboardIapHuman } from "./iap-onboarding.js";
 
 interface PrincipalRow {
   organization_id: string;
@@ -43,16 +44,33 @@ export class PostgresIapTenantResolver implements IapTenantResolver {
           new URL(request.url).pathname,
         )?.[1]
       : undefined;
-    const result = await this.#pool.query<PrincipalRow>(
+    const parameters = [
+      identity.subject,
+      identity.email,
+      this.#expectedAudience,
+      this.#organizationId,
+      requestedProjectId ?? this.#projectId,
+    ];
+    let result = await this.#pool.query<PrincipalRow>(
       "SELECT * FROM oao.resolve_iap_principal($1,$2,$3,$4,$5)",
-      [
-        identity.subject,
-        identity.email,
-        this.#expectedAudience,
-        this.#organizationId,
-        requestedProjectId ?? this.#projectId,
-      ],
+      parameters,
     );
+    if (
+      !result.rows[0] &&
+      (!requestedProjectId || requestedProjectId === this.#projectId) &&
+      !request?.headers.has("authorization")
+    ) {
+      await onboardIapHuman(this.#pool, {
+        identity,
+        expectedAudience: this.#expectedAudience,
+        organizationId: this.#organizationId,
+        projectId: this.#projectId,
+      });
+      result = await this.#pool.query<PrincipalRow>(
+        "SELECT * FROM oao.resolve_iap_principal($1,$2,$3,$4,$5)",
+        parameters,
+      );
+    }
     const row = result.rows[0];
     if (!row) return undefined;
     return {

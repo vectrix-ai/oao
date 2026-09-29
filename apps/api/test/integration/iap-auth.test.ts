@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createPool, migrate } from "@oao/db-postgres";
 import { provisionIapIdentity } from "../../src/iap-provisioning.js";
+import { ensureIapDefaultTenant } from "../../src/iap-defaults.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const ids = {
@@ -37,6 +38,10 @@ test(
       };
       await provisionIapIdentity(pool, input);
       await provisionIapIdentity(pool, input);
+      assert.deepEqual(await ensureIapDefaultTenant(pool, expectedAudience), {
+        organizationId: ids.organization,
+        projectId: ids.project,
+      });
 
       const deniedSubject = await pool.query(
         "SELECT * FROM oao.resolve_iap_principal($1,$2,$3,$4,$5)",

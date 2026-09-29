@@ -8,9 +8,7 @@ export function resolveAuthProvider(
   > = process.env,
 ): string {
   return (
-    runtimeEnvironment.AUTH_PROVIDER ??
-    loadedEnvironment.AUTH_PROVIDER ??
-    "development"
+    runtimeEnvironment.AUTH_PROVIDER ?? loadedEnvironment.AUTH_PROVIDER ?? ""
   );
 }
 

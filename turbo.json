@@ -3,6 +3,7 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
+      "env": ["AUTH_PROVIDER", "VITE_OAO_API_MODE"],
       "outputs": ["dist/**"]
     },
     "dev": {
