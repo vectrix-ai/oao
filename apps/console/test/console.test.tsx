@@ -111,6 +111,40 @@ describe("management console", () => {
     },
   );
 
+  it("explains why project access cannot be removed from the IAP default project", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const settings = await api.getSettings();
+    vi.spyOn(api, "getSettings").mockResolvedValue({
+      ...settings,
+      authProvider: "iap",
+      canManageIapMembers: true,
+      canGrantIapOwner: true,
+      isIapDefaultProject: true,
+      members: settings.members.map((member) => ({
+        ...member,
+        organizationRole: member.current ? "owner" : "member",
+      })),
+    });
+
+    renderConsole("/members", api);
+    const reviewRow = (await screen.findByText("Review Operator")).closest(
+      "tr",
+    );
+    expect(reviewRow).not.toBeNull();
+    if (!reviewRow) throw new Error("Review Operator row was not rendered");
+    expect(
+      within(reviewRow).queryByRole("button", { name: "Remove from project" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(reviewRow).getByText("Default project access required"),
+    ).toBeInTheDocument();
+    expect(
+      within(reviewRow).getByRole("button", {
+        name: "Remove organization access",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("shows WorkOS display metadata and provides logout", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });

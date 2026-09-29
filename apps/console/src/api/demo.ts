@@ -1174,6 +1174,7 @@ export class DemoConsoleApi implements ConsoleApi {
       this.#projects.find((project) => project.current) ?? this.#projects[0];
     return {
       authProvider: "development",
+      isIapDefaultProject: false,
       organization: { id: ORG_ID, name: "Example operations" },
       project: current
         ? { id: current.id, name: current.name }
@@ -2596,6 +2597,7 @@ export class DemoConsoleApi implements ConsoleApi {
       authProvider: "development" as const,
       canManageIapMembers: false,
       canGrantIapOwner: false,
+      isIapDefaultProject: false,
       projects: this.#projects,
       members: this.#members,
       apiKeys: this.#apiKeys,

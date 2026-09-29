@@ -101,10 +101,9 @@ test(
         request(who, `${path}/members/${id}`, "PATCH", { role });
       const ownerContext = await request(0, "/context");
       assert.equal(ownerContext.status, 200, await ownerContext.clone().text());
-      assert.equal(
-        (await ownerContext.json()).principal.organizationRole,
-        "owner",
-      );
+      const ownerContextBody = await ownerContext.json();
+      assert.equal(ownerContextBody.isIapDefaultProject, true);
+      assert.equal(ownerContextBody.principal.organizationRole, "owner");
       const before = await (await request(1, "/context")).json();
       assert.equal(before.principal.organizationRole, "member");
       assert.deepEqual(before.principal.scopes, IAP_MEMBER_SCOPES);

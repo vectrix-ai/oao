@@ -133,6 +133,7 @@ export interface ProjectContext {
   readonly projects: readonly Project[];
   readonly activeModelPresets: readonly string[];
   readonly authProvider: "development" | "iap" | "workos";
+  readonly isIapDefaultProject?: boolean;
 }
 
 export interface WaitForRunOptions extends RequestOptions {

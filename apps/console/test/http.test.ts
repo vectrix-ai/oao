@@ -25,6 +25,7 @@ const CONTEXT = {
   projects: [{ id: PROJECT_ID, name: "Local project" }],
   activeModelPresets: ["local-default"],
   authProvider: "development",
+  isIapDefaultProject: false,
 } as const;
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -331,12 +332,31 @@ describe("HTTP console adapter", () => {
   });
 
   it("uses IAP without application login or refresh", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        ...CONTEXT,
+        authProvider: "iap",
+        isIapDefaultProject: true,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = new HttpConsoleApi({ authProvider: "iap" });
+    await expect(api.getContext()).resolves.toMatchObject({
+      authProvider: "iap",
+      isIapDefaultProject: true,
+      project: { id: PROJECT_ID },
+    });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/v1/context"]);
+  });
+
+  it("loads IAP context in a provider-neutral image without development login", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ ...CONTEXT, authProvider: "iap" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const api = new HttpConsoleApi({ authProvider: "iap" });
+    const api = new HttpConsoleApi();
     await expect(api.getContext()).resolves.toMatchObject({
       authProvider: "iap",
       project: { id: PROJECT_ID },
@@ -1209,6 +1229,23 @@ describe("HTTP console adapter", () => {
     );
     expect(detail.events).toContainEqual(
       expect.objectContaining({
+        id: "debug:productEvents:model-started",
+        title: "Model call started",
+        status: "info",
+        summary:
+          "Waiting for the model response; this attempt has a 5-minute timeout.",
+      }),
+    );
+    expect(detail.events).toContainEqual(
+      expect.objectContaining({
+        id: "debug:productEvents:model-retry",
+        title: "Model retry scheduled",
+        status: "info",
+        summary: "Retry 1 of 3 scheduled after 2 seconds.",
+      }),
+    );
+    expect(detail.events).toContainEqual(
+      expect.objectContaining({
         kind: "reasoning",
         tokens: { input: 10, output: 4, cacheRead: 6, cacheWrite: 2 },
       }),
@@ -1232,23 +1269,6 @@ describe("HTTP console adapter", () => {
               "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run.",
           },
         }),
-      }),
-    );
-    expect(detail.events).toContainEqual(
-      expect.objectContaining({
-        id: "debug:productEvents:model-started",
-        title: "Model call started",
-        status: "info",
-        summary:
-          "Waiting for the model response; this attempt has a 5-minute timeout.",
-      }),
-    );
-    expect(detail.events).toContainEqual(
-      expect.objectContaining({
-        id: "debug:productEvents:model-retry",
-        title: "Model retry scheduled",
-        status: "info",
-        summary: "Retry 1 of 3 scheduled after 2 seconds.",
       }),
     );
     expect(detail.events).toContainEqual(

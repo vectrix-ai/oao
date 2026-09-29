@@ -1,6 +1,7 @@
 // @vitest-environment node
 
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { resolveApiMode, resolveAuthProvider } from "../vite.config.js";
 
 describe("console build auth provider", () => {
@@ -17,12 +18,29 @@ describe("console build auth provider", () => {
     expect(resolveAuthProvider({ AUTH_PROVIDER: "iap" }, {})).toBe("iap");
   });
 
-  it("defaults to development authentication", () => {
-    expect(resolveAuthProvider({}, {})).toBe("development");
+  it("discovers authentication when the build has no provider", () => {
+    expect(resolveAuthProvider({}, {})).toBe("");
+  });
+
+  it("keeps explicitly selected development authentication", () => {
+    expect(resolveAuthProvider({}, { AUTH_PROVIDER: "development" })).toBe(
+      "development",
+    );
   });
 
   it("keeps a hosted provider-neutral image in discovery mode", () => {
     expect(resolveAuthProvider({}, { AUTH_PROVIDER: "" })).toBe("");
+  });
+});
+
+describe("console build environment", () => {
+  it("passes and hashes provider and API mode through Turbo's strict environment", () => {
+    const configuration = JSON.parse(
+      readFileSync(new URL("../../../turbo.json", import.meta.url), "utf8"),
+    ) as { tasks: { build: { env: string[] } } };
+    expect(configuration.tasks.build.env).toEqual(
+      expect.arrayContaining(["AUTH_PROVIDER", "VITE_OAO_API_MODE"]),
+    );
   });
 });
 

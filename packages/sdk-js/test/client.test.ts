@@ -116,12 +116,14 @@ test("client reads project context", async () => {
         projects: [{ id: "project-1", name: "Default" }],
         activeModelPresets: [],
         authProvider: "development",
+        isIapDefaultProject: false,
       });
     },
   });
 
   const context = await client.getContext();
   assert.equal(context.project.id, "project-1");
+  assert.equal(context.isIapDefaultProject, false);
   assert.equal(requests[0]?.url, "https://api.example.test/v1/context");
 });
 

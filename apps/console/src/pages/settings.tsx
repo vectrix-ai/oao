@@ -510,7 +510,7 @@ function SettingsBody({
         label="Members table"
         caption={
           data.authProvider === "iap"
-            ? "IAP organization access. Owners can grant Owner or Admin access; admins can grant Admin access. Changes apply to existing project memberships; lowering access also revokes keys created by that user."
+            ? "IAP organization access. Owners can grant Owner or Admin access; admins can grant Admin access. Changes apply to existing project memberships; lowering access also revokes keys created by that user. The default project anchors IAP sign-in, so its project memberships cannot be removed."
             : "Members of the current project"
         }
       >
@@ -602,13 +602,19 @@ function SettingsBody({
                       !data.canGrantIapOwner)) ? null : data.authProvider ===
                   "iap" ? (
                   <>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => onRemoveMemberFromProject(member)}
-                    >
-                      Remove from project
-                    </Button>
+                    {data.isIapDefaultProject ? (
+                      <span className="muted">
+                        Default project access required
+                      </span>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => onRemoveMemberFromProject(member)}
+                      >
+                        Remove from project
+                      </Button>
+                    )}
                     <Button
                       size="sm"
                       variant="ghost"

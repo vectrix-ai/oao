@@ -536,6 +536,7 @@ export interface ProjectContext {
   readonly projects: readonly { readonly id: string; readonly name: string }[];
   readonly activeModelPresets?: readonly string[];
   readonly authProvider?: "development" | "iap" | "workos";
+  readonly isIapDefaultProject?: boolean;
 }
 
 export interface ApiKeySummary {
@@ -563,6 +564,7 @@ export interface SettingsData {
   readonly authProvider?: "development" | "iap" | "workos";
   readonly canManageIapMembers?: boolean;
   readonly canGrantIapOwner?: boolean;
+  readonly isIapDefaultProject?: boolean;
   readonly organization: {
     readonly id: string;
     readonly name: string;

@@ -76,6 +76,7 @@ interface ContextResponse {
   readonly projects: readonly { readonly id: string; readonly name: string }[];
   readonly activeModelPresets?: readonly string[];
   readonly authProvider?: "development" | "iap" | "workos";
+  readonly isIapDefaultProject?: boolean;
 }
 
 class HttpConsoleError extends Error {
@@ -161,6 +162,7 @@ function contextView(response: ContextResponse): ProjectContext {
       ? { activeModelPresets: response.activeModelPresets }
       : {}),
     ...(response.authProvider ? { authProvider: response.authProvider } : {}),
+    isIapDefaultProject: response.isIapDefaultProject === true,
   };
 }
 
@@ -2346,6 +2348,7 @@ export class HttpConsoleApi implements ConsoleApi {
         ["owner", "admin"].includes(
           context.currentPrincipal.organizationRole ?? "",
         ),
+      isIapDefaultProject: context.isIapDefaultProject === true,
       organization: {
         id: String(organization.id ?? context.organization.id),
         name: String(organization.name ?? context.organization.name),

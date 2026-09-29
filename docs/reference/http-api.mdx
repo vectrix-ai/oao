@@ -64,8 +64,10 @@ durable run.
 `GET /context` returns `principal` with `id`, `organizationId`, `projectId`,
 `kind`, internal `subject`, `scopes`, and optional `displayName`, plus the
 current organization, project, available tenant choices, model presets, and
-`authProvider`. `displayName` is presentation metadata from the active identity
-provider; authorization continues to use the PostgreSQL principal and scopes.
+`authProvider`. In IAP mode, `isIapDefaultProject` identifies the project that
+anchors console authentication; its memberships cannot be removed.
+`displayName` is presentation metadata from the active identity provider;
+authorization continues to use the PostgreSQL principal and scopes.
 
 `POST /auth/logout` requires the current cookie session, clears both session and
 refresh cookies, and returns `{}` or `{ "redirectUrl": "https://..." }`. The
@@ -768,6 +770,10 @@ indicate completion; use invocation outcomes and the run state for that. The
 Console labels them **Model call started** and **Model retry scheduled**. See
 [Model timeouts and retries](/models/adding-models#model-timeouts-and-retries)
 for cancellation, compaction, and usage limitations.
+
+If an early start observation could not be recorded, its outcome restores the
+start event with the model's start time. Start events are deduplicated per turn,
+including replay; a restored event can therefore arrive after the call finishes.
 
 `debug.modelInvocations` includes each invocation's actual start/completion
 window, OAO's normalized `finishReason`, and any provider thinking text returned

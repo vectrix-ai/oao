@@ -2082,6 +2082,10 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           ]),
         ].sort(),
         authProvider: authConfiguration.provider,
+        isIapDefaultProject:
+          authConfiguration.provider === "iap" &&
+          (await tx.query("SELECT oao.is_iap_default_project() AS value"))
+            .rows[0]?.value === true,
       });
     });
   });
