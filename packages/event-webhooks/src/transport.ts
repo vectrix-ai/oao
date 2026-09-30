@@ -6,7 +6,14 @@ import { isPublicNetworkAddress } from "@oao/mcp-remote";
 import { parseRetryAfter } from "./policy.js";
 import { WebhookTransportError, type WebhookTransport } from "./types.js";
 
-const DEFAULT_TIMEOUT_MS = 15_000;
+/** The most one delivery request may take, DNS resolution included. */
+export const WEBHOOK_REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * After a reconfiguration invalidates a lease, the old holder may still have a
+ * request in flight. Keeping the lease this much longer than the request
+ * timeout stops another worker from sending an overlapping batch.
+ */
+export const WEBHOOK_RECONFIGURE_DRAIN_MS = WEBHOOK_REQUEST_TIMEOUT_MS + 5_000;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const DRAIN_TIMEOUT_MS = 5_000;
 
@@ -66,6 +73,35 @@ export function validateWebhookEndpoint(
   return url;
 }
 
+function timeoutError(timeoutMs: number): WebhookTransportError {
+  return new WebhookTransportError(
+    "timeout",
+    `Webhook endpoint did not respond within ${timeoutMs} ms`,
+  );
+}
+
+/** Rejects with a timeout at the deadline; the abandoned work is ignored. */
+async function beforeDeadline<T>(
+  work: Promise<T>,
+  deadline: number,
+  timeoutMs: number,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(timeoutError(timeoutMs)),
+          Math.max(0, deadline - Date.now()),
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function pinnedLookup(selected: {
   readonly address: string;
   readonly family: number;
@@ -87,8 +123,11 @@ function pinnedLookup(selected: {
 export function createWebhookTransport(
   options: WebhookTransportOptions = {},
 ): WebhookTransport {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? WEBHOOK_REQUEST_TIMEOUT_MS;
   return async (request) => {
+    // One deadline covers resolution and the request, so the timeout is a
+    // strict bound that lease draining can rely on.
+    const deadline = Date.now() + timeoutMs;
     let url: URL;
     try {
       url = validateWebhookEndpoint(request.url, options);
@@ -109,10 +148,15 @@ export function createWebhookTransport(
     try {
       addresses = family
         ? [{ address: host, family }]
-        : options.resolve
-          ? await options.resolve(host)
-          : await lookup(host, { all: true, verbatim: true });
-    } catch {
+        : await beforeDeadline(
+            options.resolve
+              ? options.resolve(host)
+              : lookup(host, { all: true, verbatim: true }),
+            deadline,
+            timeoutMs,
+          );
+    } catch (error) {
+      if (error instanceof WebhookTransportError) throw error;
       throw new WebhookTransportError(
         "connection_failed",
         "Webhook endpoint host did not resolve",
@@ -184,15 +228,13 @@ export function createWebhookTransport(
           });
         },
       );
-      const timer = setTimeout(() => {
-        fail(
-          new WebhookTransportError(
-            "timeout",
-            `Webhook endpoint did not respond within ${timeoutMs} ms`,
-          ),
-        );
-        outgoing.destroy();
-      }, timeoutMs);
+      const timer = setTimeout(
+        () => {
+          fail(timeoutError(timeoutMs));
+          outgoing.destroy();
+        },
+        Math.max(0, deadline - Date.now()),
+      );
       outgoing.on("error", () =>
         fail(
           new WebhookTransportError(

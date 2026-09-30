@@ -175,3 +175,17 @@ test("a response body that never ends is abandoned after the status arrives", as
     server.close();
   }
 });
+
+test("the timeout also bounds a DNS lookup that never answers", async () => {
+  const transport = createWebhookTransport({
+    timeoutMs: 100,
+    resolve: () => new Promise(() => undefined),
+  });
+  const started = Date.now();
+  await assert.rejects(
+    transport(request("https://hooks.example.com/oao")),
+    (error: unknown) =>
+      error instanceof WebhookTransportError && error.code === "timeout",
+  );
+  assert.ok(Date.now() - started < 1_000);
+});

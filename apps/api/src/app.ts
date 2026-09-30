@@ -49,7 +49,10 @@ import {
   type UpdateProjectSandboxProviderConfigurationInput,
 } from "@oao/contracts";
 import type { McpRemotePort } from "@oao/mcp-remote";
-import { validateWebhookEndpoint } from "@oao/event-webhooks";
+import {
+  validateWebhookEndpoint,
+  WEBHOOK_RECONFIGURE_DRAIN_MS,
+} from "@oao/event-webhooks";
 import type {
   ArtifactPort,
   Principal,
@@ -4014,7 +4017,9 @@ function registerEventWebhookRoutes(
             const reenable = input.enabled === true && !row.enabled;
             // A worker may hold the lease with the old settings loaded. Bumping the
             // fence makes its batch, cursor, and disable writes fail, so nothing
-            // formed or answered under the old configuration can land.
+            // formed or answered under the old configuration can land. The lease
+            // itself is kept, capped to a short drain, because that worker's
+            // request may still be in flight and batches must never overlap.
             const invalidateLease =
               reshape ||
               (input.enabled !== undefined && input.enabled !== row.enabled);
@@ -4034,8 +4039,9 @@ function registerEventWebhookRoutes(
                consecutive_failures=CASE WHEN $10 OR $11 THEN 0 ELSE consecutive_failures END,
                next_attempt_at=CASE WHEN $10 OR $11 THEN clock_timestamp() ELSE next_attempt_at END,
                lease_fence=CASE WHEN $12 THEN lease_fence+1 ELSE lease_fence END,
-               lease_owner=CASE WHEN $12 THEN NULL ELSE lease_owner END,
-               lease_expires_at=CASE WHEN $12 THEN NULL ELSE lease_expires_at END
+               lease_expires_at=CASE WHEN $12 AND lease_owner IS NOT NULL
+                 THEN LEAST(lease_expires_at,clock_timestamp()+make_interval(secs => $13))
+                 ELSE lease_expires_at END
              WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
               [
                 actor.organizationId,
@@ -4050,6 +4056,7 @@ function registerEventWebhookRoutes(
                 reshape,
                 reenable,
                 invalidateLease,
+                WEBHOOK_RECONFIGURE_DRAIN_MS / 1000,
               ],
             );
             await dependencies.store.appendAudit(tx, actor, {

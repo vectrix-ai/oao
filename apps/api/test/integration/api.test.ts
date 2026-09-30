@@ -3527,14 +3527,16 @@ test(
               lease_owner: string | null;
               lease_fence: string;
               delivered_position: string;
+              drain_seconds: number | null;
             }>(
-              "SELECT enabled,lease_owner,lease_fence::text,delivered_position::text FROM oao.event_webhooks WHERE id=$1",
+              `SELECT enabled,lease_owner,lease_fence::text,delivered_position::text,
+                      extract(epoch FROM lease_expires_at-clock_timestamp())::float8 AS drain_seconds
+                 FROM oao.event_webhooks WHERE id=$1`,
               [webhookId],
             )
           ).rows[0];
         const invalidated = await row();
         assert.equal(invalidated?.enabled, true);
-        assert.equal(invalidated?.lease_owner, null);
         assert.equal(
           BigInt(invalidated?.lease_fence ?? "0"),
           claim.leaseFence + 1n,
@@ -3543,10 +3545,27 @@ test(
           invalidated?.delivered_position,
           work.deliveredPosition.toString(),
         );
+        // The old holder may still have a request in flight, so the lease is
+        // kept and only shortened to a drain longer than the request timeout.
+        assert.equal(invalidated?.lease_owner, "lease-test");
+        assert.ok(
+          (invalidated?.drain_seconds ?? 0) > 15 &&
+            (invalidated?.drain_seconds ?? 99) <= 20,
+          `drain ${invalidated?.drain_seconds}s`,
+        );
+        assert.equal(
+          await claimFor(),
+          undefined,
+          "no second worker may send while the old request can still be in flight",
+        );
 
-        // The released webhook is claimable at once under the new endpoint.
+        // Once the drain ends, the webhook is claimable under the new endpoint.
+        await pool.query(
+          "UPDATE oao.event_webhooks SET lease_expires_at=clock_timestamp() WHERE id=$1",
+          [webhookId],
+        );
         const reclaimed = await claimFor();
-        assert.ok(reclaimed && reclaimed.leaseFence > claim.leaseFence);
+        assert.ok(reclaimed && reclaimed.leaseFence > claim.leaseFence + 1n);
         assert.equal(
           (await store.load(reclaimed, "lease-test", 100))?.endpointUrl,
           "https://hooks.example.com/new",
@@ -3561,7 +3580,13 @@ test(
           ).status,
           200,
         );
-        assert.equal((await row())?.lease_owner, "lease-test");
+        const renamed = await row();
+        assert.equal(renamed?.lease_owner, "lease-test");
+        assert.equal(BigInt(renamed?.lease_fence ?? "0"), reclaimed.leaseFence);
+        assert.ok(
+          (renamed?.drain_seconds ?? 0) > 50,
+          "a rename keeps the full lease",
+        );
         assert.equal(
           (
             await app.request(`${webhooksPath}/${webhookId}`, {

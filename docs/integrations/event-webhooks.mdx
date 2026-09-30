@@ -387,7 +387,8 @@ pending batch and forms the next one under the new configuration. Enabling or
 disabling the webhook keeps a pending batch, which is resent under the same
 `webhook-id`. After any of these changes, a request already in flight is not
 recorded, even if the old endpoint answered `2xx` or `410`, and its events are
-delivered again. Delivery resumes immediately. To replay history into a new
+delivered again. Delivery resumes immediately, or within 20 seconds when a
+request was in flight, so batches never overlap. To replay history into a new
 receiver, create another webhook with `deliverFrom: "beginning"`.
 
 ## Security
