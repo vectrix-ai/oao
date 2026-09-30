@@ -18,7 +18,14 @@ export interface ProviderCredentialContext {
   readonly organizationId: string;
   readonly providerId: string;
   readonly providerType:
-    "openrouter" | "openai" | "anthropic" | "xai" | "daytona" | "s3" | "mcp";
+    | "openrouter"
+    | "openai"
+    | "anthropic"
+    | "xai"
+    | "daytona"
+    | "s3"
+    | "mcp"
+    | "event_webhook";
   readonly keyVersion: number;
 }
 

@@ -42,6 +42,7 @@ const toneByStatus: Record<string, ChipTone> = {
   denied: "danger",
   error: "danger",
   failed: "danger",
+  failing: "danger",
   offline: "danger",
   timed_out: "danger",
 };

@@ -211,6 +211,26 @@ export function CheckboxRow({
   );
 }
 
+/** One option of a radio group; group options in a fieldset with a legend. */
+export function RadioRow({
+  label,
+  description,
+  ...rest
+}: InputHTMLAttributes<HTMLInputElement> & {
+  readonly label: string;
+  readonly description?: string;
+}) {
+  return (
+    <label className="check-row">
+      <input type="radio" {...rest} />
+      <span>
+        <strong>{label}</strong>
+        {description ? <span className="sub">{description}</span> : null}
+      </span>
+    </label>
+  );
+}
+
 export function SearchField({
   value,
   onChange,

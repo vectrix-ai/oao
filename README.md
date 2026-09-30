@@ -150,6 +150,7 @@ for ordinary troubleshooting when you need to preserve local data.
 - `@oao/domain`: branded IDs, authorization, run/admission rules, provider ports, and redaction
 - `@oao/db-postgres`: executable migrations, RLS tenant transactions, typed repositories, ledgers, and audit/event storage
 - `@oao/events`: atomic append contracts, resumable cursors, and wake-only notification boundaries
+- `@oao/event-webhooks`: signed, ordered outbound event webhooks with durable cursors
 - `@oao/testkit`: deterministic identities, clocks, providers, and crash barriers
 - `@oao/cli`: dependency preflight and resumable guided local onboarding
 - `infra/compose`: local PostgreSQL 17, the owned-process development launcher,
@@ -159,7 +160,7 @@ The implemented local profile runs:
 
 - React/Vite management and debugging console
 - Hono REST/SSE API
-- Flue runtime worker
+- Flue runtime worker, which also delivers outbound event webhooks
 - PostgreSQL canonical/control/read-model storage and wake queue
 - Configurable development or WorkOS identity plus real project-scoped model
   providers, with optional Daytona sandboxes
@@ -280,4 +281,4 @@ The Mintlify source lives in [`docs`](docs). From that directory, run
 `mint dev --port 3333` to preview it alongside the local OAO API, or use
 `mint validate`, `mint broken-links`, and `mint a11y` before publishing. Start at
 [`docs/index.mdx`](docs/index.mdx) for the local setup, agent configuration,
-model preset, API, SSE, and codebase-integration guides.
+model preset, API, SSE, event webhook, and codebase-integration guides.

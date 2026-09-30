@@ -31,7 +31,12 @@ import type {
   CreatedPlatformApiKey,
   CreateModelPresetInput,
   CreateProjectModelProviderInput,
+  CreateEventWebhookInput,
   CreateProjectSandboxProviderInput,
+  EventWebhook,
+  EventWebhookPage,
+  RotateEventWebhookCredentialInput,
+  UpdateEventWebhookInput,
   CreateProjectStorageProviderInput,
   HealthStatus,
   Member,
@@ -440,6 +445,83 @@ export class OaoClient {
   }> {
     return this.#write(
       this.routes.modelPreset(projectId, presetId),
+      "DELETE",
+      undefined,
+      options,
+    );
+  }
+
+  listEventWebhooks(
+    projectId: string,
+    pagination: PaginationOptions = {},
+    options?: RequestOptions,
+  ): Promise<EventWebhookPage> {
+    return this.#request(
+      this.#path(this.routes.eventWebhooks(projectId), pagination),
+      options,
+    );
+  }
+
+  getEventWebhook(
+    projectId: string,
+    webhookId: string,
+    options?: RequestOptions,
+  ): Promise<EventWebhook> {
+    return this.#request(
+      this.routes.eventWebhook(projectId, webhookId),
+      options,
+    );
+  }
+
+  /** The signing secret is write-only: responses carry only its fingerprint and version. */
+  createEventWebhook(
+    projectId: string,
+    input: CreateEventWebhookInput,
+    options: WriteOptions,
+  ): Promise<EventWebhook> {
+    return this.#write(
+      this.routes.eventWebhooks(projectId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
+  updateEventWebhook(
+    projectId: string,
+    webhookId: string,
+    input: UpdateEventWebhookInput,
+    options: WriteOptions,
+  ): Promise<EventWebhook> {
+    return this.#write(
+      this.routes.eventWebhook(projectId, webhookId),
+      "PATCH",
+      input,
+      options,
+    );
+  }
+
+  rotateEventWebhookCredential(
+    projectId: string,
+    webhookId: string,
+    input: RotateEventWebhookCredentialInput,
+    options: WriteOptions,
+  ): Promise<EventWebhook> {
+    return this.#write(
+      this.routes.eventWebhookCredential(projectId, webhookId),
+      "PUT",
+      input,
+      options,
+    );
+  }
+
+  deleteEventWebhook(
+    projectId: string,
+    webhookId: string,
+    options: WriteOptions,
+  ): Promise<{ readonly id: string; readonly deleted: true }> {
+    return this.#write(
+      this.routes.eventWebhook(projectId, webhookId),
       "DELETE",
       undefined,
       options,

@@ -2521,6 +2521,255 @@ describe("management console", () => {
     expect(document.body.textContent).not.toContain("daytona-secret-value");
   });
 
+  it("creates an event webhook and shows its generated signing secret only once", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const create = vi.spyOn(api, "createEventWebhook");
+    renderConsole("/event-webhooks", api);
+    expect(
+      await screen.findByRole("heading", { name: "Webhooks" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Webhooks" })).toBeInTheDocument();
+    const seeded = (await screen.findByText("Convex receiver")).closest("tr")!;
+    expect(within(seeded).getByText("run.*")).toBeInTheDocument();
+    expect(within(seeded).getByText("message.created")).toBeInTheDocument();
+    expect(
+      within(seeded).getByText("Includes message text"),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Add webhook" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Add webhook" }));
+    const secret = (
+      dialog.getByLabelText("Generated signing secret") as HTMLInputElement
+    ).value;
+    expect(secret).toMatch(/^whsec_[A-Za-z0-9+/]{43}=$/u);
+    expect(
+      dialog.getByText("Save this secret now. OAO will not show it again."),
+    ).toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "Copy secret" }));
+    await expect(navigator.clipboard.readText()).resolves.toBe(secret);
+    expect(dialog.getByRole("button", { name: "Copied" })).toBeInTheDocument();
+
+    await user.click(
+      dialog.getByRole("radio", { name: /^Use my own secret/u }),
+    );
+    await user.type(dialog.getByLabelText("Your signing secret"), "whsec_bad");
+    expect(
+      dialog.getByText(
+        "Use whsec_ followed by the base64 encoding of 24 to 64 random bytes.",
+      ),
+    ).toBeInTheDocument();
+    await user.click(
+      dialog.getByRole("radio", { name: /^Generate a secret/u }),
+    );
+    expect(dialog.getByLabelText("Generated signing secret")).toHaveValue(
+      secret,
+    );
+
+    await user.type(dialog.getByLabelText("Name"), "Convex staging");
+    await user.type(
+      dialog.getByLabelText("Endpoint URL"),
+      "https://staging.convex.site/oao/events",
+    );
+    await user.click(dialog.getByRole("radio", { name: /^Selected events/u }));
+    const submit = dialog.getByRole("button", { name: "Create webhook" });
+    expect(submit).toBeDisabled();
+    await user.click(dialog.getByRole("checkbox", { name: /^Tool calls/u }));
+    await user.type(dialog.getByLabelText("Exact event kinds"), "run.bogus");
+    expect(
+      dialog.getByText(/Unknown event kind: run\.bogus/u),
+    ).toBeInTheDocument();
+    await user.clear(dialog.getByLabelText("Exact event kinds"));
+    await user.type(
+      dialog.getByLabelText("Exact event kinds"),
+      "message.created",
+    );
+    expect(
+      dialog.getByRole("checkbox", { name: /^Include message content/u }),
+    ).not.toBeChecked();
+    expect(
+      dialog.getByText(
+        "Sends message text to this endpoint. Only enable it for receivers you control.",
+      ),
+    ).toBeInTheDocument();
+    await user.click(submit);
+
+    const row = (await screen.findByText("Convex staging")).closest("tr")!;
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(create).toHaveBeenCalledWith({
+      displayName: "Convex staging",
+      endpointUrl: "https://staging.convex.site/oao/events",
+      signingSecret: secret,
+      eventKinds: ["tool_call.*", "message.created"],
+      includeMessageContent: false,
+      deliverFrom: "now",
+    });
+    expect(within(row).getByText("tool_call.*")).toBeInTheDocument();
+    expect(within(row).getByText("No message text")).toBeInTheDocument();
+    expect(within(row).getByText("version 1")).toBeInTheDocument();
+    expect(within(row).getByText("active")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue(secret)).not.toBeInTheDocument();
+    expect(document.body.innerHTML).not.toContain(secret.slice(6));
+  });
+
+  it("disables, re-enables, rotates, and deletes an event webhook", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const rotate = vi.spyOn(api, "rotateEventWebhookCredential");
+    renderConsole("/event-webhooks", api);
+    const row = (await screen.findByText("Convex receiver")).closest("tr")!;
+    expect(within(row).getByText("active")).toBeInTheDocument();
+
+    await user.click(within(row).getByRole("button", { name: "Disable" }));
+    expect(
+      await within(row).findByText("Disabled by a user"),
+    ).toBeInTheDocument();
+    expect(within(row).getByText("disabled")).toBeInTheDocument();
+    await user.click(within(row).getByRole("button", { name: "Enable" }));
+    expect(await within(row).findByText("active")).toBeInTheDocument();
+    expect(
+      within(row).queryByText("Disabled by a user"),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      within(row).getByRole("button", { name: "Rotate secret" }),
+    );
+    let dialog = within(
+      screen.getByRole("dialog", { name: "Rotate secret for Convex receiver" }),
+    );
+    const secret = (
+      dialog.getByLabelText("Generated signing secret") as HTMLInputElement
+    ).value;
+    expect(secret).toMatch(/^whsec_/u);
+    expect(
+      dialog.getByText("Save this secret now. OAO will not show it again."),
+    ).toBeInTheDocument();
+    expect(
+      dialog.getByRole("radio", {
+        name: /^Keep the previous secret valid for 24 hours/u,
+      }),
+    ).toBeChecked();
+    await user.click(dialog.getByRole("button", { name: "Rotate secret" }));
+    expect(await within(row).findByText("version 2")).toBeInTheDocument();
+    expect(
+      within(row).getByText(/Previous secret valid until/u),
+    ).toBeInTheDocument();
+    expect(rotate).toHaveBeenLastCalledWith(
+      "99999999-9999-4999-8999-999999999999",
+      { signingSecret: secret, previousCredentialTtlSeconds: 86_400 },
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue(secret)).not.toBeInTheDocument();
+    expect(document.body.innerHTML).not.toContain(secret.slice(6));
+
+    await user.click(
+      within(row).getByRole("button", { name: "Rotate secret" }),
+    );
+    dialog = within(
+      screen.getByRole("dialog", { name: "Rotate secret for Convex receiver" }),
+    );
+    const replacement = (
+      dialog.getByLabelText("Generated signing secret") as HTMLInputElement
+    ).value;
+    expect(replacement).not.toBe(secret);
+    await user.click(
+      dialog.getByRole("radio", {
+        name: /^Revoke the previous secret immediately/u,
+      }),
+    );
+    await user.click(dialog.getByRole("button", { name: "Rotate secret" }));
+    expect(await within(row).findByText("version 3")).toBeInTheDocument();
+    expect(
+      within(row).queryByText(/Previous secret valid until/u),
+    ).not.toBeInTheDocument();
+    expect(rotate).toHaveBeenLastCalledWith(
+      "99999999-9999-4999-8999-999999999999",
+      { signingSecret: replacement, previousCredentialTtlSeconds: 0 },
+    );
+    expect(document.body.innerHTML).not.toContain(replacement.slice(6));
+
+    await user.click(within(row).getByRole("button", { name: "Delete" }));
+    const confirm = within(
+      screen.getByRole("dialog", { name: "Delete “Convex receiver”?" }),
+    );
+    await user.click(confirm.getByRole("button", { name: "Delete webhook" }));
+    await waitFor(() =>
+      expect(screen.queryByText("Convex receiver")).not.toBeInTheDocument(),
+    );
+    expect(await screen.findByText("No webhooks")).toBeInTheDocument();
+    expect((await api.listEventWebhooks()).data).toEqual([]);
+  });
+
+  it("edits an event webhook and surfaces endpoint validation errors", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const update = vi.spyOn(api, "updateEventWebhook");
+    renderConsole("/event-webhooks", api);
+    const row = (await screen.findByText("Convex receiver")).closest("tr")!;
+    await user.click(within(row).getByRole("button", { name: "Edit" }));
+    const dialog = within(
+      screen.getByRole("dialog", { name: "Edit Convex receiver" }),
+    );
+    const save = dialog.getByRole("button", { name: "Save changes" });
+    expect(save).toBeDisabled();
+    expect(dialog.getByRole("checkbox", { name: /^Runs/u })).toBeChecked();
+    expect(dialog.getByLabelText("Exact event kinds")).toHaveValue(
+      "message.created",
+    );
+    expect(dialog.getByText("Message text leaves OAO")).toBeInTheDocument();
+    expect(
+      dialog.queryByLabelText("Generated signing secret"),
+    ).not.toBeInTheDocument();
+
+    const endpoint = dialog.getByLabelText("Endpoint URL");
+    await user.clear(endpoint);
+    await user.type(endpoint, "https://127.0.0.1/oao/events");
+    await user.click(save);
+    expect(
+      await dialog.findByText(
+        "Webhook endpoint must not target a private network",
+      ),
+    ).toBeInTheDocument();
+
+    await user.clear(endpoint);
+    await user.type(endpoint, "https://example.convex.site/oao/events/v2");
+    await user.click(dialog.getByRole("radio", { name: /^All events/u }));
+    await user.click(
+      dialog.getByRole("checkbox", { name: /^Include message content/u }),
+    );
+    expect(
+      dialog.queryByText("Message text leaves OAO"),
+    ).not.toBeInTheDocument();
+    await user.click(save);
+    expect(
+      await within(row).findByText("https://example.convex.site/oao/events/v2"),
+    ).toBeInTheDocument();
+    expect(within(row).getByText("All events")).toBeInTheDocument();
+    expect(within(row).getByText("No message text")).toBeInTheDocument();
+    expect(update).toHaveBeenLastCalledWith(
+      "99999999-9999-4999-8999-999999999999",
+      {
+        endpointUrl: "https://example.convex.site/oao/events/v2",
+        eventKinds: null,
+        includeMessageContent: false,
+      },
+    );
+  });
+
+  it("blocks webhook creation until credential encryption is configured", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    vi.spyOn(api, "listEventWebhooks").mockResolvedValue({
+      data: [],
+      credentialEncryptionConfigured: false,
+    });
+    renderConsole("/event-webhooks", api);
+    expect(
+      await screen.findByText("Encryption key required"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("No webhooks")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add webhook" })).toBeDisabled();
+  });
+
   it("adds S3-compatible workspace storage without redisplaying credentials", async () => {
     const user = userEvent.setup();
     renderConsole("/storage-providers");

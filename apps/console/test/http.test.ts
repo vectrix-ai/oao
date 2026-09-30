@@ -285,6 +285,83 @@ describe("HTTP console adapter", () => {
     expect(new Headers(remove.headers).get("idempotency-key")).toBeTruthy();
   });
 
+  it("manages event webhooks through idempotent project routes", async () => {
+    const webhook = { id: "webhook/one", displayName: "Convex" };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: [webhook],
+          pageInfo: { hasMore: false, nextCursor: null },
+          credentialEncryptionConfigured: true,
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse(webhook, 201))
+      .mockResolvedValueOnce(jsonResponse(webhook))
+      .mockResolvedValueOnce(jsonResponse(webhook))
+      .mockResolvedValueOnce(
+        jsonResponse({ id: "webhook/one", deleted: true }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+    const signingSecret = `whsec_${btoa("s".repeat(32))}`;
+
+    await expect(api.listEventWebhooks()).resolves.toEqual({
+      data: [webhook],
+      credentialEncryptionConfigured: true,
+    });
+    await api.createEventWebhook({
+      displayName: "Convex",
+      endpointUrl: "https://example.convex.site/oao/events",
+      signingSecret,
+      eventKinds: ["run.*", "message.created"],
+      includeMessageContent: true,
+      deliverFrom: "beginning",
+    });
+    await api.updateEventWebhook("webhook/one", { enabled: false });
+    await api.rotateEventWebhookCredential("webhook/one", {
+      signingSecret,
+      previousCredentialTtlSeconds: 0,
+    });
+    await api.deleteEventWebhook("webhook/one");
+
+    const calls = fetchMock.mock.calls.slice(1);
+    expect(calls.map(([url]) => url)).toEqual([
+      `/v1/projects/${PROJECT_ID}/event-webhooks?limit=200`,
+      `/v1/projects/${PROJECT_ID}/event-webhooks`,
+      `/v1/projects/${PROJECT_ID}/event-webhooks/webhook%2Fone`,
+      `/v1/projects/${PROJECT_ID}/event-webhooks/webhook%2Fone/credential`,
+      `/v1/projects/${PROJECT_ID}/event-webhooks/webhook%2Fone`,
+    ]);
+    const inits = calls.map(([, init]) => (init ?? {}) as RequestInit);
+    expect(inits.map((init) => init.method ?? "GET")).toEqual([
+      "GET",
+      "POST",
+      "PATCH",
+      "PUT",
+      "DELETE",
+    ]);
+    expect(inits[0]?.body).toBeUndefined();
+    expect(JSON.parse(String(inits[1]?.body))).toEqual({
+      displayName: "Convex",
+      endpointUrl: "https://example.convex.site/oao/events",
+      signingSecret,
+      eventKinds: ["run.*", "message.created"],
+      includeMessageContent: true,
+      deliverFrom: "beginning",
+    });
+    expect(JSON.parse(String(inits[2]?.body))).toEqual({ enabled: false });
+    expect(JSON.parse(String(inits[3]?.body))).toEqual({
+      signingSecret,
+      previousCredentialTtlSeconds: 0,
+    });
+    expect(inits[4]?.body).toBeUndefined();
+    for (const init of inits.slice(1))
+      expect(new Headers(init.headers).get("idempotency-key")).toBeTruthy();
+    expect(new Headers(inits[0]?.headers).get("idempotency-key")).toBeNull();
+  });
+
   it("bootstraps a development session once after an unauthenticated context", async () => {
     const fetchMock = vi
       .fn()

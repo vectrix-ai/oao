@@ -2214,6 +2214,147 @@ export const UpdateProjectSandboxProviderConfigurationInputSchema =
     restrictedEgress: SandboxRestrictedEgressSchema,
   });
 
+const PRODUCT_EVENT_KINDS: readonly string[] = ProductEventKindSchema.options;
+
+/** An exact product-event kind, or a family wildcard such as `run.*`. */
+export const EventWebhookKindFilterSchema = v.pipe(
+  v.string(),
+  v.maxLength(120),
+  v.check(
+    (value) =>
+      value.endsWith(".*")
+        ? /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*\.\*$/u.test(value) &&
+          PRODUCT_EVENT_KINDS.some((kind) =>
+            kind.startsWith(value.slice(0, -1)),
+          )
+        : PRODUCT_EVENT_KINDS.includes(value),
+    "event kinds must be product event kinds or family wildcards such as run.*",
+  ),
+);
+
+const EventWebhookEndpointSchema = v.pipe(
+  v.string(),
+  v.maxLength(2_048),
+  v.url(),
+  v.check((value) => {
+    const url = new URL(value);
+    return (
+      (url.protocol === "https:" || url.protocol === "http:") &&
+      !url.username &&
+      !url.password &&
+      !url.hash
+    );
+  }, "Webhook endpoint must be an HTTPS URL without user information or a fragment"),
+);
+
+/**
+ * A Standard Webhooks signing secret: `whsec_` followed by base64 encoding
+ * 24 to 64 random bytes. OAO stores it encrypted and never returns it.
+ */
+export const EventWebhookSigningSecretSchema = v.pipe(
+  v.string(),
+  v.regex(
+    /^whsec_[A-Za-z0-9+/]+={0,2}$/u,
+    "signing secret must start with whsec_",
+  ),
+  v.check((value) => {
+    try {
+      const bytes = atob(value.slice(6)).length;
+      return bytes >= 24 && bytes <= 64;
+    } catch {
+      return false;
+    }
+  }, "signing secret must encode 24 to 64 bytes"),
+);
+
+const EventWebhookDisplayNameSchema = v.pipe(
+  v.string(),
+  v.trim(),
+  v.minLength(1),
+  v.maxLength(200),
+);
+
+const EventWebhookKindsSchema = v.nullable(
+  v.pipe(
+    v.array(EventWebhookKindFilterSchema),
+    v.minLength(1),
+    v.maxLength(100),
+  ),
+);
+
+export const EventWebhookStatusSchema = v.picklist([
+  "active",
+  "failing",
+  "disabled",
+]);
+
+export const EventWebhookSchema = v.object({
+  id: IdSchema,
+  organizationId: IdSchema,
+  projectId: IdSchema,
+  displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+  endpointUrl: v.pipe(v.string(), v.maxLength(2_048)),
+  enabled: v.boolean(),
+  disabledReason: v.nullable(v.picklist(["user", "endpoint_gone"])),
+  eventKinds: v.nullable(v.array(v.string())),
+  includeMessageContent: v.boolean(),
+  credentialConfigured: v.literal(true),
+  credentialFingerprint: v.pipe(v.string(), v.regex(/^[a-f0-9]{12}$/u)),
+  credentialVersion: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  /** While set, deliveries are also signed with the previous secret. */
+  previousCredentialExpiresAt: v.nullable(TimestampSchema),
+  status: EventWebhookStatusSchema,
+  /** Project position of the last event this endpoint acknowledged or filtered out. */
+  deliveredPosition: v.pipe(v.string(), v.regex(/^\d+$/u)),
+  /** The same opaque cursor format as the SSE `id` field. */
+  cursor: v.string(),
+  pendingEvents: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  consecutiveFailures: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  nextAttemptAt: TimestampSchema,
+  lastAttemptAt: v.nullable(TimestampSchema),
+  lastSuccessAt: v.nullable(TimestampSchema),
+  lastFailureAt: v.nullable(TimestampSchema),
+  lastResponseStatus: v.nullable(v.pipe(v.number(), v.integer())),
+  lastErrorCode: v.nullable(v.string()),
+  createdByPrincipalId: IdSchema,
+  createdAt: TimestampSchema,
+  updatedAt: TimestampSchema,
+});
+
+export const CreateEventWebhookInputSchema = v.strictObject({
+  displayName: EventWebhookDisplayNameSchema,
+  endpointUrl: EventWebhookEndpointSchema,
+  signingSecret: EventWebhookSigningSecretSchema,
+  eventKinds: v.optional(EventWebhookKindsSchema, null),
+  includeMessageContent: v.optional(v.boolean(), false),
+  /** `now` skips existing events; `beginning` replays the project's full history. */
+  deliverFrom: v.optional(v.picklist(["now", "beginning"]), "now"),
+  enabled: v.optional(v.boolean(), true),
+});
+
+export const UpdateEventWebhookInputSchema = v.pipe(
+  v.strictObject({
+    displayName: v.optional(EventWebhookDisplayNameSchema),
+    endpointUrl: v.optional(EventWebhookEndpointSchema),
+    eventKinds: v.optional(EventWebhookKindsSchema),
+    includeMessageContent: v.optional(v.boolean()),
+    enabled: v.optional(v.boolean()),
+  }),
+  v.check(
+    (value) => Object.values(value).some((field) => field !== undefined),
+    "at least one field must change",
+  ),
+);
+
+export const RotateEventWebhookCredentialInputSchema = v.strictObject({
+  signingSecret: EventWebhookSigningSecretSchema,
+  /** How long deliveries stay signed with the previous secret too; 0 ends it at once. */
+  previousCredentialTtlSeconds: v.optional(
+    v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(604_800)),
+    86_400,
+  ),
+});
+
 const S3EndpointSchema = v.pipe(
   v.string(),
   v.maxLength(2048),
@@ -2391,6 +2532,24 @@ export function parseUpdateProjectSandboxProviderConfigurationInput(
   return v.parse(UpdateProjectSandboxProviderConfigurationInputSchema, input);
 }
 
+export function parseCreateEventWebhookInput(
+  input: unknown,
+): CreateEventWebhookInput {
+  return v.parse(CreateEventWebhookInputSchema, input);
+}
+
+export function parseUpdateEventWebhookInput(
+  input: unknown,
+): UpdateEventWebhookInput {
+  return v.parse(UpdateEventWebhookInputSchema, input);
+}
+
+export function parseRotateEventWebhookCredentialInput(
+  input: unknown,
+): RotateEventWebhookCredentialInput {
+  return v.parse(RotateEventWebhookCredentialInputSchema, input);
+}
+
 export function parseCreateProjectStorageProviderInput(
   input: unknown,
 ): CreateProjectStorageProviderInput {
@@ -2503,6 +2662,17 @@ export type RotateProjectSandboxProviderCredentialInput = v.InferOutput<
 >;
 export type UpdateProjectSandboxProviderConfigurationInput = v.InferOutput<
   typeof UpdateProjectSandboxProviderConfigurationInputSchema
+>;
+export type EventWebhook = v.InferOutput<typeof EventWebhookSchema>;
+export type EventWebhookStatus = v.InferOutput<typeof EventWebhookStatusSchema>;
+export type CreateEventWebhookInput = v.InferOutput<
+  typeof CreateEventWebhookInputSchema
+>;
+export type UpdateEventWebhookInput = v.InferOutput<
+  typeof UpdateEventWebhookInputSchema
+>;
+export type RotateEventWebhookCredentialInput = v.InferOutput<
+  typeof RotateEventWebhookCredentialInputSchema
 >;
 export type ProjectStorageProvider = v.InferOutput<
   typeof ProjectStorageProviderSchema

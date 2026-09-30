@@ -1,0 +1,411 @@
+---
+title: "Event webhooks"
+description: "Push signed, ordered batches of product events to your own HTTPS endpoint, such as a Convex HTTP action."
+---
+
+Event webhooks push the same product events as the
+[real-time event feed](/reference/events) to an HTTPS endpoint you control.
+Your application does not hold a connection open to OAO. Each webhook keeps a
+durable cursor in PostgreSQL, so an outage on either side delays delivery but
+never skips an event.
+
+Use a webhook when your application already has its own real-time backend,
+such as Convex, and should render agent progress from its own database. Use the
+SSE feed when a server process can stay connected to OAO.
+
+## How delivery works
+
+```text
+Runtime worker                                 Your endpoint
+┌───────────────────────────────┐   POST     ┌──────────────────────────┐
+│ claim a due webhook (lease)   │──batch────▶│ verify signature         │
+│ read events after its cursor  │            │ apply events idempotently│
+│ sign with the webhook secret  │◀──2xx──────│ return 2xx               │
+│ advance the cursor            │            └──────────────────────────┘
+└───────────────────────────────┘
+```
+
+- **Ordered:** each webhook receives events in project-position order, one
+  batch at a time. A batch holds up to 100 events and about 256 KB.
+- **At least once:** OAO advances the cursor only after a `2xx` response. A
+  failed batch is resent with the same `webhook-id` header and the same
+  events, so deduplicate by event `id`.
+- **Retries:** failures back off from 2 seconds, doubling to at most 5
+  minutes. A `Retry-After` header is honored within that range. Retries
+  continue until the endpoint recovers; events are never dropped.
+- **410 Gone:** the endpoint is disabled until you re-enable it. Its cursor is
+  kept, so re-enabling resumes where delivery stopped.
+- **Filtered events:** events outside the webhook's filter advance the cursor
+  without a request.
+- **Latency:** the runtime worker checks for new events every 500 ms by
+  default.
+
+Delivery runs in the runtime worker. Both the API and the worker need the same
+`OAO_CREDENTIAL_ENCRYPTION_KEY`, because the signing secret is stored
+encrypted.
+
+## Create a webhook
+
+<Steps>
+  <Step title="Open Webhooks">
+    In the console, open **Webhooks** under **Configure** and select **Add
+    webhook**. Creating and managing webhooks requires `project:admin`.
+  </Step>
+  <Step title="Describe the endpoint">
+    Enter a display name and the HTTPS endpoint URL. Choose **All events** or
+    the event families you need, such as `run.*` and `message.created`.
+  </Step>
+  <Step title="Save the signing secret">
+    The console generates a Standard Webhooks secret that starts with `whsec_`.
+    Copy it into your receiver's configuration now. OAO stores it encrypted and
+    never shows it again.
+  </Step>
+  <Step title="Choose where delivery starts">
+    **New events only** starts after the latest committed event. **Replay
+    history** delivers the project's full event history first.
+  </Step>
+</Steps>
+
+Or create it over HTTP. Generate the secret yourself, for example with
+`echo "whsec_$(openssl rand -base64 32)"`:
+
+```bash
+curl -X POST "$OAO_URL/v1/projects/$PROJECT_ID/event-webhooks" \
+  -H "Authorization: Bearer $OAO_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: create-convex-webhook-1" \
+  -d '{
+    "displayName": "Convex",
+    "endpointUrl": "https://happy-animal-123.convex.site/oao/events",
+    "signingSecret": "whsec_...",
+    "eventKinds": ["run.*", "message.created"],
+    "includeMessageContent": true,
+    "deliverFrom": "now"
+  }'
+```
+
+`eventKinds` accepts exact event kinds and family wildcards such as `run.*`.
+Omit it, or send `null`, to receive every event.
+
+## Delivery format
+
+Every request is a `POST` with a JSON body and three
+[Standard Webhooks](https://www.standardwebhooks.com) headers:
+
+| Header              | Value                                                             |
+| ------------------- | ----------------------------------------------------------------- |
+| `webhook-id`        | The batch ID. It stays the same when a batch is retried.          |
+| `webhook-timestamp` | Unix seconds when this attempt was signed.                        |
+| `webhook-signature` | One or more space-separated `v1,<base64 HMAC-SHA256>` signatures. |
+
+```json
+{
+  "type": "oao.events",
+  "timestamp": "2026-09-29T12:00:03.000Z",
+  "data": {
+    "webhookId": "1f0c…",
+    "organizationId": "4a2e…",
+    "projectId": "9b7d…",
+    "batchId": "c81a…",
+    "fromPosition": "140",
+    "throughPosition": "143",
+    "cursor": "djE6MTQz",
+    "events": [
+      {
+        "id": "e5d2…",
+        "aggregateType": "run",
+        "aggregateId": "0d6f…",
+        "aggregateSequence": 7,
+        "projectPosition": "143",
+        "kind": "message.created",
+        "publicPayload": { "role": "assistant" },
+        "occurredAt": "2026-09-29T12:00:02.871Z",
+        "message": {
+          "id": "77b0…",
+          "runId": "0d6f…",
+          "role": "assistant",
+          "content": "Your shipment arrives tomorrow at 10:00."
+        }
+      }
+    ]
+  }
+}
+```
+
+Each event has the same shape as an SSE event body. `fromPosition` is
+exclusive and `throughPosition` is inclusive; together they cover filtered
+events too. `cursor` uses the same opaque format as the SSE `id`, so a
+receiver can hand it to `Last-Event-ID` if it ever needs to backfill over SSE.
+
+Respond with any `2xx` status within 15 seconds. OAO ignores the response
+body and does not follow redirects.
+
+## Verify signatures
+
+Verify every request before parsing its body. The signed content is
+`${webhook-id}.${webhook-timestamp}.${rawBody}`, signed with HMAC-SHA256 using
+the base64-decoded part of the secret after `whsec_`. Reject timestamps more
+than 5 minutes from your clock.
+
+This verifier uses only Web Crypto, so it runs unchanged in Node.js 20+,
+browsers, edge runtimes, and Convex:
+
+```ts oaoSignature.ts
+function decodeBase64(value: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(value);
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+export async function verifyOaoSignature(input: {
+  body: string;
+  webhookId: string | null;
+  webhookTimestamp: string | null;
+  webhookSignature: string | null;
+  secret: string;
+}): Promise<boolean> {
+  const { body, webhookId, webhookTimestamp, webhookSignature, secret } = input;
+  if (!webhookId || !webhookTimestamp || !webhookSignature) return false;
+  const age = Math.abs(Date.now() / 1000 - Number(webhookTimestamp));
+  if (!/^\d+$/.test(webhookTimestamp) || age > 300) return false;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    decodeBase64(secret.replace(/^whsec_/, "")),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const expected = new Uint8Array(
+    await crypto.subtle.sign(
+      "HMAC",
+      key,
+      new TextEncoder().encode(`${webhookId}.${webhookTimestamp}.${body}`),
+    ),
+  );
+  return webhookSignature.split(" ").some((candidate) => {
+    const [version, value] = candidate.split(",", 2);
+    if (version !== "v1" || !value) return false;
+    let actual: Uint8Array;
+    try {
+      actual = decodeBase64(value);
+    } catch {
+      return false;
+    }
+    if (actual.length !== expected.length) return false;
+    let difference = 0;
+    for (let i = 0; i < actual.length; i += 1)
+      difference |= actual[i]! ^ expected[i]!;
+    return difference === 0;
+  });
+}
+```
+
+Applications inside the OAO monorepo can import the same check as
+`verifyEventWebhookSignature` from `@oao/sdk-js`.
+
+Any Standard Webhooks library also verifies OAO deliveries.
+
+## Receive events in Convex
+
+A Convex HTTP action is a natural receiver: it verifies the batch, and one
+mutation applies it transactionally. Your Convex queries then update every
+subscribed client, with no connection between your UI and OAO.
+
+<Steps>
+  <Step title="Store the secret">
+    ```bash
+    npx convex env set OAO_WEBHOOK_SECRET 'whsec_...'
+    ```
+    Copy the verifier above into `convex/oaoSignature.ts`.
+  </Step>
+  <Step title="Add tables for events and messages">
+    ```ts convex/schema.ts
+    import { defineSchema, defineTable } from "convex/server";
+    import { v } from "convex/values";
+
+    export default defineSchema({
+      oaoEvents: defineTable({
+        eventId: v.string(),
+        projectPosition: v.number(),
+        kind: v.string(),
+        aggregateType: v.string(),
+        aggregateId: v.string(),
+        publicPayload: v.any(),
+        occurredAt: v.string(),
+      })
+        .index("by_event_id", ["eventId"])
+        .index("by_aggregate", ["aggregateType", "aggregateId"]),
+      oaoMessages: defineTable({
+        messageId: v.string(),
+        runId: v.string(),
+        role: v.string(),
+        content: v.string(),
+      })
+        .index("by_message_id", ["messageId"])
+        .index("by_run", ["runId"]),
+    });
+    ```
+
+  </Step>
+  <Step title="Apply a batch idempotently">
+    ```ts convex/oao.ts
+    import { v } from "convex/values";
+    import { internalMutation } from "./_generated/server";
+
+    export const ingest = internalMutation({
+      // Events keep OAO's public shape; see the delivery format above.
+      args: { events: v.array(v.any()) },
+      handler: async (ctx, { events }) => {
+        for (const event of events) {
+          const seen = await ctx.db
+            .query("oaoEvents")
+            .withIndex("by_event_id", (q) => q.eq("eventId", event.id))
+            .unique();
+          // OAO delivers at least once; a retried batch repeats events.
+          if (seen) continue;
+          await ctx.db.insert("oaoEvents", {
+            eventId: event.id,
+            projectPosition: Number(event.projectPosition),
+            kind: event.kind,
+            aggregateType: event.aggregateType,
+            aggregateId: event.aggregateId,
+            publicPayload: event.publicPayload,
+            occurredAt: event.occurredAt,
+          });
+          if (event.message) {
+            await ctx.db.insert("oaoMessages", {
+              messageId: event.message.id,
+              runId: event.message.runId,
+              role: event.message.role,
+              content: event.message.content,
+            });
+          }
+        }
+      },
+    });
+    ```
+
+  </Step>
+  <Step title="Expose the HTTP action">
+    ```ts convex/http.ts
+    import { httpRouter } from "convex/server";
+    import { internal } from "./_generated/api";
+    import { httpAction } from "./_generated/server";
+    import { verifyOaoSignature } from "./oaoSignature";
+
+    const http = httpRouter();
+
+    http.route({
+      path: "/oao/events",
+      method: "POST",
+      handler: httpAction(async (ctx, request) => {
+        const body = await request.text();
+        const valid = await verifyOaoSignature({
+          body,
+          webhookId: request.headers.get("webhook-id"),
+          webhookTimestamp: request.headers.get("webhook-timestamp"),
+          webhookSignature: request.headers.get("webhook-signature"),
+          secret: process.env.OAO_WEBHOOK_SECRET!,
+        });
+        if (!valid) return new Response("Invalid signature", { status: 401 });
+        const batch = JSON.parse(body);
+        // A thrown error returns 500, so OAO retries the same batch.
+        await ctx.runMutation(internal.oao.ingest, { events: batch.data.events });
+        return new Response(null, { status: 204 });
+      }),
+    });
+
+    export default http;
+    ```
+
+  </Step>
+  <Step title="Point the webhook at Convex">
+    Use your deployment's HTTP actions domain, which ends in `.convex.site`,
+    plus the route path: `https://happy-animal-123.convex.site/oao/events`.
+  </Step>
+</Steps>
+
+Convex does not retry failed HTTP actions; OAO does. Because a retried batch
+carries the same events, the event-ID check keeps the mutation idempotent. A
+batch stays far below Convex's per-mutation write limits.
+
+<Tip>
+  To develop against a local Convex backend, run the OAO API and runtime worker
+  with `NODE_ENV=development` and
+  `OAO_EVENT_WEBHOOKS_ALLOW_PRIVATE_NETWORK=true`, then use the local HTTP
+  actions URL printed by `npx convex dev`. OAO refuses this setting outside
+  development.
+</Tip>
+
+## Include message content
+
+By default, `message.created` carries only metadata such as the role. With
+`includeMessageContent: true`, OAO adds a `message` object with the text of
+user messages and of the assistant's final reply. That is the same transcript
+text an authorized reader gets from `GET /sessions/{sessionId}`.
+
+<Warning>
+  Message content leaves OAO in every delivery. Enable it only for receivers you
+  control. Tool arguments, tool results, provider reasoning, and file bytes are
+  never included.
+</Warning>
+
+## Rotate the signing secret
+
+Send a new secret to `PUT /event-webhooks/{webhookId}/credential`. For 24
+hours, OAO signs every delivery with both the new and the previous secret, so
+you can update your receiver without rejecting deliveries. Set
+`previousCredentialTtlSeconds` to change that window, from `0` for immediate
+revocation up to 7 days.
+
+```json
+{ "signingSecret": "whsec_...", "previousCredentialTtlSeconds": 86400 }
+```
+
+## Monitor delivery
+
+The webhook resource reports delivery health:
+
+| Field                                  | Meaning                                                   |
+| -------------------------------------- | --------------------------------------------------------- |
+| `status`                               | `active`, `failing` after a failed attempt, or `disabled` |
+| `disabledReason`                       | `user`, or `endpoint_gone` after a `410` response         |
+| `pendingEvents`                        | Committed events not yet delivered or filtered out        |
+| `consecutiveFailures`, `nextAttemptAt` | Current retry streak and the next scheduled attempt       |
+| `lastResponseStatus`, `lastErrorCode`  | The last HTTP status and a safe error code                |
+| `lastSuccessAt`, `lastFailureAt`       | When the last attempt succeeded or failed                 |
+
+`lastErrorCode` is one of `http_status`, `timeout`, `connection_failed`,
+`destination_blocked`, `endpoint_gone`, or `signing_key_unavailable`. The last
+code means the worker cannot decrypt the secret; check that the API and worker
+share the same `OAO_CREDENTIAL_ENCRYPTION_KEY`.
+
+Changing the endpoint URL, event filter, or message-content setting discards a
+pending batch and forms the next one under the new configuration. Delivery
+resumes immediately. To replay history into a new receiver, create another
+webhook with `deliverFrom: "beginning"`.
+
+## Security
+
+- **Destinations:** endpoints must use HTTPS and resolve only to public
+  addresses. OAO pins the connection to the checked address, does not follow
+  redirects, and times out after 15 seconds.
+- **Secrets:** the signing secret is write-only and stored with AES-256-GCM.
+  Responses, audit entries, events, and logs carry only its fingerprint and
+  version.
+- **Endpoint URLs:** project admins can read the full URL, and audit entries
+  record only its origin. Authenticate with the signature, and never put
+  credentials in the URL.
+
+## Limits
+
+| Limit                         | Value                                |
+| ----------------------------- | ------------------------------------ |
+| Webhooks per project          | 20                                   |
+| Events per batch              | 100                                  |
+| Soft batch size               | 256 KB; a larger event is sent alone |
+| In-flight batches per webhook | 1                                    |
+| Request timeout               | 15 seconds                           |
+| Maximum retry delay           | 5 minutes                            |
+| Event filter entries          | 100                                  |

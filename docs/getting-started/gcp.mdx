@@ -19,7 +19,9 @@ A small production topology has:
 Deploy the same immutable image to both application workloads. The public
 service runs the image's `api` entrypoint and the worker pool runs its
 `worker` entrypoint. Both workloads need the same `DATABASE_URL` and
-`OAO_CREDENTIAL_ENCRYPTION_KEY`. Do not give the worker a public endpoint.
+`OAO_CREDENTIAL_ENCRYPTION_KEY`. Do not give the worker a public endpoint. The
+worker delivers [event webhooks](/integrations/event-webhooks), so give it
+outbound HTTPS access to their endpoints.
 
 ## Build and deliver an image
 

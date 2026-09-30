@@ -364,6 +364,21 @@ rotating a storage connection. See
 [Workspace backups](/storage/workspace-backups) for retention, encryption, size,
 and failure behavior.
 
+### Event webhooks to a local receiver
+
+[Event webhooks](/integrations/event-webhooks) require public HTTPS endpoints.
+To deliver to a receiver on your machine, such as a local Convex backend, add
+this to `.env` and restart `pnpm dev:local`:
+
+```dotenv
+OAO_EVENT_WEBHOOKS_ALLOW_PRIVATE_NETWORK=true
+```
+
+It allows `http://` and private-network endpoints in both the API and the
+runtime worker, and both refuse to start with it unless `NODE_ENV=development`.
+The worker polls for undelivered events every 500 ms; set
+`OAO_EVENT_WEBHOOK_POLL_MS` to change that.
+
 ### OTLP telemetry
 
 To export vendor-neutral telemetry, set the collector endpoint:

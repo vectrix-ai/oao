@@ -23,6 +23,8 @@ import type {
   CreateMcpCredentialPolicyInput,
   CreateMcpToolsetInput,
   CreateProjectInput,
+  EventWebhook,
+  EventWebhookStatus,
 } from "@oao/contracts";
 
 export type {
@@ -45,6 +47,8 @@ export type {
   RotateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
   CreateMcpToolsetInput,
+  EventWebhook,
+  EventWebhookStatus,
 };
 
 export interface McpServerList {
@@ -122,6 +126,38 @@ export interface SandboxSnapshotList {
   readonly data: readonly SandboxSnapshotEntry[];
   readonly providerId: string;
   readonly providerType: "daytona";
+}
+
+export interface EventWebhookList {
+  readonly data: readonly EventWebhook[];
+  readonly credentialEncryptionConfigured: boolean;
+}
+
+export interface CreateEventWebhookInput {
+  readonly displayName: string;
+  readonly endpointUrl: string;
+  /** Write-only `whsec_` Standard Webhooks secret; OAO never returns it. */
+  readonly signingSecret: string;
+  /** Exact kinds or family wildcards such as `run.*`; null delivers every event. */
+  readonly eventKinds?: readonly string[] | null;
+  readonly includeMessageContent?: boolean;
+  /** `now` skips existing events; `beginning` replays the project's history. */
+  readonly deliverFrom?: "now" | "beginning";
+  readonly enabled?: boolean;
+}
+
+export interface UpdateEventWebhookInput {
+  readonly displayName?: string;
+  readonly endpointUrl?: string;
+  readonly eventKinds?: readonly string[] | null;
+  readonly includeMessageContent?: boolean;
+  readonly enabled?: boolean;
+}
+
+export interface RotateEventWebhookCredentialInput {
+  readonly signingSecret: string;
+  /** Seconds the previous secret keeps signing too; 0 revokes it at once. */
+  readonly previousCredentialTtlSeconds?: number;
 }
 
 export interface CreateStorageProviderInput {
@@ -748,6 +784,19 @@ export interface ConsoleApi {
     providerId: string,
     input: UpdateSandboxProviderConfigurationInput,
   ): Promise<ProjectSandboxProvider>;
+  listEventWebhooks(): Promise<EventWebhookList>;
+  createEventWebhook(input: CreateEventWebhookInput): Promise<EventWebhook>;
+  updateEventWebhook(
+    webhookId: string,
+    input: UpdateEventWebhookInput,
+  ): Promise<EventWebhook>;
+  /** Replaces the signing secret; the old one can keep signing for a while. */
+  rotateEventWebhookCredential(
+    webhookId: string,
+    input: RotateEventWebhookCredentialInput,
+  ): Promise<EventWebhook>;
+  /** Stops delivery and erases the webhook's signing secrets. */
+  deleteEventWebhook(webhookId: string): Promise<void>;
   listStorageProviders(): Promise<StorageProviderList>;
   createStorageProvider(
     input: CreateStorageProviderInput,

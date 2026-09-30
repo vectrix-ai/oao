@@ -32,6 +32,10 @@ interface ProductEvent {
 }
 ```
 
+To receive the same events without holding a connection open, configure an
+[event webhook](/integrations/event-webhooks). OAO then pushes signed,
+ordered batches to your endpoint and keeps its own durable cursor.
+
 ## Connection lifecycle
 
 - **Opening:** the server writes a `: connected` comment line as soon as the

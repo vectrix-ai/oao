@@ -86,6 +86,14 @@ OTel SDK -> optional Collector -> configured OTLP backend
     Flue conversation state — refused for the caller's active project and for
     the organization's last project. Organization-shared connections survive
     project deletion; object-storage cleanup is an operator task.
+17. Event webhooks are cursors over the committed product-event feed, not a
+    second event store. The runtime worker claims one webhook at a time under
+    a fenced lease, records a batch before sending it, and advances the cursor
+    only after a `2xx` response, so delivery is ordered and at least once.
+    The cross-tenant claim sees only scheduling columns; endpoint URLs,
+    filters, and encrypted signing keys are read inside the tenant
+    transaction. Signing secrets are write-only and message text leaves OAO
+    only for webhooks that explicitly opt in.
 
 ## Public run states
 
@@ -107,6 +115,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 
 - `@oao/runtime-flue`: generic compiled `ManagedAgent`, pinned `@flue/postgres`, verified PostgreSQL Skill registry, progressive Flue Skill activation, durable child-session coordinator, and history projection.
 - `@oao/queue-postgres`: PostgreSQL wake jobs and platform dispatch leases.
+- `@oao/event-webhooks`: outbound event webhook delivery: Standard Webhooks signing, SSRF-guarded HTTPS transport, fenced PostgreSQL cursor store, and the runtime-worker dispatcher.
 - `@oao/tool-broker`: caller requests/claims/results and single-approver gates.
 - `@oao/models-openrouter`: live OpenRouter/OpenAI/Anthropic/xAI catalog projections, provider-neutral routing and generation-setting translation, project-scoped preset activation, and provider construction. OpenAI and Anthropic remain constrained by pinned runtime metadata; xAI dynamically admits text-output language models behind its OpenAI-compatible API. The package name is retained while the adapter seam expands beyond OpenRouter.
   Its public `src/index.ts` is a thin compatibility barrel: provider-specific catalog, validation, runtime-construction, and payload-mapping code lives under `src/providers/`, while provider-neutral preset orchestration and aggregate catalog behavior live in `src/model-presets.ts` and `src/catalog.ts`.
@@ -134,6 +143,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 - Sessions list with status, agent, usage, cost, creation and last activity
 - Session detail with Transcript and Debug tabs plus persistent child-session links
 - Pending tool calls and approvals
+- Event webhooks with write-only signing secrets, delivery status, and secret rotation
 - Errors, attempts/recovery, timing waterfall, usage/cost provenance, and redacted payload inspection
 - Organization/project/API-key/member/settings screens, including project creation and deletion
 - Hosting diagnostics for local services and optional Railway/Daytona targets; no residency claim in MVP

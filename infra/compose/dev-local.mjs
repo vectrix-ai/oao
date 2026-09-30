@@ -221,6 +221,7 @@ async function main() {
   });
   startChild("runtime worker", ["--filter", "@oao/runtime-worker", "dev"], {
     DATABASE_URL: databaseUrl,
+    NODE_ENV: nodeEnvironment,
     PORT: runtimePort,
   });
   startChild(

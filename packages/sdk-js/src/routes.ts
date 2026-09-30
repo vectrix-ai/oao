@@ -75,6 +75,12 @@ export function createRoutes(apiPrefix = "/v1") {
       `${project(projectId)}/model-providers/${segment(providerId)}`,
     modelProviderCredential: (projectId: string, providerId: string) =>
       `${project(projectId)}/model-providers/${segment(providerId)}/credential`,
+    eventWebhooks: (projectId: string) =>
+      `${project(projectId)}/event-webhooks`,
+    eventWebhook: (projectId: string, webhookId: string) =>
+      `${project(projectId)}/event-webhooks/${segment(webhookId)}`,
+    eventWebhookCredential: (projectId: string, webhookId: string) =>
+      `${project(projectId)}/event-webhooks/${segment(webhookId)}/credential`,
     sandboxProviders: (projectId: string) =>
       `${project(projectId)}/sandbox-providers`,
     sandboxProviderCredential: (projectId: string, providerId: string) =>

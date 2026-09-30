@@ -864,6 +864,52 @@ the agent is published. Use a domain-specific public name such as
 storage. The API returns `400 bad_request` with the exact rejected path in
 `error.details.path`.
 
+## Event webhooks
+
+Event webhooks push product events to a customer HTTPS endpoint in ordered,
+signed batches. They are project-scoped and every route requires
+`project:admin`. See [Event webhooks](/integrations/event-webhooks) for the
+delivery format, signature verification, and a Convex receiver.
+
+| Method   | Path                                                          | Purpose                                              |
+| -------- | ------------------------------------------------------------- | ---------------------------------------------------- |
+| `GET`    | `/projects/{projectId}/event-webhooks`                        | List webhooks with delivery status                   |
+| `POST`   | `/projects/{projectId}/event-webhooks`                        | Create a webhook with a write-only signing secret    |
+| `GET`    | `/projects/{projectId}/event-webhooks/{webhookId}`            | Read one webhook and its delivery status             |
+| `PATCH`  | `/projects/{projectId}/event-webhooks/{webhookId}`            | Change name, URL, filter, message content, or enable |
+| `PUT`    | `/projects/{projectId}/event-webhooks/{webhookId}/credential` | Rotate the signing secret                            |
+| `DELETE` | `/projects/{projectId}/event-webhooks/{webhookId}`            | Delete the webhook and its encrypted secret          |
+
+Create a webhook with:
+
+```json
+{
+  "displayName": "Convex",
+  "endpointUrl": "https://happy-animal-123.convex.site/oao/events",
+  "signingSecret": "whsec_...",
+  "eventKinds": ["run.*", "message.created"],
+  "includeMessageContent": false,
+  "deliverFrom": "now",
+  "enabled": true
+}
+```
+
+`signingSecret` is a Standard Webhooks secret: `whsec_` followed by base64
+encoding 24 to 64 random bytes. `eventKinds` accepts exact kinds and family
+wildcards such as `run.*`; `null` delivers every event. `deliverFrom` is `now`
+(default) or `beginning`. The endpoint must use HTTPS and a public host.
+
+Responses expose `credentialConfigured`, a 12-character fingerprint, the
+credential version, and delivery state: `status`, `deliveredPosition`,
+`cursor`, `pendingEvents`, `consecutiveFailures`, `nextAttemptAt`, the last
+attempt, success, and failure times, `lastResponseStatus`, and
+`lastErrorCode`. `PATCH` accepts any subset of `displayName`, `endpointUrl`,
+`eventKinds`, `includeMessageContent`, and `enabled`. Rotate with
+`{ "signingSecret": "...", "previousCredentialTtlSeconds": 86400 }`; the
+previous secret keeps signing for that many seconds, from `0` to `604800`.
+`DELETE` returns `{ "id": "...", "deleted": true }`. All writes require an
+`Idempotency-Key`, and a project can have at most 20 webhooks.
+
 ## Pagination
 
 List endpoints accept `limit` and an opaque `cursor`. Responses use:

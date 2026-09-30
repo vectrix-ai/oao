@@ -6,8 +6,10 @@ description: Know which workflows are implemented now and which remain explicit 
 The current repository is a local-first MVP. These boundaries are intentional
 and should shape integrations:
 
-- **PostgreSQL is the only application database.** There is no Convex projection
-  or Redis dependency.
+- **PostgreSQL is the only application database.** OAO has no Convex or Redis
+  dependency. [Event webhooks](/integrations/event-webhooks) can push product
+  events to a receiver you run, such as a Convex HTTP action, but OAO never
+  reads state back from it.
 - **The TypeScript SDK is a private workspace package.** OAO applications inside
   this monorepo can depend on `@oao/sdk-js` with `workspace:*`. External
   codebases should use the documented HTTP/SSE contracts until the SDK is

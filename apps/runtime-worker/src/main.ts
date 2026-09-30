@@ -4,7 +4,14 @@ import {
   ProjectWorkspaceBackupResolver,
 } from "@oao/artifact-s3";
 import type { ServerType } from "@hono/node-server";
-import { createPool, migrate } from "@oao/db-postgres";
+import { randomUUID } from "node:crypto";
+import { createPool, migrate, type PgPool } from "@oao/db-postgres";
+import {
+  allowPrivateWebhookNetwork,
+  createWebhookTransport,
+  EventWebhookDispatcher,
+  PostgresEventWebhookStore,
+} from "@oao/event-webhooks";
 import type {
   OrganizationId,
   PrincipalId,
@@ -73,6 +80,8 @@ export async function startRuntimeWorker(input: {
   readonly mcpRemote?: McpRemotePort;
   /** Tests may admit one explicit run without claiming unrelated queued work. */
   readonly backgroundWakes?: boolean;
+  /** Outbound event webhook delivery; defaults to on when credentials can be decrypted. */
+  readonly eventWebhooks?: boolean;
 }): Promise<RuntimeWorkerHandle> {
   const env = input.env ?? process.env;
   const pool = createPool(input.databaseUrl);
@@ -240,6 +249,11 @@ export async function startRuntimeWorker(input: {
     await orchestrator.enqueueRecovery();
     wakeWorker.start();
   }
+  const webhookDispatcher =
+    credentialCipher && input.eventWebhooks !== false
+      ? createEventWebhookDispatcher(pool, credentialCipher, env)
+      : undefined;
+  webhookDispatcher?.start();
 
   let ready = true;
   let server: ServerType | undefined;
@@ -285,6 +299,7 @@ export async function startRuntimeWorker(input: {
     disposed = true;
     ready = false;
     await wakeWorker.stop();
+    await webhookDispatcher?.stop();
     await projection.stop();
     await flue.stop();
     resetManagedAgentRuntime();
@@ -304,6 +319,9 @@ export async function startRuntimeWorker(input: {
       handoffPrepared = true;
       ready = false;
       await wakeWorker.stop();
+      // An interrupted delivery keeps its batch; the lease expires and another
+      // worker resends it under the same webhook-id.
+      await webhookDispatcher?.stop();
       await projection.stop();
       await closeServer();
       if (await hasActiveDispatches()) {
@@ -324,6 +342,61 @@ export async function startRuntimeWorker(input: {
       await dispose();
     },
   };
+}
+
+function createEventWebhookDispatcher(
+  pool: PgPool,
+  cipher: ProviderCredentialCipher,
+  env: NodeJS.ProcessEnv,
+): EventWebhookDispatcher {
+  const pollIntervalMs = Number(env.OAO_EVENT_WEBHOOK_POLL_MS ?? 500);
+  if (
+    !Number.isInteger(pollIntervalMs) ||
+    pollIntervalMs < 50 ||
+    pollIntervalMs > 60_000
+  )
+    throw new Error(
+      "OAO_EVENT_WEBHOOK_POLL_MS must be an integer from 50 to 60000",
+    );
+  return new EventWebhookDispatcher({
+    store: new PostgresEventWebhookStore(pool),
+    transport: createWebhookTransport({
+      allowPrivateNetwork: allowPrivateWebhookNetwork(env),
+    }),
+    decryptSigningKey: (key, context) =>
+      cipher.decrypt(
+        {
+          ciphertext: key.ciphertext,
+          nonce: key.nonce,
+          tag: key.tag,
+          keyVersion: key.keyVersion,
+        },
+        {
+          organizationId: context.organizationId,
+          providerId: context.webhookId,
+          providerType: "event_webhook",
+        },
+      ),
+    workerId: `webhooks-${process.pid}-${randomUUID()}`,
+    pollIntervalMs,
+    onError: (error, claim) => {
+      console.error(
+        JSON.stringify({
+          level: "error",
+          source: "event-webhooks",
+          ...(claim
+            ? {
+                organizationId: claim.organizationId,
+                projectId: claim.projectId,
+                webhookId: claim.webhookId,
+              }
+            : {}),
+          errorType: error instanceof Error ? error.name : typeof error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    },
+  });
 }
 
 async function main(): Promise<void> {

@@ -64,6 +64,7 @@
         "pages": [
           "integrations/files",
           "integrations/codebase",
+          "integrations/event-webhooks",
           "integrations/mcp"
         ]
       },

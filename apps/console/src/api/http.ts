@@ -3,6 +3,7 @@ import type {
   AgentSummary,
   ConsoleApi,
   CreateApiKeyInput,
+  CreateEventWebhookInput,
   CreateModelProviderInput,
   CreateModelPresetInput,
   CreateSandboxProviderInput,
@@ -10,6 +11,8 @@ import type {
   CreateStorageProviderInput,
   CreatedApiKey,
   EventConnection,
+  EventWebhook,
+  EventWebhookList,
   ListFilters,
   ModelCatalogEntry,
   ModelCatalogList,
@@ -18,6 +21,7 @@ import type {
   PageResult,
   PendingWork,
   ProjectContext,
+  RotateEventWebhookCredentialInput,
   ProjectModelProvider,
   ProjectSandboxProvider,
   ProjectStorageProvider,
@@ -34,6 +38,7 @@ import type {
   SettingsData,
   TimelineEvent,
   TimelineKind,
+  UpdateEventWebhookInput,
   UpdateSandboxProviderConfigurationInput,
   McpServer,
   McpCredential,
@@ -2227,6 +2232,52 @@ export class HttpConsoleApi implements ConsoleApi {
       `/sandbox-providers/${encodeURIComponent(providerId)}/configuration`,
       { method: "PUT", body: JSON.stringify(input) },
     );
+
+  listEventWebhooks = async (): Promise<EventWebhookList> => {
+    const response = await this.#projectRequest<
+      CursorPage<EventWebhook> & {
+        readonly credentialEncryptionConfigured?: boolean;
+      }
+    >("/event-webhooks?limit=200");
+    return {
+      data: response.data,
+      credentialEncryptionConfigured:
+        response.credentialEncryptionConfigured === true,
+    };
+  };
+
+  createEventWebhook = async (
+    input: CreateEventWebhookInput,
+  ): Promise<EventWebhook> =>
+    this.#projectRequest<EventWebhook>("/event-webhooks", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+
+  updateEventWebhook = async (
+    webhookId: string,
+    input: UpdateEventWebhookInput,
+  ): Promise<EventWebhook> =>
+    this.#projectRequest<EventWebhook>(
+      `/event-webhooks/${encodeURIComponent(webhookId)}`,
+      { method: "PATCH", body: JSON.stringify(input) },
+    );
+
+  rotateEventWebhookCredential = async (
+    webhookId: string,
+    input: RotateEventWebhookCredentialInput,
+  ): Promise<EventWebhook> =>
+    this.#projectRequest<EventWebhook>(
+      `/event-webhooks/${encodeURIComponent(webhookId)}/credential`,
+      { method: "PUT", body: JSON.stringify(input) },
+    );
+
+  deleteEventWebhook = async (webhookId: string): Promise<void> => {
+    await this.#projectRequest(
+      `/event-webhooks/${encodeURIComponent(webhookId)}`,
+      { method: "DELETE" },
+    );
+  };
 
   listStorageProviders = async (): Promise<StorageProviderList> =>
     this.#projectRequest<StorageProviderList>("/storage-providers");

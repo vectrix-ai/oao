@@ -46,6 +46,7 @@ export function ConsoleApp({
         <Route path="api-keys" element={<SettingsPage />} />
         <Route path="sandbox-providers" element={<SettingsPage />} />
         <Route path="storage-providers" element={<SettingsPage />} />
+        <Route path="event-webhooks" element={<SettingsPage />} />
         <Route path="mcp" element={<McpPage />} />
         <Route
           path="storage-providers/:providerId"
