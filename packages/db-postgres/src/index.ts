@@ -597,6 +597,10 @@ export class PostgresWakeNotifier implements WakeOnlyNotifier {
       return;
     this.#starting = this.#startListening().finally(() => {
       this.#starting = undefined;
+      // A connection lost mid-startup schedules its retry at once, and that
+      // retry is skipped if startup is still pending when it fires. Retry again
+      // once startup settles without a listener.
+      if (!this.#listener) this.#scheduleReconnect();
     });
   }
 

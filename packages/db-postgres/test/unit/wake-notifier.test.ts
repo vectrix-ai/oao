@@ -14,11 +14,15 @@ class FakeListenerClient extends EventEmitter {
   readonly queries: string[] = [];
   ended = false;
 
-  constructor(private readonly connectError?: Error) {
+  constructor(
+    private readonly connectError?: Error,
+    private readonly connectGate?: Promise<void>,
+  ) {
     super();
   }
 
   async connect(): Promise<void> {
+    await this.connectGate;
     if (this.connectError) throw this.connectError;
   }
 
@@ -175,4 +179,35 @@ test("closing releases the listener and later subscriptions stay inert", async (
   const unsubscribe = await notifier.subscribe(() => assert.fail("woken"));
   await unsubscribe();
   assert.equal(clients.length, 1);
+});
+
+test("a listener lost during a slow startup still reconnects", async () => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const clients: FakeListenerClient[] = [];
+  const notifier = new PostgresWakeNotifier(unusedPool, {
+    createListenerClient: () => {
+      // Only the first connection attempt stalls.
+      const client = new FakeListenerClient(
+        undefined,
+        clients.length === 0 ? gate : undefined,
+      );
+      clients.push(client);
+      return client as unknown as pg.Client;
+    },
+    reconnectDelayMs: 5,
+    maxReconnectDelayMs: 20,
+    onListenerError: () => undefined,
+  });
+  await notifier.subscribe(() => undefined);
+  await waitFor(() => clients.length === 1, "first connection attempt");
+  clients[0]?.emit("error", new Error("connection reset during connect"));
+  // The scheduled retry fires while the first startup is still pending.
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(clients.length, 1);
+  release();
+  await waitFor(() => clients[1]?.listening === true, "replacement listener");
+  await notifier.close();
 });
