@@ -66,11 +66,26 @@ export function decodeEventCursor(cursor: string): ProjectPosition {
   return BigInt(match[1]);
 }
 
+export interface WakeSubscriptionScope {
+  readonly organizationId: OrganizationId;
+  readonly projectId: ProjectId;
+}
+
 // Notifications never contain canonical event data. Consumers always resume from the store.
+// A wake is only a latency hint: implementations may drop, merge, or over-deliver wakes, so
+// every subscriber must also poll the store on its own schedule.
 export interface WakeOnlyNotifier {
   notifyProject(
     organizationId: OrganizationId,
     projectId: ProjectId,
   ): Promise<void>;
-  subscribe(onWake: () => void): Promise<() => Promise<void>>;
+  /**
+   * Registers a wake callback. With a scope, only wakes for that project (or wakes whose
+   * project is unknown) are delivered. Resolves without waiting for the listener to be
+   * ready and never rejects because the notification channel is unavailable.
+   */
+  subscribe(
+    onWake: () => void,
+    scope?: WakeSubscriptionScope,
+  ): Promise<() => Promise<void>>;
 }

@@ -130,6 +130,7 @@ export interface ApiDependencies {
   readonly artifacts?: ArtifactPort;
   readonly runFileStorage?: ProjectArtifactStoreResolverPort;
   readonly notifier?: WakeOnlyNotifier;
+  readonly eventStreamTiming?: Partial<EventStreamTiming>;
   readonly runtimeCommands: RuntimeCommandPort;
   readonly credentialCipher?: ProviderCredentialCipher;
   readonly mcpRemote?: McpRemotePort;
@@ -142,6 +143,22 @@ export interface ApiDependencies {
     readonly error: unknown;
   }) => void;
 }
+
+export interface EventStreamTiming {
+  /** A healthy stream closes after this long; clients reconnect with Last-Event-ID. */
+  readonly maxConnectionMs: number;
+  /** Fallback poll interval when no wake notification arrives. */
+  readonly pollIntervalMs: number;
+  /** Idle time before a keepalive comment is written so proxies keep the stream open. */
+  readonly heartbeatIntervalMs: number;
+}
+
+const DEFAULT_EVENT_STREAM_TIMING: EventStreamTiming = Object.freeze({
+  maxConnectionMs: 25_000,
+  pollIntervalMs: 1_000,
+  heartbeatIntervalMs: 10_000,
+});
+const EVENT_STREAM_PAGE_SIZE = 200;
 
 export interface ApiAuthConfiguration {
   readonly provider: "development" | "iap" | "workos";
@@ -8084,17 +8101,38 @@ function registerEventRoutes(
       }
     }
     const once = c.req.query("once") === "true";
-    return streamSSE(c, async (stream) => {
-      const deadline = Date.now() + (once ? 0 : 25_000);
+    const timing = {
+      ...DEFAULT_EVENT_STREAM_TIMING,
+      ...dependencies.eventStreamTiming,
+    };
+    // Ask buffering reverse proxies (nginx and compatible) to pass frames through at once.
+    c.header("X-Accel-Buffering", "no");
+    const response = streamSSE(c, async (stream) => {
+      const deadline = Date.now() + (once ? 0 : timing.maxConnectionMs);
       let position = after;
       let wake: (() => void) | undefined;
       let wakePromise = new Promise<void>((resolve) => {
         wake = resolve;
       });
-      const unsubscribe = dependencies.notifier
-        ? await dependencies.notifier.subscribe(() => wake?.())
-        : undefined;
+      // A one-page read never waits, so it does not need wake notifications.
+      const unsubscribe =
+        dependencies.notifier && !once
+          ? await dependencies.notifier.subscribe(() => wake?.(), {
+              organizationId: actor.organizationId,
+              projectId: actor.projectId,
+            })
+          : undefined;
+      // A client disconnect ends the wait at once instead of after the next poll.
+      stream.onAbort(() => wake?.());
+      let lastWriteAt = Date.now();
+      const writeComment = async (text: string): Promise<void> => {
+        await stream.write(`: ${text}\n\n`);
+        lastWriteAt = Date.now();
+      };
       try {
+        // Send bytes immediately so proxies commit the response instead of waiting for
+        // the first event. SSE parsers ignore comment lines.
+        if (!once) await writeComment("connected");
         do {
           const result = await dependencies.store.transaction(
             actor,
@@ -8104,7 +8142,7 @@ function registerEventRoutes(
                 `SELECT organization_id,project_id,project_position,id,aggregate_type,aggregate_id,
                       aggregate_sequence,event_kind,public_payload,occurred_at
                FROM oao.product_events WHERE organization_id=$1 AND project_id=$2 AND project_position>$3
-               ORDER BY project_position LIMIT 200`,
+               ORDER BY project_position LIMIT ${EVENT_STREAM_PAGE_SIZE}`,
                 [actor.organizationId, actor.projectId, position.toString()],
               ),
           );
@@ -8126,9 +8164,21 @@ function registerEventRoutes(
                 occurredAt: publicValue(event.occurred_at),
               }),
             });
+            lastWriteAt = Date.now();
           }
           if (once || Date.now() >= deadline) break;
-          await Promise.race([wakePromise, stream.sleep(1_000)]);
+          // A full page means more committed events are waiting; drain them first.
+          if (result.rows.length === EVENT_STREAM_PAGE_SIZE) continue;
+          if (Date.now() - lastWriteAt >= timing.heartbeatIntervalMs)
+            await writeComment("keepalive");
+          let pollTimer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([
+            wakePromise,
+            new Promise<void>((resolve) => {
+              pollTimer = setTimeout(resolve, timing.pollIntervalMs);
+            }),
+          ]);
+          clearTimeout(pollTimer);
           wakePromise = new Promise<void>((resolve) => {
             wake = resolve;
           });
@@ -8137,5 +8187,9 @@ function registerEventRoutes(
         await unsubscribe?.();
       }
     });
+    // streamSSE replaces the API-wide no-store policy with no-cache. Restore it and forbid
+    // intermediaries from compressing or otherwise transforming the stream.
+    response.headers.set("Cache-Control", "no-store, no-transform");
+    return response;
   });
 }

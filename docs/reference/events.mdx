@@ -9,12 +9,13 @@ OAO exposes one ordered Server-Sent Events feed per project:
 GET /v1/projects/{projectId}/events
 Accept: text/event-stream
 Authorization: Bearer oao_your_secret
-Last-Event-ID: 142
+Last-Event-ID: djE6MTQy
 ```
 
 Each frame's SSE `event` is the product-event kind, such as
-`run.state_changed` or `tool_call.requested`. Its SSE `id` is the committed
-project position and its JSON body has this shape:
+`run.state_changed` or `tool_call.requested`. Its SSE `id` is an opaque cursor
+for the committed project position; send it back unchanged rather than
+constructing one. Its JSON body has this shape:
 
 ```ts
 interface ProductEvent {
@@ -31,6 +32,25 @@ interface ProductEvent {
 }
 ```
 
+## Connection lifecycle
+
+- **Opening:** the server writes a `: connected` comment line as soon as the
+  stream opens, so proxies commit the response before the first event exists.
+- **Keepalive:** after 10 seconds without other output, the server writes a
+  `: keepalive` comment line. Standards-compliant SSE parsers ignore lines that
+  start with `:`. A custom parser must skip them and never treat them as events.
+- **Normal close:** a healthy stream closes after about 25 seconds. Reconnect
+  with `Last-Event-ID`; the close is not data loss.
+- **Backlog:** after a reconnect, the server sends missed events in pages of
+  200 without pausing between full pages.
+- **One page:** `?once=true` returns a single page of up to 200 events with no
+  comment lines and closes immediately.
+
+Event streams are sent with `Cache-Control: no-store, no-transform` and
+`X-Accel-Buffering: no`. If OAO runs behind your own reverse proxy or load
+balancer, disable response buffering and compression for `text/event-stream`,
+and allow at least 15 seconds between reads.
+
 ## Resume correctly
 
 1. Persist the last event ID only after your application has applied that
@@ -43,6 +63,10 @@ interface ProductEvent {
 
 The cursor is backed by committed PostgreSQL state. `LISTEN/NOTIFY` is only a
 latency optimization inside OAO, so missed notifications do not create gaps.
+Each API process shares one dedicated `LISTEN` connection across all of its open
+streams and wakes only the streams of the project that committed the event. If
+that connection drops, streams keep polling committed events every second while
+the listener reconnects.
 
 ## Model usage events
 

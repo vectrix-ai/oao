@@ -18,6 +18,7 @@ import type {
   AtomicEventAppender,
   ProductEventInput,
   WakeOnlyNotifier,
+  WakeSubscriptionScope,
 } from "@oao/events";
 import pg from "pg";
 
@@ -471,26 +472,250 @@ export class PostgresEventAppender implements AtomicEventAppender<Queryable> {
   }
 }
 
+const PRODUCT_EVENT_CHANNEL = "oao_product_events";
+
+function projectWakeKey(
+  organizationId: OrganizationId,
+  projectId: ProjectId,
+): string {
+  // Must match the payload written by oao.append_product_event.
+  return `${organizationId}/${projectId}`;
+}
+
+export interface PostgresWakeNotifierOptions {
+  /** Creates the dedicated LISTEN connection. Defaults to the pool's connection settings. */
+  readonly createListenerClient?: () => pg.Client;
+  /** First delay before reconnecting a failed listener. Doubles up to the maximum. */
+  readonly reconnectDelayMs?: number;
+  readonly maxReconnectDelayMs?: number;
+  /** How long the listener stays connected after its last subscriber leaves. */
+  readonly idleReleaseMs?: number;
+  /** Receives listener connection failures. Subscribers fall back to polling meanwhile. */
+  readonly onListenerError?: (error: unknown) => void;
+}
+
+interface WakeSubscriber {
+  readonly onWake: () => void;
+  readonly projectKey: string | undefined;
+}
+
+/**
+ * Fans PostgreSQL product-event notifications out to every in-process subscriber over one
+ * dedicated LISTEN connection. The connection lives outside the query pool, so long-lived
+ * SSE streams never pin pool clients, and a lost connection degrades to polling and
+ * reconnects with backoff instead of surfacing an unhandled client error.
+ */
 export class PostgresWakeNotifier implements WakeOnlyNotifier {
-  constructor(private readonly pool: PgPool) {}
+  readonly #pool: PgPool;
+  readonly #createListenerClient: () => pg.Client;
+  readonly #reconnectDelayMs: number;
+  readonly #maxReconnectDelayMs: number;
+  readonly #idleReleaseMs: number;
+  readonly #onListenerError: (error: unknown) => void;
+  readonly #subscribers = new Set<WakeSubscriber>();
+  readonly #retiredClients = new WeakSet<pg.Client>();
+  #listener: pg.Client | undefined;
+  #starting: Promise<void> | undefined;
+  #reconnectTimer: NodeJS.Timeout | undefined;
+  #idleTimer: NodeJS.Timeout | undefined;
+  #failedAttempts = 0;
+  #closed = false;
+
+  constructor(pool: PgPool, options: PostgresWakeNotifierOptions = {}) {
+    this.#pool = pool;
+    this.#createListenerClient =
+      options.createListenerClient ??
+      (() =>
+        new pg.Client({
+          ...pool.options,
+          // pg-pool stores the password as a non-enumerable property.
+          password: pool.options.password,
+          // Bound connection attempts so a hung connect cannot stall reconnects or shutdown.
+          connectionTimeoutMillis: 10_000,
+          // An idle LISTEN connection carries no traffic; keepalives detect silent drops.
+          keepAlive: true,
+        }));
+    this.#reconnectDelayMs = options.reconnectDelayMs ?? 1_000;
+    this.#maxReconnectDelayMs = options.maxReconnectDelayMs ?? 30_000;
+    this.#idleReleaseMs = options.idleReleaseMs ?? 30_000;
+    this.#onListenerError = options.onListenerError ?? (() => undefined);
+  }
+
   async notifyProject(
     organizationId: OrganizationId,
     projectId: ProjectId,
   ): Promise<void> {
-    await this.pool.query("SELECT pg_notify('oao_product_events', $1)", [
-      `${organizationId}/${projectId}`,
+    await this.#pool.query("SELECT pg_notify($1, $2)", [
+      PRODUCT_EVENT_CHANNEL,
+      projectWakeKey(organizationId, projectId),
     ]);
   }
-  async subscribe(onWake: () => void): Promise<() => Promise<void>> {
-    const client = await this.pool.connect();
-    const listener = () => onWake();
-    client.on("notification", listener);
-    await client.query("LISTEN oao_product_events");
-    return async () => {
-      await client.query("UNLISTEN oao_product_events");
-      client.off("notification", listener);
-      client.release();
+
+  subscribe(
+    onWake: () => void,
+    scope?: WakeSubscriptionScope,
+  ): Promise<() => Promise<void>> {
+    if (this.#closed) return Promise.resolve(() => Promise.resolve());
+    const subscriber: WakeSubscriber = {
+      onWake,
+      projectKey: scope
+        ? projectWakeKey(scope.organizationId, scope.projectId)
+        : undefined,
     };
+    this.#subscribers.add(subscriber);
+    this.#cancelIdleRelease();
+    this.#ensureListening();
+    let active = true;
+    return Promise.resolve(() => {
+      if (active) {
+        active = false;
+        this.#subscribers.delete(subscriber);
+        if (this.#subscribers.size === 0) this.#scheduleIdleRelease();
+      }
+      return Promise.resolve();
+    });
+  }
+
+  /** Releases the listener connection. Later subscriptions receive no wakes. */
+  async close(): Promise<void> {
+    this.#closed = true;
+    this.#subscribers.clear();
+    this.#cancelIdleRelease();
+    clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = undefined;
+    await this.#starting;
+    if (this.#listener) await this.#retire(this.#listener);
+  }
+
+  #ensureListening(): void {
+    if (
+      this.#closed ||
+      this.#listener ||
+      this.#starting ||
+      this.#reconnectTimer
+    )
+      return;
+    this.#starting = this.#startListening().finally(() => {
+      this.#starting = undefined;
+      // A connection lost mid-startup schedules its retry at once, and that
+      // retry is skipped if startup is still pending when it fires. Retry again
+      // once startup settles without a listener.
+      if (!this.#listener) this.#scheduleReconnect();
+    });
+  }
+
+  async #startListening(): Promise<void> {
+    let client: pg.Client;
+    try {
+      client = this.#createListenerClient();
+    } catch (error) {
+      this.#onListenerError(error);
+      this.#scheduleReconnect();
+      return;
+    }
+    // This handler stays attached after retirement so late socket errors are absorbed.
+    const lost = (error?: unknown): void => {
+      this.#handleListenerLoss(client, error);
+    };
+    client.on("error", lost);
+    client.on("end", () => lost());
+    client.on("notification", (message) => {
+      if (message.channel === PRODUCT_EVENT_CHANNEL)
+        this.#dispatch(message.payload);
+    });
+    try {
+      await client.connect();
+      await client.query(`LISTEN ${PRODUCT_EVENT_CHANNEL}`);
+    } catch (error) {
+      lost(error);
+      return;
+    }
+    if (this.#retiredClients.has(client)) return;
+    if (this.#closed) {
+      await this.#retire(client);
+      return;
+    }
+    const recovered = this.#failedAttempts > 0;
+    this.#failedAttempts = 0;
+    this.#listener = client;
+    // Notifications committed while no listener was connected were never delivered.
+    if (recovered) this.#wakeAll();
+    if (this.#subscribers.size === 0) this.#scheduleIdleRelease();
+  }
+
+  #handleListenerLoss(client: pg.Client, error?: unknown): void {
+    if (this.#retiredClients.has(client)) return;
+    this.#retiredClients.add(client);
+    if (this.#listener === client) this.#listener = undefined;
+    this.#onListenerError(
+      error ?? new Error("PostgreSQL wake listener connection ended"),
+    );
+    void client.end().catch(() => undefined);
+    // Re-read committed events now instead of waiting for the next poll.
+    this.#wakeAll();
+    this.#scheduleReconnect();
+  }
+
+  async #retire(client: pg.Client): Promise<void> {
+    if (this.#retiredClients.has(client)) return;
+    this.#retiredClients.add(client);
+    if (this.#listener === client) this.#listener = undefined;
+    await client.end().catch(() => undefined);
+  }
+
+  #scheduleReconnect(): void {
+    if (this.#closed || this.#reconnectTimer || this.#subscribers.size === 0)
+      return;
+    const delay = Math.min(
+      this.#reconnectDelayMs * 2 ** this.#failedAttempts,
+      this.#maxReconnectDelayMs,
+    );
+    this.#failedAttempts += 1;
+    this.#reconnectTimer = setTimeout(() => {
+      this.#reconnectTimer = undefined;
+      if (this.#subscribers.size > 0) this.#ensureListening();
+    }, delay);
+    this.#reconnectTimer.unref();
+  }
+
+  #scheduleIdleRelease(): void {
+    this.#cancelIdleRelease();
+    this.#idleTimer = setTimeout(() => {
+      this.#idleTimer = undefined;
+      if (this.#subscribers.size > 0) return;
+      clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = undefined;
+      if (this.#listener) void this.#retire(this.#listener);
+    }, this.#idleReleaseMs);
+    this.#idleTimer.unref();
+  }
+
+  #cancelIdleRelease(): void {
+    clearTimeout(this.#idleTimer);
+    this.#idleTimer = undefined;
+  }
+
+  #dispatch(payload: string | undefined): void {
+    for (const subscriber of [...this.#subscribers]) {
+      if (
+        subscriber.projectKey === undefined ||
+        !payload ||
+        payload === subscriber.projectKey
+      )
+        wakeSubscriber(subscriber);
+    }
+  }
+
+  #wakeAll(): void {
+    for (const subscriber of [...this.#subscribers]) wakeSubscriber(subscriber);
+  }
+}
+
+function wakeSubscriber(subscriber: WakeSubscriber): void {
+  try {
+    subscriber.onWake();
+  } catch {
+    // A wake is only a hint; one failing subscriber must not starve the others.
   }
 }
 

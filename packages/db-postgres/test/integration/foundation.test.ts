@@ -13,10 +13,12 @@ import type {
 import {
   PostgresEventAppender,
   PostgresFoundationRepository,
+  PostgresWakeNotifier,
   createPool,
   migrate,
   withTenantTransaction,
 } from "../../src/index.js";
+import pg from "pg";
 
 const databaseUrl = process.env.DATABASE_URL;
 
@@ -1637,6 +1639,67 @@ test(
             [runId],
           );
           assert.equal(remaining.rowCount, 0);
+        },
+      );
+      await t.test(
+        "one shared LISTEN connection wakes only the committing project's streams",
+        async () => {
+          const applicationName = "oao-wake-notifier-test";
+          const notifier = new PostgresWakeNotifier(pool, {
+            createListenerClient: () =>
+              new pg.Client({
+                connectionString: databaseUrl,
+                application_name: applicationName,
+              }),
+          });
+          const woken = { project: 0, other: 0 };
+          const unsubscribes = [
+            await notifier.subscribe(() => woken.project++, tenant),
+            await notifier.subscribe(() => woken.project++, tenant),
+            await notifier.subscribe(() => woken.other++, otherTenant),
+          ];
+          const waitUntil = async (
+            condition: () => boolean | Promise<boolean>,
+            label: string,
+          ): Promise<void> => {
+            const deadline = Date.now() + 5_000;
+            while (!(await condition())) {
+              if (Date.now() > deadline)
+                assert.fail(`Timed out waiting for ${label}`);
+              await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+          };
+          try {
+            await waitUntil(async () => {
+              const listeners = await pool.query<{ count: number }>(
+                "SELECT count(*)::int AS count FROM pg_stat_activity WHERE application_name=$1 AND query='LISTEN oao_product_events'",
+                [applicationName],
+              );
+              return listeners.rows[0]?.count === 1;
+            }, "one shared listener backend");
+            await withTenantTransaction(pool, tenant, (transaction) =>
+              eventAppender.append(transaction, {
+                id: uuid(98001) as EventId,
+                ...tenant,
+                aggregateType: "sandbox",
+                aggregateId: uuid(98099),
+                kind: "sandbox.started",
+                publicPayload: { region: "eu" },
+                occurredAt: new Date("2026-09-29T12:00:00.000Z"),
+              }),
+            );
+            await waitUntil(() => woken.project === 2, "project wakes");
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            assert.equal(woken.other, 0);
+          } finally {
+            for (const unsubscribe of unsubscribes) await unsubscribe();
+            await notifier.close();
+          }
+          const remaining = await pool.query<{ count: number }>(
+            "SELECT count(*)::int AS count FROM pg_stat_activity WHERE application_name=$1",
+            [applicationName],
+          );
+          assert.equal(remaining.rows[0]?.count, 0);
         },
       );
     } finally {

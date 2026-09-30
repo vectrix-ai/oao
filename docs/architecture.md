@@ -39,7 +39,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 2. Run creation returns only after a durable PostgreSQL obligation exists; no HTTP request remains open for the run lifetime.
 3. Caller-owned tool requests, claims, approvals, results, and claim fences are durable PostgreSQL records. A submitted result is distinct from a result committed into Flue history.
 4. Process work is at least once. Canonical commits use idempotency keys, leases, fencing tokens, immutable results, and downstream idempotency.
-5. PostgreSQL product events use durable per-aggregate sequences and a serialized project position. SSE resumes from committed positions; LISTEN/NOTIFY is only a wake hint.
+5. PostgreSQL product events use durable per-aggregate sequences and a serialized project position. SSE resumes from committed positions; LISTEN/NOTIFY is only a wake hint. Each API process shares one dedicated LISTEN connection outside the query pool, so open streams never hold pooled connections between reads.
 6. Browser clients never receive database credentials and never query Flue tables directly.
 7. Raw sensitive payloads are encrypted or retained only inside the explicitly documented Flue storage boundary. List views, events, logs, and telemetry are redacted.
 8. Cancellation of an unreserved queued run is database-only. Once admission becomes ambiguous or succeeds, cancellation completes keyed admission reconciliation, performs Flue abort, and waits for canonical settlement.
