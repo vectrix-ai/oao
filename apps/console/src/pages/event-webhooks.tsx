@@ -813,7 +813,13 @@ function EventWebhookDialog({
   const [deliverFrom, setDeliverFrom] = useState<"now" | "beginning">("now");
   const secret = useSigningSecret();
   const nameError = displayNameError(displayName);
-  const urlError = endpointError(endpointUrl, allowPlainHttp);
+  // The API only revalidates an endpoint that changes, so a stored URL the
+  // server no longer accepts must not block unrelated edits.
+  const endpointUnchanged =
+    webhook !== undefined && endpointUrl.trim() === webhook.endpointUrl;
+  const urlError = endpointUnchanged
+    ? undefined
+    : endpointError(endpointUrl, allowPlainHttp);
   const eventsError = selectionError(events);
   const eventKinds = selectionKinds(events);
   const changes: UpdateEventWebhookInput = webhook

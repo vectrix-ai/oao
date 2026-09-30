@@ -2796,6 +2796,47 @@ describe("management console", () => {
     );
   });
 
+  it("edits other settings of a stored HTTP webhook on a production server", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const [seeded] = (await api.listEventWebhooks()).data;
+    const stored = {
+      ...seeded!,
+      endpointUrl: "http://127.0.0.1:3211/oao/events",
+    };
+    vi.spyOn(api, "listEventWebhooks").mockResolvedValue({
+      data: [stored],
+      credentialEncryptionConfigured: true,
+      privateNetworkEndpointsAllowed: false,
+    });
+    const update = vi
+      .spyOn(api, "updateEventWebhook")
+      .mockResolvedValue({ ...stored, displayName: "Local receiver" });
+    renderConsole("/event-webhooks", api);
+    const row = (await screen.findByText("Convex receiver")).closest("tr")!;
+    await user.click(within(row).getByRole("button", { name: "Edit" }));
+    const dialog = within(
+      screen.getByRole("dialog", { name: "Edit Convex receiver" }),
+    );
+    expect(dialog.queryByText(/Endpoint must use/u)).not.toBeInTheDocument();
+    const name = dialog.getByLabelText("Name");
+    await user.clear(name);
+    await user.type(name, "Local receiver");
+    await user.click(dialog.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith(stored.id, {
+        displayName: "Local receiver",
+      }),
+    );
+    // Changing the endpoint validates it against the server's rules again.
+    await user.click(within(row).getByRole("button", { name: "Edit" }));
+    const again = within(screen.getByRole("dialog", { name: /^Edit /u }));
+    const endpoint = again.getByLabelText("Endpoint URL");
+    await user.clear(endpoint);
+    await user.type(endpoint, "http://127.0.0.1:3212/oao/events");
+    expect(again.getByText("Endpoint must use HTTPS.")).toBeInTheDocument();
+  });
+
   it("blocks webhook creation until credential encryption is configured", async () => {
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     vi.spyOn(api, "listEventWebhooks").mockResolvedValue({
