@@ -383,12 +383,12 @@ code means the worker cannot decrypt the secret; check that the API and worker
 share the same `OAO_CREDENTIAL_ENCRYPTION_KEY`.
 
 Changing the endpoint URL, event filter, or message-content setting discards a
-pending batch and forms the next one under the new configuration. So does
-enabling or disabling the webhook. A request already in flight at that moment
-is not recorded, even if the old endpoint answered `2xx` or `410`; its events
-are delivered again under the new configuration. Delivery resumes immediately.
-To replay history into a new receiver, create another webhook with
-`deliverFrom: "beginning"`.
+pending batch and forms the next one under the new configuration. Enabling or
+disabling the webhook keeps a pending batch, which is resent under the same
+`webhook-id`. After any of these changes, a request already in flight is not
+recorded, even if the old endpoint answered `2xx` or `410`, and its events are
+delivered again. Delivery resumes immediately. To replay history into a new
+receiver, create another webhook with `deliverFrom: "beginning"`.
 
 ## Security
 
