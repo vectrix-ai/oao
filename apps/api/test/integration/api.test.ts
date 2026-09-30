@@ -25,6 +25,7 @@ import {
   type ProjectId,
 } from "@oao/domain";
 import { decodeEventCursor } from "@oao/events";
+import { PostgresEventWebhookStore } from "@oao/event-webhooks";
 import { createApiApp } from "../../src/app.js";
 import { PostgresApiStore } from "../../src/store.js";
 import { provisionWorkOsIdentity } from "../../src/workos-provisioning.js";
@@ -3436,6 +3437,182 @@ test(
         assert.equal(
           (await app.request(`${webhooksPath}/not-a-uuid`)).status,
           404,
+        );
+      },
+    );
+
+    await t.test(
+      "a webhook configuration change invalidates in-flight delivery",
+      async () => {
+        const webhooksPath = `${projectPath}/event-webhooks`;
+        const created = await app.request(
+          webhooksPath,
+          jsonRequest(
+            {
+              displayName: "Lease holder",
+              endpointUrl: "https://hooks.example.com/old",
+              signingSecret: `whsec_${Buffer.alloc(32, 11).toString("base64")}`,
+            },
+            "event-webhook-lease-create",
+          ),
+        );
+        assert.equal(created.status, 201);
+        const webhookId = ((await created.json()) as { id: string }).id;
+        await pool.query(
+          "SELECT oao.append_product_event($1,$2,gen_random_uuid(),'run',gen_random_uuid(),'run.state_changed','{\"state\":\"running\"}'::jsonb,now())",
+          [integrationPrincipal.organizationId, integrationPrincipal.projectId],
+        );
+        const store = new PostgresEventWebhookStore(pool);
+        const claimFor = async () =>
+          (
+            await store.claim({
+              workerId: "lease-test",
+              limit: 50,
+              leaseMs: 60_000,
+            })
+          ).find((entry) => entry.webhookId === webhookId);
+        const claim = await claimFor();
+        assert.ok(claim);
+        // The worker has loaded the old endpoint and formed its batch range.
+        const work = await store.load(claim, "lease-test", 100);
+        assert.ok(work && work.events.length > 0);
+        assert.equal(work.endpointUrl, "https://hooks.example.com/old");
+        const through = BigInt(work.events.at(-1)?.projectPosition ?? "0");
+
+        const patch = (body: Record<string, unknown>, key: string) =>
+          app.request(`${webhooksPath}/${webhookId}`, {
+            ...jsonRequest(body, key),
+            method: "PATCH",
+          });
+        const changed = await patch(
+          { endpointUrl: "https://hooks.example.com/new" },
+          "event-webhook-lease-patch",
+        );
+        assert.equal(changed.status, 200);
+
+        // Nothing formed or answered under the old configuration can land,
+        // including a 410 from the old endpoint.
+        assert.equal(
+          await store.startBatch(
+            claim,
+            "lease-test",
+            { id: randomUUID(), throughPosition: through },
+            work.deliveredPosition,
+          ),
+          false,
+        );
+        assert.equal(
+          await store.skip(
+            claim,
+            "lease-test",
+            through,
+            work.deliveredPosition,
+          ),
+          false,
+        );
+        assert.equal(
+          await store.finish(claim, "lease-test", {
+            kind: "failed",
+            errorCode: "endpoint_gone",
+            responseStatus: 410,
+            retryAfterMs: 0,
+            disable: true,
+          }),
+          false,
+        );
+        const row = async () =>
+          (
+            await pool.query<{
+              enabled: boolean;
+              lease_owner: string | null;
+              lease_fence: string;
+              delivered_position: string;
+            }>(
+              "SELECT enabled,lease_owner,lease_fence::text,delivered_position::text FROM oao.event_webhooks WHERE id=$1",
+              [webhookId],
+            )
+          ).rows[0];
+        const invalidated = await row();
+        assert.equal(invalidated?.enabled, true);
+        assert.equal(invalidated?.lease_owner, null);
+        assert.equal(
+          BigInt(invalidated?.lease_fence ?? "0"),
+          claim.leaseFence + 1n,
+        );
+        assert.equal(
+          invalidated?.delivered_position,
+          work.deliveredPosition.toString(),
+        );
+
+        // The released webhook is claimable at once under the new endpoint.
+        const reclaimed = await claimFor();
+        assert.ok(reclaimed && reclaimed.leaseFence > claim.leaseFence);
+        assert.equal(
+          (await store.load(reclaimed, "lease-test", 100))?.endpointUrl,
+          "https://hooks.example.com/new",
+        );
+        // A rename does not change delivery, so it leaves the lease alone.
+        assert.equal(
+          (
+            await patch(
+              { displayName: "Renamed" },
+              "event-webhook-lease-rename",
+            )
+          ).status,
+          200,
+        );
+        assert.equal((await row())?.lease_owner, "lease-test");
+        assert.equal(
+          (
+            await app.request(`${webhooksPath}/${webhookId}`, {
+              method: "DELETE",
+              headers: { "idempotency-key": "event-webhook-lease-delete" },
+            })
+          ).status,
+          200,
+        );
+      },
+    );
+
+    await t.test(
+      "concurrent webhook creates cannot exceed the project limit",
+      async () => {
+        const webhooksPath = `${projectPath}/event-webhooks`;
+        const create = (key: string) =>
+          app.request(
+            webhooksPath,
+            jsonRequest(
+              {
+                displayName: `Limit ${key}`,
+                endpointUrl: `https://hooks.example.com/${key}`,
+                signingSecret: `whsec_${Buffer.alloc(32, 12).toString("base64")}`,
+              },
+              `event-webhook-limit-${key}`,
+            ),
+          );
+        const count = async () =>
+          (
+            await pool.query<{ count: number }>(
+              "SELECT count(*)::int AS count FROM oao.event_webhooks WHERE organization_id=$1 AND project_id=$2",
+              [
+                integrationPrincipal.organizationId,
+                integrationPrincipal.projectId,
+              ],
+            )
+          ).rows[0]?.count ?? 0;
+        const existing = await count();
+        for (let index = existing; index < 19; index += 1)
+          assert.equal((await create(`fill-${index}`)).status, 201);
+        const statuses = (
+          await Promise.all([create("race-a"), create("race-b")])
+        )
+          .map((response) => response.status)
+          .sort();
+        assert.deepEqual(statuses, [201, 409]);
+        assert.equal(await count(), 20);
+        await pool.query(
+          "DELETE FROM oao.event_webhooks WHERE organization_id=$1 AND project_id=$2 AND display_name LIKE 'Limit %'",
+          [integrationPrincipal.organizationId, integrationPrincipal.projectId],
         );
       },
     );

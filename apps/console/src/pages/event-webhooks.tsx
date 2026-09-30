@@ -154,8 +154,16 @@ function sameKinds(
 function endpointError(value: string): string | undefined {
   try {
     const url = new URL(value.trim());
-    if (url.protocol !== "https:" && url.protocol !== "http:")
-      return "Endpoint must use HTTPS.";
+    // Production accepts only HTTPS. Plain HTTP is allowed for a loopback
+    // receiver, which works when the deployment enables local development.
+    const host = url.hostname.replace(/^\[|\]$/gu, "");
+    const loopback =
+      host === "localhost" ||
+      host.endsWith(".localhost") ||
+      host === "::1" ||
+      /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/u.test(host);
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
+      return "Endpoint must use HTTPS. Plain HTTP works only for a local receiver in development.";
     if (url.username || url.password || url.hash)
       return "Remove credentials and the fragment from the URL.";
     return undefined;

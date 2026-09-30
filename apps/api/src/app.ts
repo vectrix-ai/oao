@@ -3876,6 +3876,11 @@ function registerEventWebhookRoutes(
           hash: requestHash(body),
           status: 201,
           execute: async () => {
+            // Concurrent creates would otherwise each count below the limit.
+            await tx.query(
+              "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+              [`event_webhooks:${actor.organizationId}:${actor.projectId}`],
+            );
             const existing = await tx.query<{ count: number }>(
               `SELECT count(*)::int AS count FROM oao.event_webhooks
               WHERE organization_id=$1 AND project_id=$2`,
@@ -4007,6 +4012,12 @@ function registerEventWebhookRoutes(
               (input.includeMessageContent !== undefined &&
                 input.includeMessageContent !== row.include_message_content);
             const reenable = input.enabled === true && !row.enabled;
+            // A worker may hold the lease with the old settings loaded. Bumping the
+            // fence makes its batch, cursor, and disable writes fail, so nothing
+            // formed or answered under the old configuration can land.
+            const invalidateLease =
+              reshape ||
+              (input.enabled !== undefined && input.enabled !== row.enabled);
             await tx.query(
               `UPDATE oao.event_webhooks SET
                display_name=COALESCE($4,display_name),
@@ -4021,7 +4032,10 @@ function registerEventWebhookRoutes(
                batch_id=CASE WHEN $10 THEN NULL ELSE batch_id END,
                batch_through_position=CASE WHEN $10 THEN NULL ELSE batch_through_position END,
                consecutive_failures=CASE WHEN $10 OR $11 THEN 0 ELSE consecutive_failures END,
-               next_attempt_at=CASE WHEN $10 OR $11 THEN clock_timestamp() ELSE next_attempt_at END
+               next_attempt_at=CASE WHEN $10 OR $11 THEN clock_timestamp() ELSE next_attempt_at END,
+               lease_fence=CASE WHEN $12 THEN lease_fence+1 ELSE lease_fence END,
+               lease_owner=CASE WHEN $12 THEN NULL ELSE lease_owner END,
+               lease_expires_at=CASE WHEN $12 THEN NULL ELSE lease_expires_at END
              WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
               [
                 actor.organizationId,
@@ -4035,6 +4049,7 @@ function registerEventWebhookRoutes(
                 input.enabled ?? null,
                 reshape,
                 reenable,
+                invalidateLease,
               ],
             );
             await dependencies.store.appendAudit(tx, actor, {

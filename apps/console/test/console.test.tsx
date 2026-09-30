@@ -2723,6 +2723,20 @@ describe("management console", () => {
 
     const endpoint = dialog.getByLabelText("Endpoint URL");
     await user.clear(endpoint);
+    await user.type(endpoint, "http://hooks.example.com/oao");
+    expect(
+      dialog.getByText(
+        "Endpoint must use HTTPS. Plain HTTP works only for a local receiver in development.",
+      ),
+    ).toBeInTheDocument();
+    expect(save).toBeDisabled();
+    await user.clear(endpoint);
+    await user.type(endpoint, "http://127.0.0.1:3211/oao");
+    expect(
+      dialog.queryByText(/Endpoint must use HTTPS/u),
+    ).not.toBeInTheDocument();
+
+    await user.clear(endpoint);
     await user.type(endpoint, "https://127.0.0.1/oao/events");
     await user.click(save);
     expect(
