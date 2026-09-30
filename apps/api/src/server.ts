@@ -28,6 +28,18 @@ const pool = createPool(configuration.databaseUrl);
 await migrate(pool);
 
 const { auth, webhookAuth } = await composeAuthentication(configuration, pool);
+// One dedicated LISTEN connection per API process wakes every open event stream.
+const notifier = new PostgresWakeNotifier(pool, {
+  onListenerError: (error) => {
+    process.stderr.write(
+      `${JSON.stringify({
+        component: "event-wake-listener",
+        ...apiErrorLogFields(error),
+        level: "warn",
+      })}\n`,
+    );
+  },
+});
 const credentialCipher = process.env.OAO_CREDENTIAL_ENCRYPTION_KEY
   ? ProviderCredentialCipher.fromBase64(
       process.env.OAO_CREDENTIAL_ENCRYPTION_KEY,
@@ -47,7 +59,7 @@ const app = createApiApp({
         ),
       }
     : {}),
-  notifier: new PostgresWakeNotifier(pool),
+  notifier,
   runtimeCommands: new PostgresRuntimeCommandPort(),
   activeModelPresetKeys: new Set(),
   ...(credentialCipher ? { credentialCipher } : {}),
@@ -132,7 +144,10 @@ process.stdout.write(
 
 const close = (): void => {
   server.close(() => {
-    void pool.end().finally(() => process.exit(0));
+    void notifier
+      .close()
+      .then(() => pool.end())
+      .finally(() => process.exit(0));
   });
 };
 process.once("SIGINT", close);

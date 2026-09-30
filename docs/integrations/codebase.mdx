@@ -909,13 +909,16 @@ an opaque cursor backed by committed PostgreSQL position. Persist it only after
 your application has applied the event, then reconnect with:
 
 ```http
-Last-Event-ID: 142
+Last-Event-ID: djE6MTQy
 ```
 
-The SDK does this automatically when `reconnect: true`. It also uses any SSE
-`retry` value as the next delay. The server closes a normal stream periodically;
-that is not data loss. PostgreSQL is authoritative, while `LISTEN/NOTIFY` only
-wakes readers.
+The SDK does this automatically when `reconnect: true`. It waits
+`reconnectDelayMs` (1 second by default) between connections, or an SSE `retry`
+value if the server sends one. The server closes a normal stream about every 25
+seconds; that is not data loss. It also writes `:` comment lines when the
+stream opens and after 10 seconds of silence, so proxies keep the connection
+alive. Parsers must skip those lines. PostgreSQL is authoritative, while
+`LISTEN/NOTIFY` only wakes readers.
 
 Expect duplicate events after a crash between applying an event and saving its
 cursor. Make your projection idempotent by event `id` or by
@@ -1246,18 +1249,19 @@ different repository.
 
 ## Failures and recovery
 
-| Failure                            | Correct response                                                                                                               |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `401 unauthenticated`              | Replace or correct the server credential. Never move it into the URL.                                                          |
-| `403 forbidden`                    | Check that the key belongs to the path's project and has the exact required scope.                                             |
-| `409 conflict` when sending a turn | Re-read the session. Submit only after its latest run is `completed`, `failed`, `cancelled`, or `timed_out`.                   |
-| `409 idempotency_conflict`         | The same mutation key was reused with a different body. Recover the original request; do not hide the conflict with a new key. |
-| Claim is not available             | Another principal holds an unexpired lease, or the work is no longer pending. Re-list durable tool calls.                      |
-| Stale tool fence                   | Discard the result. Re-list and reclaim; never submit under the old fence.                                                     |
-| Network failure after a write      | Retry the identical route and body with the same persisted idempotency key.                                                    |
-| SSE disconnect or normal close     | Reconnect with the last event ID saved after successful application.                                                           |
-| Unknown event kind                 | Persist nothing yet, re-fetch the affected durable resource, apply it idempotently, then advance the cursor.                   |
-| Worker crash during a tool         | The lease expires. A restarted worker re-lists `caller_pending` and `caller_claimed` work and claims it with a new fence.      |
+| Failure                            | Correct response                                                                                                                   |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `401 unauthenticated`              | Replace or correct the server credential. Never move it into the URL.                                                              |
+| `403 forbidden`                    | Check that the key belongs to the path's project and has the exact required scope.                                                 |
+| `409 conflict` when sending a turn | Re-read the session. Submit only after its latest run is `completed`, `failed`, `cancelled`, or `timed_out`.                       |
+| `409 idempotency_conflict`         | The same mutation key was reused with a different body. Recover the original request; do not hide the conflict with a new key.     |
+| Claim is not available             | Another principal holds an unexpired lease, or the work is no longer pending. Re-list durable tool calls.                          |
+| Stale tool fence                   | Discard the result. Re-list and reclaim; never submit under the old fence.                                                         |
+| Network failure after a write      | Retry the identical route and body with the same persisted idempotency key.                                                        |
+| SSE disconnect or normal close     | Reconnect with the last event ID saved after successful application.                                                               |
+| SSE stalls or drops behind a proxy | Disable buffering and compression for `text/event-stream`. Allow at least 15 seconds between reads; OAO keeps quiet streams alive. |
+| Unknown event kind                 | Persist nothing yet, re-fetch the affected durable resource, apply it idempotently, then advance the cursor.                       |
+| Worker crash during a tool         | The lease expires. A restarted worker re-lists `caller_pending` and `caller_claimed` work and claims it with a new fence.          |
 
 Run failures are durable terminal outcomes, not transport exceptions. Read the
 run, session transcript, safe timeline, and public request ID before deciding

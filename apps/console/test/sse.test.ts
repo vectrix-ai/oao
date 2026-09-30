@@ -22,4 +22,13 @@ describe("resumable SSE parser", () => {
     expect(parsed.rest).toBe("id: partial");
     expect(parseProductEvent(parsed.frames[0]!)).toEqual(event);
   });
+
+  it("ignores the connection and keepalive comments the API sends", () => {
+    const input = `: connected\n\nid: djE6NDI\nevent: run.state_changed\ndata: {}\n\n: keepalive\n\n`;
+    const parsed = parseSseFrames(input);
+    expect(parsed.frames).toEqual([
+      { id: "djE6NDI", event: "run.state_changed", data: "{}" },
+    ]);
+    expect(parsed.rest).toBe("");
+  });
 });
