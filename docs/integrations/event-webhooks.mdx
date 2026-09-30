@@ -37,8 +37,9 @@ Runtime worker                                 Your endpoint
   kept, so re-enabling resumes where delivery stopped.
 - **Filtered events:** events outside the webhook's filter advance the cursor
   without a request.
-- **Latency:** the runtime worker checks for new events every 500 ms by
-  default.
+- **Latency:** each event commit wakes the runtime worker, so a batch usually
+  leaves within tens of milliseconds. The worker also polls every second, so a
+  missed notification delays delivery by at most that long.
 
 Delivery runs in the runtime worker. Both the API and the worker need the same
 `OAO_CREDENTIAL_ENCRYPTION_KEY`, because the signing secret is stored

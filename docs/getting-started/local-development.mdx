@@ -376,8 +376,9 @@ OAO_EVENT_WEBHOOKS_ALLOW_PRIVATE_NETWORK=true
 
 It allows `http://` and private-network endpoints in both the API and the
 runtime worker, and both refuse to start with it unless `NODE_ENV=development`.
-The worker polls for undelivered events every 500 ms; set
-`OAO_EVENT_WEBHOOK_POLL_MS` to change that.
+Event commits wake the worker immediately. It also polls for undelivered
+events every second as a fallback; set `OAO_EVENT_WEBHOOK_POLL_MS` to change
+that interval.
 
 ### OTLP telemetry
 

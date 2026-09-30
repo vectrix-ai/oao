@@ -5,7 +5,12 @@ import {
 } from "@oao/artifact-s3";
 import type { ServerType } from "@hono/node-server";
 import { randomUUID } from "node:crypto";
-import { createPool, migrate, type PgPool } from "@oao/db-postgres";
+import {
+  createPool,
+  migrate,
+  PostgresWakeNotifier,
+  type PgPool,
+} from "@oao/db-postgres";
 import {
   allowPrivateWebhookNetwork,
   createWebhookTransport,
@@ -249,9 +254,26 @@ export async function startRuntimeWorker(input: {
     await orchestrator.enqueueRecovery();
     wakeWorker.start();
   }
-  const webhookDispatcher =
+  // Commit notifications wake the dispatcher at once; polling is the fallback.
+  const webhookWakes =
     credentialCipher && input.eventWebhooks !== false
-      ? createEventWebhookDispatcher(pool, credentialCipher, env)
+      ? new PostgresWakeNotifier(pool, {
+          onListenerError: (error) => {
+            console.error(
+              JSON.stringify({
+                level: "warn",
+                source: "event-webhook-wakes",
+                errorType: error instanceof Error ? error.name : typeof error,
+                errorMessage:
+                  error instanceof Error ? error.message : String(error),
+              }),
+            );
+          },
+        })
+      : undefined;
+  const webhookDispatcher =
+    credentialCipher && webhookWakes
+      ? createEventWebhookDispatcher(pool, credentialCipher, webhookWakes, env)
       : undefined;
   webhookDispatcher?.start();
 
@@ -300,6 +322,7 @@ export async function startRuntimeWorker(input: {
     ready = false;
     await wakeWorker.stop();
     await webhookDispatcher?.stop();
+    await webhookWakes?.close();
     await projection.stop();
     await flue.stop();
     resetManagedAgentRuntime();
@@ -322,6 +345,7 @@ export async function startRuntimeWorker(input: {
       // An interrupted delivery keeps its batch; the lease expires and another
       // worker resends it under the same webhook-id.
       await webhookDispatcher?.stop();
+      await webhookWakes?.close();
       await projection.stop();
       await closeServer();
       if (await hasActiveDispatches()) {
@@ -347,9 +371,10 @@ export async function startRuntimeWorker(input: {
 function createEventWebhookDispatcher(
   pool: PgPool,
   cipher: ProviderCredentialCipher,
+  wakes: PostgresWakeNotifier,
   env: NodeJS.ProcessEnv,
 ): EventWebhookDispatcher {
-  const pollIntervalMs = Number(env.OAO_EVENT_WEBHOOK_POLL_MS ?? 500);
+  const pollIntervalMs = Number(env.OAO_EVENT_WEBHOOK_POLL_MS ?? 1_000);
   if (
     !Number.isInteger(pollIntervalMs) ||
     pollIntervalMs < 50 ||
@@ -379,6 +404,7 @@ function createEventWebhookDispatcher(
       ),
     workerId: `webhooks-${process.pid}-${randomUUID()}`,
     pollIntervalMs,
+    subscribeToWakes: (onWake) => wakes.subscribe(onWake),
     onError: (error, claim) => {
       console.error(
         JSON.stringify({
