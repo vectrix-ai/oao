@@ -151,19 +151,21 @@ function sameKinds(
   );
 }
 
-function endpointError(value: string): string | undefined {
+function endpointError(
+  value: string,
+  allowPlainHttp: boolean,
+): string | undefined {
   try {
     const url = new URL(value.trim());
-    // Production accepts only HTTPS. Plain HTTP is allowed for a loopback
-    // receiver, which works when the deployment enables local development.
-    const host = url.hostname.replace(/^\[|\]$/gu, "");
-    const loopback =
-      host === "localhost" ||
-      host.endsWith(".localhost") ||
-      host === "::1" ||
-      /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/u.test(host);
-    if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
-      return "Endpoint must use HTTPS. Plain HTTP works only for a local receiver in development.";
+    // The server reports whether it accepts plain HTTP, which only development
+    // deployments with private-network endpoints enabled do.
+    if (
+      url.protocol !== "https:" &&
+      !(allowPlainHttp && url.protocol === "http:")
+    )
+      return allowPlainHttp
+        ? "Endpoint must use HTTP or HTTPS."
+        : "Endpoint must use HTTPS.";
     if (url.username || url.password || url.hash)
       return "Remove credentials and the fragment from the URL.";
     return undefined;
@@ -519,6 +521,7 @@ export function EventWebhookConnections() {
         <EventWebhookDialog
           key={`${action.mode}:${"webhook" in action ? action.webhook.id : "new"}`}
           {...("webhook" in action ? { webhook: action.webhook } : {})}
+          allowPlainHttp={query.data?.privateNetworkEndpointsAllowed === true}
           pending={save.isPending}
           error={save.error}
           onClose={() => {
@@ -782,6 +785,7 @@ function SigningSecretFields({
 
 function EventWebhookDialog({
   webhook,
+  allowPlainHttp,
   pending,
   error,
   onClose,
@@ -789,6 +793,8 @@ function EventWebhookDialog({
 }: {
   /** Absent when creating a webhook. */
   readonly webhook?: EventWebhook;
+  /** Whether the server accepts http:// endpoints (development only). */
+  readonly allowPlainHttp: boolean;
   readonly pending: boolean;
   readonly error: Error | null;
   readonly onClose: () => void;
@@ -807,7 +813,7 @@ function EventWebhookDialog({
   const [deliverFrom, setDeliverFrom] = useState<"now" | "beginning">("now");
   const secret = useSigningSecret();
   const nameError = displayNameError(displayName);
-  const urlError = endpointError(endpointUrl);
+  const urlError = endpointError(endpointUrl, allowPlainHttp);
   const eventsError = selectionError(events);
   const eventKinds = selectionKinds(events);
   const changes: UpdateEventWebhookInput = webhook

@@ -899,6 +899,10 @@ encoding 24 to 64 random bytes. `eventKinds` accepts exact kinds and family
 wildcards such as `run.*`; `null` delivers every event. `deliverFrom` is `now`
 (default) or `beginning`. The endpoint must use HTTPS and a public host.
 
+The list response also reports `credentialEncryptionConfigured` and
+`privateNetworkEndpointsAllowed`. The second is `true` only on development
+servers that accept `http://` and private-network endpoints.
+
 Responses expose `credentialConfigured`, a 12-character fingerprint, the
 credential version, and delivery state: `status`, `deliveredPosition`,
 `cursor`, `pendingEvents`, `consecutiveFailures`, `nextAttemptAt`, the last

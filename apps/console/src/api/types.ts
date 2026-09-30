@@ -131,6 +131,8 @@ export interface SandboxSnapshotList {
 export interface EventWebhookList {
   readonly data: readonly EventWebhook[];
   readonly credentialEncryptionConfigured: boolean;
+  /** True only on development servers that accept `http://` and private-network endpoints. */
+  readonly privateNetworkEndpointsAllowed: boolean;
 }
 
 export interface CreateEventWebhookInput {

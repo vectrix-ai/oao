@@ -295,6 +295,7 @@ describe("HTTP console adapter", () => {
           data: [webhook],
           pageInfo: { hasMore: false, nextCursor: null },
           credentialEncryptionConfigured: true,
+          privateNetworkEndpointsAllowed: true,
         }),
       )
       .mockResolvedValueOnce(jsonResponse(webhook, 201))
@@ -310,6 +311,7 @@ describe("HTTP console adapter", () => {
     await expect(api.listEventWebhooks()).resolves.toEqual({
       data: [webhook],
       credentialEncryptionConfigured: true,
+      privateNetworkEndpointsAllowed: true,
     });
     await api.createEventWebhook({
       displayName: "Convex",

@@ -457,6 +457,8 @@ export interface RotateEventWebhookCredentialInput {
 
 export interface EventWebhookPage extends Page<EventWebhook> {
   readonly credentialEncryptionConfigured: boolean;
+  /** True only on development servers that accept `http://` and private-network endpoints. */
+  readonly privateNetworkEndpointsAllowed: boolean;
 }
 
 /** Message text attached to `message.created` when the webhook opts in. */

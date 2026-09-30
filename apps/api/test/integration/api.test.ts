@@ -3297,8 +3297,10 @@ test(
         const page = (await listed.json()) as {
           data: { id: string }[];
           credentialEncryptionConfigured: boolean;
+          privateNetworkEndpointsAllowed: boolean;
         };
         assert.equal(page.credentialEncryptionConfigured, true);
+        assert.equal(page.privateNetworkEndpointsAllowed, false);
         assert.deepEqual(
           page.data.map((item) => item.id).sort(),
           [webhookId, String(backfill.id)].sort(),

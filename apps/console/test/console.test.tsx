@@ -2724,17 +2724,13 @@ describe("management console", () => {
     const endpoint = dialog.getByLabelText("Endpoint URL");
     await user.clear(endpoint);
     await user.type(endpoint, "http://hooks.example.com/oao");
-    expect(
-      dialog.getByText(
-        "Endpoint must use HTTPS. Plain HTTP works only for a local receiver in development.",
-      ),
-    ).toBeInTheDocument();
+    expect(dialog.getByText("Endpoint must use HTTPS.")).toBeInTheDocument();
     expect(save).toBeDisabled();
+    // A production server rejects plain HTTP even for a local receiver.
     await user.clear(endpoint);
     await user.type(endpoint, "http://127.0.0.1:3211/oao");
-    expect(
-      dialog.queryByText(/Endpoint must use HTTPS/u),
-    ).not.toBeInTheDocument();
+    expect(dialog.getByText("Endpoint must use HTTPS.")).toBeInTheDocument();
+    expect(save).toBeDisabled();
 
     await user.clear(endpoint);
     await user.type(endpoint, "https://127.0.0.1/oao/events");
@@ -2770,11 +2766,42 @@ describe("management console", () => {
     );
   });
 
+  it("accepts a plain HTTP receiver when the server allows private-network endpoints", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({
+      eventDelayMs: 60_000,
+      privateNetworkEndpointsAllowed: true,
+    });
+    const update = vi.spyOn(api, "updateEventWebhook");
+    renderConsole("/event-webhooks", api);
+    const row = (await screen.findByText("Convex receiver")).closest("tr")!;
+    await user.click(within(row).getByRole("button", { name: "Edit" }));
+    const dialog = within(
+      screen.getByRole("dialog", { name: "Edit Convex receiver" }),
+    );
+    const endpoint = dialog.getByLabelText("Endpoint URL");
+    await user.clear(endpoint);
+    await user.type(endpoint, "ftp://127.0.0.1/oao");
+    expect(
+      dialog.getByText("Endpoint must use HTTP or HTTPS."),
+    ).toBeInTheDocument();
+    await user.clear(endpoint);
+    await user.type(endpoint, "http://127.0.0.1:3211/oao/events");
+    expect(dialog.queryByText(/Endpoint must use/u)).not.toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith(expect.any(String), {
+        endpointUrl: "http://127.0.0.1:3211/oao/events",
+      }),
+    );
+  });
+
   it("blocks webhook creation until credential encryption is configured", async () => {
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     vi.spyOn(api, "listEventWebhooks").mockResolvedValue({
       data: [],
       credentialEncryptionConfigured: false,
+      privateNetworkEndpointsAllowed: false,
     });
     renderConsole("/event-webhooks", api);
     expect(

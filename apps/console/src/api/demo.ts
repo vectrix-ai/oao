@@ -1146,9 +1146,16 @@ function demoEventCursor(position: string): string {
     .replace(/=+$/u, "");
 }
 
-/** Mirrors the API's endpoint check for deployments without private networking. */
-function demoWebhookEndpointError(value: string): string | undefined {
+/** Mirrors the API's endpoint check, including its development-only escape hatch. */
+function demoWebhookEndpointError(
+  value: string,
+  allowPrivateNetwork: boolean,
+): string | undefined {
   const url = new URL(value);
+  if (allowPrivateNetwork)
+    return url.protocol === "https:" || url.protocol === "http:"
+      ? undefined
+      : "Webhook endpoint must use HTTPS";
   if (url.protocol !== "https:") return "Webhook endpoint must use HTTPS";
   const host = url.hostname.replace(/^\[|\]$/gu, "").toLowerCase();
   const privateIpv4 =
@@ -1197,6 +1204,8 @@ const modelPresetsSeed: readonly ModelPreset[] = [
 export interface DemoApiOptions {
   readonly scenario?: "default" | "empty" | "error";
   readonly eventDelayMs?: number;
+  /** Mirrors a development server that accepts http:// and private endpoints. */
+  readonly privateNetworkEndpointsAllowed?: boolean;
 }
 
 export class DemoConsoleApi implements ConsoleApi {
@@ -2513,6 +2522,8 @@ export class DemoConsoleApi implements ConsoleApi {
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
         .map((webhook) => this.#eventWebhookView(webhook)),
       credentialEncryptionConfigured: true,
+      privateNetworkEndpointsAllowed:
+        this.#options.privateNetworkEndpointsAllowed === true,
     };
   }
 
@@ -2528,7 +2539,10 @@ export class DemoConsoleApi implements ConsoleApi {
         "Request must contain a display name, HTTPS endpoint URL, whsec_ signing secret, and valid event kinds",
       );
     }
-    const endpointError = demoWebhookEndpointError(parsed.endpointUrl);
+    const endpointError = demoWebhookEndpointError(
+      parsed.endpointUrl,
+      this.#options.privateNetworkEndpointsAllowed === true,
+    );
     if (endpointError) throw new Error(endpointError);
     if (this.#eventWebhooks.length >= MAX_EVENT_WEBHOOKS_PER_PROJECT)
       throw new Error(
@@ -2583,7 +2597,10 @@ export class DemoConsoleApi implements ConsoleApi {
     const endpointError =
       parsed.endpointUrl === undefined
         ? undefined
-        : demoWebhookEndpointError(parsed.endpointUrl);
+        : demoWebhookEndpointError(
+            parsed.endpointUrl,
+            this.#options.privateNetworkEndpointsAllowed === true,
+          );
     if (endpointError) throw new Error(endpointError);
     const current = this.#findEventWebhook(webhookId);
     const endpointUrl =

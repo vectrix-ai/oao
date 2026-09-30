@@ -3842,6 +3842,9 @@ function registerEventWebhookRoutes(
           ...pagination(result.rows.map(eventWebhookView), limit, "createdAt"),
           credentialEncryptionConfigured:
             dependencies.credentialCipher !== undefined,
+          // Lets clients mirror the endpoint check: plain HTTP and private
+          // destinations are accepted only in development deployments.
+          privateNetworkEndpointsAllowed: endpointOptions.allowPrivateNetwork,
         });
       },
     );

@@ -2237,12 +2237,15 @@ export class HttpConsoleApi implements ConsoleApi {
     const response = await this.#projectRequest<
       CursorPage<EventWebhook> & {
         readonly credentialEncryptionConfigured?: boolean;
+        readonly privateNetworkEndpointsAllowed?: boolean;
       }
     >("/event-webhooks?limit=200");
     return {
       data: response.data,
       credentialEncryptionConfigured:
         response.credentialEncryptionConfigured === true,
+      privateNetworkEndpointsAllowed:
+        response.privateNetworkEndpointsAllowed === true,
     };
   };
 
