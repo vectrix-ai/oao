@@ -15,6 +15,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 import { useApi } from "../api/context";
+import { EventWebhookConnections } from "./event-webhooks";
 import type {
   CreateApiKeyInput,
   CreateProjectInput,
@@ -59,6 +60,7 @@ type SettingsRoute =
   | "api-keys"
   | "sandbox-providers"
   | "storage-providers"
+  | "event-webhooks"
   | "settings"
   | "hosting";
 
@@ -98,6 +100,12 @@ const copy: Record<
     title: "Storage providers",
     description:
       "S3-compatible project storage for run attachments and per-thread workspace backups.",
+  },
+  "event-webhooks": {
+    eyebrow: "Configure",
+    title: "Webhooks",
+    description:
+      "Deliver this project's events to your own endpoints, such as a Convex HTTP action, in ordered and signed batches.",
   },
   settings: {
     eyebrow: "Configure",
@@ -688,6 +696,7 @@ function SettingsBody({
 
   if (route === "sandbox-providers") return <SandboxConnections />;
   if (route === "storage-providers") return <StorageConnections />;
+  if (route === "event-webhooks") return <EventWebhookConnections />;
 
   if (route === "hosting")
     return (

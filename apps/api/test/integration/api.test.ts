@@ -24,6 +24,8 @@ import {
   type PrincipalId,
   type ProjectId,
 } from "@oao/domain";
+import { decodeEventCursor } from "@oao/events";
+import { PostgresEventWebhookStore } from "@oao/event-webhooks";
 import { createApiApp } from "../../src/app.js";
 import { PostgresApiStore } from "../../src/store.js";
 import { provisionWorkOsIdentity } from "../../src/workos-provisioning.js";
@@ -3204,6 +3206,443 @@ test(
       assert.match(body.artifactRef, /^artifact:\/\//u);
       assert.equal(body.contentType, "application/x-ndjson");
     });
+
+    await t.test(
+      "event webhooks keep signing secrets write-only and reset delivery when reconfigured",
+      async () => {
+        const secret = `whsec_${Buffer.alloc(32, 9).toString("base64")}`;
+        const rotated = `whsec_${Buffer.alloc(32, 10).toString("base64")}`;
+        const webhooksPath = `${projectPath}/event-webhooks`;
+        const valid = {
+          displayName: "Convex receiver",
+          endpointUrl: "https://hooks.example.com/oao?source=oao",
+          signingSecret: secret,
+        };
+        for (const [index, invalid] of [
+          { ...valid, endpointUrl: "http://hooks.example.com/oao" },
+          { ...valid, endpointUrl: "https://127.0.0.1/oao" },
+          { ...valid, endpointUrl: "https://user:pass@hooks.example.com/" },
+          { ...valid, signingSecret: "whsec_c2hvcnQ=" },
+          { ...valid, signingSecret: "not-a-webhook-secret" },
+          { ...valid, eventKinds: ["run.unknown"] },
+          { ...valid, eventKinds: [] },
+          { ...valid, unexpected: true },
+        ].entries()) {
+          const response = await app.request(
+            webhooksPath,
+            jsonRequest(invalid, `event-webhook-invalid-${index}`),
+          );
+          assert.equal(response.status, 400, JSON.stringify(invalid));
+        }
+
+        const created = await app.request(
+          webhooksPath,
+          jsonRequest(
+            {
+              ...valid,
+              eventKinds: ["run.*", "message.created"],
+              includeMessageContent: true,
+            },
+            "event-webhook-create-1",
+          ),
+        );
+        assert.equal(created.status, 201);
+        const webhook = (await created.json()) as Record<string, unknown>;
+        const serialized = JSON.stringify(webhook);
+        assert.doesNotMatch(serialized, /whsec_/u);
+        assert.equal(webhook.status, "active");
+        assert.equal(webhook.enabled, true);
+        assert.equal(webhook.credentialConfigured, true);
+        assert.match(String(webhook.credentialFingerprint), /^[a-f0-9]{12}$/u);
+        assert.equal(webhook.credentialVersion, 1);
+        assert.equal(webhook.previousCredentialExpiresAt, null);
+        assert.deepEqual(webhook.eventKinds, ["run.*", "message.created"]);
+        assert.equal(webhook.includeMessageContent, true);
+        assert.equal(webhook.pendingEvents, 0, "deliverFrom defaults to now");
+        assert.ok(BigInt(String(webhook.deliveredPosition)) > 0n);
+        assert.equal(
+          decodeEventCursor(String(webhook.cursor)),
+          BigInt(String(webhook.deliveredPosition)),
+        );
+        const webhookId = String(webhook.id);
+
+        const replayed = await app.request(
+          webhooksPath,
+          jsonRequest(
+            {
+              ...valid,
+              eventKinds: ["run.*", "message.created"],
+              includeMessageContent: true,
+            },
+            "event-webhook-create-1",
+          ),
+        );
+        assert.equal(replayed.headers.get("idempotency-replayed"), "true");
+        assert.equal(((await replayed.json()) as { id: string }).id, webhookId);
+
+        const history = await app.request(
+          webhooksPath,
+          jsonRequest(
+            { ...valid, displayName: "Backfill", deliverFrom: "beginning" },
+            "event-webhook-create-2",
+          ),
+        );
+        assert.equal(history.status, 201);
+        const backfill = (await history.json()) as Record<string, unknown>;
+        assert.equal(backfill.deliveredPosition, "0");
+        assert.ok(Number(backfill.pendingEvents) > 0);
+
+        const listed = await app.request(webhooksPath);
+        assert.equal(listed.status, 200);
+        const page = (await listed.json()) as {
+          data: { id: string }[];
+          credentialEncryptionConfigured: boolean;
+          privateNetworkEndpointsAllowed: boolean;
+        };
+        assert.equal(page.credentialEncryptionConfigured, true);
+        assert.equal(page.privateNetworkEndpointsAllowed, false);
+        assert.deepEqual(
+          page.data.map((item) => item.id).sort(),
+          [webhookId, String(backfill.id)].sort(),
+        );
+        assert.doesNotMatch(JSON.stringify(page), /whsec_/u);
+
+        const patch = (body: Record<string, unknown>, key: string) =>
+          app.request(`${webhooksPath}/${webhookId}`, {
+            ...jsonRequest(body, key),
+            method: "PATCH",
+          });
+        const disabled = await patch(
+          { enabled: false },
+          "event-webhook-disable",
+        );
+        assert.equal(disabled.status, 200);
+        const disabledView = (await disabled.json()) as Record<string, unknown>;
+        assert.equal(disabledView.status, "disabled");
+        assert.equal(disabledView.disabledReason, "user");
+        assert.equal((await patch({}, "event-webhook-empty")).status, 400);
+
+        // A stale batch and failure streak must not survive a new filter.
+        await pool.query(
+          `UPDATE oao.event_webhooks
+              SET batch_id=gen_random_uuid(),batch_through_position=delivered_position+1,
+                  consecutive_failures=3
+            WHERE id=$1`,
+          [webhookId],
+        );
+        const reenabled = await patch(
+          { enabled: true, eventKinds: ["message.created"] },
+          "event-webhook-reenable",
+        );
+        assert.equal(reenabled.status, 200);
+        const reenabledView = (await reenabled.json()) as Record<
+          string,
+          unknown
+        >;
+        assert.equal(reenabledView.status, "active");
+        assert.equal(reenabledView.disabledReason, null);
+        assert.equal(reenabledView.consecutiveFailures, 0);
+        assert.deepEqual(reenabledView.eventKinds, ["message.created"]);
+        const reset = await pool.query<{ batch_id: string | null }>(
+          "SELECT batch_id FROM oao.event_webhooks WHERE id=$1",
+          [webhookId],
+        );
+        assert.equal(reset.rows[0]?.batch_id, null);
+
+        const rotate = (body: Record<string, unknown>, key: string) =>
+          app.request(`${webhooksPath}/${webhookId}/credential`, {
+            ...jsonRequest(body, key),
+            method: "PUT",
+          });
+        const rotation = await rotate(
+          { signingSecret: rotated },
+          "event-webhook-rotate-1",
+        );
+        assert.equal(rotation.status, 200);
+        const rotatedView = (await rotation.json()) as Record<string, unknown>;
+        assert.equal(rotatedView.credentialVersion, 2);
+        assert.notEqual(
+          rotatedView.credentialFingerprint,
+          webhook.credentialFingerprint,
+        );
+        const overlapHours =
+          (Date.parse(String(rotatedView.previousCredentialExpiresAt)) -
+            Date.now()) /
+          3_600_000;
+        assert.ok(
+          overlapHours > 23 && overlapHours <= 24,
+          String(overlapHours),
+        );
+        const immediate = await rotate(
+          { signingSecret: secret, previousCredentialTtlSeconds: 0 },
+          "event-webhook-rotate-2",
+        );
+        const immediateView = (await immediate.json()) as Record<
+          string,
+          unknown
+        >;
+        assert.equal(immediateView.credentialVersion, 3);
+        assert.equal(immediateView.previousCredentialExpiresAt, null);
+
+        const stored = await pool.query<{ encrypted_signing_key: Buffer }>(
+          "SELECT encrypted_signing_key FROM oao.event_webhooks WHERE id=$1",
+          [webhookId],
+        );
+        assert.ok(
+          !stored.rows[0]?.encrypted_signing_key.includes(
+            Buffer.from(secret.slice(6)),
+          ),
+        );
+        const audit = await pool.query<{
+          action: string;
+          safe_detail: unknown;
+        }>(
+          `SELECT action,safe_detail FROM oao.audit_entries
+            WHERE organization_id=$1 AND project_id=$2 AND resource_id=$3
+            ORDER BY occurred_at`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            webhookId,
+          ],
+        );
+        assert.deepEqual(
+          audit.rows.map((row) => row.action),
+          [
+            "event_webhook.created",
+            "event_webhook.updated",
+            "event_webhook.updated",
+            "event_webhook.credential_rotated",
+            "event_webhook.credential_rotated",
+          ],
+        );
+        const auditText = JSON.stringify(audit.rows);
+        assert.doesNotMatch(auditText, /whsec_|source=oao/u);
+        assert.match(auditText, /https:\/\/hooks\.example\.com/u);
+
+        const remove = (key: string) =>
+          app.request(`${webhooksPath}/${webhookId}`, {
+            method: "DELETE",
+            headers: { "idempotency-key": key },
+          });
+        const deleted = await remove("event-webhook-delete-1");
+        assert.equal(deleted.status, 200);
+        assert.deepEqual(await deleted.json(), {
+          id: webhookId,
+          deleted: true,
+        });
+        assert.equal(
+          (await app.request(`${webhooksPath}/${webhookId}`)).status,
+          404,
+        );
+        assert.equal((await remove("event-webhook-delete-2")).status, 404);
+        assert.equal(
+          (await app.request(`${webhooksPath}/not-a-uuid`)).status,
+          404,
+        );
+      },
+    );
+
+    await t.test(
+      "a webhook configuration change invalidates in-flight delivery",
+      async () => {
+        const webhooksPath = `${projectPath}/event-webhooks`;
+        const created = await app.request(
+          webhooksPath,
+          jsonRequest(
+            {
+              displayName: "Lease holder",
+              endpointUrl: "https://hooks.example.com/old",
+              signingSecret: `whsec_${Buffer.alloc(32, 11).toString("base64")}`,
+            },
+            "event-webhook-lease-create",
+          ),
+        );
+        assert.equal(created.status, 201);
+        const webhookId = ((await created.json()) as { id: string }).id;
+        await pool.query(
+          "SELECT oao.append_product_event($1,$2,gen_random_uuid(),'run',gen_random_uuid(),'run.state_changed','{\"state\":\"running\"}'::jsonb,now())",
+          [integrationPrincipal.organizationId, integrationPrincipal.projectId],
+        );
+        const store = new PostgresEventWebhookStore(pool);
+        const claimFor = async () =>
+          (
+            await store.claim({
+              workerId: "lease-test",
+              limit: 50,
+              leaseMs: 60_000,
+            })
+          ).find((entry) => entry.webhookId === webhookId);
+        const claim = await claimFor();
+        assert.ok(claim);
+        // The worker has loaded the old endpoint and formed its batch range.
+        const work = await store.load(claim, "lease-test", 100);
+        assert.ok(work && work.events.length > 0);
+        assert.equal(work.endpointUrl, "https://hooks.example.com/old");
+        const through = BigInt(work.events.at(-1)?.projectPosition ?? "0");
+
+        const patch = (body: Record<string, unknown>, key: string) =>
+          app.request(`${webhooksPath}/${webhookId}`, {
+            ...jsonRequest(body, key),
+            method: "PATCH",
+          });
+        const changed = await patch(
+          { endpointUrl: "https://hooks.example.com/new" },
+          "event-webhook-lease-patch",
+        );
+        assert.equal(changed.status, 200);
+
+        // Nothing formed or answered under the old configuration can land,
+        // including a 410 from the old endpoint.
+        assert.equal(
+          await store.startBatch(
+            claim,
+            "lease-test",
+            { id: randomUUID(), throughPosition: through },
+            work.deliveredPosition,
+          ),
+          false,
+        );
+        assert.equal(
+          await store.skip(
+            claim,
+            "lease-test",
+            through,
+            work.deliveredPosition,
+          ),
+          false,
+        );
+        assert.equal(
+          await store.finish(claim, "lease-test", {
+            kind: "failed",
+            errorCode: "endpoint_gone",
+            responseStatus: 410,
+            retryAfterMs: 0,
+            disable: true,
+          }),
+          false,
+        );
+        const row = async () =>
+          (
+            await pool.query<{
+              enabled: boolean;
+              lease_owner: string | null;
+              lease_fence: string;
+              delivered_position: string;
+              drain_seconds: number | null;
+            }>(
+              `SELECT enabled,lease_owner,lease_fence::text,delivered_position::text,
+                      extract(epoch FROM lease_expires_at-clock_timestamp())::float8 AS drain_seconds
+                 FROM oao.event_webhooks WHERE id=$1`,
+              [webhookId],
+            )
+          ).rows[0];
+        const invalidated = await row();
+        assert.equal(invalidated?.enabled, true);
+        assert.equal(
+          BigInt(invalidated?.lease_fence ?? "0"),
+          claim.leaseFence + 1n,
+        );
+        assert.equal(
+          invalidated?.delivered_position,
+          work.deliveredPosition.toString(),
+        );
+        // The old holder may still have a request in flight, so the lease is
+        // kept and only shortened to a drain longer than the request timeout.
+        assert.equal(invalidated?.lease_owner, "lease-test");
+        assert.ok(
+          (invalidated?.drain_seconds ?? 0) > 15 &&
+            (invalidated?.drain_seconds ?? 99) <= 20,
+          `drain ${invalidated?.drain_seconds}s`,
+        );
+        assert.equal(
+          await claimFor(),
+          undefined,
+          "no second worker may send while the old request can still be in flight",
+        );
+
+        // Once the drain ends, the webhook is claimable under the new endpoint.
+        await pool.query(
+          "UPDATE oao.event_webhooks SET lease_expires_at=clock_timestamp() WHERE id=$1",
+          [webhookId],
+        );
+        const reclaimed = await claimFor();
+        assert.ok(reclaimed && reclaimed.leaseFence > claim.leaseFence + 1n);
+        assert.equal(
+          (await store.load(reclaimed, "lease-test", 100))?.endpointUrl,
+          "https://hooks.example.com/new",
+        );
+        // A rename does not change delivery, so it leaves the lease alone.
+        assert.equal(
+          (
+            await patch(
+              { displayName: "Renamed" },
+              "event-webhook-lease-rename",
+            )
+          ).status,
+          200,
+        );
+        const renamed = await row();
+        assert.equal(renamed?.lease_owner, "lease-test");
+        assert.equal(BigInt(renamed?.lease_fence ?? "0"), reclaimed.leaseFence);
+        assert.ok(
+          (renamed?.drain_seconds ?? 0) > 50,
+          "a rename keeps the full lease",
+        );
+        assert.equal(
+          (
+            await app.request(`${webhooksPath}/${webhookId}`, {
+              method: "DELETE",
+              headers: { "idempotency-key": "event-webhook-lease-delete" },
+            })
+          ).status,
+          200,
+        );
+      },
+    );
+
+    await t.test(
+      "concurrent webhook creates cannot exceed the project limit",
+      async () => {
+        const webhooksPath = `${projectPath}/event-webhooks`;
+        const create = (key: string) =>
+          app.request(
+            webhooksPath,
+            jsonRequest(
+              {
+                displayName: `Limit ${key}`,
+                endpointUrl: `https://hooks.example.com/${key}`,
+                signingSecret: `whsec_${Buffer.alloc(32, 12).toString("base64")}`,
+              },
+              `event-webhook-limit-${key}`,
+            ),
+          );
+        const count = async () =>
+          (
+            await pool.query<{ count: number }>(
+              "SELECT count(*)::int AS count FROM oao.event_webhooks WHERE organization_id=$1 AND project_id=$2",
+              [
+                integrationPrincipal.organizationId,
+                integrationPrincipal.projectId,
+              ],
+            )
+          ).rows[0]?.count ?? 0;
+        const existing = await count();
+        for (let index = existing; index < 19; index += 1)
+          assert.equal((await create(`fill-${index}`)).status, 201);
+        const statuses = (
+          await Promise.all([create("race-a"), create("race-b")])
+        )
+          .map((response) => response.status)
+          .sort();
+        assert.deepEqual(statuses, [201, 409]);
+        assert.equal(await count(), 20);
+        await pool.query(
+          "DELETE FROM oao.event_webhooks WHERE organization_id=$1 AND project_id=$2 AND display_name LIKE 'Limit %'",
+          [integrationPrincipal.organizationId, integrationPrincipal.projectId],
+        );
+      },
+    );
 
     await t.test(
       "a durable model preset becomes publishable and never returns a credential",

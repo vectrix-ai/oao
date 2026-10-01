@@ -1,4 +1,9 @@
-import type { ProductEvent } from "@oao/contracts";
+import {
+  parseCreateEventWebhookInput,
+  parseRotateEventWebhookCredentialInput,
+  parseUpdateEventWebhookInput,
+  type ProductEvent,
+} from "@oao/contracts";
 import type {
   AgentDetail,
   AgentSummary,
@@ -6,6 +11,7 @@ import type {
   ApiKeySummary,
   ConsoleApi,
   CreateApiKeyInput,
+  CreateEventWebhookInput,
   CreateModelProviderInput,
   CreateModelPresetInput,
   CreateSandboxProviderInput,
@@ -13,6 +19,8 @@ import type {
   CreateStorageProviderInput,
   CreatedApiKey,
   EventConnection,
+  EventWebhook,
+  EventWebhookList,
   ListFilters,
   ModelCatalogEntry,
   ModelPreset,
@@ -22,6 +30,7 @@ import type {
   ProjectModelProvider,
   ProjectSandboxProvider,
   ProjectStorageProvider,
+  RotateEventWebhookCredentialInput,
   RunFileUpload,
   SessionDetail,
   SkillDetail,
@@ -31,6 +40,7 @@ import type {
   SettingsData,
   StorageObjectEntry,
   StorageObjectList,
+  UpdateEventWebhookInput,
   UpdateSandboxProviderConfigurationInput,
   McpServer,
   McpCredential,
@@ -47,6 +57,10 @@ const XAI_PROVIDER_ID = "57575757-5757-4575-8575-575757575757";
 const DAYTONA_PROVIDER_ID = "66666666-6666-4666-8666-666666666666";
 const DAYTONA_SNAPSHOT_ID = "77777777-7777-4777-8777-777777777777";
 const DAYTONA_LARGE_SNAPSHOT_ID = "78787878-7878-4787-8787-787878787878";
+const CONVEX_WEBHOOK_ID = "99999999-9999-4999-8999-999999999999";
+/** Serialized project position the demo pretends has been committed. */
+const DEMO_COMMITTED_POSITION = 1284;
+const MAX_EVENT_WEBHOOKS_PER_PROJECT = 20;
 
 function demoRunFiles(files: readonly RunFileUpload[], messageId: string) {
   return files.map((file, index) => ({
@@ -1077,6 +1091,91 @@ const sandboxProvidersSeed: readonly ProjectSandboxProvider[] = [
   },
 ];
 
+/** Stored webhook state; the signing secret itself is never kept. */
+type DemoEventWebhook = Omit<
+  EventWebhook,
+  "status" | "pendingEvents" | "cursor"
+>;
+
+const eventWebhooksSeed: readonly DemoEventWebhook[] = [
+  {
+    id: CONVEX_WEBHOOK_ID,
+    organizationId: ORG_ID,
+    projectId: PROJECT_ID,
+    displayName: "Convex receiver",
+    endpointUrl: "https://example.convex.site/oao/events",
+    enabled: true,
+    disabledReason: null,
+    eventKinds: ["run.*", "message.created"],
+    includeMessageContent: true,
+    credentialConfigured: true,
+    credentialFingerprint: "9c1e2f4a7b3d",
+    credentialVersion: 1,
+    previousCredentialExpiresAt: null,
+    deliveredPosition: String(DEMO_COMMITTED_POSITION),
+    consecutiveFailures: 0,
+    nextAttemptAt: "2026-08-20T15:26:25.000Z",
+    lastAttemptAt: "2026-08-20T15:26:24.000Z",
+    lastSuccessAt: "2026-08-20T15:26:24.000Z",
+    lastFailureAt: null,
+    lastResponseStatus: 200,
+    lastErrorCode: null,
+    createdByPrincipalId: principalId,
+    createdAt: "2026-08-18T11:30:00.000Z",
+    updatedAt: "2026-08-18T11:30:00.000Z",
+  },
+];
+
+/** Stands in for the API's sha256 fingerprint without keeping the secret. */
+function demoSecretFingerprint(secret: string): string {
+  let high = 0x811c9dc5;
+  let low = 0x01000193;
+  for (let index = 0; index < secret.length; index += 1) {
+    const code = secret.charCodeAt(index);
+    high = Math.imul(high ^ code, 0x01000193) >>> 0;
+    low = Math.imul(low ^ code, 0x5bd1e995) >>> 0;
+  }
+  const hex = (value: number) => value.toString(16).padStart(8, "0");
+  return `${hex(high)}${hex(low)}`.slice(0, 12);
+}
+
+function demoEventCursor(position: string): string {
+  return btoa(`v1:${position}`)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/u, "");
+}
+
+/** Mirrors the API's endpoint check, including its development-only escape hatch. */
+function demoWebhookEndpointError(
+  value: string,
+  allowPrivateNetwork: boolean,
+): string | undefined {
+  const url = new URL(value);
+  if (allowPrivateNetwork)
+    return url.protocol === "https:" || url.protocol === "http:"
+      ? undefined
+      : "Webhook endpoint must use HTTPS";
+  if (url.protocol !== "https:") return "Webhook endpoint must use HTTPS";
+  const host = url.hostname.replace(/^\[|\]$/gu, "").toLowerCase();
+  const privateIpv4 =
+    /^\d{1,3}(\.\d{1,3}){3}$/u.test(host) &&
+    /^(0|10|127)\.|^169\.254\.|^172\.(1[6-9]|2\d|3[01])\.|^192\.168\./u.test(
+      host,
+    );
+  const privateIpv6 =
+    host.includes(":") &&
+    (host === "::" || host === "::1" || /^(f[cd]|fe[89ab])/u.test(host));
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    privateIpv4 ||
+    privateIpv6
+  )
+    return "Webhook endpoint must not target a private network";
+  return undefined;
+}
+
 const modelPresetsSeed: readonly ModelPreset[] = [
   {
     id: "44444444-4444-4444-8444-444444444444",
@@ -1105,6 +1204,8 @@ const modelPresetsSeed: readonly ModelPreset[] = [
 export interface DemoApiOptions {
   readonly scenario?: "default" | "empty" | "error";
   readonly eventDelayMs?: number;
+  /** Mirrors a development server that accepts http:// and private endpoints. */
+  readonly privateNetworkEndpointsAllowed?: boolean;
 }
 
 export class DemoConsoleApi implements ConsoleApi {
@@ -1131,6 +1232,7 @@ export class DemoConsoleApi implements ConsoleApi {
     sandboxProvidersSeed,
   ) as ProjectSandboxProvider[];
   #storageProviders: ProjectStorageProvider[] = [];
+  #eventWebhooks = structuredClone(eventWebhooksSeed) as DemoEventWebhook[];
   #sessions = structuredClone(sessionsSeed);
   #pending = structuredClone(pendingSeed);
   #counter = 0;
@@ -2383,6 +2485,211 @@ export class DemoConsoleApi implements ConsoleApi {
       entry.id === providerId ? updated : entry,
     );
     return structuredClone(updated);
+  }
+
+  #eventWebhookView(webhook: DemoEventWebhook): EventWebhook {
+    const previousActive =
+      webhook.previousCredentialExpiresAt !== null &&
+      Date.parse(webhook.previousCredentialExpiresAt) > Date.now();
+    return structuredClone({
+      ...webhook,
+      previousCredentialExpiresAt: previousActive
+        ? webhook.previousCredentialExpiresAt
+        : null,
+      status: !webhook.enabled
+        ? "disabled"
+        : webhook.consecutiveFailures > 0
+          ? "failing"
+          : "active",
+      pendingEvents: Math.max(
+        0,
+        DEMO_COMMITTED_POSITION - Number(webhook.deliveredPosition),
+      ),
+      cursor: demoEventCursor(webhook.deliveredPosition),
+    });
+  }
+
+  #findEventWebhook(webhookId: string): DemoEventWebhook {
+    const webhook = this.#eventWebhooks.find((entry) => entry.id === webhookId);
+    if (!webhook) throw new Error("Event webhook not found");
+    return webhook;
+  }
+
+  async listEventWebhooks(): Promise<EventWebhookList> {
+    this.#guard();
+    return {
+      data: [...this.#eventWebhooks]
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+        .map((webhook) => this.#eventWebhookView(webhook)),
+      credentialEncryptionConfigured: true,
+      privateNetworkEndpointsAllowed:
+        this.#options.privateNetworkEndpointsAllowed === true,
+    };
+  }
+
+  async createEventWebhook(
+    input: CreateEventWebhookInput,
+  ): Promise<EventWebhook> {
+    this.#guard();
+    let parsed: ReturnType<typeof parseCreateEventWebhookInput>;
+    try {
+      parsed = parseCreateEventWebhookInput(input);
+    } catch {
+      throw new Error(
+        "Request must contain a display name, HTTPS endpoint URL, whsec_ signing secret, and valid event kinds",
+      );
+    }
+    const endpointError = demoWebhookEndpointError(
+      parsed.endpointUrl,
+      this.#options.privateNetworkEndpointsAllowed === true,
+    );
+    if (endpointError) throw new Error(endpointError);
+    if (this.#eventWebhooks.length >= MAX_EVENT_WEBHOOKS_PER_PROJECT)
+      throw new Error(
+        `A project can have at most ${MAX_EVENT_WEBHOOKS_PER_PROJECT} event webhooks`,
+      );
+    this.#counter += 1;
+    const now = new Date().toISOString();
+    const created: DemoEventWebhook = {
+      id: `99999999-9999-4999-8999-${String(this.#counter).padStart(12, "0")}`,
+      organizationId: ORG_ID,
+      projectId: PROJECT_ID,
+      displayName: parsed.displayName,
+      endpointUrl: new URL(parsed.endpointUrl).href,
+      enabled: parsed.enabled,
+      disabledReason: parsed.enabled ? null : "user",
+      eventKinds: parsed.eventKinds ? [...parsed.eventKinds] : null,
+      includeMessageContent: parsed.includeMessageContent,
+      credentialConfigured: true,
+      credentialFingerprint: demoSecretFingerprint(parsed.signingSecret),
+      credentialVersion: 1,
+      previousCredentialExpiresAt: null,
+      deliveredPosition:
+        parsed.deliverFrom === "now" ? String(DEMO_COMMITTED_POSITION) : "0",
+      consecutiveFailures: 0,
+      nextAttemptAt: now,
+      lastAttemptAt: null,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      lastResponseStatus: null,
+      lastErrorCode: null,
+      createdByPrincipalId: principalId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.#eventWebhooks = [...this.#eventWebhooks, created];
+    return this.#eventWebhookView(created);
+  }
+
+  async updateEventWebhook(
+    webhookId: string,
+    input: UpdateEventWebhookInput,
+  ): Promise<EventWebhook> {
+    this.#guard();
+    let parsed: ReturnType<typeof parseUpdateEventWebhookInput>;
+    try {
+      parsed = parseUpdateEventWebhookInput(input);
+    } catch {
+      throw new Error(
+        "Request must change at least one of displayName, endpointUrl, eventKinds, includeMessageContent, or enabled",
+      );
+    }
+    const endpointError =
+      parsed.endpointUrl === undefined
+        ? undefined
+        : demoWebhookEndpointError(
+            parsed.endpointUrl,
+            this.#options.privateNetworkEndpointsAllowed === true,
+          );
+    if (endpointError) throw new Error(endpointError);
+    const current = this.#findEventWebhook(webhookId);
+    const endpointUrl =
+      parsed.endpointUrl === undefined
+        ? current.endpointUrl
+        : new URL(parsed.endpointUrl).href;
+    const eventKinds =
+      parsed.eventKinds === undefined
+        ? current.eventKinds
+        : parsed.eventKinds
+          ? [...parsed.eventKinds]
+          : null;
+    // A changed destination or filter starts a fresh batch, like the API.
+    const reshape =
+      endpointUrl !== current.endpointUrl ||
+      JSON.stringify(eventKinds) !== JSON.stringify(current.eventKinds) ||
+      (parsed.includeMessageContent !== undefined &&
+        parsed.includeMessageContent !== current.includeMessageContent);
+    const reenable = parsed.enabled === true && !current.enabled;
+    const enabled = parsed.enabled ?? current.enabled;
+    const updated: DemoEventWebhook = {
+      ...current,
+      displayName: parsed.displayName ?? current.displayName,
+      endpointUrl,
+      eventKinds,
+      includeMessageContent:
+        parsed.includeMessageContent ?? current.includeMessageContent,
+      enabled,
+      disabledReason:
+        parsed.enabled === undefined
+          ? current.disabledReason
+          : parsed.enabled
+            ? null
+            : current.enabled
+              ? "user"
+              : current.disabledReason,
+      consecutiveFailures:
+        reshape || reenable ? 0 : current.consecutiveFailures,
+      nextAttemptAt:
+        reshape || reenable ? new Date().toISOString() : current.nextAttemptAt,
+      updatedAt: new Date().toISOString(),
+    };
+    this.#eventWebhooks = this.#eventWebhooks.map((entry) =>
+      entry.id === webhookId ? updated : entry,
+    );
+    return this.#eventWebhookView(updated);
+  }
+
+  async rotateEventWebhookCredential(
+    webhookId: string,
+    input: RotateEventWebhookCredentialInput,
+  ): Promise<EventWebhook> {
+    this.#guard();
+    let parsed: ReturnType<typeof parseRotateEventWebhookCredentialInput>;
+    try {
+      parsed = parseRotateEventWebhookCredentialInput(input);
+    } catch {
+      throw new Error(
+        "Request must contain a whsec_ signing secret and an optional previousCredentialTtlSeconds from 0 to 604800",
+      );
+    }
+    const current = this.#findEventWebhook(webhookId);
+    const now = Date.now();
+    const updated: DemoEventWebhook = {
+      ...current,
+      credentialFingerprint: demoSecretFingerprint(parsed.signingSecret),
+      credentialVersion: current.credentialVersion + 1,
+      previousCredentialExpiresAt:
+        parsed.previousCredentialTtlSeconds > 0
+          ? new Date(
+              now + parsed.previousCredentialTtlSeconds * 1000,
+            ).toISOString()
+          : null,
+      consecutiveFailures: 0,
+      nextAttemptAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+    };
+    this.#eventWebhooks = this.#eventWebhooks.map((entry) =>
+      entry.id === webhookId ? updated : entry,
+    );
+    return this.#eventWebhookView(updated);
+  }
+
+  async deleteEventWebhook(webhookId: string): Promise<void> {
+    this.#guard();
+    this.#findEventWebhook(webhookId);
+    this.#eventWebhooks = this.#eventWebhooks.filter(
+      (entry) => entry.id !== webhookId,
+    );
   }
 
   async listStorageProviders() {

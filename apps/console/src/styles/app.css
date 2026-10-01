@@ -2695,6 +2695,16 @@
   gap: var(--sp-3) var(--sp-5);
 }
 
+.choice-stack {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.choice-list {
+  display: grid;
+  gap: var(--sp-2);
+}
+
 /* ---------- Responsive ---------- */
 @media (max-width: 1180px) {
   .session-workspace {

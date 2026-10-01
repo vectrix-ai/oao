@@ -21,6 +21,8 @@ import type {
   UpdateProjectMemberInput,
   ProjectSandboxProvider,
   ProjectStorageProvider,
+  EventWebhook,
+  EventWebhookStatus,
   RunFile,
   SessionWorkspaceFile,
   SessionWorkspaceFileList,
@@ -67,6 +69,8 @@ export type {
   UpdateProjectMemberInput,
   ProjectSandboxProvider,
   ProjectStorageProvider,
+  EventWebhook,
+  EventWebhookStatus,
   RunFile,
   SessionWorkspaceFile,
   SessionWorkspaceFileList,
@@ -420,6 +424,71 @@ export interface UpdateProjectSandboxProviderConfigurationInput {
   readonly restrictedEgress: {
     readonly allowedDomains: readonly string[];
     readonly allowedCidrs: readonly string[];
+  };
+}
+
+export interface CreateEventWebhookInput {
+  readonly displayName: string;
+  readonly endpointUrl: string;
+  /** Standard Webhooks secret (`whsec_` + base64 of 24–64 random bytes). Write-only. */
+  readonly signingSecret: string;
+  /** Exact kinds or family wildcards such as `run.*`; null delivers every event. */
+  readonly eventKinds?: readonly string[] | null;
+  /** Adds message text to `message.created` events. Off by default. */
+  readonly includeMessageContent?: boolean;
+  /** `now` (default) skips existing events; `beginning` replays project history. */
+  readonly deliverFrom?: "now" | "beginning";
+  readonly enabled?: boolean;
+}
+
+export interface UpdateEventWebhookInput {
+  readonly displayName?: string;
+  readonly endpointUrl?: string;
+  readonly eventKinds?: readonly string[] | null;
+  readonly includeMessageContent?: boolean;
+  readonly enabled?: boolean;
+}
+
+export interface RotateEventWebhookCredentialInput {
+  readonly signingSecret: string;
+  /** Seconds the previous secret keeps signing too (0–604800, default 86400). */
+  readonly previousCredentialTtlSeconds?: number;
+}
+
+export interface EventWebhookPage extends Page<EventWebhook> {
+  readonly credentialEncryptionConfigured: boolean;
+  /** True only on development servers that accept `http://` and private-network endpoints. */
+  readonly privateNetworkEndpointsAllowed: boolean;
+}
+
+/** Message text attached to `message.created` when the webhook opts in. */
+export interface EventWebhookMessage {
+  readonly id: string;
+  readonly runId: string;
+  readonly role: string;
+  readonly content: string;
+}
+
+export interface EventWebhookEvent extends ProductEvent {
+  readonly message?: EventWebhookMessage;
+}
+
+/** The JSON body of every event webhook delivery. */
+export interface EventWebhookBatch {
+  readonly type: "oao.events";
+  readonly timestamp: string;
+  readonly data: {
+    readonly webhookId: string;
+    readonly organizationId: string;
+    readonly projectId: string;
+    /** Equals the `webhook-id` header and stays the same when a batch is retried. */
+    readonly batchId: string;
+    /** Project position before this batch (exclusive). */
+    readonly fromPosition: string;
+    readonly throughPosition: string;
+    /** Opaque cursor for `throughPosition`, compatible with SSE `Last-Event-ID`. */
+    readonly cursor: string;
+    readonly events: readonly EventWebhookEvent[];
   };
 }
 

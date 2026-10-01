@@ -730,3 +730,48 @@ test("Harness inner-step events extend the immutable lifecycle vocabulary additi
     /agent_version_harness_operations|DROP TABLE|DELETE FROM|UPDATE /u,
   );
 });
+
+test("event webhooks keep cross-tenant claims to scheduling columns", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0052_event_webhooks.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE oao\.event_webhooks/u);
+  assert.match(sql, /PRIMARY KEY \(organization_id, project_id, id\)/u);
+  assert.match(
+    sql,
+    /REFERENCES oao\.projects\(organization_id, id\) ON DELETE CASCADE/u,
+  );
+  assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
+  assert.match(
+    sql,
+    /GRANT SELECT, INSERT, UPDATE, DELETE ON oao\.event_webhooks TO oao_app/u,
+  );
+  // The recovery role must never read endpoint URLs, filters, or key material.
+  const recoveryGrants = [
+    ...sql.matchAll(
+      /GRANT (SELECT|UPDATE) \(([^)]*)\)\s+ON oao\.event_webhooks TO oao_recovery/gu,
+    ),
+  ]
+    .map((match) => match[2] ?? "")
+    .join(",");
+  assert.ok(recoveryGrants.includes("lease_fence"));
+  assert.doesNotMatch(
+    recoveryGrants,
+    /endpoint_url|event_kinds|signing_key|nonce|tag|fingerprint/u,
+  );
+  assert.doesNotMatch(
+    sql,
+    /GRANT [A-Z, ]+ ON oao\.event_webhooks TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /REVOKE ALL ON FUNCTION oao\.claim_event_webhook_deliveries\(text,integer,interval\) FROM PUBLIC, oao_app/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.claim_event_webhook_deliveries\(text,integer,interval\) OWNER TO oao_recovery/u,
+  );
+  assert.match(sql, /FOR UPDATE OF w SKIP LOCKED/u);
+  assert.doesNotMatch(sql, /DROP TABLE|DELETE FROM|BYPASSRLS/u);
+});

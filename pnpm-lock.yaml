@@ -59,6 +59,9 @@ importers:
       '@oao/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@oao/event-webhooks':
+        specifier: workspace:*
+        version: link:../../packages/event-webhooks
       '@oao/events':
         specifier: workspace:*
         version: link:../../packages/events
@@ -172,6 +175,9 @@ importers:
       '@oao/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@oao/event-webhooks':
+        specifier: workspace:*
+        version: link:../../packages/event-webhooks
       '@oao/mcp-remote':
         specifier: workspace:*
         version: link:../../packages/mcp-remote
@@ -268,6 +274,28 @@ importers:
         version: 8.20.0
 
   packages/domain: {}
+
+  packages/event-webhooks:
+    dependencies:
+      '@oao/db-postgres':
+        specifier: workspace:*
+        version: link:../db-postgres
+      '@oao/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@oao/events':
+        specifier: workspace:*
+        version: link:../events
+      '@oao/mcp-remote':
+        specifier: workspace:*
+        version: link:../mcp-remote
+    devDependencies:
+      '@oao/provider-credentials':
+        specifier: workspace:*
+        version: link:../provider-credentials
+      '@types/pg':
+        specifier: 8.20.0
+        version: 8.20.0
 
   packages/events:
     dependencies:

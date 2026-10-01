@@ -55,7 +55,9 @@ Healthcheck path: /readyz
 ```
 
 Set the same `DATABASE_URL` and `OAO_CREDENTIAL_ENCRYPTION_KEY` values used by
-the web service. Do not generate a public domain for the worker.
+the web service. Do not generate a public domain for the worker. The worker
+also delivers [event webhooks](/integrations/event-webhooks), so it needs
+outbound HTTPS access to their endpoints.
 
 ## Provision the first identity
 

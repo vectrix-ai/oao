@@ -152,6 +152,16 @@ test(
       );
       assert.deepEqual(policies.rows, [
         {
+          tablename: "event_webhooks",
+          cmd: "ALL",
+          qual: "true",
+        },
+        {
+          tablename: "project_event_positions",
+          cmd: "SELECT",
+          qual: "true",
+        },
+        {
           tablename: "runtime_dispatches",
           cmd: "SELECT",
           qual: "true",
@@ -190,6 +200,7 @@ test(
            JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE n.nspname = 'oao'
             AND p.proname IN (
+              'claim_event_webhook_deliveries',
               'claim_runtime_wakes',
               'complete_runtime_wake',
               'find_runtime_dispatch',
@@ -200,6 +211,13 @@ test(
           ORDER BY p.proname`,
       );
       assert.deepEqual(functions.rows, [
+        {
+          proname: "claim_event_webhook_deliveries",
+          owner: "oao_recovery",
+          app_can_execute: false,
+          runtime_can_execute: true,
+          public_can_execute: false,
+        },
         {
           proname: "claim_runtime_wakes",
           owner: "oao_recovery",

@@ -6,6 +6,7 @@ import {
   OaoClient,
   createRoutes,
   parseEventStream,
+  verifyEventWebhookSignature,
 } from "../src/index.ts";
 
 test("route builders scope resources to a project and allow a custom prefix", () => {
@@ -1047,4 +1048,88 @@ test("IAP role updates retain organization role and effective scopes in the resp
   );
   assert.equal(member.organizationRole, "admin");
   assert.deepEqual(member.scopes, ["project:admin"]);
+});
+
+test("client manages event webhooks without a signing secret read path", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({ id: "webhook-1", credentialConfigured: true });
+    },
+  });
+  const secret = `whsec_${Buffer.alloc(32, 1).toString("base64")}`;
+  await client.listEventWebhooks("project-1", { limit: 5 });
+  await client.createEventWebhook(
+    "project-1",
+    {
+      displayName: "Convex",
+      endpointUrl: "https://example.convex.site/oao/events",
+      signingSecret: secret,
+      eventKinds: ["run.*", "message.created"],
+      includeMessageContent: true,
+    },
+    { idempotencyKey: "webhook-create-1" },
+  );
+  await client.getEventWebhook("project-1", "webhook/1");
+  await client.updateEventWebhook(
+    "project-1",
+    "webhook-1",
+    { enabled: false },
+    { idempotencyKey: "webhook-update-1" },
+  );
+  await client.rotateEventWebhookCredential(
+    "project-1",
+    "webhook-1",
+    { signingSecret: secret, previousCredentialTtlSeconds: 0 },
+    { idempotencyKey: "webhook-rotate-1" },
+  );
+  await client.deleteEventWebhook("project-1", "webhook-1", {
+    idempotencyKey: "webhook-delete-1",
+  });
+
+  assert.deepEqual(
+    requests.map((request) => [request.method, new URL(request.url).pathname]),
+    [
+      ["GET", "/v1/projects/project-1/event-webhooks"],
+      ["POST", "/v1/projects/project-1/event-webhooks"],
+      ["GET", "/v1/projects/project-1/event-webhooks/webhook%2F1"],
+      ["PATCH", "/v1/projects/project-1/event-webhooks/webhook-1"],
+      ["PUT", "/v1/projects/project-1/event-webhooks/webhook-1/credential"],
+      ["DELETE", "/v1/projects/project-1/event-webhooks/webhook-1"],
+    ],
+  );
+  assert.equal(new URL(requests[0]?.url ?? "").searchParams.get("limit"), "5");
+  assert.equal(requests[1]?.headers.get("idempotency-key"), "webhook-create-1");
+  assert.deepEqual(await requests[3]?.json(), { enabled: false });
+});
+
+test("event webhook signatures verify with Web Crypto", async () => {
+  // Standard Webhooks reference vector.
+  const vector = {
+    secret: "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw",
+    webhookId: "msg_p5jXN8AQM9LWM0D4loKWxJek",
+    webhookTimestamp: "1614265330",
+    body: '{"test": 2432232314}',
+    webhookSignature: "v1,bad v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=",
+    now: 1614265330,
+  };
+  assert.equal(await verifyEventWebhookSignature(vector), true);
+  assert.equal(
+    await verifyEventWebhookSignature({ ...vector, body: '{"test": 1}' }),
+    false,
+  );
+  assert.equal(
+    await verifyEventWebhookSignature({ ...vector, now: vector.now + 301 }),
+    false,
+  );
+  assert.equal(
+    await verifyEventWebhookSignature({ ...vector, webhookSignature: null }),
+    false,
+  );
+  assert.equal(
+    await verifyEventWebhookSignature({ ...vector, secret: "not-a-secret" }),
+    false,
+  );
 });

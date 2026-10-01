@@ -15,6 +15,7 @@ import {
   Settings,
   Server,
   Users,
+  Webhook,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -73,6 +74,7 @@ const navGroups: readonly {
       { to: "/sandbox-providers", label: "Sandbox providers", icon: Box },
       { to: "/storage-providers", label: "Storage providers", icon: Database },
       { to: "/mcp", label: "MCP connections", icon: Server },
+      { to: "/event-webhooks", label: "Webhooks", icon: Webhook },
       { to: "/settings", label: "Settings", icon: Settings },
     ],
   },

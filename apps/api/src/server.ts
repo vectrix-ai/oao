@@ -13,6 +13,7 @@ import {
   listXAIModelCatalog,
 } from "@oao/models-openrouter";
 import { McpRemoteClient } from "@oao/mcp-remote";
+import { allowPrivateWebhookNetwork } from "@oao/event-webhooks";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { listDaytonaSnapshots } from "@oao/sandbox-daytona";
 import { createApiApp } from "./app.js";
@@ -63,6 +64,9 @@ const app = createApiApp({
   runtimeCommands: new PostgresRuntimeCommandPort(),
   activeModelPresetKeys: new Set(),
   ...(credentialCipher ? { credentialCipher } : {}),
+  eventWebhooks: {
+    allowPrivateNetwork: allowPrivateWebhookNetwork(process.env),
+  },
   ...(credentialCipher ? { mcpRemote: new McpRemoteClient() } : {}),
   modelCatalog: {
     deploymentPresets: [],

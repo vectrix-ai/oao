@@ -10,6 +10,7 @@ import {
   DEFAULT_ANTHROPIC_MODEL_GENERATION_SETTINGS,
   DEFAULT_OPENAI_MODEL_GENERATION_SETTINGS,
   DEFAULT_XAI_MODEL_GENERATION_SETTINGS,
+  parseCreateEventWebhookInput,
   parseCreateProjectInput,
   parseCreateProjectMemberInput,
   parseCreateProjectSandboxProviderInput,
@@ -25,13 +26,16 @@ import {
   parseRotateProjectModelProviderCredentialInput,
   parseRotateProjectSandboxProviderCredentialInput,
   parseRotateProjectStorageProviderCredentialInput,
+  parseRotateEventWebhookCredentialInput,
   parseRotateMcpCredentialInput,
   parseUpdateProjectSandboxProviderConfigurationInput,
   parseToolResultEnvelope,
+  parseUpdateEventWebhookInput,
   MANAGED_AGENT_RESERVED_TOOL_NAMES,
   RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION,
   validateToolJsonValue,
   validateToolJsonSchema,
+  type CreateEventWebhookInput,
   type CreateProjectSandboxProviderInput,
   type CreateProjectStorageProviderInput,
   type CreateModelPresetInput,
@@ -41,9 +45,14 @@ import {
   type ModelProviderType,
   type SandboxSnapshotEntry,
   type ToolResultEnvelope,
+  type UpdateEventWebhookInput,
   type UpdateProjectSandboxProviderConfigurationInput,
 } from "@oao/contracts";
 import type { McpRemotePort } from "@oao/mcp-remote";
+import {
+  validateWebhookEndpoint,
+  WEBHOOK_RECONFIGURE_DRAIN_MS,
+} from "@oao/event-webhooks";
 import type {
   ArtifactPort,
   Principal,
@@ -133,6 +142,8 @@ export interface ApiDependencies {
   readonly eventStreamTiming?: Partial<EventStreamTiming>;
   readonly runtimeCommands: RuntimeCommandPort;
   readonly credentialCipher?: ProviderCredentialCipher;
+  /** Development only: allow `http://` and private-network webhook endpoints. */
+  readonly eventWebhooks?: { readonly allowPrivateNetwork: boolean };
   readonly mcpRemote?: McpRemotePort;
   readonly activeModelPresetKeys?: ReadonlySet<string>;
   readonly modelCatalog?: ModelCatalogPort;
@@ -2861,6 +2872,7 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   registerModelPresetRoutes(app, dependencies);
   registerMcpRoutes(app, dependencies, mcp);
   registerSandboxProviderRoutes(app, dependencies);
+  registerEventWebhookRoutes(app, dependencies);
   registerStorageProviderRoutes(app, dependencies);
   registerSkillRoutes(app, dependencies);
   registerAgentRoutes(app, dependencies);
@@ -3719,6 +3731,501 @@ function registerSandboxProviderRoutes(
       );
     },
   );
+}
+
+const MAX_EVENT_WEBHOOKS_PER_PROJECT = 20;
+const EVENT_WEBHOOK_VIEW_SQL = `w.id,w.organization_id,w.project_id,w.display_name,w.endpoint_url,
+  w.enabled,w.disabled_reason,w.event_kinds,w.include_message_content,
+  true AS credential_configured,left(w.credential_fingerprint,12) AS credential_fingerprint,
+  w.encryption_key_version AS credential_version,
+  CASE WHEN w.previous_credential_expires_at>clock_timestamp()
+       THEN w.previous_credential_expires_at END AS previous_credential_expires_at,
+  CASE WHEN NOT w.enabled THEN 'disabled'
+       WHEN w.consecutive_failures>0 THEN 'failing'
+       ELSE 'active' END AS status,
+  w.delivered_position::text AS delivered_position,
+  LEAST(GREATEST(COALESCE(p.committed_position,0)-w.delivered_position,0),2147483647)::int
+    AS pending_events,
+  w.consecutive_failures,w.next_attempt_at,w.last_attempt_at,w.last_success_at,
+  w.last_failure_at,w.last_response_status,w.last_error_code,
+  w.created_by_principal_id,w.created_at,w.updated_at
+  FROM oao.event_webhooks w
+  LEFT JOIN oao.project_event_positions p
+    ON p.organization_id=w.organization_id AND p.project_id=w.project_id`;
+
+function eventWebhookView(row: unknown): Record<string, unknown> {
+  const view = publicValue(row) as Record<string, unknown>;
+  return {
+    ...view,
+    cursor: encodeEventCursor(BigInt(String(view.deliveredPosition ?? "0"))),
+  };
+}
+
+async function selectEventWebhook(
+  tx: PgClient,
+  actor: Principal,
+  webhookId: string,
+): Promise<Record<string, unknown>> {
+  const result = await tx.query(
+    `SELECT ${EVENT_WEBHOOK_VIEW_SQL}
+      WHERE w.organization_id=$1 AND w.project_id=$2 AND w.id=$3`,
+    [actor.organizationId, actor.projectId, webhookId],
+  );
+  if (!result.rows[0])
+    throw new HttpApiError("not_found", "Event webhook not found");
+  return eventWebhookView(result.rows[0]);
+}
+
+function registerEventWebhookRoutes(
+  app: Hono<{ Variables: Variables }>,
+  dependencies: ApiDependencies,
+): void {
+  const endpointOptions = {
+    allowPrivateNetwork:
+      dependencies.eventWebhooks?.allowPrivateNetwork === true,
+  };
+  const checkedEndpoint = (value: string): URL => {
+    try {
+      return validateWebhookEndpoint(value, endpointOptions);
+    } catch (error) {
+      throw new HttpApiError(
+        "bad_request",
+        error instanceof Error ? error.message : "Webhook endpoint is invalid",
+      );
+    }
+  };
+  const requireCipher = (): ProviderCredentialCipher => {
+    if (!dependencies.credentialCipher)
+      throw new HttpApiError(
+        "internal_error",
+        "Provider credential encryption is not configured",
+      );
+    return dependencies.credentialCipher;
+  };
+  const webhookIdParam = (c: ApiContext): string => {
+    const value = c.req.param("webhookId") ?? "";
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+        value,
+      )
+    )
+      throw new HttpApiError("not_found", "Event webhook not found");
+    return value;
+  };
+
+  app.get("/v1/projects/:projectId/event-webhooks", async (c) => {
+    const actor = assertProject(c);
+    const limit = parseLimit(c.req.query("limit"));
+    const cursor = decodeListCursor(c.req.query("cursor"));
+    return dependencies.store.transaction(
+      actor,
+      "project:admin",
+      async (tx) => {
+        const condition = dependencies.store.cursorCondition(
+          cursor,
+          "w.created_at",
+          3,
+          "w.id",
+        );
+        const result = await tx.query(
+          `SELECT ${EVENT_WEBHOOK_VIEW_SQL}
+          WHERE w.organization_id=$1 AND w.project_id=$2${condition.sql}
+          ORDER BY w.created_at DESC,w.id DESC LIMIT $${3 + condition.values.length}`,
+          [
+            actor.organizationId,
+            actor.projectId,
+            ...condition.values,
+            limit + 1,
+          ],
+        );
+        return c.json({
+          ...pagination(result.rows.map(eventWebhookView), limit, "createdAt"),
+          credentialEncryptionConfigured:
+            dependencies.credentialCipher !== undefined,
+          // Lets clients mirror the endpoint check: plain HTTP and private
+          // destinations are accepted only in development deployments.
+          privateNetworkEndpointsAllowed: endpointOptions.allowPrivateNetwork,
+        });
+      },
+    );
+  });
+
+  app.post("/v1/projects/:projectId/event-webhooks", async (c) => {
+    const actor = assertProject(c);
+    const cipher = requireCipher();
+    const body = await readJsonObject(c.req.raw);
+    const idem = idempotencyKey(c.req.raw);
+    let input: CreateEventWebhookInput;
+    try {
+      input = parseCreateEventWebhookInput(body);
+    } catch {
+      throw new HttpApiError(
+        "bad_request",
+        "Request must contain a display name, HTTPS endpoint URL, whsec_ signing secret, and valid event kinds",
+      );
+    }
+    const endpoint = checkedEndpoint(input.endpointUrl);
+    const webhookId = randomUUID();
+    const encrypted = cipher.encrypt(input.signingSecret, {
+      organizationId: actor.organizationId,
+      providerId: webhookId,
+      providerType: "event_webhook",
+      keyVersion: 1,
+    });
+    return dependencies.store.transaction(
+      actor,
+      "project:admin",
+      async (tx) => {
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: "POST:/event-webhooks",
+          key: idem,
+          hash: requestHash(body),
+          status: 201,
+          execute: async () => {
+            // Concurrent creates would otherwise each count below the limit.
+            await tx.query(
+              "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+              [`event_webhooks:${actor.organizationId}:${actor.projectId}`],
+            );
+            const existing = await tx.query<{ count: number }>(
+              `SELECT count(*)::int AS count FROM oao.event_webhooks
+              WHERE organization_id=$1 AND project_id=$2`,
+              [actor.organizationId, actor.projectId],
+            );
+            if (
+              (existing.rows[0]?.count ?? 0) >= MAX_EVENT_WEBHOOKS_PER_PROJECT
+            )
+              throw new HttpApiError(
+                "conflict",
+                `A project can have at most ${MAX_EVENT_WEBHOOKS_PER_PROJECT} event webhooks`,
+              );
+            const position = await tx.query<{ committed_position: string }>(
+              `SELECT committed_position::text FROM oao.project_event_positions
+              WHERE organization_id=$1 AND project_id=$2`,
+              [actor.organizationId, actor.projectId],
+            );
+            const deliveredPosition =
+              input.deliverFrom === "now"
+                ? (position.rows[0]?.committed_position ?? "0")
+                : "0";
+            await tx.query(
+              `INSERT INTO oao.event_webhooks
+               (organization_id,project_id,id,display_name,endpoint_url,enabled,disabled_reason,
+                event_kinds,include_message_content,encrypted_signing_key,encryption_nonce,
+                encryption_tag,encryption_key_version,credential_fingerprint,
+                delivered_position,created_by_principal_id)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+              [
+                actor.organizationId,
+                actor.projectId,
+                webhookId,
+                input.displayName,
+                endpoint.href,
+                input.enabled,
+                input.enabled ? null : "user",
+                input.eventKinds,
+                input.includeMessageContent,
+                encrypted.ciphertext,
+                encrypted.nonce,
+                encrypted.tag,
+                encrypted.keyVersion,
+                encrypted.fingerprint,
+                deliveredPosition,
+                actor.id,
+              ],
+            );
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "event_webhook.created",
+              resourceType: "event_webhook",
+              resourceId: webhookId,
+              detail: {
+                endpointOrigin: endpoint.origin,
+                enabled: input.enabled,
+                includeMessageContent: input.includeMessageContent,
+                eventKindCount: input.eventKinds?.length ?? 0,
+                deliverFrom: input.deliverFrom,
+                credentialFingerprint: encrypted.fingerprint.slice(0, 12),
+              },
+            });
+            return selectEventWebhook(tx, actor, webhookId);
+          },
+        });
+        c.header("idempotency-replayed", String(response.replayed));
+        return c.json(response.body, 201);
+      },
+    );
+  });
+
+  app.get("/v1/projects/:projectId/event-webhooks/:webhookId", async (c) => {
+    const actor = assertProject(c);
+    const webhookId = webhookIdParam(c);
+    return dependencies.store.transaction(actor, "project:admin", async (tx) =>
+      c.json(await selectEventWebhook(tx, actor, webhookId)),
+    );
+  });
+
+  app.patch("/v1/projects/:projectId/event-webhooks/:webhookId", async (c) => {
+    const actor = assertProject(c);
+    const webhookId = webhookIdParam(c);
+    const body = await readJsonObject(c.req.raw);
+    const idem = idempotencyKey(c.req.raw);
+    let input: UpdateEventWebhookInput;
+    try {
+      input = parseUpdateEventWebhookInput(body);
+    } catch {
+      throw new HttpApiError(
+        "bad_request",
+        "Request must change at least one of displayName, endpointUrl, eventKinds, includeMessageContent, or enabled",
+      );
+    }
+    const endpoint =
+      input.endpointUrl === undefined
+        ? undefined
+        : checkedEndpoint(input.endpointUrl);
+    return dependencies.store.transaction(
+      actor,
+      "project:admin",
+      async (tx) => {
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: `PATCH:/event-webhooks/${webhookId}`,
+          key: idem,
+          hash: requestHash(body),
+          status: 200,
+          execute: async () => {
+            const current = await tx.query<{
+              endpoint_url: string;
+              event_kinds: string[] | null;
+              include_message_content: boolean;
+              enabled: boolean;
+            }>(
+              `SELECT endpoint_url,event_kinds,include_message_content,enabled
+               FROM oao.event_webhooks
+              WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
+              [actor.organizationId, actor.projectId, webhookId],
+            );
+            const row = current.rows[0];
+            if (!row)
+              throw new HttpApiError("not_found", "Event webhook not found");
+            const sameKinds =
+              input.eventKinds === undefined ||
+              JSON.stringify(input.eventKinds) ===
+                JSON.stringify(row.event_kinds);
+            // A pending batch was formed for the old destination or filter; form
+            // a new one under the new configuration instead of resending it.
+            const reshape =
+              (endpoint !== undefined && endpoint.href !== row.endpoint_url) ||
+              !sameKinds ||
+              (input.includeMessageContent !== undefined &&
+                input.includeMessageContent !== row.include_message_content);
+            const reenable = input.enabled === true && !row.enabled;
+            // A worker may hold the lease with the old settings loaded. Bumping the
+            // fence makes its batch, cursor, and disable writes fail, so nothing
+            // formed or answered under the old configuration can land. The lease
+            // itself is kept, capped to a short drain, because that worker's
+            // request may still be in flight and batches must never overlap.
+            const invalidateLease =
+              reshape ||
+              (input.enabled !== undefined && input.enabled !== row.enabled);
+            await tx.query(
+              `UPDATE oao.event_webhooks SET
+               display_name=COALESCE($4,display_name),
+               endpoint_url=COALESCE($5,endpoint_url),
+               event_kinds=CASE WHEN $6 THEN $7::text[] ELSE event_kinds END,
+               include_message_content=COALESCE($8,include_message_content),
+               enabled=COALESCE($9,enabled),
+               disabled_reason=CASE WHEN $9 IS NULL THEN disabled_reason
+                                    WHEN $9 THEN NULL
+                                    WHEN enabled THEN 'user'
+                                    ELSE disabled_reason END,
+               batch_id=CASE WHEN $10 THEN NULL ELSE batch_id END,
+               batch_through_position=CASE WHEN $10 THEN NULL ELSE batch_through_position END,
+               consecutive_failures=CASE WHEN $10 OR $11 THEN 0 ELSE consecutive_failures END,
+               next_attempt_at=CASE WHEN $10 OR $11 THEN clock_timestamp() ELSE next_attempt_at END,
+               lease_fence=CASE WHEN $12 THEN lease_fence+1 ELSE lease_fence END,
+               lease_expires_at=CASE WHEN $12 AND lease_owner IS NOT NULL
+                 THEN LEAST(lease_expires_at,clock_timestamp()+make_interval(secs => $13))
+                 ELSE lease_expires_at END
+             WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+              [
+                actor.organizationId,
+                actor.projectId,
+                webhookId,
+                input.displayName ?? null,
+                endpoint?.href ?? null,
+                input.eventKinds !== undefined,
+                input.eventKinds ?? null,
+                input.includeMessageContent ?? null,
+                input.enabled ?? null,
+                reshape,
+                reenable,
+                invalidateLease,
+                WEBHOOK_RECONFIGURE_DRAIN_MS / 1000,
+              ],
+            );
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "event_webhook.updated",
+              resourceType: "event_webhook",
+              resourceId: webhookId,
+              detail: {
+                changedFields: Object.keys(input)
+                  .filter(
+                    (key) =>
+                      input[key as keyof UpdateEventWebhookInput] !== undefined,
+                  )
+                  .sort(),
+                ...(endpoint ? { endpointOrigin: endpoint.origin } : {}),
+                ...(input.enabled === undefined
+                  ? {}
+                  : { enabled: input.enabled }),
+                ...(input.includeMessageContent === undefined
+                  ? {}
+                  : { includeMessageContent: input.includeMessageContent }),
+              },
+            });
+            return selectEventWebhook(tx, actor, webhookId);
+          },
+        });
+        c.header("idempotency-replayed", String(response.replayed));
+        return c.json(response.body);
+      },
+    );
+  });
+
+  app.put(
+    "/v1/projects/:projectId/event-webhooks/:webhookId/credential",
+    async (c) => {
+      const actor = assertProject(c);
+      const webhookId = webhookIdParam(c);
+      const cipher = requireCipher();
+      const body = await readJsonObject(c.req.raw);
+      const idem = idempotencyKey(c.req.raw);
+      let signingSecret: string;
+      let previousTtlSeconds: number;
+      try {
+        const input = parseRotateEventWebhookCredentialInput(body);
+        signingSecret = input.signingSecret;
+        previousTtlSeconds = input.previousCredentialTtlSeconds;
+      } catch {
+        throw new HttpApiError(
+          "bad_request",
+          "Request must contain a whsec_ signing secret and an optional previousCredentialTtlSeconds from 0 to 604800",
+        );
+      }
+      return dependencies.store.transaction(
+        actor,
+        "project:admin",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `PUT:/event-webhooks/${webhookId}/credential`,
+            key: idem,
+            hash: requestHash(body),
+            status: 200,
+            execute: async () => {
+              const current = await tx.query<{
+                encryption_key_version: number;
+              }>(
+                `SELECT encryption_key_version FROM oao.event_webhooks
+                WHERE organization_id=$1 AND project_id=$2 AND id=$3 FOR UPDATE`,
+                [actor.organizationId, actor.projectId, webhookId],
+              );
+              const row = current.rows[0];
+              if (!row)
+                throw new HttpApiError("not_found", "Event webhook not found");
+              const encrypted = cipher.encrypt(signingSecret, {
+                organizationId: actor.organizationId,
+                providerId: webhookId,
+                providerType: "event_webhook",
+                keyVersion: row.encryption_key_version + 1,
+              });
+              // The replaced key keeps signing during the rotation window so the
+              // receiver can switch secrets without rejecting deliveries.
+              await tx.query(
+                `UPDATE oao.event_webhooks SET
+                 previous_encrypted_signing_key=CASE WHEN $9>0 THEN encrypted_signing_key END,
+                 previous_encryption_nonce=CASE WHEN $9>0 THEN encryption_nonce END,
+                 previous_encryption_tag=CASE WHEN $9>0 THEN encryption_tag END,
+                 previous_encryption_key_version=CASE WHEN $9>0 THEN encryption_key_version END,
+                 previous_credential_expires_at=CASE WHEN $9>0
+                   THEN clock_timestamp()+make_interval(secs => $9) END,
+                 encrypted_signing_key=$4,encryption_nonce=$5,encryption_tag=$6,
+                 encryption_key_version=$7,credential_fingerprint=$8,
+                 consecutive_failures=0,next_attempt_at=clock_timestamp()
+               WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+                [
+                  actor.organizationId,
+                  actor.projectId,
+                  webhookId,
+                  encrypted.ciphertext,
+                  encrypted.nonce,
+                  encrypted.tag,
+                  encrypted.keyVersion,
+                  encrypted.fingerprint,
+                  previousTtlSeconds,
+                ],
+              );
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "event_webhook.credential_rotated",
+                resourceType: "event_webhook",
+                resourceId: webhookId,
+                detail: {
+                  credentialVersion: encrypted.keyVersion,
+                  credentialFingerprint: encrypted.fingerprint.slice(0, 12),
+                  previousCredentialTtlSeconds: previousTtlSeconds,
+                },
+              });
+              return selectEventWebhook(tx, actor, webhookId);
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body);
+        },
+      );
+    },
+  );
+
+  app.delete("/v1/projects/:projectId/event-webhooks/:webhookId", async (c) => {
+    const actor = assertProject(c);
+    const webhookId = webhookIdParam(c);
+    const idem = idempotencyKey(c.req.raw);
+    return dependencies.store.transaction(
+      actor,
+      "project:admin",
+      async (tx) => {
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: `DELETE:/event-webhooks/${webhookId}`,
+          method: "DELETE",
+          key: idem,
+          hash: requestHash({ webhookId }),
+          status: 200,
+          execute: async () => {
+            // Deleting the row erases the encrypted signing keys with it.
+            const deleted = await tx.query(
+              `DELETE FROM oao.event_webhooks
+              WHERE organization_id=$1 AND project_id=$2 AND id=$3
+              RETURNING left(credential_fingerprint,12) AS fingerprint,endpoint_url`,
+              [actor.organizationId, actor.projectId, webhookId],
+            );
+            const row = deleted.rows[0] as
+              { fingerprint: string; endpoint_url: string } | undefined;
+            if (!row)
+              throw new HttpApiError("not_found", "Event webhook not found");
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "event_webhook.deleted",
+              resourceType: "event_webhook",
+              resourceId: webhookId,
+              detail: {
+                endpointOrigin: new URL(row.endpoint_url).origin,
+                credentialFingerprint: row.fingerprint,
+              },
+            });
+            return { id: webhookId, deleted: true };
+          },
+        });
+        c.header("idempotency-replayed", String(response.replayed));
+        return c.json(response.body);
+      },
+    );
+  });
 }
 
 function registerStorageProviderRoutes(
