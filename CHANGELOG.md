@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.8.0](https://github.com/vectrix-ai/oao/compare/v0.7.2...v0.8.0) (2026-10-01)
+
+
+### Features
+
+* add self-service IAP project access ([e1d41f5](https://github.com/vectrix-ai/oao/commit/e1d41f5fef87cc5b99cebf468edeab4cb5c02151))
+* deliver product events to outbound webhooks ([#36](https://github.com/vectrix-ai/oao/issues/36)) ([a3df663](https://github.com/vectrix-ai/oao/commit/a3df6630f02c0d1807cf3c6c762d6c651f69b9ed))
+* manage IAP project access ([5d4deb2](https://github.com/vectrix-ai/oao/commit/5d4deb231e154a701e57122cedcd9fa7c3d029dd))
+
+
+### Bug Fixes
+
+* keep mirror reruns and manual sync branches from being rewritten ([5979439](https://github.com/vectrix-ai/oao/commit/5979439ff88b8489526afb7091b2ff37265939b1))
+* keep project event streams alive and share one LISTEN connection ([#35](https://github.com/vectrix-ai/oao/issues/35)) ([6fd25f3](https://github.com/vectrix-ai/oao/commit/6fd25f3a2201e5d63b55dfe3211d64ba9ee9bcfa))
+* preserve IAP access invariants ([7d3a38b](https://github.com/vectrix-ai/oao/commit/7d3a38be5f3f1b3ee83a5260bdf36fb4410bf1b7))
+* repair model start events that miss their dispatch correlation ([7d9e77c](https://github.com/vectrix-ai/oao/commit/7d9e77c707b9821ec13feb7206c605091331fd4e))
+* retry conflicting sync pull requests when the base changes ([73996af](https://github.com/vectrix-ai/oao/commit/73996afb69636adfdbaf66627c8383c710827c1d))
+* tighten IAP upgrade attribution ([acddd5f](https://github.com/vectrix-ai/oao/commit/acddd5f23432a1aa9eb6510fbc4ba45373aaf608))
+* VEC-1399 manage IAP organization roles and permissions ([892de9c](https://github.com/vectrix-ai/oao/commit/892de9c61e95c8ddf7f30c297ccb05407bef71cd))
+* VEC-1399 repair missing model start events ([3103ebd](https://github.com/vectrix-ai/oao/commit/3103ebdf934ea58498218b18c029910b3a5d5052))
+* VEC-1399 ship the IAP migrations already deployed downstream ([7914e71](https://github.com/vectrix-ai/oao/commit/7914e71974c0f3ed820cb812f76197a638a61fee))
+
 ## [0.7.2](https://github.com/vectrix-ai/oao/compare/v0.7.1...v0.7.2) (2026-09-15)
 
 ### Bug Fixes
