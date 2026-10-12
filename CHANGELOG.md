@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/vectrix-ai/oao/compare/v0.8.0...v0.8.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* VEC-2136 commit assistant text before approval gates ([#38](https://github.com/vectrix-ai/oao/issues/38)) ([e8eea37](https://github.com/vectrix-ai/oao/commit/e8eea370d50f6895e49fb797b8e3a8de408c590e))
+
 ## [0.8.0](https://github.com/vectrix-ai/oao/compare/v0.7.2...v0.8.0) (2026-10-01)
 
 
