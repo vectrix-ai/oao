@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/vectrix-ai/oao/compare/v0.9.1...v0.10.0) (2026-10-30)
+
+
+### Features
+
+* add Amazon Bedrock model provider ([9d604f6](https://github.com/vectrix-ai/oao/commit/9d604f64f59b61328d181cbfd50cd2b0569a91a1))
+
 ## [0.9.1](https://github.com/vectrix-ai/oao/compare/v0.9.0...v0.9.1) (2026-10-17)
 
 
