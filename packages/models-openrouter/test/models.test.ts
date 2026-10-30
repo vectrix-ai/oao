@@ -14,6 +14,7 @@ import {
   createOpenRouterPresetProviders,
   isApprovedCatalogModel,
   listApprovedModelCatalog,
+  listBedrockModelCatalog,
   listAnthropicModelCatalog,
   listOpenAIModelCatalog,
   listOpenRouterModelCatalog,
@@ -671,6 +672,76 @@ test("xAI offers xhigh only from Grok 4.6, as xAI documents", async () => {
       "xai/grok-4.5": ["low", "medium", "high"],
       "xai/grok-4.6": ["low", "medium", "high", "xhigh"],
     },
+  );
+});
+
+test("Bedrock catalog is the pinned Pi list and presets accept any model id", async () => {
+  const catalog = await listBedrockModelCatalog({ search: "sonnet-5" });
+  const entry = catalog.find(
+    (item) => item.model === "bedrock/eu.anthropic.claude-sonnet-5",
+  );
+  assert.equal(entry?.providerType, "bedrock");
+  assert.equal(entry?.catalogId, "eu.anthropic.claude-sonnet-5");
+  assert.ok(catalog.every((item) => item.catalogId.includes("sonnet-5")));
+  assert.ok(
+    listApprovedModelCatalog("bedrock").some(
+      (item) => item.model === entry?.model,
+    ),
+  );
+  assert.equal(
+    isApprovedCatalogModel("bedrock/eu.anthropic.claude-sonnet-5", "bedrock"),
+    true,
+  );
+  assert.equal(
+    isApprovedCatalogModel("bedrock/eu.anthropic.claude-sonnet-5", "xai"),
+    false,
+  );
+
+  const providers: Provider[] = [];
+  const registry = new ProjectModelPresetRegistry({
+    deployment: new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
+      hostedEnabled: false,
+    }),
+    registerProvider: (provider) => providers.push(provider),
+  });
+  const bedrock = {
+    ...tenantA,
+    providerType: "bedrock" as const,
+    apiKey: "ABSKbedrock-runtime-secret",
+    routing: {},
+  };
+  const resolved = registry.activate({
+    ...bedrock,
+    key: "claude-sonnet-5-bedrock-v1",
+    model: "bedrock/eu.anthropic.claude-sonnet-5",
+  });
+  assert.equal(resolved.approvedModel, "bedrock/eu.anthropic.claude-sonnet-5");
+  assert.equal(resolved.settings, null);
+  const model = providers[0]?.getModels()[0];
+  assert.equal(model?.api, "bedrock-converse-stream");
+  assert.equal(model?.id, "eu.anthropic.claude-sonnet-5");
+  assert.equal(
+    model?.baseUrl,
+    `https://bedrock-runtime.${process.env.AWS_REGION?.trim() || "eu-central-1"}.amazonaws.com`,
+  );
+
+  // Ids outside the pinned list get a dynamic model definition.
+  registry.activate({
+    ...bedrock,
+    key: "qwen-coder-v1",
+    model: "bedrock/qwen.qwen3-coder-30b-a3b-v1:0",
+  });
+  const dynamic = providers[1]?.getModels()[0];
+  assert.equal(dynamic?.id, "qwen.qwen3-coder-30b-a3b-v1:0");
+  assert.equal(dynamic?.api, "bedrock-converse-stream");
+
+  assert.throws(() =>
+    registry.activate({
+      ...bedrock,
+      key: "claude-sonnet-5-bedrock-v2",
+      model: "bedrock/eu.anthropic.claude-sonnet-5",
+      settings: { textFormat: "text", effort: "low" },
+    }),
   );
 });
 

@@ -2344,7 +2344,8 @@ export class HttpConsoleApi implements ConsoleApi {
     const response = await this.#projectRequest<
       CursorPage<ModelCatalogEntry> & {
         readonly providerId: string;
-        readonly providerType: "openrouter" | "openai" | "anthropic" | "xai";
+        readonly providerType:
+          "openrouter" | "openai" | "anthropic" | "xai" | "bedrock";
       }
     >(
       `/model-catalog?limit=200&providerId=${encodeURIComponent(providerId)}${query}`,

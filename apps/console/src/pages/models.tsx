@@ -1470,6 +1470,7 @@ function CreateProviderDialog({
           <option value="openai">OpenAI</option>
           <option value="anthropic">Anthropic</option>
           <option value="xai">xAI (Grok)</option>
+          <option value="bedrock">Amazon Bedrock</option>
         </Select>
       </Field>
       <Field label="Connection key" hint="For example openrouter-primary.">

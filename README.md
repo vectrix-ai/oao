@@ -26,7 +26,7 @@ and stream their progress into your application.
   [current limitations](docs/reference/mvp-limitations.mdx) for sandbox
   residency caveats.
 - **Any model provider, per agent.** Connect **OpenRouter** (including
-  open-weight models), **OpenAI**, **Anthropic**, or **xAI (Grok)**, then give
+  open-weight models), **OpenAI**, **Anthropic**, **xAI (Grok)**, or **Amazon Bedrock**, then give
   each agent the model preset that fits its job. A coordinator on one provider
   can delegate to agents on another.
 - **Plain HTTP + SSE API.** Create sessions, submit turns, and resume live event
@@ -70,13 +70,13 @@ starting a container.
 
 You need:
 
-| Requirement        | Version                               | Notes                                                       |
-| ------------------ | ------------------------------------- | ----------------------------------------------------------- |
-| Git                | Current release                       | Used to clone this repository                               |
-| Node.js            | 22.19.0 or newer                      | Runs the workspace and setup CLI                            |
-| pnpm               | Exactly 10.27.0                       | The version pinned by this repository                       |
-| Docker             | Current release                       | The CLI and a running Docker-compatible daemon are required |
-| Model provider key | OpenRouter, OpenAI, Anthropic, or xAI | Entered securely during setup; it is not stored in `.env`   |
+| Requirement        | Version                                               | Notes                                                       |
+| ------------------ | ----------------------------------------------------- | ----------------------------------------------------------- |
+| Git                | Current release                                       | Used to clone this repository                               |
+| Node.js            | 22.19.0 or newer                                      | Runs the workspace and setup CLI                            |
+| pnpm               | Exactly 10.27.0                                       | The version pinned by this repository                       |
+| Docker             | Current release                                       | The CLI and a running Docker-compatible daemon are required |
+| Model provider key | OpenRouter, OpenAI, Anthropic, xAI, or Amazon Bedrock | Entered securely during setup; it is not stored in `.env`   |
 
 Docker Desktop, Colima, and other Docker-compatible runtimes are supported.
 Docker Compose is optional. If pnpm is unavailable or has the wrong version,
@@ -117,7 +117,7 @@ The wizard will:
    PostgreSQL image when needed.
 2. Create safe local settings, start PostgreSQL, apply migrations, and wait for
    the API, runtime worker, and console.
-3. Let you choose OpenRouter, OpenAI, Anthropic, or xAI with the arrow keys,
+3. Let you choose OpenRouter, OpenAI, Anthropic, xAI, or Amazon Bedrock with the arrow keys,
    then securely enter the provider API key.
 4. Open a searchable model picker. Type part of the model name or ID, use the
    arrow keys to select a result, and press Enter.

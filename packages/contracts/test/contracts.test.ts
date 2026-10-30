@@ -501,6 +501,24 @@ test("model preset input requires a versioned key and supported routing", () => 
     }).model,
     "xai/grok-4.6",
   );
+  assert.equal(
+    parseCreateModelPresetInput({
+      key: "claude-sonnet-5-bedrock-v1",
+      displayName: "Claude Sonnet 5 (Bedrock)",
+      providerId: "55555555-5555-4555-8555-555555555555",
+      model: "bedrock/eu.anthropic.claude-sonnet-5",
+    }).model,
+    "bedrock/eu.anthropic.claude-sonnet-5",
+  );
+  assert.equal(
+    parseCreateModelPresetInput({
+      key: "qwen-coder-v1",
+      displayName: "Qwen Coder",
+      providerId: "55555555-5555-4555-8555-555555555555",
+      model: "bedrock/qwen.qwen3-coder-30b-a3b-v1:0",
+    }).model,
+    "bedrock/qwen.qwen3-coder-30b-a3b-v1:0",
+  );
   assert.deepEqual(
     parseCreateModelPresetInput({
       key: "grok-4-6-low-v1",

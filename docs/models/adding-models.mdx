@@ -1,12 +1,12 @@
 ---
 title: Adding models and providers
-description: Configure organization-shared OpenRouter, OpenAI, Anthropic, or xAI credentials and link approved models to agents.
+description: Configure organization-shared OpenRouter, OpenAI, Anthropic, xAI, or Amazon Bedrock credentials and link approved models to agents.
 ---
 
 OAO stores hosted model configuration in PostgreSQL. Provider connections are
 organization-shared — every project uses the same pool — while model presets
-stay per project. The MVP supports four provider types: **OpenRouter**,
-**OpenAI**, **Anthropic**, and **xAI (Grok)**.
+stay per project. The MVP supports five provider types: **OpenRouter**,
+**OpenAI**, **Anthropic**, **xAI (Grok)**, and **Amazon Bedrock**.
 An agent version never contains a raw model identifier or credential. It names
 an immutable model preset, and that preset references a provider connection in
 the same organization.
@@ -37,7 +37,7 @@ OAO_CREDENTIAL_ENCRYPTION_KEY=replace-with-the-generated-base64-value
 ```
 
 Do not put `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
-`XAI_API_KEY` in `.env`. Those keys are entered through the project UI or API
+`XAI_API_KEY`, or `AWS_BEARER_TOKEN_BEDROCK` in `.env`. Those keys are entered through the project UI or API
 and stored as tenant-scoped ciphertext.
 Without `OAO_CREDENTIAL_ENCRYPTION_KEY`, provider creation, preset publication,
 and runtime execution are unavailable. OAO does not fall back to a local fake
@@ -47,7 +47,8 @@ model.
 
 1. Open **Models**.
 2. Select **Add provider**.
-3. Choose **OpenRouter**, **OpenAI**, **Anthropic**, or **xAI (Grok)**.
+3. Choose **OpenRouter**, **OpenAI**, **Anthropic**, **xAI (Grok)**, or
+   **Amazon Bedrock**.
 4. Enter a stable project-local key, display name, and API key.
 5. Select **Add provider**.
 
@@ -74,6 +75,8 @@ archived presets fail with a provider-removed error.
    and pick a model or OpenRouter saved preset. OAO uses each connection's
    authenticated live catalog. xAI connections use `GET /v1/language-models`
    so image-generation, video, voice, and embedding-only IDs are not offered.
+   Amazon Bedrock connections list OAO's pinned model list, because Bedrock's
+   model listing API needs AWS request signing rather than an API key.
    The picker shows the first
    matches with their model identifier, context window, and reasoning support,
    and reports how many further matches the search is hiding.
@@ -113,7 +116,7 @@ OpenRouter presets may use live OpenRouter models or saved OpenRouter presets
 retention, data collection, upstream allow/deny lists, preference order, sort,
 and price caps. OAO sends every OpenRouter model, Claude models included,
 through OpenRouter's Chat Completions API, which is where these routing controls
-apply. OpenAI, Anthropic, and xAI are direct provider connections, so
+apply. OpenAI, Anthropic, xAI, and Amazon Bedrock are direct provider connections, so
 OpenRouter routing controls must be empty.
 
 For direct OpenAI presets, OAO maps the stored controls to the Responses API as
@@ -143,6 +146,47 @@ though Pi's catalog lists xhigh for Grok 4.3 and 4.5. Reasoning cannot be
 disabled on these models. Structured JSON schemas are operation-specific rather
 than a fixed model default. xAI server-side tools are not part of this preset
 contract; OAO's versioned agent tools remain available.
+
+### Amazon Bedrock
+
+Use Amazon Bedrock when model traffic must stay inside your AWS account and
+region, or when billing and access control should follow your existing AWS
+setup.
+
+1. In the AWS console, open Amazon Bedrock in the region that serves your
+   models and create an
+   [Amazon Bedrock API key](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html).
+   The key is bound to that region.
+2. Make sure model access is enabled in that region for the models you plan to
+   use, and that the key's IAM principal may invoke them.
+3. Add a provider of type **Amazon Bedrock** and paste the key as the API key.
+   No other credential is needed. Access keys, session tokens, and IAM roles
+   are not accepted.
+4. Set `AWS_REGION` on the runtime worker to the region the key was created in.
+   OAO calls `https://bedrock-runtime.<region>.amazonaws.com` and defaults to
+   `eu-central-1` when `AWS_REGION` is unset. A key used against another region
+   fails with an authorization error from Bedrock.
+
+OAO stores the exact `bedrock/<model-id>` and calls the Bedrock Converse
+Streaming API. The model ID is the Bedrock model or inference profile ID, for
+example `bedrock/eu.anthropic.claude-sonnet-5`. Pick an inference profile
+prefix (`eu.`, `us.`, `au.`, or `global.`) that matches your data residency
+requirements.
+
+Limitations:
+
+- The catalog is the model list pinned in OAO's Pi dependency. Any other
+  well-formed Bedrock model ID can still be saved in a preset through the
+  [HTTP API](#create-a-preset). The console picker lists catalog models only.
+  Such an ID runs with conservative defaults: text input only, no reasoning, a
+  128,000-token context window, a 32,768-token output limit, and zero reported
+  cost.
+- Presets do not accept generation settings, and OpenRouter routing must be
+  empty. Bedrock presets use the model's default temperature, thinking, and
+  effort behavior.
+- Cost reporting uses the pinned catalog's prices, which may differ from your
+  AWS pricing.
+- Only API keys are supported, not SigV4 credentials.
 
 ### Inspect, duplicate, or archive a preset
 
@@ -280,7 +324,9 @@ plus saved `/presets`, exposing saved presets as `openrouter/@preset/<slug>`
 options. For direct OpenAI and Anthropic connections, OAO decrypts the selected
 project key server-side and fetches the provider's live `/v1/models` catalog.
 For xAI, OAO fetches `/v1/language-models` and exposes text-output entries as
-`xai/<catalog-id>` without relying on a hard-coded Grok list. OpenAI uses the
+`xai/<catalog-id>` without relying on a hard-coded Grok list. For Amazon
+Bedrock, OAO returns its pinned model list as `bedrock/<model-id>` and does not
+call AWS, so the key is not used. OpenAI uses the
 live list for account membership and discovers new GPT-4.1, GPT-5-and-later, and
 o3-and-later family IDs without a pinned catalog update. Known
 non-Responses models and specialized audio, realtime, transcription, search,
@@ -404,7 +450,7 @@ identity is authenticated, so copied ciphertext intentionally fails.
 ### A model is not in the catalog
 
 Search `/model-catalog` with the intended provider connection. OpenRouter,
-OpenAI, Anthropic, and xAI use separate catalogs and prefixes. If an OpenRouter model
+OpenAI, Anthropic, xAI, and Amazon Bedrock use separate catalogs and prefixes. If an OpenRouter model
 or saved preset is missing, confirm the provider API key can read the OpenRouter
 catalog. If a direct OpenAI model is missing, confirm the selected key can list
 it through OpenAI's `/v1/models` endpoint and belongs to a supported text/reasoning
@@ -430,6 +476,12 @@ If a Grok model is missing, confirm the selected xAI key can list it through
 xAI's `/v1/language-models` endpoint and that the entry has text output. Image,
 video, voice, and embedding-only models are intentionally excluded from agent
 presets.
+
+If a Bedrock model is missing from the list, create the preset through the
+[HTTP API](#create-a-preset) with `"model": "bedrock/<model-id>"` and an empty
+`routing` object. The console picker shows catalog models only. If a Bedrock run
+fails with an authorization error, confirm the key's region matches `AWS_REGION`
+and that model access is enabled for that region.
 
 ### A preset is unavailable
 

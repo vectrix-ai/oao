@@ -4994,7 +4994,11 @@ function registerModelPresetRoutes(
       if (!provider)
         throw new HttpApiError("not_found", "Model provider not found");
       const providerType = provider.provider_type;
-      const apiKey = providerApiKey(actor, provider);
+      // Bedrock's catalog is static; don't decrypt a key it never uses.
+      const apiKey =
+        providerType === "bedrock"
+          ? undefined
+          : providerApiKey(actor, provider);
       const entries = (
         await catalog.listCatalog({
           providerType,
@@ -5193,6 +5197,11 @@ function registerModelPresetRoutes(
               throw new HttpApiError(
                 "bad_request",
                 "Anthropic model presets require Anthropic generation settings",
+              );
+            if (providerType === "bedrock" && settings !== null)
+              throw new HttpApiError(
+                "bad_request",
+                "Bedrock model presets do not support direct generation settings",
               );
             if (providerType === "xai" && settings !== null) {
               if ("thinking" in settings || "mode" in settings)

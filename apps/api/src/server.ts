@@ -7,6 +7,7 @@ import { createPool, migrate, PostgresWakeNotifier } from "@oao/db-postgres";
 import {
   isApprovedCatalogModel,
   listApprovedModelCatalog,
+  listBedrockModelCatalog,
   listAnthropicModelCatalog,
   listOpenAIModelCatalog,
   listOpenRouterModelCatalog,
@@ -71,6 +72,12 @@ const app = createApiApp({
   modelCatalog: {
     deploymentPresets: [],
     listCatalog: (input) => {
+      // Bedrock's catalog is static, so no credential is needed to list it.
+      if (input?.providerType === "bedrock")
+        return listBedrockModelCatalog({
+          ...(input.search ? { search: input.search } : {}),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        });
       const apiKey = input?.apiKey;
       if (!apiKey) return listApprovedModelCatalog(input?.providerType);
       const catalogInput = {

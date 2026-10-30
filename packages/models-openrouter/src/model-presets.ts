@@ -10,6 +10,7 @@ import {
 import * as v from "valibot";
 import { isApprovedCatalogModel } from "./catalog.js";
 import { createAnthropicProjectProvider } from "./providers/anthropic.js";
+import { createBedrockProjectProvider } from "./providers/bedrock.js";
 import { createOpenAIProjectProvider } from "./providers/openai.js";
 import {
   ApprovedModelPresetSchema,
@@ -184,6 +185,8 @@ function createProjectPresetProvider(input: {
     return createOpenAIProjectProvider(input);
   if (input.providerType === "anthropic")
     return createAnthropicProjectProvider(input);
+  if (input.providerType === "bedrock")
+    return createBedrockProjectProvider(input);
   return createXAIProjectProvider(input);
 }
 
@@ -237,6 +240,10 @@ export class ProjectModelPresetRegistry {
     if (input.providerType === "openrouter" && input.settings != null)
       throw new Error(
         "OpenRouter model presets do not support direct generation settings",
+      );
+    if (input.providerType === "bedrock" && input.settings != null)
+      throw new Error(
+        "Bedrock model presets do not support direct generation settings",
       );
     const settings =
       input.providerType === "openai"

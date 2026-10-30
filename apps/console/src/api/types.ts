@@ -88,7 +88,8 @@ export interface ModelPresetList {
 export interface ModelCatalogList {
   readonly data: readonly ModelCatalogEntry[];
   readonly providerId: string;
-  readonly providerType: "openrouter" | "openai" | "anthropic" | "xai";
+  readonly providerType:
+    "openrouter" | "openai" | "anthropic" | "xai" | "bedrock";
 }
 
 export interface CreateModelPresetInput {
@@ -103,7 +104,8 @@ export interface CreateModelPresetInput {
 export interface CreateModelProviderInput {
   readonly key: string;
   readonly displayName: string;
-  readonly providerType: "openrouter" | "openai" | "anthropic" | "xai";
+  readonly providerType:
+    "openrouter" | "openai" | "anthropic" | "xai" | "bedrock";
   readonly apiKey: string;
 }
 

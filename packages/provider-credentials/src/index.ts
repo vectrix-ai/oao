@@ -22,6 +22,7 @@ export interface ProviderCredentialContext {
     | "openai"
     | "anthropic"
     | "xai"
+    | "bedrock"
     | "daytona"
     | "s3"
     | "mcp"

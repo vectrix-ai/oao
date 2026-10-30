@@ -3,7 +3,7 @@ title: "Local development"
 description: "Install, start, verify, stop, and troubleshoot the complete OAO development stack."
 ---
 
-OAO's default development profile runs the console, API, runtime worker, and PostgreSQL on your machine. Development authentication is local, but executing an agent requires an OpenRouter, OpenAI, Anthropic, or xAI connection.
+OAO's default development profile runs the console, API, runtime worker, and PostgreSQL on your machine. Development authentication is local, but executing an agent requires an OpenRouter, OpenAI, Anthropic, xAI, or Amazon Bedrock connection.
 
 <Info>
   PostgreSQL is the only application database in the local profile. Daytona is
@@ -353,7 +353,7 @@ Runtime execution requires an organization-shared model provider and a
 organization-shared Daytona provider. There is no credential-free fake execution
 profile.
 
-### OpenRouter, OpenAI, Anthropic, and xAI models
+### OpenRouter, OpenAI, Anthropic, xAI, and Amazon Bedrock models
 
 Generate one platform encryption key and set it for both the API and runtime:
 
@@ -365,7 +365,7 @@ openssl rand -base64 32
 OAO_CREDENTIAL_ENCRYPTION_KEY=replace-with-generated-base64-value
 ```
 
-Restart the API and runtime, then add an OpenRouter, OpenAI, Anthropic, or xAI provider on the
+Restart the API and runtime, then add an OpenRouter, OpenAI, Anthropic, xAI, or Amazon Bedrock provider on the
 console **Models** page. Enter provider API keys there; OAO encrypts them before
 storing them in PostgreSQL for the current organization and project. Add a
 model preset linked to that connection. The model selector loads the live
@@ -381,12 +381,14 @@ plain-text output, reasoning mode and effort, verbosity, and reasoning-summary
 settings. Direct Anthropic presets pin adaptive or disabled thinking, a total
 output-token ceiling, and a supported effort level. Supported direct xAI
 reasoning presets pin text output and a documented Grok reasoning effort. The
-runtime applies these settings to every session using that preset.
+runtime applies these settings to every session using that preset. Amazon
+Bedrock connections take a Bedrock API key and follow the runtime's `AWS_REGION`;
+see [Amazon Bedrock](/models/adding-models#amazon-bedrock).
 
 <Warning>
-  Do not set `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
-  `XAI_API_KEY` in `.env`. Provider keys are write-only console/API inputs and
-  are never returned after encryption.
+  Do not set `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+  `XAI_API_KEY`, or `AWS_BEARER_TOKEN_BEDROCK` in `.env`. Provider keys are
+  write-only console/API inputs and are never returned after encryption.
 </Warning>
 
 ### Daytona sandboxes

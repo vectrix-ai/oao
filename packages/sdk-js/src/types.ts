@@ -399,13 +399,15 @@ export interface ModelPresetPage extends Page<ModelPreset> {
 /** Keep runtimeSupported when displaying entries; false means discovery only. */
 export interface ModelCatalogPage extends Page<ModelCatalogEntry> {
   readonly providerId: string;
-  readonly providerType: "openrouter" | "openai" | "anthropic" | "xai";
+  readonly providerType:
+    "openrouter" | "openai" | "anthropic" | "xai" | "bedrock";
 }
 
 export interface CreateProjectModelProviderInput {
   readonly key: string;
   readonly displayName: string;
-  readonly providerType: "openrouter" | "openai" | "anthropic" | "xai";
+  readonly providerType:
+    "openrouter" | "openai" | "anthropic" | "xai" | "bedrock";
   readonly apiKey: string;
 }
 

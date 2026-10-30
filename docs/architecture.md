@@ -26,7 +26,7 @@ PostgreSQL <---------------------------- Flue runtime worker
   control + audit + product events        one active owner
   session summaries + wake/lease queue     ManagedAgent + durable tools
   @flue/postgres canonical state                 |
-        |                                         +--> OpenRouter/OpenAI/Anthropic/xAI adapters
+        |                                         +--> OpenRouter/OpenAI/Anthropic/xAI/Bedrock adapters
         |                                         +--> Daytona adapter
         +--> S3-compatible artifacts/workspaces   +--> caller tool/approval ledger
 
@@ -128,7 +128,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 - `@oao/queue-postgres`: PostgreSQL wake jobs and platform dispatch leases.
 - `@oao/event-webhooks`: outbound event webhook delivery: Standard Webhooks signing, SSRF-guarded HTTPS transport, fenced PostgreSQL cursor store, and the runtime-worker dispatcher.
 - `@oao/tool-broker`: caller requests/claims/results and single-approver gates.
-- `@oao/models-openrouter`: live OpenRouter/OpenAI/Anthropic/xAI catalog projections, provider-neutral routing and generation-setting translation, project-scoped preset activation, and provider construction. OpenAI and Anthropic remain constrained by pinned runtime metadata; xAI dynamically admits text-output language models behind its OpenAI-compatible API. The package name is retained while the adapter seam expands beyond OpenRouter.
+- `@oao/models-openrouter`: live OpenRouter/OpenAI/Anthropic/xAI/Bedrock catalog projections, provider-neutral routing and generation-setting translation, project-scoped preset activation, and provider construction. OpenAI and Anthropic remain constrained by pinned runtime metadata; xAI dynamically admits text-output language models behind its OpenAI-compatible API; Bedrock uses the pinned Pi model list and the Converse Streaming API with a region-bound Bedrock API key. The package name is retained while the adapter seam expands beyond OpenRouter.
   Its public `src/index.ts` is a thin compatibility barrel: provider-specific catalog, validation, runtime-construction, and payload-mapping code lives under `src/providers/`, while provider-neutral preset orchestration and aggregate catalog behavior live in `src/model-presets.ts` and `src/catalog.ts`.
 - `@oao/provider-credentials`: AES-256-GCM encryption and decryption for tenant-scoped provider credentials. PostgreSQL stores ciphertext; the platform encryption key remains outside the database.
 - `@oao/model-images`: image type detection and the deterministic resize and
@@ -150,7 +150,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 
 - Skills list/detail, immutable packages and versions, and publication workflow
 - Agents list/detail, immutable versions, prompts, models, exact Skill and delegate bindings, tools, and sandbox policy
-- Organization-shared OpenRouter/OpenAI/Anthropic/xAI provider connections, write-only encrypted API keys, and approval of project model presets from the matching provider catalog
+- Organization-shared OpenRouter/OpenAI/Anthropic/xAI/Bedrock provider connections, write-only encrypted API keys, and approval of project model presets from the matching provider catalog
 - Organization-shared S3-compatible storage connections, automatic latest-thread workspace backup, and safe restore diagnostics
 - Organization-shared remote MCP servers, write-only credentials, exact-origin
   policies, discovery snapshots, project-scoped restricted toolsets, and agent bindings

@@ -194,7 +194,7 @@ The active principal cannot remove itself.
 ## Model providers, presets, and catalog
 
 A published agent version names an immutable model preset. A hosted preset
-references an OpenRouter, OpenAI, Anthropic, or xAI provider connection in the
+references an OpenRouter, OpenAI, Anthropic, xAI, or Amazon Bedrock provider connection in the
 same organization. Provider connections are organization-shared: every project
 uses the same pool, addressed through any project path. Model presets remain
 project-scoped.
@@ -214,7 +214,7 @@ Reads require `agent:read`; writes require `project:admin`. Every write requires
 an `Idempotency-Key`.
 
 Create a provider with `{ key, displayName, providerType, apiKey }`, where
-`providerType` is `openrouter`, `openai`, `anthropic`, or `xai`. Responses contain
+`providerType` is `openrouter`, `openai`, `anthropic`, `xai`, or `bedrock`. Responses contain
 `credentialConfigured`, a 12-character `credentialFingerprint`, and an
 incrementing `credentialVersion`; they never contain the API key or encryption
 material. Rotate a key with `{ "apiKey": "..." }`.
@@ -288,6 +288,11 @@ models accept the immutable xAI settings below; if an older client omits them,
 the API stores high effort and text format. Newly listed language-model IDs do
 not require a hard-coded OAO catalog update, but reasoning controls appear only
 after OAO can identify the model's supported effort levels.
+
+Bedrock catalog responses are OAO's pinned model list as `bedrock/<model-id>`;
+they do not call AWS and do not need a usable key. Bedrock presets accept any
+well-formed `bedrock/<model-id>`, require empty routing, and reject `settings`
+with `400`. See [Adding models](/models/adding-models#amazon-bedrock).
 
 ### OpenAI model settings
 

@@ -1817,6 +1817,7 @@ export const ModelProviderTypeSchema = v.picklist([
   "openai",
   "anthropic",
   "xai",
+  "bedrock",
 ]);
 
 /**
@@ -2465,8 +2466,8 @@ export const CreateModelPresetInputSchema = v.strictObject({
     v.minLength(1),
     v.maxLength(300),
     v.regex(
-      /^(?:openrouter\/(?:@preset\/)?[a-zA-Z0-9~][a-zA-Z0-9._:~/-]*|(?:openai|anthropic|xai)\/[a-z0-9~][a-z0-9._:~/-]*)$/u,
-      "model must be an approved OpenRouter, OpenAI, Anthropic, or xAI model or OpenRouter preset reference",
+      /^(?:openrouter\/(?:@preset\/)?[a-zA-Z0-9~][a-zA-Z0-9._:~/-]*|(?:openai|anthropic|xai|bedrock)\/[a-z0-9~][a-z0-9._:~/-]*)$/u,
+      "model must be an approved OpenRouter, OpenAI, Anthropic, xAI, or Bedrock model or OpenRouter preset reference",
     ),
   ),
   routing: v.optional(ModelRoutingPolicySchema, {}),

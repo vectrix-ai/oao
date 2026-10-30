@@ -406,6 +406,20 @@ test("model generation settings migrations are additive and validate safe immuta
   assert.match(xaiSql, /xai\//u);
   assert.doesNotMatch(xaiSql, /UPDATE |DELETE FROM/u);
 
+  const bedrockSql = await readFile(
+    new URL(
+      "../../migrations/0053_bedrock_model_provider.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(
+    bedrockSql,
+    /provider_type IN \('openrouter', 'openai', 'anthropic', 'xai', 'bedrock'\)/u,
+  );
+  assert.match(bedrockSql, /bedrock\//u);
+  assert.doesNotMatch(bedrockSql, /UPDATE |DELETE FROM/u);
+
   const xaiSettingsSql = await readFile(
     new URL(
       "../../migrations/0033_xai_model_generation_settings.sql",

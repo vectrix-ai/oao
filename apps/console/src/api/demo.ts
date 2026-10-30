@@ -66,6 +66,7 @@ const principalId = "33333333-3333-4333-8333-333333333333";
 const OPENROUTER_PROVIDER_ID = "55555555-5555-4555-8555-555555555555";
 const ANTHROPIC_PROVIDER_ID = "56565656-5656-4565-8565-565656565656";
 const XAI_PROVIDER_ID = "57575757-5757-4575-8575-575757575757";
+const BEDROCK_PROVIDER_ID = "58585858-5858-4585-8585-585858585858";
 const DAYTONA_PROVIDER_ID = "66666666-6666-4666-8666-666666666666";
 const DAYTONA_SNAPSHOT_ID = "77777777-7777-4777-8777-777777777777";
 const DAYTONA_LARGE_SNAPSHOT_ID = "78787878-7878-4787-8787-787878787878";
@@ -1039,6 +1040,15 @@ const modelCatalogSeed: readonly ModelCatalogEntry[] = [
     thinkingCanBeDisabled: false,
     effortLevels: ["low", "medium", "high", "xhigh"],
   },
+  {
+    providerType: "bedrock",
+    model: "bedrock/eu.anthropic.claude-sonnet-5",
+    catalogId: "eu.anthropic.claude-sonnet-5",
+    name: "Claude Sonnet 5 (EU)",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 64_000,
+    reasoning: true,
+  },
 ];
 
 const modelProvidersSeed: readonly ProjectModelProvider[] = [
@@ -1080,6 +1090,19 @@ const modelProvidersSeed: readonly ProjectModelProvider[] = [
     createdByPrincipalId: principalId,
     createdAt: "2026-08-18T11:10:00.000Z",
     updatedAt: "2026-08-18T11:10:00.000Z",
+  },
+  {
+    id: BEDROCK_PROVIDER_ID,
+    organizationId: ORG_ID,
+    key: "bedrock-primary",
+    displayName: "Bedrock primary",
+    providerType: "bedrock",
+    credentialConfigured: true,
+    credentialFingerprint: "e5f6a1b2c3d4",
+    credentialVersion: 1,
+    createdByPrincipalId: principalId,
+    createdAt: "2026-08-18T11:15:00.000Z",
+    updatedAt: "2026-08-18T11:15:00.000Z",
   },
 ];
 

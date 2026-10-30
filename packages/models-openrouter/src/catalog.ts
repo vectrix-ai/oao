@@ -4,6 +4,10 @@ import {
   listAnthropicStaticCatalog,
 } from "./providers/anthropic.js";
 import {
+  isApprovedBedrockModel,
+  listBedrockStaticCatalog,
+} from "./providers/bedrock.js";
+import {
   isApprovedOpenAIModel,
   listOpenAIStaticCatalog,
 } from "./providers/openai.js";
@@ -33,6 +37,9 @@ export function listApprovedModelCatalog(
     ...(providerType === undefined || providerType === "xai"
       ? listXAIStaticCatalog()
       : []),
+    ...(providerType === undefined || providerType === "bedrock"
+      ? listBedrockStaticCatalog()
+      : []),
   ].sort((left, right) => left.catalogId.localeCompare(right.catalogId));
 }
 
@@ -49,6 +56,8 @@ export function isApprovedCatalogModel(
     ((providerType === undefined || providerType === "anthropic") &&
       isApprovedAnthropicModel(model)) ||
     ((providerType === undefined || providerType === "xai") &&
-      isApprovedXAIModel(model))
+      isApprovedXAIModel(model)) ||
+    ((providerType === undefined || providerType === "bedrock") &&
+      isApprovedBedrockModel(model))
   );
 }

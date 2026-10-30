@@ -64,6 +64,7 @@ const MODEL_PROVIDER_LABELS: Readonly<Record<string, string>> = {
   openai: "OpenAI",
   anthropic: "Anthropic",
   xai: "xAI",
+  bedrock: "Amazon Bedrock",
 };
 
 function count(value: number, noun: string, plural = `${noun}s`): string {

@@ -136,7 +136,7 @@ async function readCatalog(
 async function ensureProvider(
   api: SetupApi,
   projectId: string,
-  providerType: "openrouter" | "openai" | "anthropic" | "xai",
+  providerType: "openrouter" | "openai" | "anthropic" | "xai" | "bedrock",
   io: SetupIo,
   state: SetupState,
 ): Promise<{
@@ -156,7 +156,9 @@ async function ensureProvider(
           ? "OpenAI"
           : providerType === "anthropic"
             ? "Anthropic"
-            : "xAI (Grok)";
+            : providerType === "xai"
+              ? "xAI (Grok)"
+              : "Amazon Bedrock";
     let apiKey: string | undefined;
     do {
       apiKey = await io.secret(`${providerName} API key`);
@@ -357,7 +359,8 @@ export async function runSetup(options: SetupOptions): Promise<SetupResult> {
         { label: "OpenAI", value: "openai" },
         { label: "Anthropic", value: "anthropic" },
         { label: "xAI (Grok)", value: "xai" },
-      ]))) as "openrouter" | "openai" | "anthropic" | "xai";
+        { label: "Amazon Bedrock", value: "bedrock" },
+      ]))) as "openrouter" | "openai" | "anthropic" | "xai" | "bedrock";
     state = { ...state, providerType };
     await saveSetupState(repositoryRoot, state);
     const { provider, catalog } = await ensureProvider(

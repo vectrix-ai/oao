@@ -367,7 +367,12 @@ describe("management console", () => {
       expect(backup.projects[1]?.agents).toEqual([]);
       expect(
         backup.modelProviders.map((provider) => provider.credentialFingerprint),
-      ).toEqual(["a1b2c3d4e5f6", "c3d4e5f6a1b2", "d4e5f6a1b2c3"]);
+      ).toEqual([
+        "a1b2c3d4e5f6",
+        "c3d4e5f6a1b2",
+        "d4e5f6a1b2c3",
+        "e5f6a1b2c3d4",
+      ]);
     } finally {
       URL.createObjectURL = originalCreate;
       URL.revokeObjectURL = originalRevoke;
@@ -2572,7 +2577,7 @@ describe("management console", () => {
     );
     expect(
       (await api.listModelProviders()).map((provider) => provider.key),
-    ).toEqual(["anthropic-primary", "xai-primary"]);
+    ).toEqual(["anthropic-primary", "xai-primary", "bedrock-primary"]);
   });
 
   it("adds and rotates a project-scoped OpenAI provider without rendering its key", async () => {
