@@ -3761,16 +3761,64 @@ describe("management console", () => {
     });
   });
 
+  it("offers OAO's own MCP server in every project without a connection", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/mcp", api);
+    await user.click(await screen.findByRole("button", { name: "Manage OAO" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "OAO" }));
+    const agentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const agent = await api.getAgent(agentId);
+    await user.click(
+      dialog.getByRole("button", { name: `Use OAO for ${agent.name}` }),
+    );
+    const grant = within(
+      await screen.findByRole("dialog", { name: `OAO for ${agent.name}` }),
+    );
+    expect(
+      grant.getByRole("checkbox", { name: /^session:read/u }),
+    ).toBeChecked();
+    await user.click(grant.getByRole("button", { name: "Publish version" }));
+    const listed = within(await screen.findByRole("dialog", { name: "OAO" }));
+    expect(
+      await listed.findByRole("button", {
+        name: `Stop using OAO for ${agent.name}`,
+      }),
+    ).toBeInTheDocument();
+    const published = await api.getAgent(agentId);
+    expect(published.version).toBe((agent.version ?? 0) + 1);
+    expect(published.versions[0]?.config.oaoTools).toEqual({
+      scopes: ["agent:read", "session:read", "run:read", "run:create"],
+      approval: "always",
+    });
+    // The rest of the version is unchanged.
+    expect(published.versions[0]?.config.systemPrompt).toBe(
+      agent.versions[0]?.config.systemPrompt,
+    );
+
+    await user.click(
+      listed.getByRole("button", { name: `Stop using OAO for ${agent.name}` }),
+    );
+    expect(
+      await listed.findByRole("button", { name: `Use OAO for ${agent.name}` }),
+    ).toBeInTheDocument();
+    expect(
+      (await api.getAgent(agentId)).versions[0]?.config.oaoTools,
+    ).toBeUndefined();
+  });
+
   it("grants an agent OAO tools with chosen scopes and approval", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     renderConsole("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", api);
-    await user.click(await screen.findByRole("button", { name: "OAO tools" }));
+    await user.click(
+      await screen.findByRole("button", { name: "OAO MCP server" }),
+    );
     expect(
-      screen.getByText("The agent cannot read or manage OAO itself."),
+      screen.getByText(/The agent does not use it\./u),
     ).toBeInTheDocument();
     await user.click(
-      screen.getByRole("checkbox", { name: /^Let this agent use OAO tools/u }),
+      screen.getByRole("checkbox", { name: /^Use OAO's own MCP server/u }),
     );
     // Approving tool calls and project administration are never offered.
     expect(

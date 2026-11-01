@@ -11,11 +11,6 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import {
-  AUTHORIZATION_SCOPE_CATALOG,
-  OAO_AGENT_TOOL_SCOPES,
-  type OaoAgentToolScope,
-} from "@oao/contracts";
 import { useApi } from "../api/context";
 import { listAllPages } from "../api/paginate";
 import type {
@@ -31,6 +26,12 @@ import type {
   McpToolset,
 } from "../api/types";
 import { describePresetRouting } from "../model-presets";
+import {
+  OaoToolGrantFields,
+  defaultOaoToolGrant,
+  describeOaoToolGrant,
+  withoutOaoTools,
+} from "./oao-tools";
 import type { ComboboxOption } from "../components/ui";
 import {
   Alert,
@@ -67,25 +68,6 @@ import {
 } from "../components/ui";
 
 const agentStatuses = ["", "published", "draft", "archived"];
-const OAO_TOOL_SCOPE_DESCRIPTIONS = new Map<string, string>(
-  AUTHORIZATION_SCOPE_CATALOG,
-);
-/** A sensible first grant: read the project and ask other agents. */
-const DEFAULT_OAO_TOOL_SCOPES: readonly OaoAgentToolScope[] = [
-  "agent:read",
-  "session:read",
-  "run:read",
-  "run:create",
-];
-
-/** The config without its OAO tool grant, which the editor sets itself. */
-function withoutOaoTools(config: AgentVersionConfig): AgentVersionConfig {
-  const copy: { -readonly [Key in keyof AgentVersionConfig]?: unknown } = {
-    ...config,
-  };
-  delete copy.oaoTools;
-  return copy as AgentVersionConfig;
-}
 type SandboxCapability = AgentVersionConfig["sandbox"]["capabilities"][number];
 
 function parseToolsJson(value: string): {
@@ -1906,97 +1888,32 @@ function AgentEditor({
           )}
         </Panel>
         <Panel
-          title="OAO tools"
+          title="OAO MCP server"
           collapsible
           defaultCollapsed
           description={
             oaoTools
-              ? `The agent can use OAO tools with ${oaoTools.scopes.length} ${oaoTools.scopes.length === 1 ? "scope" : "scopes"}${
-                  oaoTools.approval === "always"
-                    ? "; changes wait for approval"
-                    : ""
-                }.`
-              : "The agent cannot read or manage OAO itself."
+              ? `Built in: the agent uses OAO's own MCP server with ${describeOaoToolGrant(oaoTools)}.`
+              : "Built in: OAO's own MCP server needs no connection. The agent does not use it."
           }
         >
           <div className="stack">
             <CheckboxRow
-              label="Let this agent use OAO tools"
-              description="It can read other agents' sessions and runs and ask them questions, acting as the person or key that started its run and limited to the scopes below. Reading never waits for approval."
+              label="Use OAO's own MCP server"
+              description="The agent can read other agents' sessions and runs and ask them questions. Reading never waits for approval."
               checked={oaoTools !== undefined}
               disabled={!isLatest}
               onChange={(event) => {
                 const enabled = event.currentTarget.checked;
-                setOaoTools(
-                  enabled
-                    ? {
-                        scopes: [...DEFAULT_OAO_TOOL_SCOPES],
-                        approval: "always",
-                      }
-                    : undefined,
-                );
+                setOaoTools(enabled ? defaultOaoToolGrant() : undefined);
               }}
             />
             {oaoTools ? (
-              <>
-                <Field label="Changes to OAO">
-                  <Select
-                    value={oaoTools.approval}
-                    disabled={!isLatest}
-                    onChange={(event) => {
-                      const approval =
-                        event.currentTarget.value === "never"
-                          ? "never"
-                          : "always";
-                      setOaoTools((current) =>
-                        current ? { ...current, approval } : current,
-                      );
-                    }}
-                  >
-                    <option value="always">Wait for a person to approve</option>
-                    <option value="never">Run without approval</option>
-                  </Select>
-                </Field>
-                <fieldset className="scope-picker">
-                  <legend>OAO tool scopes</legend>
-                  <span className="hint">
-                    The agent may use only scopes you hold. Approving tool calls
-                    and project administration are never available to an agent.
-                  </span>
-                  <div className="scope-picker-grid">
-                    {OAO_AGENT_TOOL_SCOPES.map((scope) => (
-                      <CheckboxRow
-                        key={scope}
-                        label={scope}
-                        description={
-                          OAO_TOOL_SCOPE_DESCRIPTIONS.get(scope) ?? ""
-                        }
-                        checked={oaoTools.scopes.includes(scope)}
-                        disabled={
-                          !isLatest ||
-                          (oaoTools.scopes.length === 1 &&
-                            oaoTools.scopes.includes(scope))
-                        }
-                        onChange={(event) => {
-                          const checked = event.currentTarget.checked;
-                          setOaoTools((current) =>
-                            current
-                              ? {
-                                  ...current,
-                                  scopes: checked
-                                    ? [...current.scopes, scope]
-                                    : current.scopes.filter(
-                                        (item) => item !== scope,
-                                      ),
-                                }
-                              : current,
-                          );
-                        }}
-                      />
-                    ))}
-                  </div>
-                </fieldset>
-              </>
+              <OaoToolGrantFields
+                grant={oaoTools}
+                disabled={!isLatest}
+                onChange={setOaoTools}
+              />
             ) : null}
           </div>
         </Panel>

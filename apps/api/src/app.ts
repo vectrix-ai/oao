@@ -6790,7 +6790,7 @@ function registerAgentRoutes(
       const result = await tx.query(
         `SELECT d.id,d.organization_id,d.project_id,d.agent_key AS key,d.name,COALESCE(d.description,'') AS description,
                 d.latest_version_id,v.version,v.config->>'modelPreset' AS model,
-                v.config->'sandbox' AS sandbox,
+                v.config->'sandbox' AS sandbox,v.config->'oaoTools' AS oao_tools,
                 CASE WHEN v.id IS NULL THEN 'draft' ELSE 'published' END AS status,
                 d.created_at,COALESCE(v.created_at,d.created_at) AS updated_at
          FROM oao.agent_definitions d
@@ -6884,7 +6884,7 @@ function registerAgentRoutes(
             const result = await tx.query(
               `SELECT d.id,d.organization_id,d.project_id,d.agent_key AS key,d.name,COALESCE(d.description,'') AS description,
                     d.latest_version_id,v.version,v.config->>'modelPreset' AS model,
-                    v.config->'sandbox' AS sandbox,'published' AS status,
+                    v.config->'sandbox' AS sandbox,v.config->'oaoTools' AS oao_tools,'published' AS status,
                     d.created_at,v.created_at AS updated_at
              FROM oao.agent_definitions d JOIN oao.agent_versions v
                ON v.organization_id=d.organization_id AND v.project_id=d.project_id
@@ -6922,7 +6922,7 @@ function registerAgentRoutes(
       const result = await tx.query(
         `SELECT d.id,d.organization_id,d.project_id,d.agent_key AS key,d.name,COALESCE(d.description,'') AS description,
                 d.latest_version_id,v.version,v.config->>'modelPreset' AS model,
-                v.config->'sandbox' AS sandbox,
+                v.config->'sandbox' AS sandbox,v.config->'oaoTools' AS oao_tools,
                 CASE WHEN v.id IS NULL THEN 'draft' ELSE 'published' END AS status,
                 d.created_at,COALESCE(v.created_at,d.created_at) AS updated_at
          FROM oao.agent_definitions d

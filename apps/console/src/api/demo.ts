@@ -1448,6 +1448,7 @@ export class DemoConsoleApi implements ConsoleApi {
       version: 1,
       latestVersionId: versionId,
       sandbox: config.sandbox,
+      oaoTools: config.oaoTools ?? null,
       createdAt: now,
       updatedAt: now,
       versions: [
@@ -1496,6 +1497,7 @@ export class DemoConsoleApi implements ConsoleApi {
       updatedAt: now,
       model: config.modelPreset,
       sandbox: config.sandbox,
+      oaoTools: config.oaoTools ?? null,
       versions: [
         {
           id: versionId,

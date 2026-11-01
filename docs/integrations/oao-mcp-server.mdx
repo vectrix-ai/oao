@@ -125,8 +125,16 @@ approval does not settle until someone decides it, for example with
 ## Let OAO agents use these tools
 
 An agent inside OAO can use the same tools, for example to check what other
-agents did and ask them about it. Grant them in the agent version under
-**Agents → OAO tools** in the console, or with `oaoTools` in the config:
+agents did and ask them about it. The server is built in, so there is no
+connection, endpoint, or credential to set up:
+
+- **MCP connections** lists **OAO** as a built-in connection in every
+  project. **Manage** shows which agents use it; **Use** next to an agent
+  picks the scopes and publishes a new version of that agent with them, and
+  **Stop using** publishes one without.
+- In the agent editor, **OAO MCP server** does the same for the version you
+  are editing.
+- Through the API, set `oaoTools` in the agent version config:
 
 ```json
 {

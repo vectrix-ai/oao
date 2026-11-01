@@ -5,6 +5,9 @@ import {
   CreateModelPresetInputSchema,
   DiscoverMcpServerInputSchema,
   ManagedAgentPublicationConfigSchema,
+  OAO_MCP_TOOL_CATALOG,
+  availableOaoMcpTools,
+  type OaoMcpToolDescriptor,
   type Run,
 } from "@oao/contracts";
 import {
@@ -30,16 +33,8 @@ export interface OaoToolContext {
   readonly signal?: AbortSignal;
 }
 
-export interface OaoTool {
-  readonly name: string;
-  readonly title: string;
-  readonly description: string;
-  /** Every scope a caller must hold for the tool to be offered. */
-  readonly scopes: readonly string[];
-  /** Read-only tools change nothing in OAO. */
-  readonly readOnly: boolean;
-  /** Changes a resource the whole organization shares. */
-  readonly organizationShared?: boolean;
+/** A tool of the catalog in `@oao/contracts`, with its input and behaviour. */
+export interface OaoTool extends OaoMcpToolDescriptor {
   readonly input: v.ObjectSchema<v.ObjectEntries, undefined>;
   readonly run: (
     input: Readonly<Record<string, unknown>>,
@@ -124,21 +119,22 @@ const AgentConfig = v.pipe(
   ),
 );
 
-function tool<Entries extends v.ObjectEntries>(definition: {
-  readonly name: string;
-  readonly title: string;
-  readonly description: string;
-  readonly scopes: readonly string[];
-  readonly readOnly: boolean;
-  readonly organizationShared?: boolean;
-  readonly input: Entries;
-  readonly run: (
-    input: v.InferOutput<v.StrictObjectSchema<Entries, undefined>>,
-    context: OaoToolContext,
-  ) => Promise<unknown>;
-}): OaoTool {
+/** Implements the catalog entry `name`. */
+function tool<Entries extends v.ObjectEntries>(
+  name: string,
+  definition: {
+    readonly input: Entries;
+    readonly run: (
+      input: v.InferOutput<v.StrictObjectSchema<Entries, undefined>>,
+      context: OaoToolContext,
+    ) => Promise<unknown>;
+  },
+): OaoTool {
+  const descriptor = OAO_MCP_TOOL_CATALOG.find((entry) => entry.name === name);
+  if (!descriptor)
+    throw new Error(`${name} is not in the OAO MCP tool catalog`);
   return {
-    ...definition,
+    ...descriptor,
     input: v.strictObject(definition.input) as unknown as OaoTool["input"],
     run: definition.run as OaoTool["run"],
   };
@@ -289,23 +285,12 @@ function skillVersion(input: {
  * passes through an agent's context.
  */
 export const OAO_TOOLS: readonly OaoTool[] = [
-  tool({
-    name: "get_context",
-    title: "Get context",
-    description:
-      "Shows who is calling, the project these tools act in, and the scopes the caller holds.",
-    scopes: [],
-    readOnly: true,
+  tool("get_context", {
     input: {},
     run: (_input, context) => context.client.getContext(withSignal(context)),
   }),
 
-  tool({
-    name: "list_agents",
-    title: "List agents",
-    description: "Lists the project's agents, newest first.",
-    scopes: ["agent:read"],
-    readOnly: true,
+  tool("list_agents", {
     input: { limit: Limit, cursor: Cursor },
     run: (input, context) =>
       context.client.listAgents(
@@ -314,12 +299,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         withSignal(context),
       ),
   }),
-  tool({
-    name: "get_agent",
-    title: "Get agent",
-    description: "Reads an agent and its most recent versions.",
-    scopes: ["agent:read"],
-    readOnly: true,
+  tool("get_agent", {
     input: { agentId: Id },
     run: async (input, context) => ({
       ...(await context.client.getAgent(
@@ -337,13 +317,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
       ).data,
     }),
   }),
-  tool({
-    name: "get_agent_version",
-    title: "Get agent version",
-    description:
-      "Reads one immutable agent version with its full configuration.",
-    scopes: ["agent:read"],
-    readOnly: true,
+  tool("get_agent_version", {
     input: { agentId: Id, versionId: Id },
     run: (input, context) =>
       context.client.getAgentVersion(
@@ -353,13 +327,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         withSignal(context),
       ),
   }),
-  tool({
-    name: "create_agent",
-    title: "Create agent",
-    description:
-      "Creates an agent, optionally publishing its first version from config. Binding Skills or MCP toolsets also needs skill:bind or mcp:bind.",
-    scopes: ["agent:write"],
-    readOnly: false,
+  tool("create_agent", {
     input: {
       key: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(100))),
       name: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
@@ -387,13 +355,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         write(context, "create_agent"),
       ),
   }),
-  tool({
-    name: "publish_agent_version",
-    title: "Publish agent version",
-    description:
-      "Publishes a new immutable version of an agent. New sessions use it; existing sessions keep their version.",
-    scopes: ["agent:write"],
-    readOnly: false,
+  tool("publish_agent_version", {
     input: { agentId: Id, config: AgentConfig, idempotencyKey: IdempotencyKey },
     run: (input, context) =>
       context.client.publishAgentVersion(
@@ -403,13 +365,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         write(context, "publish_agent_version"),
       ),
   }),
-  tool({
-    name: "delete_agent",
-    title: "Delete agent",
-    description:
-      "Archives an agent so no new session can start on it. History stays.",
-    scopes: ["agent:write"],
-    readOnly: false,
+  tool("delete_agent", {
     input: { agentId: Id, idempotencyKey: IdempotencyKey },
     run: (input, context) =>
       context.client.deleteAgent(
@@ -419,13 +375,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
       ),
   }),
 
-  tool({
-    name: "list_sessions",
-    title: "List sessions",
-    description:
-      "Lists sessions newest first, with each session's agent, title, and latest run state. agentId keeps only that agent's sessions from the page.",
-    scopes: ["session:read"],
-    readOnly: true,
+  tool("list_sessions", {
     input: { agentId: v.optional(Id), limit: Limit, cursor: Cursor },
     run: async (input, context) => {
       const sessions = await context.client.listSessions(
@@ -445,13 +395,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
           };
     },
   }),
-  tool({
-    name: "get_session",
-    title: "Get session",
-    description:
-      "Reads a session: its agent, runs, full transcript, timeline, delegations, and pending work. includeDebug adds model invocations, tool calls, and sandbox detail.",
-    scopes: ["session:read"],
-    readOnly: true,
+  tool("get_session", {
     input: { sessionId: Id, includeDebug: v.optional(v.boolean()) },
     run: async (input, context) => {
       const session = (await context.client.getSession(
@@ -462,13 +406,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
       return input.includeDebug === true ? session : without(session, "debug");
     },
   }),
-  tool({
-    name: "start_session",
-    title: "Start session",
-    description:
-      "Starts a new session on an agent with a first message and, by default, waits for the agent's answer.",
-    scopes: ["session:write", "run:create"],
-    readOnly: false,
+  tool("start_session", {
     input: {
       agentId: v.optional(Id),
       agentVersionId: v.optional(
@@ -503,13 +441,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
       };
     },
   }),
-  tool({
-    name: "send_message",
-    title: "Send message",
-    description:
-      "Sends a message to an existing session as a new run, for example a question about an earlier run. The agent answers with the whole session in context. The session's latest run must have settled. By default waits for the answer.",
-    scopes: ["run:create"],
-    readOnly: false,
+  tool("send_message", {
     input: {
       sessionId: Id,
       message: Message,
@@ -526,12 +458,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
       return settle(context, run, input.waitSeconds);
     },
   }),
-  tool({
-    name: "list_runs",
-    title: "List runs",
-    description: "Lists the project's runs, newest first.",
-    scopes: ["run:read"],
-    readOnly: true,
+  tool("list_runs", {
     input: { limit: Limit, cursor: Cursor },
     run: (input, context) =>
       context.client.listRuns(
@@ -540,12 +467,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         withSignal(context),
       ),
   }),
-  tool({
-    name: "get_run",
-    title: "Get run",
-    description: "Reads a run's state.",
-    scopes: ["run:read"],
-    readOnly: true,
+  tool("get_run", {
     input: { runId: Id },
     run: (input, context) =>
       context.client.getRun(
@@ -554,13 +476,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         withSignal(context),
       ),
   }),
-  tool({
-    name: "get_run_messages",
-    title: "Get run messages",
-    description:
-      "Reads the messages of a run: the input, the agent's answers, and tool messages.",
-    scopes: ["run:read"],
-    readOnly: true,
+  tool("get_run_messages", {
     input: { runId: Id, limit: Limit, cursor: Cursor },
     run: (input, context) =>
       context.client.listRunMessages(
@@ -570,13 +486,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         withSignal(context),
       ),
   }),
-  tool({
-    name: "get_run_timeline",
-    title: "Get run timeline",
-    description:
-      "Reads what happened during a run: model turns, tool calls, approvals, and errors.",
-    scopes: ["run:read"],
-    readOnly: true,
+  tool("get_run_timeline", {
     input: { runId: Id, limit: Limit, cursor: Cursor },
     run: (input, context) =>
       context.client.listRunTimeline(
@@ -586,13 +496,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         withSignal(context),
       ),
   }),
-  tool({
-    name: "wait_for_run",
-    title: "Wait for run",
-    description:
-      "Waits for a run to settle and returns its state and the agent's answer.",
-    scopes: ["run:read"],
-    readOnly: true,
+  tool("wait_for_run", {
     input: { runId: Id, waitSeconds: WaitSeconds },
     run: async (input, context) =>
       settle(
@@ -605,12 +509,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         input.waitSeconds,
       ),
   }),
-  tool({
-    name: "cancel_run",
-    title: "Cancel run",
-    description: "Requests cancellation of an unsettled run.",
-    scopes: ["run:cancel"],
-    readOnly: false,
+  tool("cancel_run", {
     input: { runId: Id, idempotencyKey: IdempotencyKey },
     run: (input, context) =>
       context.client.cancelRun(
@@ -620,13 +519,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
       ),
   }),
 
-  tool({
-    name: "list_approvals",
-    title: "List approvals",
-    description:
-      "Lists tool approvals, newest first, optionally only those of one run.",
-    scopes: ["run:read"],
-    readOnly: true,
+  tool("list_approvals", {
     input: { runId: v.optional(Id), limit: Limit, cursor: Cursor },
     run: (input, context) =>
       context.client.listApprovals(
@@ -638,12 +531,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         withSignal(context),
       ),
   }),
-  tool({
-    name: "decide_approval",
-    title: "Decide approval",
-    description: "Approves or denies a pending tool approval.",
-    scopes: ["approval:resolve"],
-    readOnly: false,
+  tool("decide_approval", {
     input: {
       approvalId: Id,
       decision: v.picklist(["approved", "denied"]),
@@ -662,13 +550,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
       ),
   }),
 
-  tool({
-    name: "get_delegation",
-    title: "Get delegation",
-    description:
-      "Reads a delegation between a coordinator and a child agent, with its child runs.",
-    scopes: ["delegation:read"],
-    readOnly: true,
+  tool("get_delegation", {
     input: { delegationId: Id },
     run: (input, context) =>
       context.client.getDelegation(
@@ -677,13 +559,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         withSignal(context),
       ),
   }),
-  tool({
-    name: "message_delegation",
-    title: "Message delegation",
-    description:
-      "Sends a follow-up to a delegated child agent's session and, by default, waits for its answer.",
-    scopes: ["delegation:message", "run:create"],
-    readOnly: false,
+  tool("message_delegation", {
     input: {
       delegationId: Id,
       message: Message,
@@ -712,12 +588,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
     },
   }),
 
-  tool({
-    name: "list_skills",
-    title: "List Skills",
-    description: "Lists the project's Skills.",
-    scopes: ["skill:read"],
-    readOnly: true,
+  tool("list_skills", {
     input: { limit: Limit, cursor: Cursor },
     run: (input, context) =>
       context.client.listSkills(
@@ -726,12 +597,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         withSignal(context),
       ),
   }),
-  tool({
-    name: "get_skill",
-    title: "Get Skill",
-    description: "Reads a Skill and its versions.",
-    scopes: ["skill:read"],
-    readOnly: true,
+  tool("get_skill", {
     input: { skillId: Id },
     run: (input, context) =>
       context.client.getSkill(
@@ -740,13 +606,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         withSignal(context),
       ),
   }),
-  tool({
-    name: "create_skill",
-    title: "Create Skill",
-    description:
-      "Creates a Skill and publishes its first version from SKILL.md fields and text files.",
-    scopes: ["skill:write"],
-    readOnly: false,
+  tool("create_skill", {
     input: {
       key: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(100))),
       displayName: v.optional(v.pipe(v.string(), v.maxLength(200))),
@@ -766,13 +626,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         write(context, "create_skill"),
       ),
   }),
-  tool({
-    name: "publish_skill_version",
-    title: "Publish Skill version",
-    description:
-      "Publishes a new immutable version of a Skill. Agents keep the version they pin until republished.",
-    scopes: ["skill:write"],
-    readOnly: false,
+  tool("publish_skill_version", {
     input: { skillId: Id, ...SkillVersion, idempotencyKey: IdempotencyKey },
     run: (input, context) =>
       context.client.publishSkillVersion(
@@ -783,12 +637,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
       ),
   }),
 
-  tool({
-    name: "list_model_presets",
-    title: "List model presets",
-    description: "Lists the model presets an agent version may name.",
-    scopes: ["agent:read"],
-    readOnly: true,
+  tool("list_model_presets", {
     input: { limit: Limit, cursor: Cursor },
     run: (input, context) =>
       context.client.listModelPresets(
@@ -797,13 +646,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         withSignal(context),
       ),
   }),
-  tool({
-    name: "create_model_preset",
-    title: "Create model preset",
-    description:
-      "Creates a project model preset on an existing model provider connection.",
-    scopes: ["project:admin"],
-    readOnly: false,
+  tool("create_model_preset", {
     input: {
       ...CreateModelPresetInputSchema.entries,
       idempotencyKey: IdempotencyKey,
@@ -818,33 +661,17 @@ export const OAO_TOOLS: readonly OaoTool[] = [
     },
   }),
 
-  tool({
-    name: "list_mcp_servers",
-    title: "List MCP servers",
-    description:
-      "Lists the organization's remote MCP servers and their discovered tools.",
-    scopes: ["mcp:read"],
-    readOnly: true,
+  tool("list_mcp_servers", {
     input: {},
     run: (_input, context) =>
       context.client.listMcpServers(context.projectId, withSignal(context)),
   }),
-  tool({
-    name: "list_mcp_credentials",
-    title: "List MCP credentials",
-    description: "Lists MCP credential metadata. Secrets are never returned.",
-    scopes: ["credential:read_metadata"],
-    readOnly: true,
+  tool("list_mcp_credentials", {
     input: {},
     run: (_input, context) =>
       context.client.listMcpCredentials(context.projectId, withSignal(context)),
   }),
-  tool({
-    name: "list_mcp_credential_policies",
-    title: "List MCP credential policies",
-    description: "Lists the policies that let an MCP server use a credential.",
-    scopes: ["mcp:read"],
-    readOnly: true,
+  tool("list_mcp_credential_policies", {
     input: {},
     run: (_input, context) =>
       context.client.listMcpCredentialPolicies(
@@ -852,25 +679,12 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         withSignal(context),
       ),
   }),
-  tool({
-    name: "list_mcp_toolsets",
-    title: "List MCP toolsets",
-    description:
-      "Lists the project's MCP toolsets, the tool selections agents bind.",
-    scopes: ["mcp:read"],
-    readOnly: true,
+  tool("list_mcp_toolsets", {
     input: {},
     run: (_input, context) =>
       context.client.listMcpToolsets(context.projectId, withSignal(context)),
   }),
-  tool({
-    name: "create_mcp_server",
-    title: "Create MCP server",
-    description:
-      "Adds a remote MCP server to the organization. Credentials are added in the console or API, never through this tool.",
-    scopes: ["mcp:write"],
-    readOnly: false,
-    organizationShared: true,
+  tool("create_mcp_server", {
     input: {
       ...CreateMcpServerInputSchema.entries,
       idempotencyKey: IdempotencyKey,
@@ -884,14 +698,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
       );
     },
   }),
-  tool({
-    name: "discover_mcp_server",
-    title: "Discover MCP server tools",
-    description:
-      "Connects to an MCP server through a credential policy and records the tools it offers.",
-    scopes: ["mcp:discover"],
-    readOnly: false,
-    organizationShared: true,
+  tool("discover_mcp_server", {
     input: {
       serverId: Id,
       ...DiscoverMcpServerInputSchema.entries,
@@ -908,14 +715,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
       );
     },
   }),
-  tool({
-    name: "create_mcp_credential_policy",
-    title: "Create MCP credential policy",
-    description:
-      "Lets an MCP server use an existing credential, within the credential's destination.",
-    scopes: ["mcp:write"],
-    readOnly: false,
-    organizationShared: true,
+  tool("create_mcp_credential_policy", {
     input: {
       ...CreateMcpCredentialPolicyInputSchema.entries,
       idempotencyKey: IdempotencyKey,
@@ -929,13 +729,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
       );
     },
   }),
-  tool({
-    name: "create_mcp_toolset",
-    title: "Create MCP toolset",
-    description:
-      "Selects discovered tools of an MCP server, with their approvals, for agents of this project to bind.",
-    scopes: ["mcp:write"],
-    readOnly: false,
+  tool("create_mcp_toolset", {
     input: {
       ...CreateMcpToolsetInputSchema.entries,
       idempotencyKey: IdempotencyKey,
@@ -950,12 +744,7 @@ export const OAO_TOOLS: readonly OaoTool[] = [
     },
   }),
 
-  tool({
-    name: "list_audit_entries",
-    title: "List audit entries",
-    description: "Lists the project's audit trail, newest first.",
-    scopes: ["audit:read"],
-    readOnly: true,
+  tool("list_audit_entries", {
     input: { limit: Limit, cursor: Cursor },
     run: (input, context) =>
       context.client.listAuditEntries(
@@ -979,9 +768,10 @@ export function availableOaoTools(
     readonly tools?: readonly OaoTool[];
   } = {},
 ): readonly OaoTool[] {
-  return (options.tools ?? OAO_TOOLS).filter(
-    (tool) =>
-      (scopes.has("*") || tool.scopes.every((scope) => scopes.has(scope))) &&
-      !(options.projectRestricted === true && tool.organizationShared === true),
+  const offered = new Set(
+    availableOaoMcpTools(scopes, {
+      projectRestricted: options.projectRestricted === true,
+    }).map((tool) => tool.name),
   );
+  return (options.tools ?? OAO_TOOLS).filter((tool) => offered.has(tool.name));
 }

@@ -2,7 +2,18 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useRef, useState, type FormEvent } from "react";
 import { useApi } from "../api/context";
-import { mcpResourceDestination } from "@oao/contracts";
+import {
+  OAO_MCP_TOOL_CATALOG,
+  mcpResourceDestination,
+  type ManagedAgentOaoTools,
+} from "@oao/contracts";
+import { Link } from "react-router";
+import {
+  OaoToolGrantFields,
+  defaultOaoToolGrant,
+  describeOaoToolGrant,
+  withoutOaoTools,
+} from "./oao-tools";
 import type {
   CreateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
@@ -78,6 +89,7 @@ export function McpPage() {
   const [revokingCredential, setRevokingCredential] =
     useState<McpCredential | null>(null);
   const [removingServer, setRemovingServer] = useState<McpServer | null>(null);
+  const [managingOao, setManagingOao] = useState(false);
   const servers = useQuery({
     queryKey: ["mcp-servers"],
     queryFn: () => api.listMcpServers(),
@@ -227,9 +239,13 @@ export function McpPage() {
           <ConnectionsPanel
             servers={liveServers}
             toolsets={toolsets.data?.data ?? []}
+            oaoAgents={
+              (agents.data?.data ?? []).filter((agent) => agent.oaoTools).length
+            }
             disabled={!encryptionConfigured}
             onAdd={() => setWizardOpen(true)}
             onManage={(server) => setManagingServerId(server.id)}
+            onManageOao={() => setManagingOao(true)}
           />
           <UnattachedCredentialsPanel
             credentials={(credentials.data?.data ?? []).filter(
@@ -245,6 +261,20 @@ export function McpPage() {
             onRevoke={setRevokingCredential}
           />
         </div>
+      ) : null}
+      {managingOao ? (
+        <OaoServerDialog
+          agents={agents.data?.data ?? []}
+          onClose={() => setManagingOao(false)}
+          onChanged={async (agent, grant) => {
+            await queryClient.invalidateQueries({ queryKey: ["agents"] });
+            notify(
+              grant
+                ? `${agent.name} uses OAO's MCP server.`
+                : `${agent.name} no longer uses OAO's MCP server.`,
+            );
+          }}
+        />
       ) : null}
       {managingServer && !nestedOpen ? (
         <ConnectionDetailsDialog
@@ -728,16 +758,43 @@ function ConnectionDetailsDialog({
 function ConnectionsPanel({
   servers,
   toolsets,
+  oaoAgents,
   disabled,
   onAdd,
   onManage,
+  onManageOao,
 }: {
   readonly servers: readonly McpServer[];
   readonly toolsets: readonly McpToolset[];
+  /** How many agents use OAO's own MCP server. */
+  readonly oaoAgents: number;
   readonly disabled: boolean;
   readonly onAdd: () => void;
   readonly onManage: (server: McpServer) => void;
+  readonly onManageOao: () => void;
 }) {
+  const builtIn = (
+    <article className="resource-card mcp-connection-card">
+      <header className="row">
+        <h2>OAO</h2>
+        <StatusChip value="built in" />
+        <Button size="sm" aria-label="Manage OAO" onClick={onManageOao}>
+          Manage
+        </Button>
+      </header>
+      <span>This project&apos;s own MCP server. Nothing to connect.</span>
+      <dl>
+        <div>
+          <dt>Tools</dt>
+          <dd>{OAO_MCP_TOOL_CATALOG.length}</dd>
+        </div>
+        <div>
+          <dt>Agents using it</dt>
+          <dd>{oaoAgents}</dd>
+        </div>
+      </dl>
+    </article>
+  );
   return (
     <Panel
       title="Connections"
@@ -754,10 +811,11 @@ function ConnectionsPanel({
         </Button>
       }
     >
+      <div className="cards-grid">{builtIn}</div>
       {servers.length === 0 ? (
         <EmptyState
           icon="⌁"
-          title="No MCP connections"
+          title="No remote MCP servers"
           description="Use the guided setup to connect a server, test authentication, and choose the tools agents may use."
           action={
             <Button variant="primary" disabled={disabled} onClick={onAdd}>
@@ -818,6 +876,185 @@ function ConnectionsPanel({
         </div>
       )}
     </Panel>
+  );
+}
+
+/**
+ * OAO's own MCP server. Agents in this project use it without a connection
+ * or credential: attaching it publishes a new agent version that grants it.
+ */
+function OaoServerDialog({
+  agents,
+  onClose,
+  onChanged,
+}: {
+  readonly agents: readonly AgentSummary[];
+  readonly onClose: () => void;
+  readonly onChanged: (
+    agent: AgentSummary,
+    grant: ManagedAgentOaoTools | undefined,
+  ) => Promise<void>;
+}) {
+  const api = useApi();
+  const [editing, setEditing] = useState<{
+    readonly agent: AgentSummary;
+    readonly grant: ManagedAgentOaoTools;
+  } | null>(null);
+  const publish = useMutation({
+    mutationFn: async (input: {
+      readonly agent: AgentSummary;
+      readonly grant: ManagedAgentOaoTools | undefined;
+    }) => {
+      const detail = await api.getAgent(input.agent.id);
+      const latest =
+        detail.versions.find(
+          (version) => version.id === detail.latestVersionId,
+        ) ?? detail.versions[0];
+      if (!latest)
+        throw new Error(`${input.agent.name} has no published version.`);
+      await api.publishAgentVersion(input.agent.id, {
+        ...withoutOaoTools(latest.config),
+        ...(input.grant ? { oaoTools: input.grant } : {}),
+      });
+      await onChanged(input.agent, input.grant);
+    },
+    onSuccess: () => setEditing(null),
+  });
+  if (editing)
+    return (
+      <Dialog
+        title={`OAO for ${editing.agent.name}`}
+        description="Publishes a new version of the agent. Sessions that already started keep the version they started with."
+        wide
+        onClose={() => {
+          publish.reset();
+          setEditing(null);
+        }}
+        onSubmit={(event: FormEvent<HTMLFormElement>) => {
+          event.preventDefault();
+          publish.mutate({ agent: editing.agent, grant: editing.grant });
+        }}
+        footer={
+          <>
+            <Button
+              onClick={() => setEditing(null)}
+              disabled={publish.isPending}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" loading={publish.isPending}>
+              {publish.isPending ? "Publishing…" : "Publish version"}
+            </Button>
+          </>
+        }
+      >
+        <div className="stack">
+          <OaoToolGrantFields
+            grant={editing.grant}
+            disabled={publish.isPending}
+            onChange={(grant) => setEditing({ ...editing, grant })}
+          />
+          {publish.error ? (
+            <FormError>{publish.error.message}</FormError>
+          ) : null}
+        </div>
+      </Dialog>
+    );
+  return (
+    <Dialog
+      title="OAO"
+      description="This project's own MCP server is built in: there is nothing to connect, test, or store. An agent that uses it acts as the person or key that started its run, limited to the scopes you grant."
+      wide
+      onClose={onClose}
+      footer={
+        <Button variant="primary" onClick={onClose}>
+          Done
+        </Button>
+      }
+    >
+      <div className="stack">
+        <TableCard label="Agents and OAO" caption="Agents and OAO">
+          <thead>
+            <tr>
+              <th>Agent</th>
+              <th>OAO</th>
+              <th aria-label="Actions" />
+            </tr>
+          </thead>
+          <tbody>
+            {agents.map((agent) => (
+              <tr key={agent.id}>
+                <td>
+                  <strong>{agent.name}</strong>
+                </td>
+                <td>
+                  {agent.oaoTools
+                    ? `Uses it with ${describeOaoToolGrant(agent.oaoTools)}`
+                    : agent.latestVersionId
+                      ? "Not used"
+                      : "Publish a version first"}
+                </td>
+                <td className="cell-actions">
+                  {agent.latestVersionId ? (
+                    <>
+                      <Button
+                        size="sm"
+                        aria-label={`${agent.oaoTools ? "Change" : "Use"} OAO for ${agent.name}`}
+                        disabled={publish.isPending}
+                        onClick={() =>
+                          setEditing({
+                            agent,
+                            grant: agent.oaoTools ?? defaultOaoToolGrant(),
+                          })
+                        }
+                      >
+                        {agent.oaoTools ? "Change" : "Use"}
+                      </Button>
+                      {agent.oaoTools ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`Stop using OAO for ${agent.name}`}
+                          disabled={publish.isPending}
+                          onClick={() =>
+                            publish.mutate({ agent, grant: undefined })
+                          }
+                        >
+                          Stop using
+                        </Button>
+                      ) : null}
+                    </>
+                  ) : null}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </TableCard>
+        {agents.length === 0 ? (
+          <span className="muted">Create an agent to let it use OAO.</span>
+        ) : null}
+        {publish.error ? <FormError>{publish.error.message}</FormError> : null}
+        <p className="muted">
+          External agents connect to this server with a project API key. The
+          address and a setup command are on{" "}
+          <Link to="/api-keys">API keys</Link>.
+        </p>
+        <details>
+          <summary>The {OAO_MCP_TOOL_CATALOG.length} tools</summary>
+          <ul className="oao-tool-list">
+            {OAO_MCP_TOOL_CATALOG.map((tool) => (
+              <li key={tool.name}>
+                <code>{tool.name}</code> {tool.description}{" "}
+                <span className="muted">
+                  {tool.scopes.length ? tool.scopes.join(", ") : "no scope"}
+                  {tool.readOnly ? "" : " · changes OAO"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      </div>
+    </Dialog>
   );
 }
 

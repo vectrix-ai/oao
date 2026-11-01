@@ -4369,6 +4369,19 @@ test(
           scopes: grant,
           approval: "never",
         });
+        // Agent summaries say which agents use OAO's own MCP server.
+        const summaries = (await (
+          await app.request(`${projectPath}/agents?limit=100`)
+        ).json()) as { data: { id: string; oaoTools: unknown }[] };
+        assert.deepEqual(
+          summaries.data.find((entry) => entry.id === agent.id)?.oaoTools,
+          { scopes: grant, approval: "never" },
+        );
+        assert.ok(
+          summaries.data.some(
+            (entry) => entry.id !== agent.id && entry.oaoTools === null,
+          ),
+        );
 
         const startSession = async (key: string, headers = {}) => {
           const response = await app.request(

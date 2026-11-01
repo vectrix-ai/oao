@@ -234,6 +234,8 @@ export interface AgentSummary {
   readonly latestVersionId: string | null;
   /** Draft and legacy Agent rows can legitimately have no published policy. */
   readonly sandbox: AgentVersionConfig["sandbox"] | null;
+  /** The latest version's grant of OAO's own MCP server, if any. */
+  readonly oaoTools?: ManagedAgentOaoTools | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }

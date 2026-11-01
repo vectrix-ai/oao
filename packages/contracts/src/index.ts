@@ -1428,6 +1428,319 @@ export const ManagedAgentDelegateSchema = v.strictObject({
 });
 
 /**
+ * The tools of OAO's own MCP server: what each does, the scopes a caller
+ * needs for it to be offered, and whether it changes OAO. `@oao/mcp-server`
+ * implements each entry; the console shows them.
+ */
+export interface OaoMcpToolDescriptor {
+  readonly name: string;
+  readonly title: string;
+  readonly description: string;
+  /** Every scope a caller must hold for the tool to be offered. */
+  readonly scopes: readonly AuthorizationScopeName[];
+  /** Read-only tools change nothing in OAO. */
+  readonly readOnly: boolean;
+  /** Changes a resource the whole organization shares. */
+  readonly organizationShared?: true;
+}
+
+type AuthorizationScopeName = (typeof AUTHORIZATION_SCOPE_CATALOG)[number][0];
+
+export const OAO_MCP_TOOL_CATALOG: readonly OaoMcpToolDescriptor[] = [
+  {
+    name: "get_context",
+    title: "Get context",
+    description:
+      "Shows who is calling, the project these tools act in, and the scopes the caller holds.",
+    scopes: [],
+    readOnly: true,
+  },
+  {
+    name: "list_agents",
+    title: "List agents",
+    description: "Lists the project's agents, newest first.",
+    scopes: ["agent:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_agent",
+    title: "Get agent",
+    description: "Reads an agent and its most recent versions.",
+    scopes: ["agent:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_agent_version",
+    title: "Get agent version",
+    description:
+      "Reads one immutable agent version with its full configuration.",
+    scopes: ["agent:read"],
+    readOnly: true,
+  },
+  {
+    name: "create_agent",
+    title: "Create agent",
+    description:
+      "Creates an agent, optionally publishing its first version from config. Binding Skills or MCP toolsets also needs skill:bind or mcp:bind.",
+    scopes: ["agent:write"],
+    readOnly: false,
+  },
+  {
+    name: "publish_agent_version",
+    title: "Publish agent version",
+    description:
+      "Publishes a new immutable version of an agent. New sessions use it; existing sessions keep their version.",
+    scopes: ["agent:write"],
+    readOnly: false,
+  },
+  {
+    name: "delete_agent",
+    title: "Delete agent",
+    description:
+      "Archives an agent so no new session can start on it. History stays.",
+    scopes: ["agent:write"],
+    readOnly: false,
+  },
+  {
+    name: "list_sessions",
+    title: "List sessions",
+    description:
+      "Lists sessions newest first, with each session's agent, title, and latest run state. agentId keeps only that agent's sessions from the page.",
+    scopes: ["session:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_session",
+    title: "Get session",
+    description:
+      "Reads a session: its agent, runs, full transcript, timeline, delegations, and pending work. includeDebug adds model invocations, tool calls, and sandbox detail.",
+    scopes: ["session:read"],
+    readOnly: true,
+  },
+  {
+    name: "start_session",
+    title: "Start session",
+    description:
+      "Starts a new session on an agent with a first message and, by default, waits for the agent's answer.",
+    scopes: ["session:write", "run:create"],
+    readOnly: false,
+  },
+  {
+    name: "send_message",
+    title: "Send message",
+    description:
+      "Sends a message to an existing session as a new run, for example a question about an earlier run. The agent answers with the whole session in context. The session's latest run must have settled. By default waits for the answer.",
+    scopes: ["run:create"],
+    readOnly: false,
+  },
+  {
+    name: "list_runs",
+    title: "List runs",
+    description: "Lists the project's runs, newest first.",
+    scopes: ["run:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_run",
+    title: "Get run",
+    description: "Reads a run's state.",
+    scopes: ["run:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_run_messages",
+    title: "Get run messages",
+    description:
+      "Reads the messages of a run: the input, the agent's answers, and tool messages.",
+    scopes: ["run:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_run_timeline",
+    title: "Get run timeline",
+    description:
+      "Reads what happened during a run: model turns, tool calls, approvals, and errors.",
+    scopes: ["run:read"],
+    readOnly: true,
+  },
+  {
+    name: "wait_for_run",
+    title: "Wait for run",
+    description:
+      "Waits for a run to settle and returns its state and the agent's answer.",
+    scopes: ["run:read"],
+    readOnly: true,
+  },
+  {
+    name: "cancel_run",
+    title: "Cancel run",
+    description: "Requests cancellation of an unsettled run.",
+    scopes: ["run:cancel"],
+    readOnly: false,
+  },
+  {
+    name: "list_approvals",
+    title: "List approvals",
+    description:
+      "Lists tool approvals, newest first, optionally only those of one run.",
+    scopes: ["run:read"],
+    readOnly: true,
+  },
+  {
+    name: "decide_approval",
+    title: "Decide approval",
+    description: "Approves or denies a pending tool approval.",
+    scopes: ["approval:resolve"],
+    readOnly: false,
+  },
+  {
+    name: "get_delegation",
+    title: "Get delegation",
+    description:
+      "Reads a delegation between a coordinator and a child agent, with its child runs.",
+    scopes: ["delegation:read"],
+    readOnly: true,
+  },
+  {
+    name: "message_delegation",
+    title: "Message delegation",
+    description:
+      "Sends a follow-up to a delegated child agent's session and, by default, waits for its answer.",
+    scopes: ["delegation:message", "run:create"],
+    readOnly: false,
+  },
+  {
+    name: "list_skills",
+    title: "List Skills",
+    description: "Lists the project's Skills.",
+    scopes: ["skill:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_skill",
+    title: "Get Skill",
+    description: "Reads a Skill and its versions.",
+    scopes: ["skill:read"],
+    readOnly: true,
+  },
+  {
+    name: "create_skill",
+    title: "Create Skill",
+    description:
+      "Creates a Skill and publishes its first version from SKILL.md fields and text files.",
+    scopes: ["skill:write"],
+    readOnly: false,
+  },
+  {
+    name: "publish_skill_version",
+    title: "Publish Skill version",
+    description:
+      "Publishes a new immutable version of a Skill. Agents keep the version they pin until republished.",
+    scopes: ["skill:write"],
+    readOnly: false,
+  },
+  {
+    name: "list_model_presets",
+    title: "List model presets",
+    description: "Lists the model presets an agent version may name.",
+    scopes: ["agent:read"],
+    readOnly: true,
+  },
+  {
+    name: "create_model_preset",
+    title: "Create model preset",
+    description:
+      "Creates a project model preset on an existing model provider connection.",
+    scopes: ["project:admin"],
+    readOnly: false,
+  },
+  {
+    name: "list_mcp_servers",
+    title: "List MCP servers",
+    description:
+      "Lists the organization's remote MCP servers and their discovered tools.",
+    scopes: ["mcp:read"],
+    readOnly: true,
+  },
+  {
+    name: "list_mcp_credentials",
+    title: "List MCP credentials",
+    description: "Lists MCP credential metadata. Secrets are never returned.",
+    scopes: ["credential:read_metadata"],
+    readOnly: true,
+  },
+  {
+    name: "list_mcp_credential_policies",
+    title: "List MCP credential policies",
+    description: "Lists the policies that let an MCP server use a credential.",
+    scopes: ["mcp:read"],
+    readOnly: true,
+  },
+  {
+    name: "list_mcp_toolsets",
+    title: "List MCP toolsets",
+    description:
+      "Lists the project's MCP toolsets, the tool selections agents bind.",
+    scopes: ["mcp:read"],
+    readOnly: true,
+  },
+  {
+    name: "create_mcp_server",
+    title: "Create MCP server",
+    description:
+      "Adds a remote MCP server to the organization. Credentials are added in the console or API, never through this tool.",
+    scopes: ["mcp:write"],
+    readOnly: false,
+    organizationShared: true,
+  },
+  {
+    name: "discover_mcp_server",
+    title: "Discover MCP server tools",
+    description:
+      "Connects to an MCP server through a credential policy and records the tools it offers.",
+    scopes: ["mcp:discover"],
+    readOnly: false,
+    organizationShared: true,
+  },
+  {
+    name: "create_mcp_credential_policy",
+    title: "Create MCP credential policy",
+    description:
+      "Lets an MCP server use an existing credential, within the credential's destination.",
+    scopes: ["mcp:write"],
+    readOnly: false,
+    organizationShared: true,
+  },
+  {
+    name: "create_mcp_toolset",
+    title: "Create MCP toolset",
+    description:
+      "Selects discovered tools of an MCP server, with their approvals, for agents of this project to bind.",
+    scopes: ["mcp:write"],
+    readOnly: false,
+  },
+  {
+    name: "list_audit_entries",
+    title: "List audit entries",
+    description: "Lists the project's audit trail, newest first.",
+    scopes: ["audit:read"],
+    readOnly: true,
+  },
+];
+
+/** The tools a caller with these scopes is offered. */
+export function availableOaoMcpTools(
+  scopes: ReadonlySet<string>,
+  options: { readonly projectRestricted?: boolean } = {},
+): readonly OaoMcpToolDescriptor[] {
+  return OAO_MCP_TOOL_CATALOG.filter(
+    (tool) =>
+      (scopes.has("*") || tool.scopes.every((scope) => scopes.has(scope))) &&
+      !(options.projectRestricted === true && tool.organizationShared === true),
+  );
+}
+
+/**
  * Scopes an agent version may grant its built-in OAO tools. Deciding
  * approvals and project administration stay with people and API keys, so an
  * agent can never approve its own or another agent's tool calls.

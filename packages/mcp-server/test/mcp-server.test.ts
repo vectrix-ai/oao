@@ -6,7 +6,10 @@ import {
   Client,
   StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client";
-import { AUTHORIZATION_SCOPE_CATALOG } from "@oao/contracts";
+import {
+  AUTHORIZATION_SCOPE_CATALOG,
+  OAO_MCP_TOOL_CATALOG,
+} from "@oao/contracts";
 import { OaoClient } from "@oao/sdk-js";
 
 import {
@@ -143,6 +146,13 @@ function text(result: { readonly content?: unknown }): string {
   const content = result.content as readonly { type: string; text: string }[];
   return content[0]?.text ?? "";
 }
+
+test("every catalog entry is implemented, in catalog order", () => {
+  assert.deepEqual(
+    OAO_TOOLS.map((tool) => tool.name),
+    OAO_MCP_TOOL_CATALOG.map((tool) => tool.name),
+  );
+});
 
 test("every tool names real scopes and has a unique name", () => {
   const known = new Set<string>(

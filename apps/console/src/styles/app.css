@@ -649,6 +649,15 @@
 .mcp-connection-card code {
   overflow-wrap: anywhere;
 }
+.oao-tool-list {
+  display: grid;
+  gap: var(--sp-2);
+  max-height: 320px;
+  margin: var(--sp-2) 0 0;
+  padding-left: var(--sp-4);
+  overflow-y: auto;
+  font-size: 13px;
+}
 .mcp-connection-card dl,
 .wizard-review {
   display: grid;
