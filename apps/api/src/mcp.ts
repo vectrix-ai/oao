@@ -1,13 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
-import type {
-  CreateMcpCredentialInput,
-  CreateMcpCredentialPolicyInput,
-  CreateMcpServerInput,
-  CreateMcpToolsetInput,
-  McpCredential,
-  McpCredentialPolicy,
-  McpServer,
-  McpToolset,
+import {
+  canonicalMcpOrigin,
+  type CreateMcpCredentialInput,
+  type CreateMcpCredentialPolicyInput,
+  type CreateMcpServerInput,
+  type CreateMcpToolsetInput,
+  type McpCredential,
+  type McpCredentialDestination,
+  type McpCredentialPolicy,
+  type McpServer,
+  type McpToolset,
+  type RotateMcpCredentialInput,
 } from "@oao/contracts";
 import type { Principal } from "@oao/domain";
 import type { PgClient } from "@oao/db-postgres";
@@ -49,6 +52,8 @@ interface CredentialRow {
   display_name: string;
   credential_kind: "static_bearer" | "api_key_header";
   header_name: string | null;
+  destination_origin: string | null;
+  destination_path_prefix: string | null;
   credential_fingerprint: string;
   credential_version: number;
   status: "active" | "deprecated" | "revoked";
@@ -101,6 +106,8 @@ interface ConnectionRow {
   credential_id: string;
   credential_kind: "static_bearer" | "api_key_header";
   header_name: string | null;
+  destination_origin: string | null;
+  destination_path_prefix: string | null;
   encrypted_secret: Buffer;
   encryption_nonce: Buffer;
   encryption_tag: Buffer;
@@ -123,6 +130,44 @@ function digest(value: unknown): Buffer {
 
 function timestamp(value: Date): string {
   return value.toISOString();
+}
+
+/**
+ * The destination a rotated version keeps. A pinned destination never moves:
+ * the secret of every later version goes to the same place. A credential
+ * stored before destinations existed is pinned by the first rotation that
+ * names one.
+ */
+function rotatedDestination(
+  current: {
+    readonly destination_origin: string | null;
+    readonly destination_path_prefix: string | null;
+  },
+  requested: McpCredentialDestination | undefined,
+): McpCredentialDestination | null {
+  const pinned =
+    current.destination_origin !== null &&
+    current.destination_path_prefix !== null
+      ? {
+          origin: current.destination_origin,
+          pathPrefix: current.destination_path_prefix,
+        }
+      : null;
+  if (!requested) return pinned;
+  const destination = {
+    origin: canonicalMcpOrigin(requested.origin),
+    pathPrefix: requested.pathPrefix,
+  };
+  if (
+    pinned &&
+    (pinned.origin !== destination.origin ||
+      pinned.pathPrefix !== destination.pathPrefix)
+  )
+    throw new HttpApiError(
+      "bad_request",
+      "MCP credential destination is pinned; create a new credential for another destination",
+    );
+  return destination;
 }
 
 function server(row: ServerRow): McpServer {
@@ -154,6 +199,13 @@ function credential(row: CredentialRow): McpCredential {
     displayName: row.display_name,
     kind: row.credential_kind,
     headerName: row.header_name,
+    destination:
+      row.destination_origin && row.destination_path_prefix
+        ? {
+            origin: row.destination_origin,
+            pathPrefix: row.destination_path_prefix,
+          }
+        : null,
     credentialConfigured: true,
     credentialFingerprint: row.credential_fingerprint.slice(0, 12),
     credentialVersion: row.credential_version,
@@ -235,7 +287,8 @@ const SERVER_SELECT = `
 const CREDENTIAL_SELECT = `
   SELECT resource.id,resource.organization_id,
          resource.credential_key,resource.display_name,resource.credential_kind,
-         resource.header_name,version.credential_fingerprint,
+         resource.header_name,version.destination_origin,
+         version.destination_path_prefix,version.credential_fingerprint,
          version.version AS credential_version,lifecycle.status,
          resource.created_by_principal_id,resource.created_at,resource.updated_at
     FROM oao.mcp_credentials resource
@@ -405,8 +458,9 @@ export class McpAdminService {
       `INSERT INTO oao.mcp_credential_versions (
          organization_id,id,credential_id,version,encrypted_secret,
          encryption_nonce,encryption_tag,encryption_key_version,
-         credential_fingerprint,created_by_principal_id
-       ) VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9)`,
+         credential_fingerprint,destination_origin,destination_path_prefix,
+         created_by_principal_id
+       ) VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [
         actor.organizationId,
         versionId,
@@ -416,6 +470,8 @@ export class McpAdminService {
         encrypted.tag,
         encrypted.keyVersion,
         encrypted.fingerprint,
+        canonicalMcpOrigin(input.destination.origin),
+        input.destination.pathPrefix,
         actor.id,
       ],
     );
@@ -442,13 +498,16 @@ export class McpAdminService {
     tx: PgClient,
     actor: Principal,
     credentialId: string,
-    secret: string,
+    input: RotateMcpCredentialInput,
   ): Promise<McpCredential> {
     const locked = await tx.query<{
       active_version_id: string;
       version: number;
+      destination_origin: string | null;
+      destination_path_prefix: string | null;
     }>(
-      `SELECT credential.active_version_id,version.version
+      `SELECT credential.active_version_id,version.version,
+              version.destination_origin,version.destination_path_prefix
          FROM oao.mcp_credentials credential
          JOIN oao.mcp_credential_versions version
            ON version.organization_id=credential.organization_id
@@ -460,9 +519,10 @@ export class McpAdminService {
     const current = locked.rows[0];
     if (!current)
       throw new HttpApiError("not_found", "MCP credential not found");
+    const destination = rotatedDestination(current, input.destination);
     const version = current.version + 1;
     const versionId = randomUUID();
-    const encrypted = this.cipher.encrypt(secret, {
+    const encrypted = this.cipher.encrypt(input.secret, {
       organizationId: actor.organizationId,
       providerId: credentialId,
       providerType: "mcp",
@@ -478,8 +538,9 @@ export class McpAdminService {
       `INSERT INTO oao.mcp_credential_versions (
          organization_id,id,credential_id,version,encrypted_secret,
          encryption_nonce,encryption_tag,encryption_key_version,
-         credential_fingerprint,created_by_principal_id
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+         credential_fingerprint,destination_origin,destination_path_prefix,
+         created_by_principal_id
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [
         actor.organizationId,
         versionId,
@@ -490,6 +551,8 @@ export class McpAdminService {
         encrypted.tag,
         encrypted.keyVersion,
         encrypted.fingerprint,
+        destination?.origin ?? null,
+        destination?.pathPrefix ?? null,
         actor.id,
       ],
     );
@@ -556,18 +619,46 @@ export class McpAdminService {
     actor: Principal,
     input: CreateMcpCredentialPolicyInput,
   ): Promise<McpCredentialPolicy> {
-    const credentialExists = await tx.query(
-      `SELECT 1 FROM oao.mcp_credentials credential
-       JOIN oao.mcp_credential_version_lifecycle lifecycle
-         ON lifecycle.organization_id=credential.organization_id
-        AND lifecycle.credential_version_id=credential.active_version_id
-        AND lifecycle.status='active'
-       WHERE credential.organization_id=$1
-         AND credential.id=$2`,
-      [actor.organizationId, input.credentialId],
+    // The policy must lie inside the destination pinned on the credential's
+    // active version, so a policy can never redirect an existing secret.
+    const active = await tx.query<{
+      destination_origin: string | null;
+      within_destination: boolean | null;
+    }>(
+      `SELECT version.destination_origin,
+              oao.mcp_policy_within_destination(
+                $3,$4,version.destination_origin,version.destination_path_prefix
+              ) AS within_destination
+         FROM oao.mcp_credentials credential
+         JOIN oao.mcp_credential_versions version
+           ON version.organization_id=credential.organization_id
+          AND version.id=credential.active_version_id
+         JOIN oao.mcp_credential_version_lifecycle lifecycle
+           ON lifecycle.organization_id=version.organization_id
+          AND lifecycle.credential_version_id=version.id
+          AND lifecycle.status='active'
+        WHERE credential.organization_id=$1
+          AND credential.id=$2`,
+      [
+        actor.organizationId,
+        input.credentialId,
+        input.exactOrigin,
+        input.pathPrefix,
+      ],
     );
-    if (!credentialExists.rowCount)
+    const credentialVersion = active.rows[0];
+    if (!credentialVersion)
       throw new HttpApiError("bad_request", "MCP credential is unavailable");
+    if (credentialVersion.destination_origin === null)
+      throw new HttpApiError(
+        "bad_request",
+        "MCP credential has no pinned destination; rotate it with a destination before creating a policy",
+      );
+    if (credentialVersion.within_destination !== true)
+      throw new HttpApiError(
+        "bad_request",
+        "MCP credential policy origin and path prefix must lie inside the credential's pinned destination",
+      );
     const id = randomUUID();
     const versionId = randomUUID();
     await tx.query(
@@ -656,7 +747,8 @@ export class McpAdminService {
               policy.exact_origin,policy.path_prefix,
               policy.timeout_ms,policy.maximum_response_bytes,
               credential.id AS credential_id,credential.credential_kind,
-              credential.header_name,version.encrypted_secret,
+              credential.header_name,version.destination_origin,
+              version.destination_path_prefix,version.encrypted_secret,
               version.encryption_nonce,version.encryption_tag,
               version.encryption_key_version
          FROM oao.mcp_servers resource
@@ -683,6 +775,13 @@ export class McpAdminService {
          JOIN oao.mcp_credential_versions version
            ON version.organization_id=credential.organization_id
           AND version.id=credential.active_version_id
+          AND (
+            version.destination_origin IS NULL
+            OR oao.mcp_policy_within_destination(
+              policy.exact_origin,policy.path_prefix,
+              version.destination_origin,version.destination_path_prefix
+            )
+          )
          JOIN oao.mcp_credential_version_lifecycle credential_lifecycle
            ON credential_lifecycle.organization_id=version.organization_id
           AND credential_lifecycle.credential_version_id=version.id
@@ -728,6 +827,14 @@ export class McpAdminService {
         timeoutMs: row.timeout_ms,
         maximumResponseBytes: row.maximum_response_bytes,
         credential: material,
+        ...(row.destination_origin && row.destination_path_prefix
+          ? {
+              credentialDestination: {
+                origin: row.destination_origin,
+                pathPrefix: row.destination_path_prefix,
+              },
+            }
+          : {}),
       },
     };
   }

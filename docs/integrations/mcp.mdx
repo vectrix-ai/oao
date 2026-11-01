@@ -51,7 +51,9 @@ screen in order:
   Choose **Bearer token** or **API-key header** and enter the write-only secret.
   For an API-key header, also enter its safe header name. Expand **Security
   policy and limits** and confirm the exact HTTPS origin, allowed path prefix,
-  request timeout, and response-size limit. OAO never returns the secret after
+  request timeout, and response-size limit. The credential is pinned to that
+  origin and path prefix when it is saved; see [Credential
+  destinations](#credential-destinations). OAO never returns the secret after
   saving it. Select **Next**.
 </Step>
 
@@ -119,6 +121,7 @@ credential_id="$(
       displayName: "Example MCP credential",
       kind: "static_bearer",
       headerName: null,
+      destination: {origin: "https://mcp.example.com", pathPrefix: "/mcp"},
       secret: $secret
     }')" \
     "$OAO_API_URL/projects/$OAO_PROJECT_ID/mcp-credentials" \
@@ -211,6 +214,52 @@ as the next immutable server version and makes it the latest version. Existing
 toolsets and sessions remain pinned to their prior server version until an
 operator deliberately publishes a replacement toolset and agent version.
 
+## Credential destinations
+
+Every credential version is pinned to one destination: an HTTPS origin and a
+path prefix, set when the credential is created. The secret is only ever sent
+inside that destination. A credential policy can use the credential only when
+the policy's exact origin equals the destination origin and its path prefix
+lies inside the destination path prefix. Prefixes are compared on path-segment
+boundaries: a destination of `/mcp` contains `/mcp` and `/mcp/v2`, but not
+`/mcpx` and not `/`.
+
+OAO checks this in three places, so no single path can bypass it:
+
+- Creating a credential policy outside the destination returns `400`.
+- Authenticated discovery refuses a policy that lies outside the destination.
+- At execution time the runtime only loads a credential for a policy inside the
+  destination, and the egress broker refuses any credential-bearing request
+  outside it.
+
+Without the pin, any principal with `mcp:write` and `mcp:discover` could point
+an organization-shared credential at their own server and receive the secret
+through discovery.
+
+Rotating a credential keeps its destination. To send a secret somewhere else,
+create a new credential.
+
+### Credentials stored before destinations existed
+
+Upgrading pins existing credentials from the policies that already use them,
+so no existing binding breaks:
+
+- If all of a credential's policies use one origin, the credential is pinned to
+  that origin. Its path prefix is the policies' path prefix when they all use
+  the same one, and `/` otherwise.
+- Policy prefixes used to match as plain string prefixes, so `/mcp` also
+  served an endpoint at `/mcpx`. When a server relied on that, or is a legacy
+  SSE server that may post messages to a sibling path, the credential is pinned
+  to the prefix's parent instead (`/mcp` becomes `/`, `/api/sse` becomes
+  `/api/`).
+- A credential without policies, or with policies on more than one origin,
+  stays unpinned. Its existing policies keep working, but no new policy can use
+  it. The console shows it as **Unpinned**.
+
+To pin an unpinned credential, rotate it with a destination. Policies outside
+that destination stop working at once; create replacement policies inside it
+and publish agent versions that use them.
+
 ## Egress and credential boundary
 
 The broker requires TLS, resolves the hostname before each request, denies
@@ -220,7 +269,8 @@ rebinding. It strips caller-supplied authorization, cookie, and proxy
 authorization headers before injecting the configured secret.
 
 Credential-bearing requests must retain the exact scheme, host, and port and
-remain under the policy path prefix. Redirects are not followed. Requests and
+remain under the policy path prefix and inside the credential's pinned
+destination. Redirects are not followed. Requests and
 responses are size-limited, and calls honor cancellation and the policy timeout.
 At execution time OAO rechecks the session binding, run creator's current
 authorization, project membership, and every resource lifecycle before it

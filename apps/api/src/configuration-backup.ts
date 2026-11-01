@@ -4,6 +4,7 @@ import {
   CONFIGURATION_BACKUP_FORMAT,
   CONFIGURATION_BACKUP_FORMAT_VERSION,
   agentVersionPublicationOrder,
+  canonicalMcpOrigin,
   checkConfigurationBackupReferences,
   configurationBackupCounts,
   parseConfigurationBackup,
@@ -381,7 +382,8 @@ export async function exportOrganizationConfiguration(
   const credentials = await transaction.query<Row>(
     `SELECT credential.id,credential.credential_key,credential.display_name,
             credential.credential_kind,credential.header_name,lifecycle.status,
-            version.credential_fingerprint
+            version.credential_fingerprint,version.destination_origin,
+            version.destination_path_prefix
        FROM oao.mcp_credentials credential
        LEFT JOIN oao.mcp_credential_versions version
          ON version.organization_id=credential.organization_id
@@ -511,6 +513,14 @@ export async function exportOrganizationConfiguration(
           ? ("api_key_header" as const)
           : ("static_bearer" as const),
       headerName: (row.header_name as string | null) ?? null,
+      destination:
+        typeof row.destination_origin === "string" &&
+        typeof row.destination_path_prefix === "string"
+          ? {
+              origin: row.destination_origin,
+              pathPrefix: row.destination_path_prefix,
+            }
+          : null,
       status:
         row.status === "active" ? ("active" as const) : ("revoked" as const),
       credentialFingerprint:
@@ -1241,8 +1251,9 @@ async function restoreConnections(
         `INSERT INTO oao.mcp_credential_versions (
            organization_id,id,credential_id,version,encrypted_secret,
            encryption_nonce,encryption_tag,encryption_key_version,
-           credential_fingerprint,created_by_principal_id
-         ) VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9)`,
+           credential_fingerprint,destination_origin,destination_path_prefix,
+           created_by_principal_id
+         ) VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9,$10,$11)`,
         [
           org,
           versionId,
@@ -1252,6 +1263,10 @@ async function restoreConnections(
           encrypted.tag,
           encrypted.keyVersion,
           encrypted.fingerprint,
+          credential.destination
+            ? canonicalMcpOrigin(credential.destination.origin)
+            : null,
+          credential.destination?.pathPrefix ?? null,
           actor.id,
         ],
       );

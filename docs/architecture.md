@@ -70,10 +70,12 @@ OTel SDK -> optional Collector -> configured OTLP backend
     one PostgreSQL-authoritative workspace identity. Tool replay is keyed and
     hashed; parent cancellation cascades to unsettled child runs.
 14. Remote MCP access is pinned by immutable server, toolset, and credential
-    policy versions. Session bindings copy those exact IDs. The runtime performs
-    live authorization/lifecycle checks before decrypting a credential, and the
+    policy versions. Session bindings copy those exact IDs. Each credential
+    version is pinned to one destination origin and path prefix, and a policy
+    may use it only inside that destination. The runtime performs live
+    authorization/lifecycle checks before decrypting a credential, and the
     egress broker injects it only for the policy's exact HTTPS origin and path
-    prefix. MCP secrets never enter Flue state, prompts, events, logs, or the
+    prefix inside the credential's destination. MCP secrets never enter Flue state, prompts, events, logs, or the
     sandbox.
 15. API keys, model provider connections, storage provider connections,
     sandbox provider connections, and MCP servers/credentials/credential

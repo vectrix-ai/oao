@@ -495,13 +495,21 @@ Repeated discovery returns the current immutable version while metadata is
 unchanged. Tool metadata drift publishes and returns the next server version;
 existing toolsets remain pinned to their original server version.
 
-Create a credential with `{ key, displayName, kind, headerName, secret }`.
-`static_bearer` requires `headerName: null`; `api_key_header` requires a safe
-header name. Responses contain only the fingerprint, version, lifecycle, and
-`credentialConfigured: true`. Rotate with `{ secret }`.
+Create a credential with `{ key, displayName, kind, headerName, destination,
+secret }`. `static_bearer` requires `headerName: null`; `api_key_header`
+requires a safe header name. `destination` is `{ origin, pathPrefix }`: the
+only HTTPS origin and path prefix the secret may be sent to. Responses contain
+the destination, fingerprint, version, lifecycle, and `credentialConfigured:
+true`; `destination` is `null` for a credential stored before destinations were
+pinned. Rotate with `{ secret }`. The rotated version keeps the destination;
+rotation accepts `destination` only to pin an unpinned credential, or when it
+equals the pinned one.
 
 Create a policy with `{ key, displayName, credentialId, exactOrigin,
-pathPrefix, timeoutMs, maximumResponseBytes }`. Create a toolset with `{ key,
+pathPrefix, timeoutMs, maximumResponseBytes }`. The exact origin must equal the
+credential's destination origin and the path prefix must lie inside its
+destination path prefix on a path-segment boundary; otherwise the request
+returns `400`, as it does for an unpinned credential. Create a toolset with `{ key,
 displayName, serverVersionId, tools: [{ remoteToolName, approval }] }`.
 Discovery is capped at 256 tools; a toolset may select 1–64 tools.
 

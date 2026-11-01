@@ -190,7 +190,7 @@ test(
     try {
       await t.test("migration applies cleanly and is idempotent", async () => {
         const first = await migrate(pool);
-        assert.equal(first.applied.length + first.alreadyApplied.length, 52);
+        assert.equal(first.applied.length + first.alreadyApplied.length, 53);
         const second = await migrate(pool);
         assert.deepEqual(second.alreadyApplied, [
           "0001_foundation.sql",
@@ -245,6 +245,7 @@ test(
           "0051_iap_access_metadata_and_backfill.sql",
           "0052_event_webhooks.sql",
           "0053_bedrock_model_provider.sql",
+          "0054_mcp_credential_destination.sql",
         ]);
         await seed(pool);
       });

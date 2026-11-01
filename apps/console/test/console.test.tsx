@@ -426,6 +426,7 @@ describe("management console", () => {
         displayName: "Acme token",
         kind: "static_bearer",
         headerName: null,
+        destination: { origin: "https://mcp.acme.test", pathPrefix: "/" },
         status: "active",
         credentialFingerprint: null,
       },
@@ -1263,6 +1264,10 @@ describe("management console", () => {
     expect(agent.versions[0]?.config.mcpBindings).toEqual([
       expect.objectContaining({ namespace: "trace_observability" }),
     ]);
+    expect((await api.listMcpCredentials()).data[0]?.destination).toEqual({
+      origin: "https://mcp.example.test",
+      pathPrefix: "/rpc",
+    });
 
     await user.click(
       screen.getByRole("button", { name: "Advanced resources" }),
@@ -1296,6 +1301,28 @@ describe("management console", () => {
         approval: "never",
       }),
     ]);
+
+    // A policy can never point the pinned credential at another server.
+    await user.click(screen.getByRole("button", { name: "Add policy" }));
+    const policyDialog = within(
+      await screen.findByRole("dialog", { name: "Add credential policy" }),
+    );
+    expect(policyDialog.getByLabelText("Exact HTTPS origin")).toHaveValue(
+      "https://mcp.example.test",
+    );
+    await user.type(policyDialog.getByLabelText("Key"), "trace-elsewhere");
+    await user.type(policyDialog.getByLabelText("Display name"), "Elsewhere");
+    await user.clear(policyDialog.getByLabelText("Exact HTTPS origin"));
+    await user.type(
+      policyDialog.getByLabelText("Exact HTTPS origin"),
+      "https://attacker.example.test",
+    );
+    await user.click(policyDialog.getByRole("button", { name: "Save" }));
+    expect(
+      await policyDialog.findByText(
+        /inside the credential's pinned destination/u,
+      ),
+    ).toBeInTheDocument();
   });
 
   it("uploads multiple Markdown files into the selected package folder", async () => {

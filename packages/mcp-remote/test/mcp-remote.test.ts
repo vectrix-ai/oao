@@ -5,6 +5,7 @@ import { once } from "node:events";
 import {
   McpRemoteClient,
   createBrokeredMcpFetch,
+  isPathWithin,
   isPublicNetworkAddress,
   validateCredentialHeaderName,
 } from "../src/index.js";
@@ -186,6 +187,63 @@ test("permits only the credential policy origin and path prefix", async () => {
   );
   await assert.rejects(
     fetch("https://mcp.example.test.evil.test/rpc/messages"),
+    /outside the credential policy/u,
+  );
+});
+
+test("credential-bearing requests stay inside the pinned credential destination", async () => {
+  assert.equal(isPathWithin("/mcp", "/mcp"), true);
+  assert.equal(isPathWithin("/mcp/messages", "/mcp"), true);
+  assert.equal(isPathWithin("/mcpx", "/mcp"), false);
+  assert.equal(isPathWithin("/api/x", "/api/"), true);
+  // The policy prefix "/mcp" admits "/mcpx" as a string prefix; the pinned
+  // destination does not.
+  const fetch = createBrokeredMcpFetch(
+    {
+      endpointUrl: "https://mcp.example.test/mcp",
+      exactOrigin: "https://mcp.example.test",
+      pathPrefix: "/mcp",
+      credentialDestination: {
+        origin: "https://mcp.example.test",
+        pathPrefix: "/mcp",
+      },
+      transport: "streamable_http",
+      credential: { kind: "static_bearer", secret: "super-secret" },
+    },
+    { resolve: async () => [{ address: "1.1.1.1", family: 4 }] },
+  );
+  await assert.rejects(
+    fetch("https://mcp.example.test/mcpx"),
+    /outside the credential policy/u,
+  );
+  assert.throws(
+    () =>
+      createBrokeredMcpFetch({
+        endpointUrl: "https://mcp.example.test/other/mcp",
+        exactOrigin: "https://mcp.example.test",
+        pathPrefix: "/",
+        credentialDestination: {
+          origin: "https://mcp.example.test",
+          pathPrefix: "/mcp",
+        },
+        transport: "streamable_http",
+        credential: { kind: "static_bearer", secret: "super-secret" },
+      }),
+    /outside the credential policy/u,
+  );
+  assert.throws(
+    () =>
+      createBrokeredMcpFetch({
+        endpointUrl: "https://attacker.example.test/mcp",
+        exactOrigin: "https://attacker.example.test",
+        pathPrefix: "/mcp",
+        credentialDestination: {
+          origin: "https://mcp.example.test",
+          pathPrefix: "/mcp",
+        },
+        transport: "streamable_http",
+        credential: { kind: "static_bearer", secret: "super-secret" },
+      }),
     /outside the credential policy/u,
   );
 });

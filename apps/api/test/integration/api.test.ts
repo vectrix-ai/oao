@@ -15,7 +15,7 @@ import {
   listApprovedModelCatalog,
 } from "@oao/models-openrouter";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
-import type { McpRemotePort } from "@oao/mcp-remote";
+import type { McpConnectionDefinition, McpRemotePort } from "@oao/mcp-remote";
 import {
   brandedId,
   type AuthorizationScope,
@@ -131,9 +131,11 @@ class TransactionalTestRuntimeCommands implements RuntimeCommandPort {
 }
 
 let fakeMcpDiscoveryRevision = 1;
+const fakeMcpConnections: McpConnectionDefinition[] = [];
 const fakeMcpRemote: McpRemotePort = {
-  discover: () =>
-    Promise.resolve([
+  discover: (connection) => {
+    fakeMcpConnections.push(connection);
+    return Promise.resolve([
       {
         name: "lookup_trace",
         title: "Lookup trace",
@@ -151,7 +153,8 @@ const fakeMcpRemote: McpRemotePort = {
           additionalProperties: false,
         },
       },
-    ]),
+    ]);
+  },
   call: () =>
     Promise.resolve({
       content: '{"found":true}',
@@ -458,6 +461,10 @@ test(
               displayName: "Integration MCP token",
               kind: "static_bearer",
               headerName: null,
+              destination: {
+                origin: "https://MCP.example.test:443",
+                pathPrefix: "/mcp",
+              },
               secret: "integration-mcp-secret",
             },
             "mcp-credential-1",
@@ -466,7 +473,28 @@ test(
         assert.equal(credentialResponse.status, 201);
         const credentialText = await credentialResponse.text();
         assert.doesNotMatch(credentialText, /integration-mcp-secret/u);
-        const credential = JSON.parse(credentialText) as { id: string };
+        const credential = JSON.parse(credentialText) as {
+          id: string;
+          destination: unknown;
+        };
+        assert.deepEqual(credential.destination, {
+          origin: "https://mcp.example.test",
+          pathPrefix: "/mcp",
+        });
+        const redirectedRotation = await app.request(
+          `${projectPath}/mcp-credentials/${credential.id}/rotate`,
+          jsonRequest(
+            {
+              secret: "redirected-integration-mcp-secret",
+              destination: {
+                origin: "https://attacker.example.test",
+                pathPrefix: "/mcp",
+              },
+            },
+            "mcp-credential-rotate-redirect-1",
+          ),
+        );
+        assert.equal(redirectedRotation.status, 400);
         const rotationResponse = await app.request(
           `${projectPath}/mcp-credentials/${credential.id}/rotate`,
           jsonRequest(
@@ -502,6 +530,48 @@ test(
         const policy = (await policyResponse.json()) as {
           latestVersionId: string;
         };
+        // An equivalent spelling of the destination origin is inside it.
+        const equivalentPolicy = await app.request(
+          `${projectPath}/mcp-credential-policies`,
+          jsonRequest(
+            {
+              key: "integration-mcp-egress-default-port",
+              displayName: "Integration MCP egress on the default port",
+              credentialId: credential.id,
+              exactOrigin: "https://MCP.example.test:443",
+              pathPrefix: "/mcp/tools",
+            },
+            "mcp-policy-default-port-1",
+          ),
+        );
+        assert.equal(equivalentPolicy.status, 201);
+        // A policy can never send the credential outside its pinned
+        // destination: not to another origin, not to a broader path, and
+        // not to a sibling path that merely shares a string prefix.
+        for (const [index, outside] of [
+          { exactOrigin: "https://attacker.example.test", pathPrefix: "/mcp" },
+          { exactOrigin: "https://mcp.example.test", pathPrefix: "/" },
+          { exactOrigin: "https://mcp.example.test", pathPrefix: "/mcpx" },
+        ].entries()) {
+          const refused = await app.request(
+            `${projectPath}/mcp-credential-policies`,
+            jsonRequest(
+              {
+                key: `integration-mcp-outside-${index}`,
+                displayName: "Outside the credential destination",
+                credentialId: credential.id,
+                ...outside,
+              },
+              `mcp-policy-outside-${index}`,
+            ),
+          );
+          assert.equal(refused.status, 400, JSON.stringify(outside));
+          assert.match(
+            ((await refused.json()) as { error: { message: string } }).error
+              .message,
+            /pinned destination/u,
+          );
+        }
 
         const serverResponse = await app.request(
           `${projectPath}/mcp-servers`,
@@ -533,6 +603,10 @@ test(
             .length,
           1,
         );
+        assert.deepEqual(fakeMcpConnections.at(-1)?.credentialDestination, {
+          origin: "https://mcp.example.test",
+          pathPrefix: "/mcp",
+        });
 
         const toolsetResponse = await app.request(
           `${projectPath}/mcp-toolsets`,
@@ -647,6 +721,189 @@ test(
           await audit.text(),
           /rotated-integration-mcp-secret|"authorization"\s*:/iu,
         );
+      },
+    );
+
+    await t.test(
+      "an MCP credential stored before destinations existed keeps its policies and is pinned on rotation",
+      async () => {
+        const organizationId = integrationPrincipal.organizationId;
+        const credentialId = randomUUID();
+        const versionId = randomUUID();
+        const legacyPolicyId = randomUUID();
+        const legacyPolicyVersionId = randomUUID();
+        const encrypted = new ProviderCredentialCipher(
+          Buffer.alloc(32, 5),
+        ).encrypt("legacy-integration-mcp-secret", {
+          organizationId,
+          providerId: credentialId,
+          providerType: "mcp",
+          keyVersion: 1,
+        });
+        // The state migration 0054 leaves a credential whose policies span
+        // more than one origin in: no destination on its version.
+        await pool.query(
+          `INSERT INTO oao.mcp_credentials (
+             organization_id,id,credential_key,display_name,credential_kind,
+             header_name,created_by_principal_id
+           ) VALUES ($1,$2,'legacy-mcp-token','Legacy MCP token','static_bearer',NULL,$3)`,
+          [organizationId, credentialId, integrationPrincipal.id],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_credential_versions (
+             organization_id,id,credential_id,version,encrypted_secret,
+             encryption_nonce,encryption_tag,encryption_key_version,
+             credential_fingerprint,created_by_principal_id
+           ) VALUES ($1,$2,$3,1,$4,$5,$6,1,$7,$8)`,
+          [
+            organizationId,
+            versionId,
+            credentialId,
+            encrypted.ciphertext,
+            encrypted.nonce,
+            encrypted.tag,
+            encrypted.fingerprint,
+            integrationPrincipal.id,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_credential_version_lifecycle (
+             organization_id,credential_version_id,updated_by_principal_id
+           ) VALUES ($1,$2,$3)`,
+          [organizationId, versionId, integrationPrincipal.id],
+        );
+        await pool.query(
+          "UPDATE oao.mcp_credentials SET active_version_id=$3 WHERE organization_id=$1 AND id=$2",
+          [organizationId, credentialId, versionId],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_credential_policies (
+             organization_id,id,policy_key,display_name,created_by_principal_id
+           ) VALUES ($1,$2,'legacy-mcp-egress','Legacy MCP egress',$3)`,
+          [organizationId, legacyPolicyId, integrationPrincipal.id],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_credential_policy_versions (
+             organization_id,id,policy_id,version,credential_id,exact_origin,
+             path_prefix,timeout_ms,maximum_response_bytes,content_hash,
+             created_by_principal_id
+           ) VALUES ($1,$2,$3,1,$4,'https://legacy.example.test','/mcp',10000,65536,$5,$6)`,
+          [
+            organizationId,
+            legacyPolicyVersionId,
+            legacyPolicyId,
+            credentialId,
+            createHash("sha256").update(legacyPolicyVersionId).digest(),
+            integrationPrincipal.id,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_credential_policy_version_lifecycle (
+             organization_id,policy_version_id,updated_by_principal_id
+           ) VALUES ($1,$2,$3)`,
+          [organizationId, legacyPolicyVersionId, integrationPrincipal.id],
+        );
+        await pool.query(
+          "UPDATE oao.mcp_credential_policies SET latest_version_id=$3 WHERE organization_id=$1 AND id=$2",
+          [organizationId, legacyPolicyId, legacyPolicyVersionId],
+        );
+
+        const listed = (await (
+          await app.request(`${projectPath}/mcp-credentials`)
+        ).json()) as {
+          data: readonly { id: string; destination: unknown }[];
+        };
+        assert.equal(
+          listed.data.find((item) => item.id === credentialId)?.destination,
+          null,
+        );
+        const newPolicy = await app.request(
+          `${projectPath}/mcp-credential-policies`,
+          jsonRequest(
+            {
+              key: "legacy-mcp-new-egress",
+              displayName: "New egress for a legacy credential",
+              credentialId,
+              exactOrigin: "https://attacker.example.test",
+              pathPrefix: "/",
+            },
+            "mcp-legacy-policy-1",
+          ),
+        );
+        assert.equal(newPolicy.status, 400);
+        assert.match(
+          ((await newPolicy.json()) as { error: { message: string } }).error
+            .message,
+          /no pinned destination/u,
+        );
+
+        const server = (await (
+          await app.request(
+            `${projectPath}/mcp-servers`,
+            jsonRequest(
+              {
+                key: "legacy-mcp",
+                displayName: "Legacy MCP",
+                endpointUrl: "https://legacy.example.test/mcp",
+                transport: "streamable_http",
+              },
+              "mcp-legacy-server-1",
+            ),
+          )
+        ).json()) as { id: string };
+        const grandfathered = await app.request(
+          `${projectPath}/mcp-servers/${server.id}/discover`,
+          jsonRequest(
+            { credentialPolicyVersionId: legacyPolicyVersionId },
+            "mcp-legacy-discovery-1",
+          ),
+        );
+        assert.equal(grandfathered.status, 200);
+        assert.equal(
+          fakeMcpConnections.at(-1)?.credentialDestination,
+          undefined,
+        );
+
+        const pinned = await app.request(
+          `${projectPath}/mcp-credentials/${credentialId}/rotate`,
+          jsonRequest(
+            {
+              secret: "pinned-legacy-integration-mcp-secret",
+              destination: {
+                origin: "https://pinned.example.test",
+                pathPrefix: "/",
+              },
+            },
+            "mcp-legacy-rotate-1",
+          ),
+        );
+        assert.equal(pinned.status, 200);
+        assert.deepEqual(
+          ((await pinned.json()) as { destination: unknown }).destination,
+          { origin: "https://pinned.example.test", pathPrefix: "/" },
+        );
+        const outside = await app.request(
+          `${projectPath}/mcp-servers/${server.id}/discover`,
+          jsonRequest(
+            { credentialPolicyVersionId: legacyPolicyVersionId },
+            "mcp-legacy-discovery-2",
+          ),
+        );
+        assert.equal(outside.status, 400);
+        const inside = await app.request(
+          `${projectPath}/mcp-credential-policies`,
+          jsonRequest(
+            {
+              key: "legacy-mcp-pinned-egress",
+              displayName: "Pinned egress",
+              credentialId,
+              exactOrigin: "https://pinned.example.test",
+              pathPrefix: "/mcp",
+            },
+            "mcp-legacy-policy-2",
+          ),
+        );
+        assert.equal(inside.status, 201);
       },
     );
 

@@ -37,6 +37,7 @@ const toneByStatus: Record<string, ChipTone> = {
   draft: "warning",
   operator: "warning",
   pending: "warning",
+  unpinned: "warning",
   waiting_for_approval: "warning",
   waiting_for_tool: "warning",
 

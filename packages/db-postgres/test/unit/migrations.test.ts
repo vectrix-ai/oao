@@ -789,3 +789,35 @@ test("event webhooks keep cross-tenant claims to scheduling columns", async () =
   assert.match(sql, /FOR UPDATE OF w SKIP LOCKED/u);
   assert.doesNotMatch(sql, /DROP TABLE|DELETE FROM|BYPASSRLS/u);
 });
+
+test("MCP credential destinations are additive and restore forced row security", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0054_mcp_credential_destination.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(sql, /ADD COLUMN destination_origin text/u);
+  assert.match(sql, /ADD COLUMN destination_path_prefix text/u);
+  assert.match(sql, /CREATE FUNCTION oao\.mcp_canonical_origin/u);
+  assert.match(sql, /CREATE FUNCTION oao\.mcp_path_within/u);
+  assert.match(sql, /CREATE FUNCTION oao\.mcp_policy_within_destination/u);
+  // Every relaxation for the backfill is undone in the same migration.
+  for (const table of [
+    "mcp_credential_versions",
+    "mcp_credential_policy_versions",
+    "mcp_server_versions",
+  ]) {
+    assert.match(
+      sql,
+      new RegExp(`ALTER TABLE oao\\.${table} NO FORCE ROW LEVEL SECURITY`, "u"),
+    );
+    assert.match(
+      sql,
+      new RegExp(`ALTER TABLE oao\\.${table} FORCE ROW LEVEL SECURITY`, "u"),
+    );
+  }
+  assert.match(sql, /ENABLE TRIGGER mcp_credential_versions_immutable/u);
+  assert.doesNotMatch(sql, /DROP TABLE|DROP COLUMN|DELETE FROM|BYPASSRLS/u);
+});

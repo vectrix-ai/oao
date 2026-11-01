@@ -4925,6 +4925,8 @@ interface McpExecutionRow {
   credential_version_id: string;
   credential_kind: "static_bearer" | "api_key_header";
   header_name: string | null;
+  destination_origin: string | null;
+  destination_path_prefix: string | null;
   encrypted_secret: Buffer;
   encryption_nonce: Buffer;
   encryption_tag: Buffer;
@@ -4996,6 +4998,7 @@ export function createPostgresMcpToolExecutor(input: {
                     policy.maximum_response_bytes,credential.id AS credential_id,
                     version.id AS credential_version_id,
                     credential.credential_kind,credential.header_name,
+                    version.destination_origin,version.destination_path_prefix,
                     version.encrypted_secret,version.encryption_nonce,
                     version.encryption_tag,version.encryption_key_version
                FROM oao.session_mcp_bindings binding
@@ -5038,6 +5041,13 @@ export function createPostgresMcpToolExecutor(input: {
                JOIN oao.mcp_credential_versions version
                  ON version.organization_id=credential.organization_id
                 AND version.id=credential.active_version_id
+                AND (
+                  version.destination_origin IS NULL
+                  OR oao.mcp_policy_within_destination(
+                    policy.exact_origin,policy.path_prefix,
+                    version.destination_origin,version.destination_path_prefix
+                  )
+                )
                JOIN oao.mcp_credential_version_lifecycle credential_lifecycle
                  ON credential_lifecycle.organization_id=version.organization_id
                 AND credential_lifecycle.credential_version_id=version.id
@@ -5155,6 +5165,14 @@ export function createPostgresMcpToolExecutor(input: {
             timeoutMs: row.timeout_ms,
             maximumResponseBytes: row.maximum_response_bytes,
             credential,
+            ...(row.destination_origin && row.destination_path_prefix
+              ? {
+                  credentialDestination: {
+                    origin: row.destination_origin,
+                    pathPrefix: row.destination_path_prefix,
+                  },
+                }
+              : {}),
           },
           {
             tool: {

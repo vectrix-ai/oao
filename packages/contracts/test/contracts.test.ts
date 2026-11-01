@@ -26,6 +26,9 @@ import {
   parseCreateMcpServerInput,
   parseCreateMcpCredentialInput,
   parseCreateMcpCredentialPolicyInput,
+  parseRotateMcpCredentialInput,
+  mcpDestinationContains,
+  mcpPathWithin,
   CreateProjectInputSchema,
 } from "../src/index.js";
 
@@ -781,6 +784,80 @@ test("agent publications pin focused Harness Operations with structured results"
   );
 });
 
+test("MCP credentials pin an HTTPS destination that policies must lie inside", () => {
+  const destination = {
+    origin: "https://mcp.example.test",
+    pathPrefix: "/mcp",
+  };
+  assert.deepEqual(
+    parseCreateMcpCredentialInput({
+      key: "pinned",
+      displayName: "Pinned",
+      kind: "static_bearer",
+      destination,
+      secret: "secret-value",
+    }).destination,
+    destination,
+  );
+  assert.throws(() =>
+    parseCreateMcpCredentialInput({
+      key: "unpinned",
+      displayName: "Unpinned",
+      kind: "static_bearer",
+      secret: "secret-value",
+    }),
+  );
+  for (const unsafe of [
+    { origin: "http://mcp.example.test", pathPrefix: "/" },
+    { origin: "https://mcp.example.test/mcp", pathPrefix: "/" },
+    { origin: "https://user@mcp.example.test", pathPrefix: "/" },
+    { origin: "https://mcp.example.test", pathPrefix: "mcp" },
+    { origin: "https://mcp.example.test", pathPrefix: "/mcp?x=1" },
+  ])
+    assert.throws(
+      () =>
+        parseCreateMcpCredentialInput({
+          key: "unsafe",
+          displayName: "Unsafe",
+          kind: "static_bearer",
+          destination: unsafe,
+          secret: "secret-value",
+        }),
+      JSON.stringify(unsafe),
+    );
+  assert.equal(
+    parseRotateMcpCredentialInput({ secret: "secret-value" }).destination,
+    undefined,
+  );
+
+  assert.equal(mcpPathWithin("/mcp", "/mcp"), true);
+  assert.equal(mcpPathWithin("/mcp/v2", "/mcp"), true);
+  assert.equal(mcpPathWithin("/mcpx", "/mcp"), false);
+  assert.equal(mcpPathWithin("/api/x", "/api/"), true);
+  assert.equal(mcpPathWithin("/", "/mcp"), false);
+  assert.equal(
+    mcpDestinationContains(destination, {
+      origin: "https://MCP.example.test:443/",
+      pathPrefix: "/mcp/tools",
+    }),
+    true,
+  );
+  assert.equal(
+    mcpDestinationContains(destination, {
+      origin: "https://attacker.example.test",
+      pathPrefix: "/mcp",
+    }),
+    false,
+  );
+  assert.equal(
+    mcpDestinationContains(destination, {
+      origin: "https://mcp.example.test",
+      pathPrefix: "/",
+    }),
+    false,
+  );
+});
+
 test("MCP contracts require HTTPS, safe credential headers, and unique bindings", () => {
   assert.equal(
     parseCreateMcpServerInput({
@@ -804,6 +881,7 @@ test("MCP contracts require HTTPS, safe credential headers, and unique bindings"
       displayName: "Unsafe",
       kind: "api_key_header",
       headerName: "Host",
+      destination: { origin: "https://mcp.example.test", pathPrefix: "/" },
       secret: "secret-value",
     }),
   );

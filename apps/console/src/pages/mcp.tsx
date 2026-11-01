@@ -13,6 +13,7 @@ import type {
   McpCredentialPolicy,
   McpServer,
   McpToolset,
+  RotateMcpCredentialInput,
 } from "../api/types";
 import {
   Alert,
@@ -115,8 +116,8 @@ export function McpPage() {
   const rotate = useMutation({
     mutationFn: (input: {
       readonly credentialId: string;
-      readonly secret: string;
-    }) => api.rotateMcpCredential(input.credentialId, { secret: input.secret }),
+      readonly value: RotateMcpCredentialInput;
+    }) => api.rotateMcpCredential(input.credentialId, input.value),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["mcp-credentials"] });
       setRotatingCredential(null);
@@ -195,7 +196,7 @@ export function McpPage() {
             <div className="stack">
               <ResourcePanel
                 title="Credentials"
-                description="Encrypted bearer tokens or API-key headers. Values are write-only."
+                description="Encrypted bearer tokens or API-key headers, each pinned to the one destination its secret may reach. Values are write-only."
                 action="Add credential"
                 disabled={!encryptionConfigured}
                 onAction={() => setDialog("credential")}
@@ -215,6 +216,7 @@ export function McpPage() {
                       <tr>
                         <th>Name</th>
                         <th>Kind</th>
+                        <th>Destination</th>
                         <th>Fingerprint</th>
                         <th>Status</th>
                         <th>Actions</th>
@@ -229,6 +231,16 @@ export function McpPage() {
                             <code>{item.key}</code>
                           </td>
                           <td>{item.kind.replaceAll("_", " ")}</td>
+                          <td>
+                            {item.destination ? (
+                              <code>
+                                {item.destination.origin}
+                                {item.destination.pathPrefix}
+                              </code>
+                            ) : (
+                              <StatusChip value="unpinned" />
+                            )}
+                          </td>
                           <td>
                             <span className="key-mask">
                               ••••{item.credentialFingerprint.slice(-6)}
@@ -266,7 +278,7 @@ export function McpPage() {
               </ResourcePanel>
               <ResourcePanel
                 title="Credential policies"
-                description="Bind one credential to an exact HTTPS origin and path prefix."
+                description="Use one credential at an exact HTTPS origin and path prefix inside the credential's pinned destination."
                 action="Add policy"
                 disabled={(credentials.data?.data.length ?? 0) === 0}
                 onAction={() => setDialog("policy")}
@@ -495,8 +507,8 @@ export function McpPage() {
             rotate.reset();
             setRotatingCredential(null);
           }}
-          onSubmit={(secret) =>
-            rotate.mutate({ credentialId: rotatingCredential.id, secret })
+          onSubmit={(value) =>
+            rotate.mutate({ credentialId: rotatingCredential.id, value })
           }
         />
       ) : null}
@@ -732,6 +744,7 @@ function McpSetupDialog({
           kind: credentialKind,
           headerName:
             credentialKind === "api_key_header" ? headerName.trim() : null,
+          destination: { origin: exactOrigin, pathPrefix },
           secret,
         });
         current = remember({ credential });
@@ -984,8 +997,9 @@ function McpSetupDialog({
       {step === 1 ? (
         <div className="stack">
           <Alert tone="info" role="status" title="Credential stays write-only">
-            OAO encrypts this value immediately and injects it only at the exact
-            approved destination. It is never shown again.
+            OAO encrypts this value immediately and pins it to the origin and
+            path prefix under Security policy and limits. It is never shown
+            again, and no later policy can send it anywhere else.
           </Alert>
           <Field label="Authentication type">
             <Select
@@ -1030,11 +1044,17 @@ function McpSetupDialog({
           <details className="policy-details">
             <summary>Security policy and limits</summary>
             <div className="policy-body stack">
-              <Field label="Exact HTTPS origin">
+              <Field
+                label="Exact HTTPS origin"
+                hint="The credential is pinned to this origin and path prefix."
+              >
                 <Input
                   type="url"
                   value={exactOrigin}
-                  disabled={resources.policy !== undefined}
+                  disabled={
+                    resources.credential !== undefined ||
+                    resources.policy !== undefined
+                  }
                   onChange={(event) =>
                     setExactOrigin(event.currentTarget.value)
                   }
@@ -1050,7 +1070,10 @@ function McpSetupDialog({
               >
                 <Input
                   value={pathPrefix}
-                  disabled={resources.policy !== undefined}
+                  disabled={
+                    resources.credential !== undefined ||
+                    resources.policy !== undefined
+                  }
                   onChange={(event) => setPathPrefix(event.currentTarget.value)}
                 />
               </Field>
@@ -1247,9 +1270,16 @@ function RotateCredentialDialog({
   readonly pending: boolean;
   readonly error: Error | null;
   readonly onClose: () => void;
-  readonly onSubmit: (secret: string) => void;
+  readonly onSubmit: (value: RotateMcpCredentialInput) => void;
 }) {
   const [secret, setSecret] = useState("");
+  const [origin, setOrigin] = useState("");
+  const [pathPrefix, setPathPrefix] = useState("/");
+  // A credential stored before destinations existed is pinned on rotation.
+  const pin = credential.destination === null;
+  const invalid =
+    secret.length < 8 ||
+    (pin && (!origin.startsWith("https://") || !pathPrefix.startsWith("/")));
   return (
     <Dialog
       title={`Rotate ${credential.displayName}`}
@@ -1257,23 +1287,45 @@ function RotateCredentialDialog({
       onClose={onClose}
       onSubmit={(event) => {
         event.preventDefault();
-        if (secret.length >= 8) onSubmit(secret);
+        if (invalid) return;
+        onSubmit(
+          pin ? { secret, destination: { origin, pathPrefix } } : { secret },
+        );
       }}
       footer={
         <>
           <Button onClick={onClose} disabled={pending}>
             Cancel
           </Button>
-          <Button
-            type="submit"
-            variant="primary"
-            disabled={pending || secret.length < 8}
-          >
+          <Button type="submit" variant="primary" disabled={pending || invalid}>
             {pending ? "Rotating…" : "Rotate credential"}
           </Button>
         </>
       }
     >
+      {pin ? (
+        <>
+          <Alert tone="warning" role="status" title="Pin a destination">
+            This credential predates destination pinning. Its existing policies
+            keep working until it is rotated; new policies need a pinned
+            destination. Policies outside the destination stop working.
+          </Alert>
+          <Field label="Destination HTTPS origin">
+            <Input
+              type="url"
+              placeholder="https://mcp.example.com"
+              value={origin}
+              onChange={(event) => setOrigin(event.target.value)}
+            />
+          </Field>
+          <Field label="Destination path prefix">
+            <Input
+              value={pathPrefix}
+              onChange={(event) => setPathPrefix(event.target.value)}
+            />
+          </Field>
+        </>
+      ) : null}
       <Field label="New secret">
         <Input
           type="password"
@@ -1356,8 +1408,14 @@ function McpCreateDialog({
   const [transport, setTransport] =
     useState<CreateMcpServerInput["transport"]>("streamable_http");
   const [credentialId, setCredentialId] = useState(credentials[0]?.id ?? "");
-  const [exactOrigin, setExactOrigin] = useState("");
-  const [pathPrefix, setPathPrefix] = useState("/");
+  const initialDestination =
+    kind === "policy" ? credentials[0]?.destination : undefined;
+  const [exactOrigin, setExactOrigin] = useState(
+    initialDestination?.origin ?? "",
+  );
+  const [pathPrefix, setPathPrefix] = useState(
+    initialDestination?.pathPrefix ?? "/",
+  );
   const eligibleServers = servers.filter((server) => server.tools.length > 0);
   const [serverVersionId, setServerVersionId] = useState(
     eligibleServers[0]?.latestVersionId ?? "",
@@ -1378,7 +1436,10 @@ function McpCreateDialog({
   const invalid =
     !validKey ||
     !displayName.trim() ||
-    (kind === "credential" && secret.length < 8) ||
+    (kind === "credential" &&
+      (secret.length < 8 ||
+        !exactOrigin.startsWith("https://") ||
+        !pathPrefix.startsWith("/"))) ||
     (kind === "server" && !endpointUrl.startsWith("https://")) ||
     (kind === "policy" &&
       (!credentialId ||
@@ -1396,6 +1457,7 @@ function McpCreateDialog({
           displayName: displayName.trim(),
           kind: credentialKind,
           headerName: credentialKind === "api_key_header" ? headerName : null,
+          destination: { origin: exactOrigin, pathPrefix },
           secret,
         },
       });
@@ -1487,6 +1549,26 @@ function McpCreateDialog({
                 />
               </Field>
             ) : null}
+            <Field
+              label="Destination HTTPS origin"
+              hint="The secret is only ever sent to this origin."
+            >
+              <Input
+                type="url"
+                placeholder="https://mcp.example.com"
+                value={exactOrigin}
+                onChange={(event) => setExactOrigin(event.target.value)}
+              />
+            </Field>
+            <Field
+              label="Destination path prefix"
+              hint="Policies for this credential must stay under this path."
+            >
+              <Input
+                value={pathPrefix}
+                onChange={(event) => setPathPrefix(event.target.value)}
+              />
+            </Field>
             <Field label="Secret" hint="Write-only. It will never be returned.">
               <Input
                 type="password"
@@ -1527,7 +1609,16 @@ function McpCreateDialog({
             <Field label="Credential">
               <Select
                 value={credentialId}
-                onChange={(event) => setCredentialId(event.target.value)}
+                onChange={(event) => {
+                  setCredentialId(event.target.value);
+                  const destination = credentials.find(
+                    (item) => item.id === event.target.value,
+                  )?.destination;
+                  if (destination) {
+                    setExactOrigin(destination.origin);
+                    setPathPrefix(destination.pathPrefix);
+                  }
+                }}
               >
                 {credentials.map((item) => (
                   <option key={item.id} value={item.id}>

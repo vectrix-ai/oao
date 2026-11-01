@@ -110,7 +110,9 @@ and should shape integrations:
 - **Remote MCP is HTTPS and static-credential only.** OAO supports Streamable
   HTTP and legacy SSE with static bearer or safe API-key headers, immutable
   discovery snapshots, restricted toolsets, and exact-origin credential
-  injection. Stdio, OAuth/refresh, dynamic client registration, per-user
+  injection inside each credential's pinned destination. A credential the
+  upgrade could not pin keeps its existing policies but accepts no new policy
+  until it is rotated with a destination. Stdio, OAuth/refresh, dynamic client registration, per-user
   delegated credentials, automatic retry of outcome-unknown calls, and sandbox
   secret substitution are deferred. Tool results are untrusted remote content;
   OAO bounds and validates them but cannot prove they are free of prompt

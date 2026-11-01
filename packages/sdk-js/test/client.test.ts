@@ -292,6 +292,7 @@ test("client manages redacted MCP resources", async () => {
       displayName: "LangSmith proxy",
       kind: "static_bearer",
       headerName: null,
+      destination: { origin: "https://mcp.example.test", pathPrefix: "/mcp" },
       secret: "secret-value",
     },
     { idempotencyKey: "credential-1" },
@@ -309,6 +310,7 @@ test("client manages redacted MCP resources", async () => {
     displayName: "LangSmith proxy",
     kind: "static_bearer",
     headerName: null,
+    destination: { origin: "https://mcp.example.test", pathPrefix: "/mcp" },
     secret: "secret-value",
   });
   assert.equal(

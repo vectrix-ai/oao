@@ -1966,6 +1966,71 @@ export const DiscoverMcpServerInputSchema = v.strictObject({
   credentialPolicyVersionId: v.optional(IdSchema),
 });
 
+const McpHttpsOriginSchema = v.pipe(
+  v.string(),
+  v.maxLength(512),
+  v.url(),
+  v.check((value) => {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.pathname === "/" &&
+      !url.search &&
+      !url.hash &&
+      !url.username &&
+      !url.password
+    );
+  }, "origin must be an HTTPS origin without a path, query, user information or fragment"),
+);
+
+const McpPathPrefixSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(1_024),
+  v.regex(
+    /^\/[^?#]*$/u,
+    "pathPrefix must be absolute and contain no query or fragment",
+  ),
+);
+
+/**
+ * The only HTTPS origin and path prefix a credential version's secret may be
+ * sent to. Policies that use the credential must lie inside it.
+ */
+export const McpCredentialDestinationSchema = v.strictObject({
+  origin: McpHttpsOriginSchema,
+  pathPrefix: McpPathPrefixSchema,
+});
+
+/** The canonical form OAO stores an HTTPS origin in: lowercase, no default port. */
+export function canonicalMcpOrigin(value: string): string {
+  return new URL(value).origin;
+}
+
+/**
+ * True when `path` equals `prefix` or continues it after a "/" boundary:
+ * "/mcp" contains "/mcp" and "/mcp/v2" but not "/mcpx".
+ */
+export function mcpPathWithin(path: string, prefix: string): boolean {
+  return (
+    path === prefix ||
+    (path.startsWith(prefix) &&
+      (prefix.endsWith("/") || path.charAt(prefix.length) === "/"))
+  );
+}
+
+/** True when a policy's origin and path prefix lie inside a credential destination. */
+export function mcpDestinationContains(
+  destination: { readonly origin: string; readonly pathPrefix: string },
+  target: { readonly origin: string; readonly pathPrefix: string },
+): boolean {
+  return (
+    canonicalMcpOrigin(target.origin) ===
+      canonicalMcpOrigin(destination.origin) &&
+    mcpPathWithin(target.pathPrefix, destination.pathPrefix)
+  );
+}
+
 export const McpCredentialSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
@@ -1973,6 +2038,10 @@ export const McpCredentialSchema = v.object({
   displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
   kind: McpCredentialKindSchema,
   headerName: v.nullable(McpCredentialHeaderSchema),
+  /** Null only for a credential stored before destinations were pinned. */
+  destination: v.nullable(
+    v.object({ origin: v.string(), pathPrefix: v.string() }),
+  ),
   credentialConfigured: v.literal(true),
   credentialFingerprint: v.pipe(v.string(), v.regex(/^[a-f0-9]{12}$/u)),
   credentialVersion: v.pipe(v.number(), v.integer(), v.minValue(1)),
@@ -1988,6 +2057,7 @@ export const CreateMcpCredentialInputSchema = v.pipe(
     displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
     kind: McpCredentialKindSchema,
     headerName: v.optional(v.nullable(McpCredentialHeaderSchema), null),
+    destination: McpCredentialDestinationSchema,
     secret: v.pipe(v.string(), v.minLength(8), v.maxLength(16_384)),
   }),
   v.check(
@@ -2000,6 +2070,11 @@ export const CreateMcpCredentialInputSchema = v.pipe(
 
 export const RotateMcpCredentialInputSchema = v.strictObject({
   secret: v.pipe(v.string(), v.minLength(8), v.maxLength(16_384)),
+  /**
+   * Pins a credential stored before destinations existed. A pinned
+   * credential keeps its destination; this must then be omitted or equal.
+   */
+  destination: v.optional(McpCredentialDestinationSchema),
 });
 
 export const McpCredentialPolicySchema = v.object({
@@ -2631,6 +2706,9 @@ export type CreateMcpCredentialInput = v.InferOutput<
 export type RotateMcpCredentialInput = v.InferOutput<
   typeof RotateMcpCredentialInputSchema
 >;
+export type McpCredentialDestination = v.InferOutput<
+  typeof McpCredentialDestinationSchema
+>;
 export type McpCredentialPolicy = v.InferOutput<
   typeof McpCredentialPolicySchema
 >;
@@ -2796,6 +2874,8 @@ const BackupMcpCredentialSchema = v.strictObject({
   displayName: BackupNameSchema,
   kind: McpCredentialKindSchema,
   headerName: v.nullable(McpCredentialHeaderSchema),
+  /** Absent in backups made before destinations were pinned. */
+  destination: v.optional(v.nullable(McpCredentialDestinationSchema), null),
   status: v.picklist(["active", "revoked"]),
   credentialFingerprint: BackupFingerprintSchema,
 });

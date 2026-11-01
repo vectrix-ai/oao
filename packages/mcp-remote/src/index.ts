@@ -39,11 +39,21 @@ export type McpCredentialMaterial =
       readonly secret: string;
     };
 
+export interface McpCredentialDestination {
+  readonly origin: string;
+  readonly pathPrefix: string;
+}
+
 export interface McpConnectionDefinition {
   readonly endpointUrl: string;
   /** Credential-bearing requests may target only this origin and path prefix. */
   readonly exactOrigin?: string;
   readonly pathPrefix?: string;
+  /**
+   * The destination pinned on the credential version. Every credential-bearing
+   * request must also lie inside it, on a path-segment boundary.
+   */
+  readonly credentialDestination?: McpCredentialDestination;
   readonly transport: McpTransport;
   readonly timeoutMs?: number;
   readonly maximumResponseBytes?: number;
@@ -149,6 +159,29 @@ export function isPublicNetworkAddress(address: string): boolean {
   if (family === 4) return !isBlockedIpv4(address);
   if (family === 6) return !isBlockedIpv6(address);
   return false;
+}
+
+/**
+ * True when `path` equals `prefix` or continues it after a "/" boundary:
+ * "/mcp" contains "/mcp" and "/mcp/v2" but not "/mcpx".
+ */
+export function isPathWithin(path: string, prefix: string): boolean {
+  return (
+    path === prefix ||
+    (path.startsWith(prefix) &&
+      (prefix.endsWith("/") || path.charAt(prefix.length) === "/"))
+  );
+}
+
+function withinDestination(
+  url: URL,
+  destination: McpCredentialDestination | undefined,
+): boolean {
+  if (!destination) return true;
+  return (
+    url.origin === new URL(destination.origin).origin &&
+    isPathWithin(url.pathname, destination.pathPrefix)
+  );
 }
 
 export function validateCredentialHeaderName(value: string): string {
@@ -335,7 +368,9 @@ export function createBrokeredMcpFetch(
   if (
     endpoint.origin !== exactOrigin ||
     !pathPrefix.startsWith("/") ||
-    !endpoint.pathname.startsWith(pathPrefix)
+    !endpoint.pathname.startsWith(pathPrefix) ||
+    (definition.credential &&
+      !withinDestination(endpoint, definition.credentialDestination))
   )
     throw new TypeError("MCP endpoint is outside the credential policy");
   const maximumResponseBytes =
@@ -361,7 +396,9 @@ export function createBrokeredMcpFetch(
     if (
       (requested.protocol !== "https:" && !options.allowPrivateNetwork) ||
       requested.origin !== exactOrigin ||
-      !requested.pathname.startsWith(pathPrefix)
+      !requested.pathname.startsWith(pathPrefix) ||
+      (definition.credential &&
+        !withinDestination(requested, definition.credentialDestination))
     )
       throw new Error(
         "MCP request destination is outside the credential policy",

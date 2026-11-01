@@ -1,8 +1,10 @@
 import {
   CONFIGURATION_BACKUP_FORMAT,
   CONFIGURATION_BACKUP_FORMAT_VERSION,
+  canonicalMcpOrigin,
   checkConfigurationBackupReferences,
   configurationBackupCounts,
+  mcpDestinationContains,
   parseConfigurationBackup,
   parseConfigurationRestoreInput,
   parseCreateEventWebhookInput,
@@ -2063,6 +2065,10 @@ export class DemoConsoleApi implements ConsoleApi {
       displayName: input.displayName,
       kind: input.kind,
       headerName: input.headerName ?? null,
+      destination: {
+        origin: canonicalMcpOrigin(input.destination.origin),
+        pathPrefix: input.destination.pathPrefix,
+      },
       credentialConfigured: true,
       credentialFingerprint: "000000000000",
       credentialVersion: 1,
@@ -2075,13 +2081,32 @@ export class DemoConsoleApi implements ConsoleApi {
     return structuredClone(created);
   }
 
-  async rotateMcpCredential(credentialId: string) {
+  async rotateMcpCredential(
+    credentialId: string,
+    input: Parameters<ConsoleApi["rotateMcpCredential"]>[1],
+  ) {
     const credential = this.#mcpCredentials.find(
       (item) => item.id === credentialId,
     );
     if (!credential) throw new Error("MCP credential not found");
+    const requested = input.destination
+      ? {
+          origin: canonicalMcpOrigin(input.destination.origin),
+          pathPrefix: input.destination.pathPrefix,
+        }
+      : undefined;
+    if (
+      credential.destination &&
+      requested &&
+      (requested.origin !== credential.destination.origin ||
+        requested.pathPrefix !== credential.destination.pathPrefix)
+    )
+      throw new Error(
+        "MCP credential destination is pinned; create a new credential for another destination",
+      );
     const rotated = {
       ...credential,
+      destination: credential.destination ?? requested ?? null,
       credentialVersion: credential.credentialVersion + 1,
       updatedAt: new Date().toISOString(),
     };
@@ -2114,6 +2139,23 @@ export class DemoConsoleApi implements ConsoleApi {
   async createMcpCredentialPolicy(
     input: Parameters<ConsoleApi["createMcpCredentialPolicy"]>[0],
   ) {
+    const credential = this.#mcpCredentials.find(
+      (item) => item.id === input.credentialId && item.status === "active",
+    );
+    if (!credential) throw new Error("MCP credential is unavailable");
+    if (!credential.destination)
+      throw new Error(
+        "MCP credential has no pinned destination; rotate it with a destination before creating a policy",
+      );
+    if (
+      !mcpDestinationContains(credential.destination, {
+        origin: input.exactOrigin,
+        pathPrefix: input.pathPrefix,
+      })
+    )
+      throw new Error(
+        "MCP credential policy origin and path prefix must lie inside the credential's pinned destination",
+      );
     const now = new Date().toISOString();
     const created: McpCredentialPolicy = {
       id: crypto.randomUUID(),
@@ -3312,6 +3354,7 @@ export class DemoConsoleApi implements ConsoleApi {
         displayName: credential.displayName,
         kind: credential.kind,
         headerName: credential.headerName,
+        destination: credential.destination,
         status: credential.status === "revoked" ? "revoked" : "active",
         credentialFingerprint:
           credential.status === "revoked"
@@ -3710,6 +3753,7 @@ export class DemoConsoleApi implements ConsoleApi {
         displayName: entry.displayName,
         kind: entry.kind,
         headerName: entry.headerName,
+        destination: entry.destination,
         status: entry.status,
       });
     }

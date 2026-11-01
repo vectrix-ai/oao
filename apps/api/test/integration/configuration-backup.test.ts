@@ -279,6 +279,7 @@ async function seedSource(
       displayName: "Trace token",
       kind: "static_bearer",
       headerName: null,
+      destination: { origin: "https://mcp.example.test", pathPrefix: "/mcp" },
       secret: SECRETS.mcp,
     },
     201,
@@ -292,6 +293,7 @@ async function seedSource(
       displayName: "Old token",
       kind: "api_key_header",
       headerName: "x-api-key",
+      destination: { origin: "https://old.example.test", pathPrefix: "/" },
       secret: "backup-old-mcp-secret",
     },
     201,
@@ -810,10 +812,19 @@ test(
         backup.mcpCredentials.map((credential) => [
           credential.key,
           credential.status,
+          credential.destination,
         ]),
         [
-          ["backup-trace-token", "active"],
-          ["backup-old-token", "revoked"],
+          [
+            "backup-trace-token",
+            "active",
+            { origin: "https://mcp.example.test", pathPrefix: "/mcp" },
+          ],
+          [
+            "backup-old-token",
+            "revoked",
+            { origin: "https://old.example.test", pathPrefix: "/" },
+          ],
         ],
       );
     });

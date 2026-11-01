@@ -3217,6 +3217,9 @@ function registerMcpRoutes(
                 kind: created.kind,
                 fingerprint: created.credentialFingerprint,
                 credentialVersion: created.credentialVersion,
+                destination: created.destination
+                  ? `${created.destination.origin}${created.destination.pathPrefix}`
+                  : null,
               },
             });
             await dependencies.store.appendEvent(tx, actor, {
@@ -3259,7 +3262,7 @@ function registerMcpRoutes(
                 tx,
                 actor,
                 c.req.param("credentialId"),
-                input.secret,
+                input,
               );
               await dependencies.store.appendAudit(tx, actor, {
                 action: "mcp.credential_rotated",
@@ -3268,6 +3271,9 @@ function registerMcpRoutes(
                 detail: {
                   fingerprint: rotated.credentialFingerprint,
                   credentialVersion: rotated.credentialVersion,
+                  destination: rotated.destination
+                    ? `${rotated.destination.origin}${rotated.destination.pathPrefix}`
+                    : null,
                 },
               });
               await dependencies.store.appendEvent(tx, actor, {
