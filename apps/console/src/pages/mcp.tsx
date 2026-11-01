@@ -53,7 +53,7 @@ import {
 
 /** A create dialog opened from one connection's details. */
 type CreateDialog = {
-  readonly kind: "policy" | "toolset";
+  readonly kind: "credential" | "policy" | "toolset";
   readonly server: McpServer;
 };
 
@@ -119,9 +119,11 @@ export function McpPage() {
   };
   const create = useMutation({
     mutationFn: async (input: McpCreateInput) =>
-      input.kind === "policy"
-        ? api.createMcpCredentialPolicy(input.value)
-        : api.createMcpToolset(input.value),
+      input.kind === "credential"
+        ? api.createMcpCredential(input.value)
+        : input.kind === "policy"
+          ? api.createMcpCredentialPolicy(input.value)
+          : api.createMcpToolset(input.value),
     onSuccess: async () => {
       await refresh();
       setDialog(null);
@@ -585,6 +587,13 @@ function ConnectionDetailsDialog({
 
         <span className="row">
           <h3>Authentication</h3>
+          <Button
+            size="sm"
+            icon={<Plus size={13} />}
+            onClick={() => onCreate("credential")}
+          >
+            Add credential
+          </Button>
           <Button
             size="sm"
             icon={<Plus size={13} />}
@@ -2314,10 +2323,11 @@ function RotateCredentialDialog({
 }
 
 type McpCreateInput =
+  | { readonly kind: "credential"; readonly value: CreateMcpCredentialInput }
   | { readonly kind: "policy"; readonly value: CreateMcpCredentialPolicyInput }
   | { readonly kind: "toolset"; readonly value: CreateMcpToolsetInput };
 
-/** Adds a policy or a toolset to one connection. */
+/** Adds a credential, a policy, or a toolset to one connection. */
 function McpCreateDialog({
   kind,
   server,
@@ -2345,12 +2355,21 @@ function McpCreateDialog({
   const [selectedTools, setSelectedTools] = useState<readonly string[]>([]);
   const [toolApproval, setToolApproval] =
     useState<CreateMcpToolsetInput["tools"][number]["approval"]>("always");
-  const title =
-    kind === "policy" ? "Add credential policy" : "Create MCP toolset";
+  const [credentialKind, setCredentialKind] = useState<
+    "static_bearer" | "api_key_header"
+  >("static_bearer");
+  const [headerName, setHeaderName] = useState("X-API-Key");
+  const [secret, setSecret] = useState("");
+  const title = {
+    credential: "Add MCP credential",
+    policy: "Add credential policy",
+    toolset: "Create MCP toolset",
+  }[kind];
   const validKey = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/u.test(key);
   const invalid =
     !validKey ||
     !displayName.trim() ||
+    (kind === "credential" && (!derived || secret.length < 8)) ||
     (kind === "policy" &&
       (!credentialId ||
         !exactOrigin.startsWith("https://") ||
@@ -2359,7 +2378,36 @@ function McpCreateDialog({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (invalid) return;
-    if (kind === "policy")
+    if (kind === "credential" && derived)
+      // The secret may reach only this connection's endpoint.
+      onSubmit({
+        kind,
+        value:
+          credentialKind === "api_key_header"
+            ? {
+                key,
+                displayName: displayName.trim(),
+                kind: credentialKind,
+                headerName,
+                destination: {
+                  origin: derived.exactOrigin,
+                  pathPrefix: derived.pathPrefix,
+                },
+                secret,
+              }
+            : {
+                key,
+                displayName: displayName.trim(),
+                kind: credentialKind,
+                headerName: null,
+                destination: {
+                  origin: derived.exactOrigin,
+                  pathPrefix: derived.pathPrefix,
+                },
+                secret,
+              },
+      });
+    else if (kind === "policy")
       onSubmit({
         kind,
         value: {
@@ -2373,7 +2421,7 @@ function McpCreateDialog({
           forwardCallContext,
         },
       });
-    else
+    else if (kind === "toolset")
       onSubmit({
         kind,
         value: {
@@ -2456,6 +2504,47 @@ function McpCreateDialog({
               disabled={false}
               onChange={setForwardCallContext}
             />
+          </>
+        ) : kind === "credential" ? (
+          <>
+            <Field label="Credential type">
+              <Select
+                value={credentialKind}
+                onChange={(event) =>
+                  setCredentialKind(
+                    event.currentTarget.value === "api_key_header"
+                      ? "api_key_header"
+                      : "static_bearer",
+                  )
+                }
+              >
+                <option value="static_bearer">Static bearer</option>
+                <option value="api_key_header">API key header</option>
+              </Select>
+            </Field>
+            {credentialKind === "api_key_header" ? (
+              <Field label="Header name">
+                <Input
+                  value={headerName}
+                  onChange={(event) => setHeaderName(event.target.value)}
+                />
+              </Field>
+            ) : null}
+            <Field
+              label="Secret"
+              hint={
+                derived
+                  ? `Stored encrypted and sent only to ${derived.exactOrigin}${derived.pathPrefix}. Add a policy for it afterwards. OAuth client credentials are set up with Add MCP server.`
+                  : "This endpoint cannot hold a credential."
+              }
+            >
+              <Input
+                type="password"
+                autoComplete="off"
+                value={secret}
+                onChange={(event) => setSecret(event.target.value)}
+              />
+            </Field>
           </>
         ) : (
           <>

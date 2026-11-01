@@ -1344,8 +1344,39 @@ describe("management console", () => {
       }),
     ]);
 
+    // A replacement credential can be added from the connection itself,
+    // pinned to its endpoint.
+    await user.click(
+      withToolset.getByRole("button", { name: "Add credential" }),
+    );
+    const credentialDialog = within(
+      await screen.findByRole("dialog", { name: "Add MCP credential" }),
+    );
+    await user.type(credentialDialog.getByLabelText("Key"), "trace-backup");
+    await user.type(
+      credentialDialog.getByLabelText("Display name"),
+      "Trace backup",
+    );
+    await user.type(
+      credentialDialog.getByLabelText("Secret"),
+      "backup-secret-value",
+    );
+    await user.click(credentialDialog.getByRole("button", { name: "Save" }));
+    const withCredential = within(
+      await screen.findByRole("dialog", { name: "Trace observability" }),
+    );
+    const backup = (await api.listMcpCredentials()).data.find(
+      (credential) => credential.key === "trace-backup",
+    );
+    expect(backup?.destination).toEqual({
+      origin: "https://mcp.example.test",
+      pathPrefix: "/rpc",
+    });
+
     // A policy can never point the pinned credential at another server.
-    await user.click(withToolset.getByRole("button", { name: "Add policy" }));
+    await user.click(
+      withCredential.getByRole("button", { name: "Add policy" }),
+    );
     const policyDialog = within(
       await screen.findByRole("dialog", { name: "Add credential policy" }),
     );
