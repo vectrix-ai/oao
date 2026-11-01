@@ -77,6 +77,11 @@
         },
         {
           "type": "json",
+          "path": "packages/mcp-server/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
           "path": "packages/model-images/package.json",
           "jsonpath": "$.version"
         },
@@ -123,6 +128,10 @@
         {
           "type": "generic",
           "path": "packages/mcp-remote/src/index.ts"
+        },
+        {
+          "type": "generic",
+          "path": "packages/mcp-server/src/server.ts"
         }
       ]
     }

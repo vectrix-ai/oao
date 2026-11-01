@@ -38,6 +38,11 @@ import type {
   McpToolset,
   CreateMcpServerInput,
   DiscoverMcpServerInput,
+  McpServerUsage,
+  RemoveMcpServerResult,
+  DiscoverMcpAuthorizationInput,
+  McpAuthorizationDiscovery,
+  McpCredentialTestResult,
   CreateMcpCredentialInput,
   RotateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
@@ -91,6 +96,11 @@ export type {
   McpToolset,
   CreateMcpServerInput,
   DiscoverMcpServerInput,
+  McpServerUsage,
+  RemoveMcpServerResult,
+  DiscoverMcpAuthorizationInput,
+  McpAuthorizationDiscovery,
+  McpCredentialTestResult,
   CreateMcpCredentialInput,
   RotateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
@@ -164,11 +174,24 @@ export interface PlatformApiKey {
   readonly name: string;
   readonly prefix: string;
   readonly scopes: readonly string[];
+  /** `project` keys work only inside `projectId`; `organization` keys in every project. */
+  readonly access: ApiKeyAccess;
+  readonly projectId: string | null;
   readonly createdAt: string;
   readonly lastUsedAt?: string | null;
   readonly revokedAt?: string | null;
   readonly expiresAt?: string;
   readonly shown?: boolean;
+}
+
+export type ApiKeyAccess = "organization" | "project";
+
+export interface CreateApiKeyInput {
+  readonly name: string;
+  readonly scopes: readonly string[];
+  /** Defaults to `organization`, or to `project` for a project-restricted caller. */
+  readonly access?: ApiKeyAccess;
+  readonly expiresAt?: string;
 }
 
 /** The secret is present only on the first successful create response. */
@@ -258,6 +281,15 @@ export interface PublishAgentVersionInput {
     readonly agentVersionId: string;
     readonly maxParallel?: number;
   }[];
+  /**
+   * Lets the agent use the OAO MCP tools in its runs, acting as the run's
+   * creator narrowed to these scopes. `approval` (default `always`) applies
+   * to the tools that change OAO.
+   */
+  readonly oaoTools?: {
+    readonly scopes: readonly string[];
+    readonly approval?: "never" | "always";
+  };
   readonly sandbox: SandboxPolicyInput;
   readonly limits: {
     /** Maximum model turns per run, an integer from 1 through 256. Default: 32. */

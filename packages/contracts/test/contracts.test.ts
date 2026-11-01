@@ -26,6 +26,13 @@ import {
   parseCreateMcpServerInput,
   parseCreateMcpCredentialInput,
   parseCreateMcpCredentialPolicyInput,
+  parseRotateMcpCredentialInput,
+  parseDiscoverMcpAuthorizationInput,
+  McpCredentialTestResultSchema,
+  McpServerUsageSchema,
+  RemoveMcpServerResultSchema,
+  mcpDestinationContains,
+  mcpPathWithin,
   CreateProjectInputSchema,
 } from "../src/index.js";
 
@@ -781,6 +788,215 @@ test("agent publications pin focused Harness Operations with structured results"
   );
 });
 
+test("MCP credentials pin an HTTPS destination that policies must lie inside", () => {
+  const destination = {
+    origin: "https://mcp.example.test",
+    pathPrefix: "/mcp",
+  };
+  const pinned = parseCreateMcpCredentialInput({
+    key: "pinned",
+    displayName: "Pinned",
+    kind: "static_bearer",
+    destination,
+    secret: "secret-value",
+  });
+  assert.ok(pinned.kind === "static_bearer");
+  assert.deepEqual(pinned.destination, destination);
+  assert.throws(() =>
+    parseCreateMcpCredentialInput({
+      key: "unpinned",
+      displayName: "Unpinned",
+      kind: "static_bearer",
+      secret: "secret-value",
+    }),
+  );
+  for (const unsafe of [
+    { origin: "http://mcp.example.test", pathPrefix: "/" },
+    { origin: "https://mcp.example.test/mcp", pathPrefix: "/" },
+    { origin: "https://user@mcp.example.test", pathPrefix: "/" },
+    { origin: "https://mcp.example.test", pathPrefix: "mcp" },
+    { origin: "https://mcp.example.test", pathPrefix: "/mcp?x=1" },
+  ])
+    assert.throws(
+      () =>
+        parseCreateMcpCredentialInput({
+          key: "unsafe",
+          displayName: "Unsafe",
+          kind: "static_bearer",
+          destination: unsafe,
+          secret: "secret-value",
+        }),
+      JSON.stringify(unsafe),
+    );
+  assert.equal(
+    parseRotateMcpCredentialInput({ secret: "secret-value" }).destination,
+    undefined,
+  );
+
+  assert.equal(mcpPathWithin("/mcp", "/mcp"), true);
+  assert.equal(mcpPathWithin("/mcp/v2", "/mcp"), true);
+  assert.equal(mcpPathWithin("/mcpx", "/mcp"), false);
+  assert.equal(mcpPathWithin("/api/x", "/api/"), true);
+  assert.equal(mcpPathWithin("/", "/mcp"), false);
+  assert.equal(
+    mcpDestinationContains(destination, {
+      origin: "https://MCP.example.test:443/",
+      pathPrefix: "/mcp/tools",
+    }),
+    true,
+  );
+  assert.equal(
+    mcpDestinationContains(destination, {
+      origin: "https://attacker.example.test",
+      pathPrefix: "/mcp",
+    }),
+    false,
+  );
+  assert.equal(
+    mcpDestinationContains(destination, {
+      origin: "https://mcp.example.test",
+      pathPrefix: "/",
+    }),
+    false,
+  );
+});
+
+test("OAuth client-credentials MCP credentials pin a confirmed authorization configuration", () => {
+  const oauth = {
+    resource: "https://app.example.test/api/integrations/oao/extraction/mcp",
+    resourceMetadataUrl:
+      "https://app.example.test/.well-known/oauth-protected-resource/api/integrations/oao/extraction/mcp",
+    issuer: "https://auth.example.test",
+    tokenEndpoint: "https://auth.example.test/oauth2/token",
+    clientId: "client_01EXAMPLE",
+    scope: "extraction:mcp",
+  };
+  const parsed = parseCreateMcpCredentialInput({
+    key: "extraction",
+    displayName: "Extraction",
+    kind: "oauth_client_credentials",
+    oauth,
+    secret: "client-secret-value",
+  });
+  assert.ok(parsed.kind === "oauth_client_credentials");
+  assert.deepEqual(parsed.oauth, {
+    ...oauth,
+    tokenEndpointAuthMethod: "client_secret_post",
+    sendResource: true,
+  });
+  for (const unsafe of [
+    { tokenEndpoint: "http://auth.example.test/oauth2/token" },
+    { issuer: "https://user@auth.example.test" },
+    { scope: "extraction:mcp  extra" },
+    { scope: 'quoted"scope' },
+    { tokenEndpointAuthMethod: "private_key_jwt" },
+    { clientId: "" },
+  ])
+    assert.throws(
+      () =>
+        parseCreateMcpCredentialInput({
+          key: "extraction",
+          displayName: "Extraction",
+          kind: "oauth_client_credentials",
+          oauth: { ...oauth, ...unsafe },
+          secret: "client-secret-value",
+        }),
+      JSON.stringify(unsafe),
+    );
+  // The destination is the pinned resource; it cannot be given separately.
+  assert.throws(() =>
+    parseCreateMcpCredentialInput({
+      key: "extraction",
+      displayName: "Extraction",
+      kind: "oauth_client_credentials",
+      oauth,
+      destination: { origin: "https://attacker.example.test", pathPrefix: "/" },
+      secret: "client-secret-value",
+    }),
+  );
+  assert.deepEqual(
+    parseRotateMcpCredentialInput({
+      secret: "next-client-secret",
+      oauth: { clientId: "client_02EXAMPLE" },
+    }).oauth,
+    { clientId: "client_02EXAMPLE" },
+  );
+  assert.throws(() =>
+    parseRotateMcpCredentialInput({
+      secret: "next-client-secret",
+      oauth: { resource: "https://attacker.example.test/mcp" },
+    }),
+  );
+  assert.throws(() =>
+    parseDiscoverMcpAuthorizationInput({ endpointUrl: "http://app.test/mcp" }),
+  );
+  assert.deepEqual(
+    v.parse(McpCredentialTestResultSchema, {
+      ok: false,
+      errorCode: "credential_rejected",
+    }),
+    { ok: false, errorCode: "credential_rejected" },
+  );
+  assert.throws(() =>
+    v.parse(McpCredentialTestResultSchema, { ok: false, errorCode: "leak" }),
+  );
+});
+
+test("MCP server usage and removal results carry only identifiers and names", () => {
+  const usage = v.parse(McpServerUsageSchema, {
+    agents: [{ id, key: "triage", name: "Triage" }],
+    otherProjects: [{ id, slug: "support", name: "Support", agentCount: 2 }],
+    toolsets: [],
+    credentialPolicies: [{ id, key: "egress", displayName: "Egress" }],
+    credentials: [{ id, key: "token", displayName: "Token" }],
+  });
+  assert.equal(usage.otherProjects[0]?.agentCount, 2);
+  assert.throws(() =>
+    v.parse(RemoveMcpServerResultSchema, {
+      revokedToolsetIds: ["not-a-uuid"],
+      revokedCredentialPolicyIds: [],
+      revokedCredentialIds: [],
+    }),
+  );
+});
+
+test("MCP call context is opt-in and its header namespace is reserved", () => {
+  assert.equal(
+    parseCreateMcpCredentialPolicyInput({
+      key: "egress",
+      displayName: "Egress",
+      credentialId: id,
+      exactOrigin: "https://mcp.example.test",
+      pathPrefix: "/mcp",
+    }).forwardCallContext,
+    false,
+  );
+  assert.equal(
+    parseCreateMcpCredentialPolicyInput({
+      key: "egress",
+      displayName: "Egress",
+      credentialId: id,
+      exactOrigin: "https://mcp.example.test",
+      pathPrefix: "/mcp",
+      forwardCallContext: true,
+    }).forwardCallContext,
+    true,
+  );
+  for (const headerName of ["X-OAO-Session-Id", "x-oao-anything"])
+    assert.throws(
+      () =>
+        parseCreateMcpCredentialInput({
+          key: "reserved",
+          displayName: "Reserved",
+          kind: "api_key_header",
+          headerName,
+          destination: { origin: "https://mcp.example.test", pathPrefix: "/" },
+          secret: "secret-value",
+        }),
+      headerName,
+    );
+});
+
 test("MCP contracts require HTTPS, safe credential headers, and unique bindings", () => {
   assert.equal(
     parseCreateMcpServerInput({
@@ -804,6 +1020,7 @@ test("MCP contracts require HTTPS, safe credential headers, and unique bindings"
       displayName: "Unsafe",
       kind: "api_key_header",
       headerName: "Host",
+      destination: { origin: "https://mcp.example.test", pathPrefix: "/" },
       secret: "secret-value",
     }),
   );

@@ -646,8 +646,97 @@
   font-weight: 700;
 }
 
-.mcp-connection-card code {
+.mcp-connections-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: var(--sp-3);
+}
+.mcp-connection-card {
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: var(--sp-3);
+  min-width: 0;
+  padding: var(--sp-4);
+  border: var(--bw-control) solid var(--line);
+  background: var(--surface);
+}
+.mcp-connection-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.mcp-connection-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.mcp-connection-card-title h2 {
+  font-size: 15px;
   overflow-wrap: anywhere;
+}
+.mcp-connection-card > dl {
+  align-content: start;
+}
+.mcp-connection-card-subtitle {
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-connection-card > small {
+  padding-top: var(--sp-2);
+  border-top: var(--bw) solid var(--border-soft);
+  color: var(--text-3);
+}
+.mcp-connection-add {
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  gap: var(--sp-2);
+  min-height: 180px;
+  padding: var(--sp-4);
+  border: var(--bw-control) dashed var(--border-soft);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.mcp-connection-add:hover:not(:disabled),
+.mcp-connection-add:focus-visible {
+  border-color: var(--line);
+  color: var(--text);
+}
+.mcp-connection-add:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.mcp-connection-add strong {
+  color: var(--text);
+}
+.mcp-connection-add span {
+  font-size: 13px;
+}
+code.mcp-connection-card-subtitle {
+  font-size: 12px;
+}
+.mcp-secrets-note {
+  margin: 0;
+  font-size: 13px;
+}
+.oao-tool-list {
+  display: grid;
+  gap: var(--sp-2);
+  max-height: 320px;
+  margin: var(--sp-2) 0 0;
+  padding-left: var(--sp-4);
+  overflow-y: auto;
+  font-size: 13px;
 }
 .mcp-connection-card dl,
 .wizard-review {

@@ -33,6 +33,18 @@ test("route builders scope resources to a project and allow a custom prefix", ()
     "/platform/v2/projects/project%2Fone/mcp-servers/server%20one/discover",
   );
   assert.equal(
+    routes.mcpServerUsage("project/one", "server one"),
+    "/platform/v2/projects/project%2Fone/mcp-servers/server%20one/usage",
+  );
+  assert.equal(
+    routes.mcpAuthorizationDiscovery("project/one"),
+    "/platform/v2/projects/project%2Fone/mcp-authorization-discovery",
+  );
+  assert.equal(
+    routes.testMcpCredential("project/one", "credential one"),
+    "/platform/v2/projects/project%2Fone/mcp-credentials/credential%20one/test",
+  );
+  assert.equal(
     routes.agentVersion("project/one", "agent one", "version/one"),
     "/platform/v2/projects/project%2Fone/agents/agent%20one/versions/version%2Fone",
   );
@@ -292,6 +304,7 @@ test("client manages redacted MCP resources", async () => {
       displayName: "LangSmith proxy",
       kind: "static_bearer",
       headerName: null,
+      destination: { origin: "https://mcp.example.test", pathPrefix: "/mcp" },
       secret: "secret-value",
     },
     { idempotencyKey: "credential-1" },
@@ -309,10 +322,77 @@ test("client manages redacted MCP resources", async () => {
     displayName: "LangSmith proxy",
     kind: "static_bearer",
     headerName: null,
+    destination: { origin: "https://mcp.example.test", pathPrefix: "/mcp" },
     secret: "secret-value",
   });
   assert.equal(
     requests[1]?.url.endsWith("/mcp-servers/server-1/discover"),
+    true,
+  );
+});
+
+test("client discovers MCP authorization and tests OAuth credentials without idempotency keys", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({ ok: true, expiresIn: 3600, grantedScope: "a" });
+    },
+  });
+  await client.discoverMcpAuthorization("project-1", {
+    endpointUrl: "https://mcp.example.test/mcp",
+  });
+  const tested = await client.testMcpCredential("project-1", "credential-1");
+  assert.deepEqual(tested, { ok: true, expiresIn: 3600, grantedScope: "a" });
+  assert.equal(requests[0]?.method, "POST");
+  assert.equal(
+    requests[0]?.url.endsWith(
+      "/projects/project-1/mcp-authorization-discovery",
+    ),
+    true,
+  );
+  assert.deepEqual(await requests[0]?.json(), {
+    endpointUrl: "https://mcp.example.test/mcp",
+  });
+  assert.equal(requests[1]?.method, "POST");
+  assert.equal(
+    requests[1]?.url.endsWith("/mcp-credentials/credential-1/test"),
+    true,
+  );
+  assert.equal(requests[0]?.headers.get("idempotency-key"), null);
+  assert.equal(requests[1]?.headers.get("idempotency-key"), null);
+});
+
+test("client removes an MCP server and reads what still uses it", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({});
+    },
+  });
+  await client.getMcpServerUsage("project-1", "server-1");
+  await client.removeMcpServer("project-1", "server-1", {
+    idempotencyKey: "remove-1",
+  });
+  await client.removeMcpServer("project-1", "server-1", {
+    idempotencyKey: "remove-2",
+    keepCredentials: true,
+  });
+  assert.equal(
+    requests[0]?.url.endsWith("/projects/project-1/mcp-servers/server-1/usage"),
+    true,
+  );
+  assert.equal(requests[1]?.method, "DELETE");
+  assert.equal(
+    requests[1]?.url.endsWith("/projects/project-1/mcp-servers/server-1"),
+    true,
+  );
+  assert.equal(requests[1]?.headers.get("idempotency-key"), "remove-1");
+  assert.equal(
+    requests[2]?.url.endsWith("/mcp-servers/server-1?keepCredentials=true"),
     true,
   );
 });

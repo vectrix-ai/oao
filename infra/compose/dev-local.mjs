@@ -274,6 +274,8 @@ async function main() {
     DATABASE_URL: databaseUrl,
     NODE_ENV: nodeEnvironment,
     PORT: runtimePort,
+    // Agents granted OAO tools call the local API.
+    OAO_API_URL: process.env.OAO_API_URL ?? `http://127.0.0.1:${apiPort}`,
   });
   startChild(
     "console",

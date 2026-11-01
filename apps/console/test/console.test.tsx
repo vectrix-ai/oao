@@ -405,6 +405,7 @@ describe("management console", () => {
       pathPrefix: "/",
       timeoutMs: 10_000,
       maximumResponseBytes: 65_536,
+      forwardCallContext: false,
       status: "active" as const,
     };
     const backup = parseConfigurationBackup(acmeBackup());
@@ -426,6 +427,8 @@ describe("management console", () => {
         displayName: "Acme token",
         kind: "static_bearer",
         headerName: null,
+        destination: { origin: "https://mcp.acme.test", pathPrefix: "/" },
+        oauth: null,
         status: "active",
         credentialFingerprint: null,
       },
@@ -1237,8 +1240,23 @@ describe("management console", () => {
       dialog.getAllByText("https://mcp.example.test/rpc").length,
     ).toBeGreaterThan(0);
     await user.click(dialog.getByRole("button", { name: "Test and discover" }));
-    await user.click(
-      await dialog.findByRole("checkbox", { name: /Look up trace/u }),
+    const lookupTrace = await dialog.findByRole("checkbox", {
+      name: /Look up trace/u,
+    });
+    // Toggling a tool more than once and changing its approval keeps the
+    // wizard open.
+    await user.click(lookupTrace);
+    await user.click(lookupTrace);
+    expect(lookupTrace).not.toBeChecked();
+    await user.click(lookupTrace);
+    expect(lookupTrace).toBeChecked();
+    await user.selectOptions(
+      dialog.getByLabelText("Approval for lookup_trace"),
+      "never",
+    );
+    await user.selectOptions(
+      dialog.getByLabelText("Approval for lookup_trace"),
+      "always",
     );
     await user.click(dialog.getByRole("button", { name: "Next" }));
     await user.selectOptions(
@@ -1263,11 +1281,39 @@ describe("management console", () => {
     expect(agent.versions[0]?.config.mcpBindings).toEqual([
       expect.objectContaining({ namespace: "trace_observability" }),
     ]);
+    expect((await api.listMcpCredentials()).data[0]?.destination).toEqual({
+      origin: "https://mcp.example.test",
+      pathPrefix: "/rpc",
+    });
 
+    // Everything about one connection opens from its card.
     await user.click(
-      screen.getByRole("button", { name: "Advanced resources" }),
+      screen.getByRole("button", { name: "Manage Trace observability" }),
     );
-    await user.click(screen.getByRole("button", { name: "Create toolset" }));
+    const details = within(
+      await screen.findByRole("dialog", { name: "Trace observability" }),
+    );
+    expect(details.getByText("lookup_trace, search_runs")).toBeInTheDocument();
+
+    // A connection an agent still uses cannot be removed.
+    await user.click(details.getByRole("button", { name: "Remove" }));
+    const removal = within(
+      await screen.findByRole("dialog", {
+        name: "Remove Trace observability",
+      }),
+    );
+    expect(
+      await removal.findByText(/These agents still use this connection/u),
+    ).toBeInTheDocument();
+    expect(
+      removal.queryByRole("button", { name: "Remove connection" }),
+    ).not.toBeInTheDocument();
+    await user.click(removal.getByRole("button", { name: "Close" }));
+
+    const reopened = within(
+      await screen.findByRole("dialog", { name: "Trace observability" }),
+    );
+    await user.click(reopened.getByRole("button", { name: "Create toolset" }));
     const toolsetDialog = within(
       await screen.findByRole("dialog", { name: "Create MCP toolset" }),
     );
@@ -1284,9 +1330,10 @@ describe("management console", () => {
       toolsetDialog.getByRole("checkbox", { name: /Look up trace/u }),
     );
     await user.click(toolsetDialog.getByRole("button", { name: "Save" }));
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    const withToolset = within(
+      await screen.findByRole("dialog", { name: "Trace observability" }),
     );
+    expect(await withToolset.findByText("Trace read only")).toBeInTheDocument();
     const manualToolset = (await api.listMcpToolsets()).data.find(
       (toolset) => toolset.key === "trace-read-only",
     );
@@ -1296,6 +1343,282 @@ describe("management console", () => {
         approval: "never",
       }),
     ]);
+
+    // A replacement credential can be added from the connection itself,
+    // pinned to its endpoint.
+    await user.click(
+      withToolset.getByRole("button", { name: "Add credential" }),
+    );
+    const credentialDialog = within(
+      await screen.findByRole("dialog", { name: "Add MCP credential" }),
+    );
+    await user.type(credentialDialog.getByLabelText("Key"), "trace-backup");
+    await user.type(
+      credentialDialog.getByLabelText("Display name"),
+      "Trace backup",
+    );
+    await user.type(
+      credentialDialog.getByLabelText("Secret"),
+      "backup-secret-value",
+    );
+    await user.click(credentialDialog.getByRole("button", { name: "Save" }));
+    const withCredential = within(
+      await screen.findByRole("dialog", { name: "Trace observability" }),
+    );
+    const backup = (await api.listMcpCredentials()).data.find(
+      (credential) => credential.key === "trace-backup",
+    );
+    expect(backup?.destination).toEqual({
+      origin: "https://mcp.example.test",
+      pathPrefix: "/rpc",
+    });
+
+    // A policy can never point the pinned credential at another server.
+    await user.click(
+      withCredential.getByRole("button", { name: "Add policy" }),
+    );
+    const policyDialog = within(
+      await screen.findByRole("dialog", { name: "Add credential policy" }),
+    );
+    expect(policyDialog.getByLabelText("Exact HTTPS origin")).toHaveValue(
+      "https://mcp.example.test",
+    );
+    await user.type(policyDialog.getByLabelText("Key"), "trace-elsewhere");
+    await user.type(policyDialog.getByLabelText("Display name"), "Elsewhere");
+    await user.clear(policyDialog.getByLabelText("Exact HTTPS origin"));
+    await user.type(
+      policyDialog.getByLabelText("Exact HTTPS origin"),
+      "https://attacker.example.test",
+    );
+    await user.click(policyDialog.getByRole("button", { name: "Save" }));
+    expect(
+      await policyDialog.findByText(/path prefix must lie inside/u),
+    ).toBeInTheDocument();
+  });
+
+  it("sets up an MCP server with OAuth client credentials after confirming discovery", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/mcp", api);
+    await user.click(
+      (await screen.findAllByRole("button", { name: "Add MCP server" }))[0]!,
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "Add MCP server" }),
+    );
+    await user.type(dialog.getByLabelText("Display name"), "Order extraction");
+    await user.type(
+      dialog.getByLabelText("HTTPS MCP endpoint"),
+      "https://app.example.test/api/integrations/oao/extraction/mcp",
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    await user.selectOptions(
+      dialog.getByLabelText("Authentication type"),
+      "oauth_client_credentials",
+    );
+    // Nothing can be saved before the authorization server is confirmed.
+    await user.type(
+      dialog.getByLabelText("Client secret"),
+      "demo-client-secret",
+    );
+    expect(dialog.getByRole("button", { name: "Next" })).toBeDisabled();
+    await user.click(
+      dialog.getByRole("button", { name: "Discover authorization" }),
+    );
+    expect(
+      await dialog.findByText(
+        "https://app.example.test/.well-known/oauth-protected-resource/api/integrations/oao/extraction/mcp",
+      ),
+    ).toBeInTheDocument();
+    expect(dialog.getByLabelText("Authorization server")).toHaveValue(
+      "https://auth.example.com",
+    );
+    expect(
+      dialog.getByText("https://auth.example.com/oauth2/token"),
+    ).toBeInTheDocument();
+    expect(dialog.getByLabelText("Scope")).toHaveValue("mcp:tools");
+    expect(dialog.getByLabelText("Client authentication")).toHaveValue(
+      "client_secret_post",
+    );
+    // Changing the endpoint drops the discovery made for the old one.
+    await user.click(dialog.getByRole("button", { name: "Back" }));
+    await user.clear(dialog.getByLabelText("HTTPS MCP endpoint"));
+    await user.type(
+      dialog.getByLabelText("HTTPS MCP endpoint"),
+      "https://app.example.test/api/integrations/oao/extraction/mcp-v2",
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    expect(
+      dialog.getByRole("button", { name: "Discover authorization" }),
+    ).toBeInTheDocument();
+    expect(dialog.queryByLabelText("Client ID")).not.toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "Back" }));
+    await user.clear(dialog.getByLabelText("HTTPS MCP endpoint"));
+    await user.type(
+      dialog.getByLabelText("HTTPS MCP endpoint"),
+      "https://app.example.test/api/integrations/oao/extraction/mcp",
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    // The discovery made for this endpoint applies again.
+    await user.click(dialog.getByRole("button", { name: "Discover again" }));
+    expect(await dialog.findByLabelText("Client ID")).toBeInTheDocument();
+    await user.type(dialog.getByLabelText("Client ID"), "client_demo");
+    await user.click(
+      dialog.getByRole("checkbox", { name: /Forward call context/u }),
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    expect(dialog.getByText("OAuth client credentials")).toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "Test and discover" }));
+    await user.click(
+      await dialog.findByRole("checkbox", { name: /Look up trace/u }),
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    await user.click(dialog.getByRole("button", { name: "Finish setup" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(document.body.textContent).not.toContain("demo-client-secret");
+
+    const credential = (await api.listMcpCredentials()).data[0]!;
+    expect(credential.kind).toBe("oauth_client_credentials");
+    expect(
+      (await api.listMcpCredentialPolicies()).data[0]?.forwardCallContext,
+    ).toBe(true);
+    expect(credential.destination).toEqual({
+      origin: "https://app.example.test",
+      pathPrefix: "/api/integrations/oao/extraction/mcp",
+    });
+    expect(credential.oauth).toEqual({
+      resource: "https://app.example.test/api/integrations/oao/extraction/mcp",
+      resourceMetadataUrl:
+        "https://app.example.test/.well-known/oauth-protected-resource/api/integrations/oao/extraction/mcp",
+      issuer: "https://auth.example.com",
+      tokenEndpoint: "https://auth.example.com/oauth2/token",
+      clientId: "client_demo",
+      tokenEndpointAuthMethod: "client_secret_post",
+      scope: "mcp:tools",
+      sendResource: true,
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Manage Order extraction" }),
+    );
+    const details = within(
+      await screen.findByRole("dialog", { name: "Order extraction" }),
+    );
+    await user.click(
+      details.getByRole("button", {
+        name: "Test Order extraction credential",
+      }),
+    );
+    expect(
+      await screen.findByText("Token issued for 3600s with scope mcp:tools."),
+    ).toBeInTheDocument();
+
+    // No agent uses it, so it can be removed with its credential.
+    await user.click(details.getByRole("button", { name: "Remove" }));
+    const removal = within(
+      await screen.findByRole("dialog", { name: "Remove Order extraction" }),
+    );
+    expect(
+      await removal.findByRole("checkbox", {
+        name: /Also revoke its credential and policy/u,
+      }),
+    ).toBeChecked();
+    await user.click(
+      removal.getByRole("button", { name: "Remove connection" }),
+    );
+    expect(
+      await screen.findByText("Order extraction was removed."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Order extraction" }),
+    ).not.toBeInTheDocument();
+    // A removed connection leaves every list.
+    expect((await api.listMcpServers()).data).toEqual([]);
+    expect((await api.listMcpCredentials()).data).toEqual([]);
+    expect((await api.listMcpCredentialPolicies()).data).toEqual([]);
+    expect((await api.listMcpToolsets()).data).toEqual([]);
+  });
+
+  it("adds a connection back after removing it but keeping its credential", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/mcp", api);
+    const addDocsSearch = async (secret: string) => {
+      await user.click(
+        (await screen.findAllByRole("button", { name: "Add MCP server" }))[0]!,
+      );
+      const dialog = within(
+        await screen.findByRole("dialog", { name: "Add MCP server" }),
+      );
+      await user.type(dialog.getByLabelText("Display name"), "Docs search");
+      await user.type(
+        dialog.getByLabelText("HTTPS MCP endpoint"),
+        "https://docs.example.test/mcp",
+      );
+      await user.click(dialog.getByRole("button", { name: "Next" }));
+      await user.type(dialog.getByLabelText("Secret"), secret);
+      await user.click(dialog.getByRole("button", { name: "Next" }));
+      await user.click(
+        dialog.getByRole("button", { name: "Test and discover" }),
+      );
+      await user.click(
+        await dialog.findByRole("checkbox", { name: /Look up trace/u }),
+      );
+      await user.click(dialog.getByRole("button", { name: "Next" }));
+      await user.click(dialog.getByRole("button", { name: "Finish setup" }));
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      );
+    };
+    await addDocsSearch("docs-secret-one");
+
+    await user.click(
+      screen.getByRole("button", { name: "Manage Docs search" }),
+    );
+    const details = within(
+      await screen.findByRole("dialog", { name: "Docs search" }),
+    );
+    await user.click(details.getByRole("button", { name: "Remove" }));
+    const removal = within(
+      await screen.findByRole("dialog", { name: "Remove Docs search" }),
+    );
+    await user.click(
+      await removal.findByRole("checkbox", {
+        name: /Also revoke its credential and policy/u,
+      }),
+    );
+    await user.click(
+      removal.getByRole("button", { name: "Remove connection" }),
+    );
+    expect(
+      await screen.findByText("Docs search was removed."),
+    ).toBeInTheDocument();
+    // The kept credential stays reachable.
+    expect(
+      await screen.findByRole("heading", {
+        name: "Credentials not used by any connection",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Revoke Docs search credential" }),
+    ).toBeInTheDocument();
+
+    // The same name works again; the kept credential's key is skipped.
+    await addDocsSearch("docs-secret-two");
+    expect(
+      (await api.listMcpCredentials()).data.map((item) => item.key).sort(),
+    ).toEqual(["docs-search-credential", "docs-search-credential-2"]);
+    expect((await api.listMcpServers()).data.map((item) => item.key)).toEqual([
+      "docs-search",
+    ]);
+    // Its kept policy covers the new connection again.
+    expect(
+      screen.queryByRole("heading", {
+        name: "Credentials not used by any connection",
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("uploads multiple Markdown files into the selected package folder", async () => {
@@ -2863,10 +3186,16 @@ describe("management console", () => {
     await user.click(
       await screen.findByRole("button", { name: "Create API key" }),
     );
+    // The page names the project's OAO MCP endpoint for external agents.
+    expect(
+      screen.getByText(/^http:\/\/[^ ]+\/v1\/projects\/[0-9a-f-]{36}\/mcp$/u),
+    ).toBeInTheDocument();
     const create = within(
       screen.getByRole("dialog", { name: "Create API key" }),
     );
     await user.type(create.getByLabelText("Name"), "Session integration");
+    // A new key works only in this project unless widened on purpose.
+    expect(create.getByLabelText("Access")).toHaveValue("project");
     expect(
       create.getByRole("checkbox", { name: /^agent:write/u }),
     ).not.toBeChecked();
@@ -2886,6 +3215,7 @@ describe("management console", () => {
       scopes: expect.arrayContaining(
         AUTHORIZATION_SCOPE_CATALOG.map(([scope]) => scope),
       ),
+      access: "project",
     });
     expect(createKey.mock.calls[0]?.[0].scopes).toHaveLength(
       AUTHORIZATION_SCOPE_CATALOG.length,
@@ -2897,7 +3227,8 @@ describe("management console", () => {
       (save.getByLabelText("API key secret") as HTMLInputElement).value,
     ).toMatch(/^oao_/u);
     await user.click(save.getByRole("button", { name: "I’ve saved it" }));
-    expect(await screen.findByText("Session integration")).toBeInTheDocument();
+    const row = (await screen.findByText("Session integration")).closest("tr")!;
+    expect(within(row).getByText("This project")).toBeInTheDocument();
     expect(screen.queryByLabelText("API key secret")).not.toBeInTheDocument();
   });
 
@@ -3458,6 +3789,89 @@ describe("management console", () => {
         description: "Customer id or exact name.",
         minLength: 1,
       },
+    });
+  });
+
+  it("offers OAO's own MCP server in every project without a connection", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/mcp", api);
+    await user.click(await screen.findByRole("button", { name: "Manage OAO" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "OAO" }));
+    const agentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const agent = await api.getAgent(agentId);
+    await user.click(
+      dialog.getByRole("button", { name: `Use OAO for ${agent.name}` }),
+    );
+    const grant = within(
+      await screen.findByRole("dialog", { name: `OAO for ${agent.name}` }),
+    );
+    expect(
+      grant.getByRole("checkbox", { name: /^session:read/u }),
+    ).toBeChecked();
+    await user.click(grant.getByRole("button", { name: "Publish version" }));
+    const listed = within(await screen.findByRole("dialog", { name: "OAO" }));
+    expect(
+      await listed.findByRole("button", {
+        name: `Stop using OAO for ${agent.name}`,
+      }),
+    ).toBeInTheDocument();
+    const published = await api.getAgent(agentId);
+    expect(published.version).toBe((agent.version ?? 0) + 1);
+    expect(published.versions[0]?.config.oaoTools).toEqual({
+      scopes: ["agent:read", "session:read", "run:read", "run:create"],
+      approval: "always",
+    });
+    // The rest of the version is unchanged.
+    expect(published.versions[0]?.config.systemPrompt).toBe(
+      agent.versions[0]?.config.systemPrompt,
+    );
+
+    await user.click(
+      listed.getByRole("button", { name: `Stop using OAO for ${agent.name}` }),
+    );
+    expect(
+      await listed.findByRole("button", { name: `Use OAO for ${agent.name}` }),
+    ).toBeInTheDocument();
+    expect(
+      (await api.getAgent(agentId)).versions[0]?.config.oaoTools,
+    ).toBeUndefined();
+  });
+
+  it("grants an agent OAO tools with chosen scopes and approval", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", api);
+    await user.click(
+      await screen.findByRole("button", { name: "OAO MCP server" }),
+    );
+    expect(
+      screen.getByText(/The agent does not use it\./u),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("checkbox", { name: /^Use OAO's own MCP server/u }),
+    );
+    // Approving tool calls and project administration are never offered.
+    expect(
+      screen.queryByRole("checkbox", { name: /^approval:resolve/u }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: /^project:admin/u }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: /^run:create/u }),
+    ).toBeChecked();
+    await user.click(screen.getByRole("checkbox", { name: /^run:create/u }));
+    await user.click(screen.getByRole("checkbox", { name: /^audit:read/u }));
+    await user.selectOptions(screen.getByLabelText("Changes to OAO"), "never");
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 4")).toBeInTheDocument();
+    const updated = await api.getAgent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    expect(updated.versions[0]?.config.oaoTools).toEqual({
+      scopes: ["agent:read", "session:read", "run:read", "audit:read"],
+      approval: "never",
     });
   });
 

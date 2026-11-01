@@ -27,6 +27,7 @@ import type {
   AuthLogoutResult,
   AuthSession,
   CreateAgentInput,
+  CreateApiKeyInput,
   CreateProjectInput,
   CreateProjectMemberInput,
   CreatedSession,
@@ -96,6 +97,11 @@ import type {
   McpToolsetList,
   CreateMcpServerInput,
   DiscoverMcpServerInput,
+  McpServerUsage,
+  RemoveMcpServerResult,
+  DiscoverMcpAuthorizationInput,
+  McpAuthorizationDiscovery,
+  McpCredentialTestResult,
   CreateMcpCredentialInput,
   RotateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
@@ -385,7 +391,7 @@ export class OaoClient {
 
   createApiKey(
     projectId: string,
-    input: { readonly name: string; readonly scopes: readonly string[] },
+    input: CreateApiKeyInput,
     options: WriteOptions,
   ): Promise<CreatedPlatformApiKey> {
     return this.#write(this.routes.apiKeys(projectId), "POST", input, options);
@@ -1012,6 +1018,40 @@ export class OaoClient {
     );
   }
 
+  /**
+   * What still uses an MCP server and what removing it would revoke. A
+   * server cannot be removed while a live agent's current version binds it.
+   */
+  getMcpServerUsage(
+    projectId: string,
+    serverId: string,
+    options?: RequestOptions,
+  ): Promise<McpServerUsage> {
+    return this.#request(
+      this.routes.mcpServerUsage(projectId, serverId),
+      options,
+    );
+  }
+
+  /**
+   * Retires an MCP server: revokes its versions and this project's toolsets
+   * for it, plus the policies and credentials only it used unless
+   * `keepCredentials` is set. Refused with 409 while an agent uses it.
+   */
+  removeMcpServer(
+    projectId: string,
+    serverId: string,
+    options: WriteOptions & { readonly keepCredentials?: boolean },
+  ): Promise<RemoveMcpServerResult> {
+    const { keepCredentials, ...write } = options;
+    return this.#write(
+      `${this.routes.mcpServer(projectId, serverId)}${keepCredentials ? "?keepCredentials=true" : ""}`,
+      "DELETE",
+      undefined,
+      write,
+    );
+  }
+
   listMcpCredentials(
     projectId: string,
     options?: RequestOptions,
@@ -1043,6 +1083,38 @@ export class OaoClient {
       "POST",
       input,
       options,
+    );
+  }
+
+  /**
+   * Reads an MCP endpoint's OAuth authorization metadata without sending a
+   * credential, for an operator to confirm before creating an
+   * `oauth_client_credentials` credential.
+   */
+  discoverMcpAuthorization(
+    projectId: string,
+    input: DiscoverMcpAuthorizationInput,
+    options?: RequestOptions,
+  ): Promise<McpAuthorizationDiscovery> {
+    return this.#request(this.routes.mcpAuthorizationDiscovery(projectId), {
+      ...options,
+      method: "POST",
+      body: input,
+    });
+  }
+
+  /**
+   * Requests a fresh token for an OAuth credential and returns only its
+   * lifetime and granted scope, or a safe error code.
+   */
+  testMcpCredential(
+    projectId: string,
+    credentialId: string,
+    options?: RequestOptions,
+  ): Promise<McpCredentialTestResult> {
+    return this.#request(
+      this.routes.testMcpCredential(projectId, credentialId),
+      { ...options, method: "POST" },
     );
   }
 

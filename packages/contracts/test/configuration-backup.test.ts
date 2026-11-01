@@ -79,6 +79,8 @@ function fixture(): ConfigurationBackup {
         displayName: "Token",
         kind: "static_bearer",
         headerName: null,
+        destination: { origin: "https://mcp.example.test", pathPrefix: "/" },
+        oauth: null,
         status: "active",
         credentialFingerprint: null,
       },
@@ -97,6 +99,7 @@ function fixture(): ConfigurationBackup {
             pathPrefix: "/",
             timeoutMs: 10_000,
             maximumResponseBytes: 65_536,
+            forwardCallContext: false,
             status: "active",
             contentHash: HASH,
           },
@@ -236,6 +239,16 @@ test("a consistent backup parses, has no problems, and is counted", () => {
     agentVersions: 2,
     eventWebhooks: 0,
   });
+});
+
+test("a backup made before credential destinations existed restores them unpinned", () => {
+  const legacy = fixture() as unknown as {
+    mcpCredentials: Record<string, unknown>[];
+  };
+  delete legacy.mcpCredentials[0]!.destination;
+  const backup = parseConfigurationBackup(legacy);
+  assert.equal(backup.mcpCredentials[0]?.destination, null);
+  assert.deepEqual(checkConfigurationBackupReferences(backup), []);
 });
 
 test("the backup format and version numbering are enforced", () => {

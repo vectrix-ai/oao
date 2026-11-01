@@ -1427,6 +1427,367 @@ export const ManagedAgentDelegateSchema = v.strictObject({
   ),
 });
 
+/**
+ * The tools of OAO's own MCP server: what each does, the scopes a caller
+ * needs for it to be offered, and whether it changes OAO. `@oao/mcp-server`
+ * implements each entry; the console shows them.
+ */
+export interface OaoMcpToolDescriptor {
+  readonly name: string;
+  readonly title: string;
+  readonly description: string;
+  /** Every scope a caller must hold for the tool to be offered. */
+  readonly scopes: readonly AuthorizationScopeName[];
+  /** Read-only tools change nothing in OAO. */
+  readonly readOnly: boolean;
+  /** Changes a resource the whole organization shares. */
+  readonly organizationShared?: true;
+}
+
+type AuthorizationScopeName = (typeof AUTHORIZATION_SCOPE_CATALOG)[number][0];
+
+export const OAO_MCP_TOOL_CATALOG: readonly OaoMcpToolDescriptor[] = [
+  {
+    name: "get_context",
+    title: "Get context",
+    description:
+      "Shows who is calling, the project these tools act in, and the scopes the caller holds.",
+    scopes: [],
+    readOnly: true,
+  },
+  {
+    name: "list_agents",
+    title: "List agents",
+    description: "Lists the project's agents, newest first.",
+    scopes: ["agent:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_agent",
+    title: "Get agent",
+    description: "Reads an agent and its most recent versions.",
+    scopes: ["agent:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_agent_version",
+    title: "Get agent version",
+    description:
+      "Reads one immutable agent version with its full configuration.",
+    scopes: ["agent:read"],
+    readOnly: true,
+  },
+  {
+    name: "create_agent",
+    title: "Create agent",
+    description:
+      "Creates an agent, optionally publishing its first version from config. Binding Skills or MCP toolsets also needs skill:bind or mcp:bind.",
+    scopes: ["agent:write"],
+    readOnly: false,
+  },
+  {
+    name: "publish_agent_version",
+    title: "Publish agent version",
+    description:
+      "Publishes a new immutable version of an agent. New sessions use it; existing sessions keep their version.",
+    scopes: ["agent:write"],
+    readOnly: false,
+  },
+  {
+    name: "delete_agent",
+    title: "Delete agent",
+    description:
+      "Archives an agent so no new session can start on it. History stays.",
+    scopes: ["agent:write"],
+    readOnly: false,
+  },
+  {
+    name: "list_sessions",
+    title: "List sessions",
+    description:
+      "Lists sessions newest first, with each session's agent, title, and latest run state. agentId keeps only that agent's sessions from the page.",
+    scopes: ["session:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_session",
+    title: "Get session",
+    description:
+      "Reads a session: its agent, runs, full transcript, timeline, delegations, and pending work. includeDebug adds model invocations, tool calls, and sandbox detail.",
+    scopes: ["session:read"],
+    readOnly: true,
+  },
+  {
+    name: "start_session",
+    title: "Start session",
+    description:
+      "Starts a new session on an agent with a first message and, by default, waits for the agent's answer.",
+    scopes: ["session:write", "run:create", "run:read"],
+    readOnly: false,
+  },
+  {
+    name: "send_message",
+    title: "Send message",
+    description:
+      "Sends a message to an existing session as a new run, for example a question about an earlier run. The agent answers with the whole session in context. The session's latest run must have settled. By default waits for the answer.",
+    scopes: ["run:create", "run:read"],
+    readOnly: false,
+  },
+  {
+    name: "list_runs",
+    title: "List runs",
+    description: "Lists the project's runs, newest first.",
+    scopes: ["run:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_run",
+    title: "Get run",
+    description: "Reads a run's state.",
+    scopes: ["run:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_run_messages",
+    title: "Get run messages",
+    description:
+      "Reads the messages of a run: the input, the agent's answers, and tool messages.",
+    scopes: ["run:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_run_timeline",
+    title: "Get run timeline",
+    description:
+      "Reads what happened during a run: model turns, tool calls, approvals, and errors.",
+    scopes: ["run:read"],
+    readOnly: true,
+  },
+  {
+    name: "wait_for_run",
+    title: "Wait for run",
+    description:
+      "Waits for a run to settle and returns its state and the agent's answer.",
+    scopes: ["run:read"],
+    readOnly: true,
+  },
+  {
+    name: "cancel_run",
+    title: "Cancel run",
+    description: "Requests cancellation of an unsettled run.",
+    scopes: ["run:cancel"],
+    readOnly: false,
+  },
+  {
+    name: "list_approvals",
+    title: "List approvals",
+    description:
+      "Lists tool approvals, newest first, optionally only those of one run.",
+    scopes: ["run:read"],
+    readOnly: true,
+  },
+  {
+    name: "decide_approval",
+    title: "Decide approval",
+    description: "Approves or denies a pending tool approval.",
+    scopes: ["approval:resolve"],
+    readOnly: false,
+  },
+  {
+    name: "get_delegation",
+    title: "Get delegation",
+    description:
+      "Reads a delegation between a coordinator and a child agent, with its child runs.",
+    scopes: ["delegation:read"],
+    readOnly: true,
+  },
+  {
+    name: "message_delegation",
+    title: "Message delegation",
+    description:
+      "Sends a follow-up to a delegated child agent's session and, by default, waits for its answer.",
+    scopes: ["delegation:message", "run:create", "run:read"],
+    readOnly: false,
+  },
+  {
+    name: "list_skills",
+    title: "List Skills",
+    description: "Lists the project's Skills.",
+    scopes: ["skill:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_skill",
+    title: "Get Skill",
+    description: "Reads a Skill and its versions.",
+    scopes: ["skill:read"],
+    readOnly: true,
+  },
+  {
+    name: "create_skill",
+    title: "Create Skill",
+    description:
+      "Creates a Skill and publishes its first version from SKILL.md fields and text files.",
+    scopes: ["skill:write"],
+    readOnly: false,
+  },
+  {
+    name: "publish_skill_version",
+    title: "Publish Skill version",
+    description:
+      "Publishes a new immutable version of a Skill. Agents keep the version they pin until republished.",
+    scopes: ["skill:write"],
+    readOnly: false,
+  },
+  {
+    name: "list_model_presets",
+    title: "List model presets",
+    description: "Lists the model presets an agent version may name.",
+    scopes: ["agent:read"],
+    readOnly: true,
+  },
+  {
+    name: "create_model_preset",
+    title: "Create model preset",
+    description:
+      "Creates a project model preset on an existing model provider connection.",
+    scopes: ["project:admin"],
+    readOnly: false,
+  },
+  {
+    name: "list_mcp_servers",
+    title: "List MCP servers",
+    description:
+      "Lists the organization's remote MCP servers and their discovered tools.",
+    scopes: ["mcp:read"],
+    readOnly: true,
+  },
+  {
+    name: "list_mcp_credentials",
+    title: "List MCP credentials",
+    description: "Lists MCP credential metadata. Secrets are never returned.",
+    scopes: ["credential:read_metadata"],
+    readOnly: true,
+  },
+  {
+    name: "list_mcp_credential_policies",
+    title: "List MCP credential policies",
+    description: "Lists the policies that let an MCP server use a credential.",
+    scopes: ["mcp:read"],
+    readOnly: true,
+  },
+  {
+    name: "list_mcp_toolsets",
+    title: "List MCP toolsets",
+    description:
+      "Lists the project's MCP toolsets, the tool selections agents bind.",
+    scopes: ["mcp:read"],
+    readOnly: true,
+  },
+  {
+    name: "create_mcp_server",
+    title: "Create MCP server",
+    description:
+      "Adds a remote MCP server to the organization. Credentials are added in the console or API, never through this tool.",
+    scopes: ["mcp:write"],
+    readOnly: false,
+    organizationShared: true,
+  },
+  {
+    name: "discover_mcp_server",
+    title: "Discover MCP server tools",
+    description:
+      "Connects to an MCP server through a credential policy and records the tools it offers.",
+    scopes: ["mcp:discover"],
+    readOnly: false,
+    organizationShared: true,
+  },
+  {
+    name: "create_mcp_credential_policy",
+    title: "Create MCP credential policy",
+    description:
+      "Lets an MCP server use an existing credential, within the credential's destination.",
+    scopes: ["mcp:write"],
+    readOnly: false,
+    organizationShared: true,
+  },
+  {
+    name: "create_mcp_toolset",
+    title: "Create MCP toolset",
+    description:
+      "Selects discovered tools of an MCP server, with their approvals, for agents of this project to bind.",
+    scopes: ["mcp:write"],
+    readOnly: false,
+  },
+  {
+    name: "list_audit_entries",
+    title: "List audit entries",
+    description: "Lists the project's audit trail, newest first.",
+    scopes: ["audit:read"],
+    readOnly: true,
+  },
+];
+
+/** The tools a caller with these scopes is offered. */
+export function availableOaoMcpTools(
+  scopes: ReadonlySet<string>,
+  options: { readonly projectRestricted?: boolean } = {},
+): readonly OaoMcpToolDescriptor[] {
+  return OAO_MCP_TOOL_CATALOG.filter(
+    (tool) =>
+      (scopes.has("*") || tool.scopes.every((scope) => scopes.has(scope))) &&
+      !(options.projectRestricted === true && tool.organizationShared === true),
+  );
+}
+
+/**
+ * Scopes an agent version may grant its built-in OAO tools. Deciding
+ * approvals and project administration stay with people and API keys, so an
+ * agent can never approve its own or another agent's tool calls.
+ */
+export const OAO_AGENT_TOOL_SCOPES = [
+  "agent:read",
+  "agent:write",
+  "skill:read",
+  "skill:write",
+  "skill:bind",
+  "mcp:read",
+  "mcp:write",
+  "mcp:discover",
+  "mcp:bind",
+  "credential:read_metadata",
+  "session:read",
+  "session:write",
+  "run:create",
+  "run:read",
+  "run:cancel",
+  "delegation:read",
+  "delegation:message",
+  "audit:read",
+] as const;
+export type OaoAgentToolScope = (typeof OAO_AGENT_TOOL_SCOPES)[number];
+
+/** Model-visible names of built-in OAO tools start with this prefix. */
+export const OAO_AGENT_TOOL_PREFIX = "oao__";
+
+/**
+ * Lets an agent use the OAO MCP tools inside its runs. A run acts as the
+ * person or key that started it, narrowed to these scopes. Read-only tools
+ * never ask for approval; `approval` applies to the tools that change OAO.
+ */
+export const ManagedAgentOaoToolsSchema = v.strictObject({
+  scopes: v.pipe(
+    v.array(v.picklist(OAO_AGENT_TOOL_SCOPES)),
+    v.minLength(1),
+    v.maxLength(OAO_AGENT_TOOL_SCOPES.length),
+    v.check(
+      (scopes) => new Set(scopes).size === scopes.length,
+      "OAO tool scopes must be unique",
+    ),
+  ),
+  approval: v.optional(v.picklist(["never", "always"]), "always"),
+});
+
 const ManagedAgentDelegatesSchema = v.pipe(
   v.array(ManagedAgentDelegateSchema),
   v.maxLength(32),
@@ -1479,6 +1840,7 @@ export const ManagedAgentPublicationConfigSchema = v.pipe(
       [],
     ),
     delegates: v.optional(ManagedAgentDelegatesSchema, []),
+    oaoTools: v.optional(ManagedAgentOaoToolsSchema),
     sandbox: v.strictObject({
       enabled: v.boolean(),
       provider: ProjectSandboxProviderKeySchema,
@@ -1509,8 +1871,11 @@ export const ManagedAgentPublicationConfigSchema = v.pipe(
       ...config.tools.map((tool) => tool.name),
       ...config.harnessOperations.map((operation) => operation.key),
     ];
-    return new Set(names).size === names.length;
-  }, "Agent tools and Harness Operations must not collide with another mounted tool name"),
+    return (
+      new Set(names).size === names.length &&
+      names.every((name) => !name.startsWith(OAO_AGENT_TOOL_PREFIX))
+    );
+  }, `Agent tools and Harness Operations must not collide with another mounted tool name or start with ${OAO_AGENT_TOOL_PREFIX}`),
 );
 
 export function parseManagedAgentSnapshotForPublication(
@@ -1529,6 +1894,7 @@ export const ManagedAgentSnapshotSchema = v.strictObject({
   skills: v.optional(v.array(ManagedSkillBindingSnapshotSchema), []),
   mcpTools: v.optional(v.array(ManagedMcpToolSnapshotSchema), []),
   delegates: v.optional(ManagedAgentDelegatesSchema, []),
+  oaoTools: v.optional(ManagedAgentOaoToolsSchema),
   sandbox: v.strictObject({
     enabled: v.boolean(),
     provider: v.optional(LegacySandboxProviderKeySchema, "local-fake"),
@@ -1719,6 +2085,9 @@ export type ManagedHarnessOperation = v.InferOutput<
   typeof ManagedHarnessOperationSchema
 >;
 export type ManagedMcpBinding = v.InferOutput<typeof ManagedMcpBindingSchema>;
+export type ManagedAgentOaoTools = v.InferOutput<
+  typeof ManagedAgentOaoToolsSchema
+>;
 export type ManagedMcpToolSnapshot = v.InferOutput<
   typeof ManagedMcpToolSnapshotSchema
 >;
@@ -1904,6 +2273,13 @@ export const McpLifecycleStatusSchema = v.picklist([
 export const McpCredentialKindSchema = v.picklist([
   "static_bearer",
   "api_key_header",
+  "oauth_client_credentials",
+]);
+
+/** How OAO authenticates to the token endpoint. `client_secret_post` is the default. */
+export const McpTokenEndpointAuthMethodSchema = v.picklist([
+  "client_secret_post",
+  "client_secret_basic",
 ]);
 
 const McpCredentialHeaderSchema = v.pipe(
@@ -1926,6 +2302,10 @@ const McpCredentialHeaderSchema = v.pipe(
         "upgrade",
       ]).has(value.toLowerCase()),
     "credential header is not allowed",
+  ),
+  v.check(
+    (value) => !value.toLowerCase().startsWith("x-oao-"),
+    "x-oao-* headers are reserved for OAO call context",
   ),
 );
 
@@ -1966,6 +2346,206 @@ export const DiscoverMcpServerInputSchema = v.strictObject({
   credentialPolicyVersionId: v.optional(IdSchema),
 });
 
+const McpResourceSummarySchema = v.object({
+  id: IdSchema,
+  key: v.string(),
+  displayName: v.string(),
+});
+
+/**
+ * What still uses an MCP server, and what removing it would revoke. A server
+ * cannot be removed while any live agent's current version binds its tools.
+ */
+export const McpServerUsageSchema = v.object({
+  /** Live agents in this project whose current version binds the server. */
+  agents: v.array(
+    v.object({ id: IdSchema, key: v.string(), name: v.string() }),
+  ),
+  /** Other projects of the organization with such agents, by count only. */
+  otherProjects: v.array(
+    v.object({
+      id: IdSchema,
+      slug: v.string(),
+      name: v.string(),
+      agentCount: v.number(),
+    }),
+  ),
+  /** This project's active toolsets for the server. */
+  toolsets: v.array(McpResourceSummarySchema),
+  /** Active credential policies no other active server uses. */
+  credentialPolicies: v.array(McpResourceSummarySchema),
+  /** Active credentials used only by those policies. */
+  credentials: v.array(McpResourceSummarySchema),
+});
+
+export const RemoveMcpServerResultSchema = v.object({
+  server: McpServerSchema,
+  revokedToolsetIds: v.array(IdSchema),
+  revokedCredentialPolicyIds: v.array(IdSchema),
+  revokedCredentialIds: v.array(IdSchema),
+});
+
+const McpHttpsOriginSchema = v.pipe(
+  v.string(),
+  v.maxLength(512),
+  v.url(),
+  v.check((value) => {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.pathname === "/" &&
+      !url.search &&
+      !url.hash &&
+      !url.username &&
+      !url.password
+    );
+  }, "origin must be an HTTPS origin without a path, query, user information or fragment"),
+);
+
+const McpPathPrefixSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(1_024),
+  v.regex(
+    /^\/[^?#]*$/u,
+    "pathPrefix must be absolute and contain no query or fragment",
+  ),
+);
+
+/**
+ * The only HTTPS origin and path prefix a credential version's secret may be
+ * sent to. Policies that use the credential must lie inside it.
+ */
+export const McpCredentialDestinationSchema = v.strictObject({
+  origin: McpHttpsOriginSchema,
+  pathPrefix: McpPathPrefixSchema,
+});
+
+/** The canonical form OAO stores an HTTPS origin in: lowercase, no default port. */
+export function canonicalMcpOrigin(value: string): string {
+  return new URL(value).origin;
+}
+
+/**
+ * True when `path` equals `prefix` or continues it after a "/" boundary:
+ * "/mcp" contains "/mcp" and "/mcp/v2" but not "/mcpx".
+ */
+export function mcpPathWithin(path: string, prefix: string): boolean {
+  return (
+    path === prefix ||
+    (path.startsWith(prefix) &&
+      (prefix.endsWith("/") || path.charAt(prefix.length) === "/"))
+  );
+}
+
+/**
+ * The destination of an OAuth credential: the origin and path of its pinned
+ * resource, without a trailing slash.
+ */
+export function mcpResourceDestination(resource: string): {
+  readonly origin: string;
+  readonly pathPrefix: string;
+} {
+  const url = new URL(resource);
+  return {
+    origin: url.origin,
+    pathPrefix:
+      url.pathname.length > 1 && url.pathname.endsWith("/")
+        ? url.pathname.slice(0, -1)
+        : url.pathname,
+  };
+}
+
+/** True when a policy's origin and path prefix lie inside a credential destination. */
+export function mcpDestinationContains(
+  destination: { readonly origin: string; readonly pathPrefix: string },
+  target: { readonly origin: string; readonly pathPrefix: string },
+): boolean {
+  return (
+    canonicalMcpOrigin(target.origin) ===
+      canonicalMcpOrigin(destination.origin) &&
+    mcpPathWithin(target.pathPrefix, destination.pathPrefix)
+  );
+}
+
+const McpHttpsUrlSchema = v.pipe(
+  v.string(),
+  v.maxLength(2_048),
+  v.url(),
+  v.check((value) => {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" && !url.username && !url.password && !url.hash
+    );
+  }, "must be an HTTPS URL without user information or a fragment"),
+);
+
+/** RFC 6749 §3.3: space-separated scope tokens. */
+const McpOAuthScopeSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(1_024),
+  v.regex(
+    /^[\x21\x23-\x5b\x5d-\x7e]+(?: [\x21\x23-\x5b\x5d-\x7e]+)*$/u,
+    "scope must be space-separated OAuth scope tokens",
+  ),
+);
+
+const McpOAuthClientIdSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(512),
+  v.regex(/^[\x20-\x7e]+$/u, "clientId must be printable ASCII"),
+);
+
+/**
+ * The OAuth client-credentials configuration pinned on a credential version,
+ * as confirmed from authorization discovery. `resource` is the protected
+ * resource metadata `resource`, which identifies the MCP endpoint.
+ */
+export const McpOAuthClientCredentialsConfigSchema = v.strictObject({
+  resource: McpEndpointSchema,
+  resourceMetadataUrl: McpHttpsUrlSchema,
+  issuer: McpHttpsUrlSchema,
+  tokenEndpoint: McpHttpsUrlSchema,
+  clientId: McpOAuthClientIdSchema,
+  tokenEndpointAuthMethod: v.optional(
+    McpTokenEndpointAuthMethodSchema,
+    "client_secret_post",
+  ),
+  scope: McpOAuthScopeSchema,
+  /**
+   * False omits the RFC 8707 `resource` token request parameter, a deliberate
+   * deviation for authorization servers that reject it.
+   */
+  sendResource: v.optional(v.boolean(), true),
+});
+
+/**
+ * Re-pins an OAuth credential on rotation. Every field is optional and keeps
+ * the current value when left out; the resource never changes.
+ */
+export const McpOAuthClientCredentialsRotationSchema = v.strictObject({
+  resourceMetadataUrl: v.optional(McpHttpsUrlSchema),
+  issuer: v.optional(McpHttpsUrlSchema),
+  tokenEndpoint: v.optional(McpHttpsUrlSchema),
+  clientId: v.optional(McpOAuthClientIdSchema),
+  tokenEndpointAuthMethod: v.optional(McpTokenEndpointAuthMethodSchema),
+  scope: v.optional(McpOAuthScopeSchema),
+  sendResource: v.optional(v.boolean()),
+});
+
+const McpCredentialOAuthSchema = v.object({
+  resource: v.string(),
+  resourceMetadataUrl: v.string(),
+  issuer: v.string(),
+  tokenEndpoint: v.string(),
+  clientId: v.string(),
+  tokenEndpointAuthMethod: McpTokenEndpointAuthMethodSchema,
+  scope: v.string(),
+  sendResource: v.boolean(),
+});
+
 export const McpCredentialSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
@@ -1973,6 +2553,12 @@ export const McpCredentialSchema = v.object({
   displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
   kind: McpCredentialKindSchema,
   headerName: v.nullable(McpCredentialHeaderSchema),
+  /** Null only for a credential stored before destinations were pinned. */
+  destination: v.nullable(
+    v.object({ origin: v.string(), pathPrefix: v.string() }),
+  ),
+  /** The pinned OAuth configuration of an `oauth_client_credentials` credential. */
+  oauth: v.nullable(McpCredentialOAuthSchema),
   credentialConfigured: v.literal(true),
   credentialFingerprint: v.pipe(v.string(), v.regex(/^[a-f0-9]{12}$/u)),
   credentialVersion: v.pipe(v.number(), v.integer(), v.minValue(1)),
@@ -1982,25 +2568,118 @@ export const McpCredentialSchema = v.object({
   updatedAt: TimestampSchema,
 });
 
-export const CreateMcpCredentialInputSchema = v.pipe(
+const McpCredentialSecretSchema = v.pipe(
+  v.string(),
+  v.minLength(8),
+  v.maxLength(16_384),
+);
+
+export const CreateMcpCredentialInputSchema = v.variant("kind", [
   v.strictObject({
     key: McpResourceKeySchema,
     displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
-    kind: McpCredentialKindSchema,
-    headerName: v.optional(v.nullable(McpCredentialHeaderSchema), null),
-    secret: v.pipe(v.string(), v.minLength(8), v.maxLength(16_384)),
+    kind: v.literal("static_bearer"),
+    headerName: v.optional(
+      v.null("headerName is required only for API-key-header credentials"),
+      null,
+    ),
+    destination: McpCredentialDestinationSchema,
+    secret: McpCredentialSecretSchema,
   }),
-  v.check(
-    (value) =>
-      (value.kind === "static_bearer" && value.headerName === null) ||
-      (value.kind === "api_key_header" && value.headerName !== null),
-    "headerName is required only for API-key-header credentials",
-  ),
-);
+  v.strictObject({
+    key: McpResourceKeySchema,
+    displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+    kind: v.literal("api_key_header"),
+    headerName: McpCredentialHeaderSchema,
+    destination: McpCredentialDestinationSchema,
+    secret: McpCredentialSecretSchema,
+  }),
+  /**
+   * The destination is the pinned resource, and `secret` is the client
+   * secret: it is only ever sent to the pinned token endpoint.
+   */
+  v.strictObject({
+    key: McpResourceKeySchema,
+    displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+    kind: v.literal("oauth_client_credentials"),
+    headerName: v.optional(v.null(), null),
+    oauth: McpOAuthClientCredentialsConfigSchema,
+    secret: McpCredentialSecretSchema,
+  }),
+]);
 
 export const RotateMcpCredentialInputSchema = v.strictObject({
-  secret: v.pipe(v.string(), v.minLength(8), v.maxLength(16_384)),
+  /** The new secret; for an OAuth credential, the new client secret. */
+  secret: McpCredentialSecretSchema,
+  /**
+   * Pins a credential stored before destinations existed. A pinned
+   * credential keeps its destination; this must then be omitted or equal.
+   */
+  destination: v.optional(McpCredentialDestinationSchema),
+  /** Only for an OAuth credential: changes to its pinned configuration. */
+  oauth: v.optional(McpOAuthClientCredentialsRotationSchema),
 });
+
+export const DiscoverMcpAuthorizationInputSchema = v.strictObject({
+  endpointUrl: McpEndpointSchema,
+});
+
+const McpMetadataListSchema = v.nullable(v.array(v.string()));
+
+/**
+ * What credential-free discovery found for an MCP endpoint, for an operator
+ * to confirm before entering a client ID and secret.
+ */
+export const McpAuthorizationDiscoverySchema = v.object({
+  endpointUrl: v.string(),
+  resource: v.string(),
+  resourceName: v.nullable(v.string()),
+  resourceMetadataUrl: v.string(),
+  resourceMetadataSource: v.picklist(["www_authenticate", "well_known"]),
+  challengeScope: v.nullable(v.string()),
+  scopesSupported: v.array(v.string()),
+  authorizationServers: v.array(
+    v.object({
+      issuer: v.string(),
+      tokenEndpoint: v.nullable(v.string()),
+      metadataSource: v.nullable(v.picklist(["oauth", "oidc"])),
+      tokenEndpointAuthMethodsSupported: McpMetadataListSchema,
+      grantTypesSupported: McpMetadataListSchema,
+      scopesSupported: McpMetadataListSchema,
+      /** Null when OAO can request tokens from this server. */
+      problem: v.nullable(
+        v.picklist([
+          "metadata_unavailable",
+          "issuer_mismatch",
+          "token_endpoint_missing",
+          "token_endpoint_insecure",
+          "token_endpoint_unreachable",
+        ]),
+      ),
+    }),
+  ),
+});
+
+/** Safe error codes of OAuth MCP credential failures. */
+export const McpCredentialErrorCodeSchema = v.picklist([
+  "authorization_discovery_failed",
+  "resource_mismatch",
+  "authorization_server_changed",
+  "credential_token_failed",
+  "credential_rejected",
+  "insufficient_scope",
+  "remote_forbidden",
+]);
+
+/** The result of testing an OAuth credential. The token itself is never returned. */
+export const McpCredentialTestResultSchema = v.variant("ok", [
+  v.object({
+    ok: v.literal(true),
+    expiresIn: v.nullable(v.number()),
+    grantedScope: v.nullable(v.string()),
+  }),
+  v.object({ ok: v.literal(false), errorCode: McpCredentialErrorCodeSchema }),
+]);
 
 export const McpCredentialPolicySchema = v.object({
   id: IdSchema,
@@ -2014,6 +2693,8 @@ export const McpCredentialPolicySchema = v.object({
   pathPrefix: v.pipe(v.string(), v.minLength(1), v.maxLength(1_024)),
   timeoutMs: v.pipe(v.number(), v.integer(), v.minValue(1_000)),
   maximumResponseBytes: v.pipe(v.number(), v.integer(), v.minValue(1_024)),
+  /** Whether requests carry the X-OAO-* call identity headers. */
+  forwardCallContext: v.boolean(),
   status: McpLifecycleStatusSchema,
   createdByPrincipalId: IdSchema,
   createdAt: TimestampSchema,
@@ -2053,6 +2734,12 @@ export const CreateMcpCredentialPolicyInputSchema = v.strictObject({
     v.pipe(v.number(), v.integer(), v.minValue(1_024), v.maxValue(10_485_760)),
     1_048_576,
   ),
+  /**
+   * Sends the organization, project, session, run, tool-call, and run-key
+   * identity to the approved MCP server as X-OAO-* headers. Off by default:
+   * opting in discloses OAO identifiers to that server.
+   */
+  forwardCallContext: v.optional(v.boolean(), false),
 });
 
 export const McpToolsetToolSchema = v.object({
@@ -2071,6 +2758,8 @@ export const McpToolsetSchema = v.object({
   displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
   latestVersionId: IdSchema,
   version: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  /** The MCP server the toolset's version belongs to. */
+  serverId: IdSchema,
   serverVersionId: IdSchema,
   status: McpLifecycleStatusSchema,
   tools: v.array(McpToolsetToolSchema),
@@ -2586,6 +3275,12 @@ export function parseCreateMcpCredentialInput(
   return v.parse(CreateMcpCredentialInputSchema, input);
 }
 
+export function parseDiscoverMcpAuthorizationInput(
+  input: unknown,
+): DiscoverMcpAuthorizationInput {
+  return v.parse(DiscoverMcpAuthorizationInputSchema, input);
+}
+
 export function parseRotateMcpCredentialInput(
   input: unknown,
 ): RotateMcpCredentialInput {
@@ -2624,12 +3319,37 @@ export type CreateMcpServerInput = v.InferOutput<
 export type DiscoverMcpServerInput = v.InferOutput<
   typeof DiscoverMcpServerInputSchema
 >;
+export type McpServerUsage = v.InferOutput<typeof McpServerUsageSchema>;
+export type RemoveMcpServerResult = v.InferOutput<
+  typeof RemoveMcpServerResultSchema
+>;
 export type McpCredential = v.InferOutput<typeof McpCredentialSchema>;
 export type CreateMcpCredentialInput = v.InferOutput<
   typeof CreateMcpCredentialInputSchema
 >;
 export type RotateMcpCredentialInput = v.InferOutput<
   typeof RotateMcpCredentialInputSchema
+>;
+export type McpCredentialDestination = v.InferOutput<
+  typeof McpCredentialDestinationSchema
+>;
+export type McpTokenEndpointAuthMethod = v.InferOutput<
+  typeof McpTokenEndpointAuthMethodSchema
+>;
+export type McpOAuthClientCredentialsConfig = v.InferOutput<
+  typeof McpOAuthClientCredentialsConfigSchema
+>;
+export type DiscoverMcpAuthorizationInput = v.InferOutput<
+  typeof DiscoverMcpAuthorizationInputSchema
+>;
+export type McpAuthorizationDiscovery = v.InferOutput<
+  typeof McpAuthorizationDiscoverySchema
+>;
+export type McpCredentialErrorCode = v.InferOutput<
+  typeof McpCredentialErrorCodeSchema
+>;
+export type McpCredentialTestResult = v.InferOutput<
+  typeof McpCredentialTestResultSchema
 >;
 export type McpCredentialPolicy = v.InferOutput<
   typeof McpCredentialPolicySchema
@@ -2796,6 +3516,19 @@ const BackupMcpCredentialSchema = v.strictObject({
   displayName: BackupNameSchema,
   kind: McpCredentialKindSchema,
   headerName: v.nullable(McpCredentialHeaderSchema),
+  /** Absent in backups made before destinations were pinned. */
+  destination: v.optional(v.nullable(McpCredentialDestinationSchema), null),
+  /** The pinned OAuth configuration; the client secret is never included. */
+  oauth: v.optional(
+    v.nullable(
+      v.strictObject({
+        ...McpOAuthClientCredentialsConfigSchema.entries,
+        tokenEndpointAuthMethod: McpTokenEndpointAuthMethodSchema,
+        sendResource: v.boolean(),
+      }),
+    ),
+    null,
+  ),
   status: v.picklist(["active", "revoked"]),
   credentialFingerprint: BackupFingerprintSchema,
 });
@@ -2818,6 +3551,8 @@ const BackupMcpCredentialPolicySchema = v.strictObject({
           v.integer(),
           v.minValue(1_024),
         ),
+        /** Absent in backups made before call context could be forwarded. */
+        forwardCallContext: v.optional(v.boolean(), false),
         status: BackupLifecycleSchema,
         contentHash: BackupHashSchema,
       }),
@@ -3245,9 +3980,25 @@ export function checkConfigurationBackupReferences(
   uniqueKeys(backup.storageProviders, "Storage provider");
   if (backup.storageProviders.filter((provider) => provider.default).length > 1)
     problems.push("More than one storage provider is the default");
-  uniqueKeys(backup.mcpServers, "MCP server");
-  uniqueKeys(backup.mcpCredentials, "MCP credential");
-  uniqueKeys(backup.mcpCredentialPolicies, "MCP credential policy");
+  // A removed MCP resource frees its key, like an archived agent.
+  const removed = <
+    T extends { readonly versions: readonly { readonly status: string }[] },
+  >(
+    entries: readonly (T & { readonly key: string })[],
+  ) =>
+    entries.map((entry) => ({
+      key: entry.key,
+      archived: entry.versions.at(-1)?.status === "revoked",
+    }));
+  uniqueKeys(removed(backup.mcpServers), "MCP server");
+  uniqueKeys(
+    backup.mcpCredentials.map((credential) => ({
+      key: credential.key,
+      archived: credential.status === "revoked",
+    })),
+    "MCP credential",
+  );
+  uniqueKeys(removed(backup.mcpCredentialPolicies), "MCP credential policy");
 
   const serverVersions = new Map<string, readonly string[]>();
   for (const server of backup.mcpServers) {
@@ -3270,6 +4021,13 @@ export function checkConfigurationBackupReferences(
     )
       problems.push(
         `MCP credential ${credential.key} needs a header name exactly when it is an API-key header`,
+      );
+    if (
+      (credential.kind === "oauth_client_credentials") !==
+      Boolean(credential.oauth)
+    )
+      problems.push(
+        `MCP credential ${credential.key} needs an OAuth configuration exactly when it uses OAuth client credentials`,
       );
   }
   const policyVersions = new Set<string>();
@@ -3312,7 +4070,7 @@ export function checkConfigurationBackupReferences(
         );
     }
     uniqueKeys(project.skills, `${where} Skill`);
-    uniqueKeys(project.mcpToolsets, `${where} MCP toolset`);
+    uniqueKeys(removed(project.mcpToolsets), `${where} MCP toolset`);
     uniqueKeys(project.agents, `${where} agent`);
     const skillVersions = new Set<string>();
     for (const skill of project.skills) {

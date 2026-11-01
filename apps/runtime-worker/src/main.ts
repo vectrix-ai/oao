@@ -35,7 +35,11 @@ import {
   withModelCallTimeout,
   type FauxResponseStep,
 } from "@oao/models-openrouter";
-import { McpRemoteClient, type McpRemotePort } from "@oao/mcp-remote";
+import {
+  McpRemoteClient,
+  allowPrivateMcpNetwork,
+  type McpRemotePort,
+} from "@oao/mcp-remote";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { PostgresWakeQueue, WakeWorker } from "@oao/queue-postgres";
 import {
@@ -45,6 +49,7 @@ import {
   RuntimeProjection,
   configureVendorNeutralTelemetry,
   createProjectModelPresetActivator,
+  createOaoToolExecutor,
   createPostgresMcpToolExecutor,
   registerRuntimeModelProvider,
   resetManagedAgentRuntime,
@@ -84,6 +89,8 @@ export async function startRuntimeWorker(input: {
   readonly fakeModelCallTimeoutMs?: number;
   readonly platformTools?: ReadonlyMap<string, PlatformToolHandler>;
   readonly mcpRemote?: McpRemotePort;
+  /** Tests may route agents' OAO tool calls to an in-process API. */
+  readonly oaoApiFetch?: typeof globalThis.fetch;
   /** Tests may admit one explicit run without claiming unrelated queued work. */
   readonly backgroundWakes?: boolean;
   /** Outbound event webhook delivery; defaults to on when credentials can be decrypted. */
@@ -143,6 +150,7 @@ export async function startRuntimeWorker(input: {
     deployment: deploymentPresets,
     registerProvider: (provider) => registerRuntimeModelProvider(provider),
   });
+  const allowPrivateMcp = allowPrivateMcpNetwork(env);
   const credentialCipher = env.OAO_CREDENTIAL_ENCRYPTION_KEY
     ? ProviderCredentialCipher.fromBase64(env.OAO_CREDENTIAL_ENCRYPTION_KEY)
     : undefined;
@@ -168,9 +176,18 @@ export async function startRuntimeWorker(input: {
     ? createPostgresMcpToolExecutor({
         pool,
         credentialCipher,
-        remote: input.mcpRemote ?? new McpRemoteClient(),
+        remote:
+          input.mcpRemote ??
+          new McpRemoteClient({ allowPrivateNetwork: allowPrivateMcp }),
       })
     : undefined;
+  // Agents granted OAO tools call the OAO API with a run token.
+  const oaoApiUrl = env.OAO_API_URL?.trim() || undefined;
+  const oaoTools = createOaoToolExecutor({
+    pool,
+    ...(oaoApiUrl ? { apiUrl: oaoApiUrl } : {}),
+    ...(input.oaoApiFetch ? { fetch: input.oaoApiFetch } : {}),
+  });
   const flue = await startManagedFlueRuntime({
     pool,
     providers,
@@ -178,6 +195,7 @@ export async function startRuntimeWorker(input: {
     broker,
     skills,
     delegations,
+    oaoTools,
     ...(mcp ? { mcp } : {}),
     ...(runFileStorage ? { runFileStorage } : {}),
     ...(input.platformTools ? { platformTools: input.platformTools } : {}),

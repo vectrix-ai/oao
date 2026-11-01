@@ -18,6 +18,7 @@ import { useApi } from "../api/context";
 import { ConfigurationBackupPanel } from "./configuration-backup";
 import { EventWebhookConnections } from "./event-webhooks";
 import type {
+  ApiKeyAccess,
   CreateApiKeyInput,
   CreateProjectInput,
   CreateSandboxProviderInput,
@@ -655,50 +656,65 @@ function SettingsBody({
       </TableCard>
     );
 
-  if (route === "api-keys")
+  if (route === "api-keys") {
+    const currentProject = data.projects.find((project) => project.current);
+    const mcpServer = currentProject ? (
+      <OaoMcpServerNote projectId={currentProject.id} />
+    ) : null;
     return data.apiKeys.length === 0 ? (
-      <EmptyState
-        icon="⚿"
-        title="No API keys"
-        description="An API key is a scoped project credential for an integration or CI job."
-      />
+      <>
+        {mcpServer}
+        <EmptyState
+          icon="⚿"
+          title="No API keys"
+          description="An API key is a scoped project credential for an integration or CI job."
+        />
+      </>
     ) : (
-      <TableCard label="API keys table" caption="Scoped project API keys">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Prefix</th>
-            <th>Scopes</th>
-            <th>Last used</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.apiKeys.map((key) => (
-            <tr key={key.id}>
-              <td>
-                <span className="member-cell">
-                  <span className="entity-icon" aria-hidden="true">
-                    <KeyRound size={15} />
-                  </span>
-                  <strong>{key.name}</strong>
-                </span>
-              </td>
-              <td>
-                <span className="key-mask">{key.prefix}</span>
-              </td>
-              <td>
-                {key.scopes.map((scope) => (
-                  <span className="scope" key={scope}>
-                    {scope}
-                  </span>
-                ))}
-              </td>
-              <td>{key.lastUsedAt ? formatDate(key.lastUsedAt) : "Never"}</td>
+      <>
+        {mcpServer}
+        <TableCard label="API keys table" caption="Scoped project API keys">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Prefix</th>
+              <th>Access</th>
+              <th>Scopes</th>
+              <th>Last used</th>
             </tr>
-          ))}
-        </tbody>
-      </TableCard>
+          </thead>
+          <tbody>
+            {data.apiKeys.map((key) => (
+              <tr key={key.id}>
+                <td>
+                  <span className="member-cell">
+                    <span className="entity-icon" aria-hidden="true">
+                      <KeyRound size={15} />
+                    </span>
+                    <strong>{key.name}</strong>
+                  </span>
+                </td>
+                <td>
+                  <span className="key-mask">{key.prefix}</span>
+                </td>
+                <td>
+                  {key.access === "project" ? "This project" : "All projects"}
+                </td>
+                <td>
+                  {key.scopes.map((scope) => (
+                    <span className="scope" key={scope}>
+                      {scope}
+                    </span>
+                  ))}
+                </td>
+                <td>{key.lastUsedAt ? formatDate(key.lastUsedAt) : "Never"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </TableCard>
+      </>
     );
+  }
 
   if (route === "sandbox-providers") return <SandboxConnections />;
   if (route === "storage-providers") return <StorageConnections />;
@@ -1941,6 +1957,24 @@ function DeleteProjectDialog({
   );
 }
 
+/** Where an external agent connects to manage this project through MCP. */
+function OaoMcpServerNote({ projectId }: { readonly projectId: string }) {
+  const endpoint = `${window.location.origin}/v1/projects/${projectId}/mcp`;
+  return (
+    <Alert tone="info" role="note" title="OAO MCP server">
+      <p>
+        An external agent can manage this project through MCP at{" "}
+        <code>{endpoint}</code>. It sends an API key as a bearer token and is
+        offered only the tools that key's scopes allow. Use a key with access to
+        only this project.
+      </p>
+      <pre className="code-block" aria-label="MCP client setup">
+        {`claude mcp add --transport http oao ${endpoint} \\\n  --header "Authorization: Bearer $OAO_API_KEY"`}
+      </pre>
+    </Alert>
+  );
+}
+
 function CreateApiKeyDialog({
   pending,
   error,
@@ -1953,6 +1987,7 @@ function CreateApiKeyDialog({
   readonly onSubmit: (input: CreateApiKeyInput) => void;
 }) {
   const [name, setName] = useState("");
+  const [access, setAccess] = useState<ApiKeyAccess>("project");
   const [scopes, setScopes] = useState(
     () => new Set<string>(DEFAULT_API_KEY_SCOPES),
   );
@@ -1973,7 +2008,7 @@ function CreateApiKeyDialog({
       onSubmit={(event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
         if (!nameError && !scopesError)
-          onSubmit({ name: name.trim(), scopes: [...scopes] });
+          onSubmit({ name: name.trim(), scopes: [...scopes], access });
       }}
       footer={
         <>
@@ -2003,13 +2038,35 @@ function CreateApiKeyDialog({
           onChange={(event) => setName(event.target.value)}
         />
       </Field>
+      <Field
+        label="Access"
+        hint={
+          access === "project"
+            ? "The key works only in this project. It can read the connections the organization shares but cannot change them, other projects, members, or keys outside this project."
+            : "The key works in every project of the organization."
+        }
+      >
+        <Select
+          value={access}
+          onChange={(event) =>
+            setAccess(
+              event.currentTarget.value === "organization"
+                ? "organization"
+                : "project",
+            )
+          }
+        >
+          <option value="project">Only this project</option>
+          <option value="organization">All projects in the organization</option>
+        </Select>
+      </Field>
       <fieldset className="scope-picker">
         <legend>Project scopes</legend>
         <span className="hint">
-          Keys apply across the organization. Select only scopes you hold.
-          Creating keys requires project:admin or *. Signed-in users also need
-          organization owner or admin membership. API-key callers qualify
-          through their scopes. Replace an existing key to change its scopes.
+          Select only scopes you hold. Creating keys requires project:admin or
+          *. Signed-in users also need organization owner or admin membership.
+          API-key callers qualify through their scopes. Replace an existing key
+          to change its scopes.
         </span>
         <div className="scope-picker-grid">
           {AUTHORIZATION_SCOPE_CATALOG.map(([scope, description]) => (

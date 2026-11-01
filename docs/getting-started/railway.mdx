@@ -55,7 +55,10 @@ Healthcheck path: /readyz
 ```
 
 Set the same `DATABASE_URL` and `OAO_CREDENTIAL_ENCRYPTION_KEY` values used by
-the web service. Do not generate a public domain for the worker. The worker
+the web service. Set `OAO_API_URL` to the web service's private address, for
+example `http://${{web.RAILWAY_PRIVATE_DOMAIN}}:${{web.PORT}}`, so agents can
+use [OAO tools](/integrations/oao-mcp-server#let-oao-agents-use-these-tools).
+Do not generate a public domain for the worker. The worker
 also delivers [event webhooks](/integrations/event-webhooks), so it needs
 outbound HTTPS access to their endpoints.
 

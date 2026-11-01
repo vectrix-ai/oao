@@ -1,0 +1,191 @@
+---
+title: "Manage OAO through MCP"
+description: "Let an external agent manage a project's agents, sessions, runs, and configuration through OAO's own MCP server."
+---
+
+Every OAO project serves a Model Context Protocol (MCP) server. An external
+agent such as Claude Code, Codex, or your own MCP client connects to it and
+manages the project: it reads and publishes agents, starts sessions, asks
+agents questions, follows runs, decides approvals, and maintains Skills, model
+presets, and MCP toolsets.
+
+The server is a thin layer over the [HTTP API](/reference/http-api). Each tool
+call goes through the same route a REST client would use, with the caller's
+own credential, so authorization, row-level security, idempotency, and the
+audit trail are the same.
+
+## Connect a client
+
+The endpoint is per project:
+
+```text
+https://oao.example.com/v1/projects/{projectId}/mcp
+```
+
+**Settings → API keys** in the console shows the endpoint of the current
+project. The server speaks Streamable HTTP without sessions, so clients using
+either the 2025 or the 2026-07-28 MCP revision can connect.
+
+Authenticate with an [OAO API key](/reference/authentication#create-an-integration-key)
+sent as a bearer token. Create a key with **Only this project** access and
+only the scopes the agent needs; a [project key](/reference/authentication#project-keys)
+cannot reach other projects or change connections the organization shares.
+The server refuses browser sessions, so a web page a signed-in user visits
+cannot drive it.
+
+<Tabs>
+  <Tab title="Claude Code">
+    ```bash
+    claude mcp add --transport http oao \
+      https://oao.example.com/v1/projects/$PROJECT_ID/mcp \
+      --header "Authorization: Bearer $OAO_API_KEY"
+    ```
+  </Tab>
+  <Tab title="JSON configuration">
+    Many clients read an `mcpServers` object:
+
+    ```json
+    {
+      "mcpServers": {
+        "oao": {
+          "type": "http",
+          "url": "https://oao.example.com/v1/projects/PROJECT_ID/mcp",
+          "headers": { "Authorization": "Bearer oao_your_secret" }
+        }
+      }
+    }
+    ```
+
+  </Tab>
+</Tabs>
+
+<Warning>
+  The key carries all the authority of its scopes. Keep it in the client's
+  secret store or an environment variable, never in a repository file.
+</Warning>
+
+## Rights
+
+A client is offered only the tools whose scopes its key holds; with `*` it
+sees them all. The API checks the scopes again on every call. A project key is
+never offered the tools that change organization-shared MCP servers and
+policies.
+
+| Tool                                                                           | Scopes                                         |
+| ------------------------------------------------------------------------------ | ---------------------------------------------- |
+| `get_context`                                                                  | none                                           |
+| `list_agents`, `get_agent`, `get_agent_version`, `list_model_presets`          | `agent:read`                                   |
+| `create_agent`, `publish_agent_version`, `delete_agent`                        | `agent:write`                                  |
+| `list_sessions`, `get_session`                                                 | `session:read`                                 |
+| `start_session`                                                                | `session:write`, `run:create`, `run:read`      |
+| `send_message`                                                                 | `run:create`, `run:read`                       |
+| `list_runs`, `get_run`, `get_run_messages`, `get_run_timeline`, `wait_for_run` | `run:read`                                     |
+| `list_approvals`                                                               | `run:read`                                     |
+| `cancel_run`                                                                   | `run:cancel`                                   |
+| `decide_approval`                                                              | `approval:resolve`                             |
+| `get_delegation`                                                               | `delegation:read`                              |
+| `message_delegation`                                                           | `delegation:message`, `run:create`, `run:read` |
+| `list_skills`, `get_skill`                                                     | `skill:read`                                   |
+| `create_skill`, `publish_skill_version`                                        | `skill:write`                                  |
+| `create_model_preset`                                                          | `project:admin`                                |
+| `list_mcp_servers`, `list_mcp_credential_policies`, `list_mcp_toolsets`        | `mcp:read`                                     |
+| `list_mcp_credentials`                                                         | `credential:read_metadata`                     |
+| `create_mcp_server`, `create_mcp_credential_policy`, `create_mcp_toolset`      | `mcp:write`                                    |
+| `discover_mcp_server`                                                          | `mcp:discover`                                 |
+| `list_audit_entries`                                                           | `audit:read`                                   |
+
+Publishing an agent version that binds Skills or MCP toolsets also needs
+`skill:bind` or `mcp:bind`, as it does over REST.
+
+No tool takes a plaintext secret. Model, storage, and sandbox provider
+credentials, MCP credentials, and API keys are created in the console or
+through the HTTP API, so a secret never passes through an agent's context.
+
+## Ask an agent about its run
+
+To question an agent about work it did:
+
+1. `list_sessions` finds the session; pass `agentId` to keep one agent's
+   sessions.
+2. `get_session` reads its runs and full transcript.
+3. `send_message` sends the question to that same session as a new run. The
+   agent answers with the whole session in context.
+
+The question and the answer become part of that session's transcript, like
+any follow-up. The session's latest run must have settled first; otherwise
+the call fails with `conflict`.
+
+`start_session`, `send_message`, and `message_delegation` wait up to
+`waitSeconds` (default 45, at most 600) for the run to settle and then return
+the agent's answer. When the run is still going, the result has
+`settled: false`; call `wait_for_run` later. A run waiting for a human
+approval does not settle until someone decides it, for example with
+`decide_approval`.
+
+## Let OAO agents use these tools
+
+An agent inside OAO can use the same tools, for example to check what other
+agents did and ask them about it. The server is built in, so there is no
+connection, endpoint, or credential to set up:
+
+- **MCP connections** lists **OAO** as a built-in connection in every
+  project. **Manage** shows which agents use it; **Use** next to an agent
+  picks the scopes and publishes a new version of that agent with them, and
+  **Stop using** publishes one without.
+- In the agent editor, **OAO MCP server** does the same for the version you
+  are editing.
+- Through the API, set `oaoTools` in the agent version config:
+
+```json
+{
+  "oaoTools": {
+    "scopes": ["agent:read", "session:read", "run:read", "run:create"],
+    "approval": "always"
+  }
+}
+```
+
+The model sees each tool with an `oao__` prefix, such as
+`oao__list_sessions` and `oao__send_message`.
+
+- **Identity.** A run acts as the person or API key that started it. Its
+  rights are the scopes in `oaoTools` that this principal still holds when
+  the tool runs; removing a member or revoking the key takes them away at
+  once. Like a [project key](/reference/authentication#project-keys), a run
+  stays in its project and is never offered the tools that change
+  organization-shared connections. The audit trail records the acting run as
+  `viaRunId`.
+- **Grant.** `scopes` are any of `agent:read`, `agent:write`, `skill:read`,
+  `skill:write`, `skill:bind`, `mcp:read`, `mcp:write`, `mcp:discover`,
+  `mcp:bind`, `credential:read_metadata`, `session:read`, `session:write`,
+  `run:create`, `run:read`, `run:cancel`, `delegation:read`,
+  `delegation:message`, and `audit:read`. The publisher must hold each one.
+  `approval:resolve` and `project:admin` cannot be granted, so an agent never
+  approves its own or another agent's tool calls.
+- **Approval.** Read-only tools run at once. `approval` (default `always`)
+  decides whether tools that change OAO wait for a person to approve each
+  call.
+- **No chains.** A run an agent started, by sending a message or starting a
+  session, keeps only the read scopes of its grant, and so do the runs it
+  delegates to. It cannot change OAO or start or message further runs, which
+  rules out agents asking each other in a loop.
+- **Credentials.** The runtime worker mints a token for each call, valid only
+  for that call and while the run is unsettled, and keeps only its SHA-256.
+  Writes use the tool call as their `Idempotency-Key`, so a replayed call
+  repeats nothing.
+
+The runtime worker reaches the API through `OAO_API_URL`, for example
+`http://127.0.0.1:3000`. `pnpm dev:local` sets it; in a deployment, set it on
+the worker to an address of the API the worker can reach. Without it, OAO tool
+calls fail with an error that names the variable.
+
+## Retries and results
+
+Every write sends an `Idempotency-Key`. Pass `idempotencyKey` to retry a call
+safely: the same key and arguments return the first result instead of doing
+the work twice. Without it, each call is a new write.
+
+Results are the API's JSON. `get_session` leaves out the debug block (model
+invocations, tool calls, and sandbox detail) unless `includeDebug` is `true`.
+A failed call is a tool error carrying the API's `status`, `code`, `message`,
+and `requestId`.

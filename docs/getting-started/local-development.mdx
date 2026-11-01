@@ -446,6 +446,32 @@ Event commits wake the worker immediately. It also polls for undelivered
 events every second as a fallback; set `OAO_EVENT_WEBHOOK_POLL_MS` to change
 that interval.
 
+### MCP servers on your machine or tailnet
+
+[Remote MCP servers](/integrations/mcp) must resolve to public addresses. To
+connect one that runs on your machine or a private network, such as a Tailscale
+tailnet, add this to `.env` and restart `pnpm dev:local`:
+
+```dotenv
+OAO_MCP_ALLOW_PRIVATE_NETWORK=true
+```
+
+It lifts the public-address check for MCP discovery, tool calls, and OAuth
+token requests in both the API and the runtime worker, and both refuse to start
+with it unless `NODE_ENV=development`. Endpoints, origins, and metadata URLs
+must still be `https://` URLs. `tailscale serve` is one way to give a local
+server a certificate; the server must then advertise `https://` URLs in its
+`WWW-Authenticate` challenge and protected resource metadata.
+
+### OAO's own MCP server and OAO tools
+
+The API serves each project's [MCP server](/integrations/oao-mcp-server) at
+`http://127.0.0.1:3000/v1/projects/{projectId}/mcp`; connect a client with a
+project API key. For agents granted
+[OAO tools](/integrations/oao-mcp-server#let-oao-agents-use-these-tools),
+`pnpm dev:local` sets `OAO_API_URL` on the runtime worker to the local API.
+Set `OAO_API_URL` in `.env` only to point the worker at another API.
+
 ### OTLP telemetry
 
 To export vendor-neutral telemetry, set the collector endpoint:

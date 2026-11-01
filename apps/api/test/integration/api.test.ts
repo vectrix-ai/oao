@@ -1,6 +1,10 @@
+import {
+  Client as McpClient,
+  StreamableHTTPClientTransport,
+} from "@modelcontextprotocol/client";
 import { AUTHORIZATION_SCOPE_CATALOG } from "@oao/contracts";
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
 import { DevelopmentAuthAdapter } from "@oao/auth-core";
@@ -15,7 +19,13 @@ import {
   listApprovedModelCatalog,
 } from "@oao/models-openrouter";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
-import type { McpRemotePort } from "@oao/mcp-remote";
+import {
+  McpRemoteError,
+  type McpAuthorizationDiscovery,
+  type McpConnectionDefinition,
+  type McpOAuthClientCredentialsMaterial,
+  type McpRemotePort,
+} from "@oao/mcp-remote";
 import {
   brandedId,
   type AuthorizationScope,
@@ -131,9 +141,58 @@ class TransactionalTestRuntimeCommands implements RuntimeCommandPort {
 }
 
 let fakeMcpDiscoveryRevision = 1;
+const fakeMcpConnections: McpConnectionDefinition[] = [];
+const extractionEndpoint =
+  "https://extraction.example.test/api/integrations/oao/extraction/mcp";
+const fakeAuthorization: McpAuthorizationDiscovery = {
+  endpointUrl: extractionEndpoint,
+  resource: extractionEndpoint,
+  resourceName: null,
+  resourceMetadataUrl:
+    "https://extraction.example.test/.well-known/oauth-protected-resource/api/integrations/oao/extraction/mcp",
+  resourceMetadataSource: "www_authenticate",
+  challengeScope: "extraction:mcp",
+  scopesSupported: ["extraction:mcp"],
+  authorizationServers: [
+    {
+      issuer: "https://auth.example.test",
+      tokenEndpoint: "https://auth.example.test/oauth2/token",
+      metadataSource: "oauth",
+      tokenEndpointAuthMethodsSupported: [
+        "client_secret_post",
+        "client_secret_basic",
+      ],
+      grantTypesSupported: ["authorization_code"],
+      scopesSupported: null,
+      problem: null,
+    },
+  ],
+};
+const fakeAuthorizationRequests: string[] = [];
+const fakeCredentialTests: McpOAuthClientCredentialsMaterial[] = [];
+let fakeDiscoveryFailure: McpRemoteError | undefined;
+let fakeAuthorizationFailure: McpRemoteError | undefined;
+/** Runs while a discovery is in flight, between its load and its save. */
+let fakeDiscoveryHook: (() => Promise<void>) | undefined;
+let fakeCredentialTestFailure: McpRemoteError | undefined;
 const fakeMcpRemote: McpRemotePort = {
-  discover: () =>
-    Promise.resolve([
+  discoverAuthorization: (endpointUrl) => {
+    fakeAuthorizationRequests.push(endpointUrl);
+    if (fakeAuthorizationFailure)
+      return Promise.reject(fakeAuthorizationFailure);
+    return Promise.resolve({ ...fakeAuthorization, endpointUrl });
+  },
+  testCredential: (credential) => {
+    fakeCredentialTests.push(credential);
+    return fakeCredentialTestFailure
+      ? Promise.reject(fakeCredentialTestFailure)
+      : Promise.resolve({ expiresIn: 3600, grantedScope: credential.scope });
+  },
+  discover: async (connection) => {
+    fakeMcpConnections.push(connection);
+    if (fakeDiscoveryFailure) throw fakeDiscoveryFailure;
+    await fakeDiscoveryHook?.();
+    return Promise.resolve([
       {
         name: "lookup_trace",
         title: "Lookup trace",
@@ -151,7 +210,8 @@ const fakeMcpRemote: McpRemotePort = {
           additionalProperties: false,
         },
       },
-    ]),
+    ]);
+  },
   call: () =>
     Promise.resolve({
       content: '{"found":true}',
@@ -458,6 +518,10 @@ test(
               displayName: "Integration MCP token",
               kind: "static_bearer",
               headerName: null,
+              destination: {
+                origin: "https://MCP.example.test:443",
+                pathPrefix: "/mcp",
+              },
               secret: "integration-mcp-secret",
             },
             "mcp-credential-1",
@@ -466,7 +530,28 @@ test(
         assert.equal(credentialResponse.status, 201);
         const credentialText = await credentialResponse.text();
         assert.doesNotMatch(credentialText, /integration-mcp-secret/u);
-        const credential = JSON.parse(credentialText) as { id: string };
+        const credential = JSON.parse(credentialText) as {
+          id: string;
+          destination: unknown;
+        };
+        assert.deepEqual(credential.destination, {
+          origin: "https://mcp.example.test",
+          pathPrefix: "/mcp",
+        });
+        const redirectedRotation = await app.request(
+          `${projectPath}/mcp-credentials/${credential.id}/rotate`,
+          jsonRequest(
+            {
+              secret: "redirected-integration-mcp-secret",
+              destination: {
+                origin: "https://attacker.example.test",
+                pathPrefix: "/mcp",
+              },
+            },
+            "mcp-credential-rotate-redirect-1",
+          ),
+        );
+        assert.equal(redirectedRotation.status, 400);
         const rotationResponse = await app.request(
           `${projectPath}/mcp-credentials/${credential.id}/rotate`,
           jsonRequest(
@@ -502,6 +587,48 @@ test(
         const policy = (await policyResponse.json()) as {
           latestVersionId: string;
         };
+        // An equivalent spelling of the destination origin is inside it.
+        const equivalentPolicy = await app.request(
+          `${projectPath}/mcp-credential-policies`,
+          jsonRequest(
+            {
+              key: "integration-mcp-egress-default-port",
+              displayName: "Integration MCP egress on the default port",
+              credentialId: credential.id,
+              exactOrigin: "https://MCP.example.test:443",
+              pathPrefix: "/mcp/tools",
+            },
+            "mcp-policy-default-port-1",
+          ),
+        );
+        assert.equal(equivalentPolicy.status, 201);
+        // A policy can never send the credential outside its pinned
+        // destination: not to another origin, not to a broader path, and
+        // not to a sibling path that merely shares a string prefix.
+        for (const [index, outside] of [
+          { exactOrigin: "https://attacker.example.test", pathPrefix: "/mcp" },
+          { exactOrigin: "https://mcp.example.test", pathPrefix: "/" },
+          { exactOrigin: "https://mcp.example.test", pathPrefix: "/mcpx" },
+        ].entries()) {
+          const refused = await app.request(
+            `${projectPath}/mcp-credential-policies`,
+            jsonRequest(
+              {
+                key: `integration-mcp-outside-${index}`,
+                displayName: "Outside the credential destination",
+                credentialId: credential.id,
+                ...outside,
+              },
+              `mcp-policy-outside-${index}`,
+            ),
+          );
+          assert.equal(refused.status, 400, JSON.stringify(outside));
+          assert.match(
+            ((await refused.json()) as { error: { message: string } }).error
+              .message,
+            /pinned destination/u,
+          );
+        }
 
         const serverResponse = await app.request(
           `${projectPath}/mcp-servers`,
@@ -533,6 +660,11 @@ test(
             .length,
           1,
         );
+        assert.deepEqual(fakeMcpConnections.at(-1)?.credentialDestination, {
+          origin: "https://mcp.example.test",
+          pathPrefix: "/mcp",
+        });
+        assert.equal(fakeMcpConnections.at(-1)?.context, undefined);
 
         const toolsetResponse = await app.request(
           `${projectPath}/mcp-toolsets`,
@@ -647,6 +779,528 @@ test(
           await audit.text(),
           /rotated-integration-mcp-secret|"authorization"\s*:/iu,
         );
+      },
+    );
+
+    await t.test(
+      "an MCP credential stored before destinations existed keeps its policies and is pinned on rotation",
+      async () => {
+        const organizationId = integrationPrincipal.organizationId;
+        const credentialId = randomUUID();
+        const versionId = randomUUID();
+        const legacyPolicyId = randomUUID();
+        const legacyPolicyVersionId = randomUUID();
+        const encrypted = new ProviderCredentialCipher(
+          Buffer.alloc(32, 5),
+        ).encrypt("legacy-integration-mcp-secret", {
+          organizationId,
+          providerId: credentialId,
+          providerType: "mcp",
+          keyVersion: 1,
+        });
+        // The state migration 0054 leaves a credential whose policies span
+        // more than one origin in: no destination on its version.
+        await pool.query(
+          `INSERT INTO oao.mcp_credentials (
+             organization_id,id,credential_key,display_name,credential_kind,
+             header_name,created_by_principal_id
+           ) VALUES ($1,$2,'legacy-mcp-token','Legacy MCP token','static_bearer',NULL,$3)`,
+          [organizationId, credentialId, integrationPrincipal.id],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_credential_versions (
+             organization_id,id,credential_id,version,credential_kind,
+             encrypted_secret,encryption_nonce,encryption_tag,
+             encryption_key_version,credential_fingerprint,created_by_principal_id
+           ) VALUES ($1,$2,$3,1,'static_bearer',$4,$5,$6,1,$7,$8)`,
+          [
+            organizationId,
+            versionId,
+            credentialId,
+            encrypted.ciphertext,
+            encrypted.nonce,
+            encrypted.tag,
+            encrypted.fingerprint,
+            integrationPrincipal.id,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_credential_version_lifecycle (
+             organization_id,credential_version_id,updated_by_principal_id
+           ) VALUES ($1,$2,$3)`,
+          [organizationId, versionId, integrationPrincipal.id],
+        );
+        await pool.query(
+          "UPDATE oao.mcp_credentials SET active_version_id=$3 WHERE organization_id=$1 AND id=$2",
+          [organizationId, credentialId, versionId],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_credential_policies (
+             organization_id,id,policy_key,display_name,created_by_principal_id
+           ) VALUES ($1,$2,'legacy-mcp-egress','Legacy MCP egress',$3)`,
+          [organizationId, legacyPolicyId, integrationPrincipal.id],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_credential_policy_versions (
+             organization_id,id,policy_id,version,credential_id,exact_origin,
+             path_prefix,timeout_ms,maximum_response_bytes,content_hash,
+             created_by_principal_id
+           ) VALUES ($1,$2,$3,1,$4,'https://legacy.example.test','/mcp',10000,65536,$5,$6)`,
+          [
+            organizationId,
+            legacyPolicyVersionId,
+            legacyPolicyId,
+            credentialId,
+            createHash("sha256").update(legacyPolicyVersionId).digest(),
+            integrationPrincipal.id,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_credential_policy_version_lifecycle (
+             organization_id,policy_version_id,updated_by_principal_id
+           ) VALUES ($1,$2,$3)`,
+          [organizationId, legacyPolicyVersionId, integrationPrincipal.id],
+        );
+        await pool.query(
+          "UPDATE oao.mcp_credential_policies SET latest_version_id=$3 WHERE organization_id=$1 AND id=$2",
+          [organizationId, legacyPolicyId, legacyPolicyVersionId],
+        );
+
+        const listed = (await (
+          await app.request(`${projectPath}/mcp-credentials`)
+        ).json()) as {
+          data: readonly { id: string; destination: unknown }[];
+        };
+        assert.equal(
+          listed.data.find((item) => item.id === credentialId)?.destination,
+          null,
+        );
+        const newPolicy = await app.request(
+          `${projectPath}/mcp-credential-policies`,
+          jsonRequest(
+            {
+              key: "legacy-mcp-new-egress",
+              displayName: "New egress for a legacy credential",
+              credentialId,
+              exactOrigin: "https://attacker.example.test",
+              pathPrefix: "/",
+            },
+            "mcp-legacy-policy-1",
+          ),
+        );
+        assert.equal(newPolicy.status, 400);
+        assert.match(
+          ((await newPolicy.json()) as { error: { message: string } }).error
+            .message,
+          /no pinned destination/u,
+        );
+
+        const server = (await (
+          await app.request(
+            `${projectPath}/mcp-servers`,
+            jsonRequest(
+              {
+                key: "legacy-mcp",
+                displayName: "Legacy MCP",
+                endpointUrl: "https://legacy.example.test/mcp",
+                transport: "streamable_http",
+              },
+              "mcp-legacy-server-1",
+            ),
+          )
+        ).json()) as { id: string };
+        const grandfathered = await app.request(
+          `${projectPath}/mcp-servers/${server.id}/discover`,
+          jsonRequest(
+            { credentialPolicyVersionId: legacyPolicyVersionId },
+            "mcp-legacy-discovery-1",
+          ),
+        );
+        assert.equal(grandfathered.status, 200);
+        assert.equal(
+          fakeMcpConnections.at(-1)?.credentialDestination,
+          undefined,
+        );
+
+        const pinned = await app.request(
+          `${projectPath}/mcp-credentials/${credentialId}/rotate`,
+          jsonRequest(
+            {
+              secret: "pinned-legacy-integration-mcp-secret",
+              destination: {
+                origin: "https://pinned.example.test",
+                pathPrefix: "/",
+              },
+            },
+            "mcp-legacy-rotate-1",
+          ),
+        );
+        assert.equal(pinned.status, 200);
+        assert.deepEqual(
+          ((await pinned.json()) as { destination: unknown }).destination,
+          { origin: "https://pinned.example.test", pathPrefix: "/" },
+        );
+        const outside = await app.request(
+          `${projectPath}/mcp-servers/${server.id}/discover`,
+          jsonRequest(
+            { credentialPolicyVersionId: legacyPolicyVersionId },
+            "mcp-legacy-discovery-2",
+          ),
+        );
+        assert.equal(outside.status, 400);
+        const inside = await app.request(
+          `${projectPath}/mcp-credential-policies`,
+          jsonRequest(
+            {
+              key: "legacy-mcp-pinned-egress",
+              displayName: "Pinned egress",
+              credentialId,
+              exactOrigin: "https://pinned.example.test",
+              pathPrefix: "/mcp",
+            },
+            "mcp-legacy-policy-2",
+          ),
+        );
+        assert.equal(inside.status, 201);
+      },
+    );
+
+    await t.test(
+      "OAuth client-credentials MCP credentials pin confirmed authorization metadata",
+      async () => {
+        const discovered = await app.request(
+          `${projectPath}/mcp-authorization-discovery`,
+          jsonRequest({ endpointUrl: extractionEndpoint }, "unused"),
+        );
+        assert.equal(discovered.status, 200);
+        assert.deepEqual(await discovered.json(), fakeAuthorization);
+        const authorizationServer = fakeAuthorization.authorizationServers[0]!;
+        const oauth = {
+          resource: fakeAuthorization.resource,
+          resourceMetadataUrl: fakeAuthorization.resourceMetadataUrl,
+          issuer: authorizationServer.issuer,
+          tokenEndpoint: authorizationServer.tokenEndpoint!,
+          clientId: "client_integration_extraction",
+          scope: "extraction:mcp",
+        };
+
+        // A configuration discovery does not confirm is never pinned.
+        const unconfirmed = await app.request(
+          `${projectPath}/mcp-credentials`,
+          jsonRequest(
+            {
+              key: "integration-extraction-unconfirmed",
+              displayName: "Unconfirmed extraction",
+              kind: "oauth_client_credentials",
+              oauth: {
+                ...oauth,
+                tokenEndpoint: "https://attacker.example.test/token",
+              },
+              secret: "integration-oauth-client-secret",
+            },
+            "mcp-oauth-credential-unconfirmed-1",
+          ),
+        );
+        assert.equal(unconfirmed.status, 400);
+
+        const createdResponse = await app.request(
+          `${projectPath}/mcp-credentials`,
+          jsonRequest(
+            {
+              key: "integration-extraction",
+              displayName: "Integration extraction",
+              kind: "oauth_client_credentials",
+              oauth,
+              secret: "integration-oauth-client-secret",
+            },
+            "mcp-oauth-credential-1",
+          ),
+        );
+        assert.equal(createdResponse.status, 201);
+        const createdText = await createdResponse.text();
+        assert.doesNotMatch(createdText, /integration-oauth-client-secret/u);
+        const created = JSON.parse(createdText) as {
+          id: string;
+          kind: string;
+          destination: unknown;
+          oauth: unknown;
+          credentialFingerprint: string;
+        };
+        assert.equal(created.kind, "oauth_client_credentials");
+        assert.deepEqual(created.destination, {
+          origin: "https://extraction.example.test",
+          pathPrefix: "/api/integrations/oao/extraction/mcp",
+        });
+        assert.deepEqual(created.oauth, {
+          ...oauth,
+          tokenEndpointAuthMethod: "client_secret_post",
+          sendResource: true,
+        });
+        // The fingerprint covers the secret and the pinned configuration.
+        assert.notEqual(
+          created.credentialFingerprint,
+          createHash("sha256")
+            .update("integration-oauth-client-secret")
+            .digest("hex")
+            .slice(0, 12),
+        );
+
+        // A retry of the completed create replays its saved response even
+        // when the metadata server is unavailable.
+        fakeAuthorizationFailure = new McpRemoteError(
+          "authorization_discovery_failed",
+          "The MCP server publishes no OAuth protected resource metadata",
+        );
+        const replayed = await app.request(
+          `${projectPath}/mcp-credentials`,
+          jsonRequest(
+            {
+              key: "integration-extraction",
+              displayName: "Integration extraction",
+              kind: "oauth_client_credentials",
+              oauth,
+              secret: "integration-oauth-client-secret",
+            },
+            "mcp-oauth-credential-1",
+          ),
+        );
+        fakeAuthorizationFailure = undefined;
+        assert.equal(replayed.status, 201);
+        assert.equal(
+          ((await replayed.json()) as { id: string }).id,
+          created.id,
+        );
+
+        const outside = await app.request(
+          `${projectPath}/mcp-credential-policies`,
+          jsonRequest(
+            {
+              key: "integration-extraction-outside",
+              displayName: "Outside the resource",
+              credentialId: created.id,
+              exactOrigin: "https://extraction.example.test",
+              pathPrefix: "/api/",
+            },
+            "mcp-oauth-policy-outside-1",
+          ),
+        );
+        assert.equal(outside.status, 400);
+        const policy = (await (
+          await app.request(
+            `${projectPath}/mcp-credential-policies`,
+            jsonRequest(
+              {
+                key: "integration-extraction-egress",
+                displayName: "Extraction egress",
+                credentialId: created.id,
+                exactOrigin: "https://extraction.example.test",
+                pathPrefix: "/api/integrations/oao/extraction/mcp",
+                forwardCallContext: true,
+              },
+              "mcp-oauth-policy-1",
+            ),
+          )
+        ).json()) as { latestVersionId: string; forwardCallContext: boolean };
+        assert.equal(policy.forwardCallContext, true);
+        const server = (await (
+          await app.request(
+            `${projectPath}/mcp-servers`,
+            jsonRequest(
+              {
+                key: "integration-extraction",
+                displayName: "Integration extraction",
+                endpointUrl: extractionEndpoint,
+                transport: "streamable_http",
+              },
+              "mcp-oauth-server-1",
+            ),
+          )
+        ).json()) as { id: string };
+        const discovery = await app.request(
+          `${projectPath}/mcp-servers/${server.id}/discover`,
+          jsonRequest(
+            { credentialPolicyVersionId: policy.latestVersionId },
+            "unused",
+          ),
+        );
+        assert.equal(discovery.status, 200);
+        const connection = fakeMcpConnections.at(-1)!;
+        assert.equal(connection.credential?.kind, "oauth_client_credentials");
+        assert.ok(connection.credential?.kind === "oauth_client_credentials");
+        assert.equal(
+          connection.credential.organizationId,
+          integrationPrincipal.organizationId,
+        );
+        assert.equal(
+          connection.credential.clientSecret,
+          "integration-oauth-client-secret",
+        );
+        assert.equal(connection.credential.resource, extractionEndpoint);
+        // Discovery has no run: only the tenant is forwarded.
+        assert.deepEqual(connection.context, {
+          organizationId: integrationPrincipal.organizationId,
+          projectId: integrationPrincipal.projectId,
+        });
+        const firstVersionId = connection.credential.credentialVersionId;
+
+        // A remote OAuth failure surfaces only its safe code.
+        fakeDiscoveryFailure = new McpRemoteError(
+          "credential_token_failed",
+          "The authorization server refused the token request (invalid_client)",
+        );
+        const failed = await app.request(
+          `${projectPath}/mcp-servers/${server.id}/discover`,
+          jsonRequest(
+            { credentialPolicyVersionId: policy.latestVersionId },
+            "unused",
+          ),
+        );
+        fakeDiscoveryFailure = undefined;
+        assert.equal(failed.status, 400);
+        assert.match(
+          ((await failed.json()) as { error: { message: string } }).error
+            .message,
+          /credential_token_failed/u,
+        );
+        const failureEvent = await pool.query<{ payload: unknown }>(
+          `SELECT public_payload AS payload FROM oao.product_events
+            WHERE organization_id=$1 AND project_id=$2
+              AND event_kind='mcp.discovery_failed' AND aggregate_id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            server.id,
+          ],
+        );
+        assert.equal(
+          (failureEvent.rows.at(-1)?.payload as { errorCode?: string })
+            .errorCode,
+          "credential_token_failed",
+        );
+
+        const tested = await app.request(
+          `${projectPath}/mcp-credentials/${created.id}/test`,
+          { method: "POST" },
+        );
+        assert.equal(tested.status, 200);
+        assert.deepEqual(await tested.json(), {
+          ok: true,
+          expiresIn: 3600,
+          grantedScope: "extraction:mcp",
+        });
+        fakeCredentialTestFailure = new McpRemoteError(
+          "credential_rejected",
+          "The MCP server rejected the credential",
+        );
+        const rejected = await app.request(
+          `${projectPath}/mcp-credentials/${created.id}/test`,
+          { method: "POST" },
+        );
+        fakeCredentialTestFailure = undefined;
+        assert.deepEqual(await rejected.json(), {
+          ok: false,
+          errorCode: "credential_rejected",
+        });
+
+        // Rotating the secret and client ID keeps the pinned metadata and
+        // needs no new discovery.
+        const requestsBefore = fakeAuthorizationRequests.length;
+        const rotatedResponse = await app.request(
+          `${projectPath}/mcp-credentials/${created.id}/rotate`,
+          jsonRequest(
+            {
+              secret: "rotated-integration-oauth-client-secret",
+              oauth: {
+                clientId: "client_integration_extraction_2",
+                tokenEndpointAuthMethod: "client_secret_basic",
+              },
+            },
+            "mcp-oauth-rotate-1",
+          ),
+        );
+        assert.equal(rotatedResponse.status, 200);
+        const rotated = (await rotatedResponse.json()) as {
+          credentialVersion: number;
+          destination: unknown;
+          oauth: { clientId: string; tokenEndpointAuthMethod: string };
+        };
+        assert.equal(fakeAuthorizationRequests.length, requestsBefore);
+        assert.equal(rotated.credentialVersion, 2);
+        assert.deepEqual(rotated.destination, created.destination);
+        assert.equal(rotated.oauth.clientId, "client_integration_extraction_2");
+        assert.equal(
+          rotated.oauth.tokenEndpointAuthMethod,
+          "client_secret_basic",
+        );
+        await app.request(`${projectPath}/mcp-credentials/${created.id}/test`, {
+          method: "POST",
+        });
+        assert.notEqual(
+          fakeCredentialTests.at(-1)?.credentialVersionId,
+          firstVersionId,
+        );
+        assert.equal(
+          fakeCredentialTests.at(-1)?.clientSecret,
+          "rotated-integration-oauth-client-secret",
+        );
+
+        // A retry of the completed rotation replays, not rotates again.
+        const replayedRotation = await app.request(
+          `${projectPath}/mcp-credentials/${created.id}/rotate`,
+          jsonRequest(
+            {
+              secret: "rotated-integration-oauth-client-secret",
+              oauth: {
+                clientId: "client_integration_extraction_2",
+                tokenEndpointAuthMethod: "client_secret_basic",
+              },
+            },
+            "mcp-oauth-rotate-1",
+          ),
+        );
+        assert.equal(replayedRotation.status, 200);
+        assert.equal(
+          ((await replayedRotation.json()) as { credentialVersion: number })
+            .credentialVersion,
+          2,
+        );
+
+        for (const [index, body] of [
+          {
+            secret: "rotated-integration-oauth-client-secret-2",
+            oauth: { tokenEndpoint: "https://attacker.example.test/token" },
+          },
+          {
+            secret: "rotated-integration-oauth-client-secret-2",
+            destination: {
+              origin: "https://attacker.example.test",
+              pathPrefix: "/",
+            },
+          },
+        ].entries()) {
+          const refused = await app.request(
+            `${projectPath}/mcp-credentials/${created.id}/rotate`,
+            jsonRequest(body, `mcp-oauth-rotate-refused-${index}`),
+          );
+          assert.equal(refused.status, 400, JSON.stringify(body));
+        }
+
+        const staticTest = await app.request(
+          `${projectPath}/mcp-credentials/${
+            (
+              (await (
+                await app.request(`${projectPath}/mcp-credentials`)
+              ).json()) as { data: readonly { id: string; kind: string }[] }
+            ).data.find((item) => item.kind === "static_bearer")!.id
+          }/test`,
+          { method: "POST" },
+        );
+        assert.equal(staticTest.status, 400);
+
+        const audit = await app.request(`${projectPath}/audit?limit=200`);
+        const auditText = await audit.text();
+        assert.doesNotMatch(auditText, /integration-oauth-client-secret/u);
+        assert.match(auditText, /mcp\.credential_tested/u);
       },
     );
 
@@ -3193,6 +3847,667 @@ test(
       },
     );
 
+    await t.test(
+      "a project API key stays inside its project and out of organization administration",
+      async () => {
+        const created = await app.request(
+          `${projectPath}/api-keys`,
+          jsonRequest(
+            { name: "Project key", scopes: ["*"], access: "project" },
+            "project-key-create-1",
+          ),
+        );
+        assert.equal(created.status, 201);
+        const projectKey = (await created.json()) as {
+          id: string;
+          secret: string;
+          access: string;
+          projectId: string;
+        };
+        assert.equal(projectKey.access, "project");
+        assert.equal(projectKey.projectId, integrationPrincipal.projectId);
+        const bearer = { authorization: `Bearer ${projectKey.secret}` };
+
+        const otherCreated = await app.request(
+          "/v1/projects",
+          jsonRequest(
+            { slug: "restricted-other", name: "Other project" },
+            "project-key-other-project-1",
+          ),
+        );
+        assert.equal(otherCreated.status, 201);
+        const other = (await otherCreated.json()) as { id: string };
+        try {
+          assert.equal(
+            (
+              await app.request(`${projectPath}/agents?limit=1`, {
+                headers: bearer,
+              })
+            ).status,
+            200,
+          );
+          const outside = await app.request(
+            `/v1/projects/${other.id}/agents?limit=1`,
+            { headers: bearer },
+          );
+          assert.equal(outside.status, 403);
+          assert.match(await outside.text(), /restricted to its project/u);
+
+          // Lists name only the key's own project.
+          const projects = (await (
+            await app.request("/v1/projects?limit=100", { headers: bearer })
+          ).json()) as { data: { id: string }[] };
+          assert.deepEqual(
+            projects.data.map((project) => project.id),
+            [integrationPrincipal.projectId],
+          );
+          const context = (await (
+            await app.request("/v1/context", { headers: bearer })
+          ).json()) as {
+            principal: { projectRestricted?: boolean };
+            projects: { id: string }[];
+          };
+          assert.equal(context.principal.projectRestricted, true);
+          assert.deepEqual(
+            context.projects.map((project) => project.id),
+            [integrationPrincipal.projectId],
+          );
+
+          // Organization administration and shared connections are refused,
+          // while reads of shared connections still work.
+          for (const [path, init] of [
+            [
+              "/v1/projects",
+              jsonRequest(
+                { slug: "key-made", name: "Key made" },
+                "project-key-made-1",
+                bearer,
+              ),
+            ],
+            [
+              `/v1/projects/${other.id}`,
+              {
+                method: "DELETE",
+                headers: {
+                  ...bearer,
+                  "idempotency-key": "project-key-delete-1",
+                },
+              },
+            ],
+            [
+              `/v1/organizations/${integrationPrincipal.organizationId}/configuration-backup`,
+              { headers: bearer },
+            ],
+            [
+              `${projectPath}/mcp-servers`,
+              jsonRequest(
+                {
+                  key: "restricted-server",
+                  name: "Restricted server",
+                  endpointUrl: "https://mcp.example.test/rpc",
+                },
+                "project-key-server-1",
+                bearer,
+              ),
+            ],
+            [
+              `${projectPath}/model-providers`,
+              jsonRequest(
+                { key: "restricted-provider", provider: "openrouter" },
+                "project-key-provider-1",
+                bearer,
+              ),
+            ],
+            [
+              `${projectPath}/members`,
+              jsonRequest(
+                { email: "restricted@example.test", role: "member" },
+                "project-key-member-1",
+                bearer,
+              ),
+            ],
+          ] as const) {
+            const response = await app.request(path, init);
+            assert.equal(response.status, 403, path);
+          }
+          assert.equal(
+            (
+              await app.request(`${projectPath}/mcp-servers`, {
+                headers: bearer,
+              })
+            ).status,
+            200,
+          );
+
+          // Keys it creates stay restricted to the same project.
+          const widened = await app.request(
+            `${projectPath}/api-keys`,
+            jsonRequest(
+              {
+                name: "Widened",
+                scopes: ["agent:read"],
+                access: "organization",
+              },
+              "project-key-widen-1",
+              bearer,
+            ),
+          );
+          assert.equal(widened.status, 403);
+          const child = await app.request(
+            `${projectPath}/api-keys`,
+            jsonRequest(
+              { name: "Child key", scopes: ["agent:read"] },
+              "project-key-child-1",
+              bearer,
+            ),
+          );
+          assert.equal(child.status, 201);
+          const childKey = (await child.json()) as {
+            id: string;
+            access: string;
+          };
+          assert.equal(childKey.access, "project");
+
+          // It lists and revokes only keys of its own project.
+          const listed = (await (
+            await app.request(`${projectPath}/api-keys?limit=100`, {
+              headers: bearer,
+            })
+          ).json()) as { data: { id: string; access: string }[] };
+          assert.ok(listed.data.length >= 2);
+          assert.ok(listed.data.every((key) => key.access === "project"));
+          const organizationKey = (await (
+            await app.request(
+              `${projectPath}/api-keys`,
+              jsonRequest(
+                { name: "Organization key", scopes: ["agent:read"] },
+                "project-key-org-1",
+              ),
+            )
+          ).json()) as { id: string; access: string };
+          assert.equal(organizationKey.access, "organization");
+          const foreignRevoke = await app.request(
+            `${projectPath}/api-keys/${organizationKey.id}`,
+            {
+              method: "DELETE",
+              headers: { ...bearer, "idempotency-key": "project-key-revoke-1" },
+            },
+          );
+          assert.equal(foreignRevoke.status, 404);
+          assert.equal(
+            (
+              await app.request(`${projectPath}/api-keys/${childKey.id}`, {
+                method: "DELETE",
+                headers: {
+                  ...bearer,
+                  "idempotency-key": "project-key-revoke-2",
+                },
+              })
+            ).status,
+            200,
+          );
+          assert.equal(
+            (
+              await app.request(
+                `${projectPath}/api-keys/${organizationKey.id}`,
+                {
+                  method: "DELETE",
+                  headers: { "idempotency-key": "project-key-revoke-3" },
+                },
+              )
+            ).status,
+            200,
+          );
+
+          // Deleting a project revokes the keys restricted to it. An
+          // organization key issues one inside the other project.
+          const issuer = (await (
+            await app.request(
+              `${projectPath}/api-keys`,
+              jsonRequest(
+                { name: "Issuer", scopes: ["*"] },
+                "project-key-issuer-1",
+              ),
+            )
+          ).json()) as { id: string; secret: string };
+          const otherKey = await app.request(
+            `/v1/projects/${other.id}/api-keys`,
+            jsonRequest(
+              {
+                name: "Other project key",
+                scopes: ["agent:read"],
+                access: "project",
+              },
+              "project-key-other-1",
+              { authorization: `Bearer ${issuer.secret}` },
+            ),
+          );
+          await app.request(`${projectPath}/api-keys/${issuer.id}`, {
+            method: "DELETE",
+            headers: { "idempotency-key": "project-key-issuer-revoke-1" },
+          });
+          assert.equal(otherKey.status, 201);
+          const otherKeyBody = (await otherKey.json()) as {
+            id: string;
+            secret: string;
+          };
+          assert.equal(
+            (
+              await app.request(`/v1/projects/${other.id}`, {
+                method: "DELETE",
+                headers: { "idempotency-key": "project-key-other-delete-1" },
+              })
+            ).status,
+            200,
+          );
+          const revoked = await pool.query<{ revoked: boolean }>(
+            "SELECT revoked_at IS NOT NULL AS revoked FROM oao.api_keys WHERE id=$1",
+            [otherKeyBody.id],
+          );
+          assert.equal(revoked.rows[0]?.revoked, true);
+          assert.equal(
+            (
+              await app.request("/v1/context", {
+                headers: { authorization: `Bearer ${otherKeyBody.secret}` },
+              })
+            ).status,
+            401,
+          );
+        } finally {
+          await app.request(`/v1/projects/${other.id}`, {
+            method: "DELETE",
+            headers: { "idempotency-key": "project-key-other-delete-2" },
+          });
+          await app.request(`${projectPath}/api-keys/${projectKey.id}`, {
+            method: "DELETE",
+            headers: { "idempotency-key": "project-key-revoke-4" },
+          });
+        }
+      },
+    );
+
+    await t.test(
+      "the OAO MCP server acts in the project with the caller's own key",
+      async () => {
+        const agent = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "mcp-managed-agent",
+              name: "MCP managed agent",
+              config: {
+                systemPrompt: "Answer questions about invoices.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "mcp-managed-agent-1",
+          ),
+        );
+        assert.equal(agent.status, 201);
+        const agentId = ((await agent.json()) as { id: string }).id;
+        const created = await app.request(
+          `${projectPath}/api-keys`,
+          jsonRequest(
+            {
+              name: "MCP client",
+              access: "project",
+              scopes: [
+                "agent:read",
+                "session:read",
+                "session:write",
+                "run:create",
+                "run:read",
+              ],
+            },
+            "mcp-client-key-1",
+          ),
+        );
+        const key = (await created.json()) as { id: string; secret: string };
+        const endpoint = new URL(`http://oao.test${projectPath}/mcp`);
+        const connect = async (authorization?: string) => {
+          const client = new McpClient({ name: "test", version: "1.0.0" });
+          await client.connect(
+            new StreamableHTTPClientTransport(endpoint, {
+              fetch: async (input, init) => app.fetch(new Request(input, init)),
+              ...(authorization
+                ? { requestInit: { headers: { authorization } } }
+                : {}),
+            }),
+          );
+          return client;
+        };
+        const textOf = (result: { readonly content?: unknown }) =>
+          (result.content as { text: string }[])[0]!.text;
+        try {
+          const client = await connect(`Bearer ${key.secret}`);
+          const names = (await client.listTools()).tools.map(
+            (tool) => tool.name,
+          );
+          assert.ok(names.includes("list_agents"));
+          assert.ok(names.includes("start_session"));
+          assert.ok(names.includes("send_message"));
+          assert.ok(!names.includes("create_agent"));
+          assert.ok(!names.includes("decide_approval"));
+
+          const context = JSON.parse(
+            textOf(
+              await client.callTool({ name: "get_context", arguments: {} }),
+            ),
+          ) as { principal: { kind: string; projectRestricted?: boolean } };
+          assert.equal(context.principal.kind, "api_key");
+          assert.equal(context.principal.projectRestricted, true);
+
+          const agents = JSON.parse(
+            textOf(
+              await client.callTool({
+                name: "list_agents",
+                arguments: { limit: 100 },
+              }),
+            ),
+          ) as { data: { id: string }[] };
+          assert.ok(agents.data.some((entry) => entry.id === agentId));
+
+          // A write goes through the REST route, idempotency included.
+          const start = () =>
+            client.callTool({
+              name: "start_session",
+              arguments: {
+                agentId,
+                message: "What was the invoice total?",
+                waitSeconds: 0,
+                idempotencyKey: "mcp-start-1",
+              },
+            });
+          const started = JSON.parse(textOf(await start())) as {
+            session: { id: string };
+            run: { id: string; state: string; createdByPrincipalId: string };
+            settled: boolean;
+          };
+          assert.equal(started.settled, false);
+          assert.equal(started.run.state, "queued");
+          const replayed = JSON.parse(textOf(await start())) as {
+            session: { id: string };
+          };
+          assert.equal(replayed.session.id, started.session.id);
+          const creator = await pool.query<{ subject: string }>(
+            "SELECT subject FROM oao.principals WHERE id=$1",
+            [started.run.createdByPrincipalId],
+          );
+          assert.equal(creator.rows[0]?.subject, `api-key:${key.id}`);
+
+          // The session is busy, so a follow-up is refused as the API does.
+          const busy = await client.callTool({
+            name: "send_message",
+            arguments: {
+              sessionId: started.session.id,
+              message: "And the due date?",
+              waitSeconds: 0,
+            },
+          });
+          assert.equal(busy.isError, true);
+          assert.match(textOf(busy), /"code":"conflict"/u);
+          await client.close();
+
+          // Browser sessions and other projects are refused.
+          const cookieOnly = await app.fetch(
+            new Request(endpoint, {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                accept: "application/json, text/event-stream",
+              },
+              body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: 1,
+                method: "tools/list",
+              }),
+            }),
+          );
+          assert.equal(cookieOnly.status, 401);
+          const elsewhere = await app.fetch(
+            new Request(
+              "http://oao.test/v1/projects/00000000-0000-4000-8000-00000000beef/mcp",
+              {
+                method: "POST",
+                headers: {
+                  authorization: `Bearer ${key.secret}`,
+                  "content-type": "application/json",
+                },
+                body: "{}",
+              },
+            ),
+          );
+          assert.equal(elsewhere.status, 403);
+        } finally {
+          await app.request(`${projectPath}/api-keys/${key.id}`, {
+            method: "DELETE",
+            headers: { "idempotency-key": "mcp-client-key-revoke-1" },
+          });
+        }
+      },
+    );
+
+    await t.test(
+      "an agent's run token acts as the run's creator, narrowed, while the run is unsettled",
+      async () => {
+        const agentConfig = (oaoTools: unknown) => ({
+          systemPrompt: "Coordinate other agents.",
+          modelPreset: baseModelPresetKey,
+          tools: [],
+          sandbox: disabledSandbox,
+          limits: { maxTurns: 32, timeoutMs: 60_000 },
+          oaoTools,
+        });
+        // Agents can never be granted approvals or project administration.
+        const forbidden = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "oao-tools-forbidden",
+              name: "Forbidden grant",
+              config: agentConfig({ scopes: ["approval:resolve"] }),
+            },
+            "oao-tools-agent-forbidden-1",
+          ),
+        );
+        assert.equal(forbidden.status, 400);
+
+        // A publisher may grant only scopes it holds.
+        const publisherKey = (await (
+          await app.request(
+            `${projectPath}/api-keys`,
+            jsonRequest(
+              { name: "Publisher", scopes: ["agent:write"] },
+              "oao-tools-publisher-key-1",
+            ),
+          )
+        ).json()) as { id: string; secret: string };
+        const escalated = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "oao-tools-escalated",
+              name: "Escalated grant",
+              config: agentConfig({ scopes: ["session:read"] }),
+            },
+            "oao-tools-agent-escalated-1",
+            { authorization: `Bearer ${publisherKey.secret}` },
+          ),
+        );
+        assert.equal(escalated.status, 403);
+
+        const grant = [
+          "agent:read",
+          "agent:write",
+          "session:read",
+          "session:write",
+          "run:create",
+          "run:read",
+        ];
+        const created = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "oao-tools-coordinator",
+              name: "OAO tools coordinator",
+              config: agentConfig({ scopes: grant, approval: "never" }),
+            },
+            "oao-tools-agent-1",
+          ),
+        );
+        assert.equal(created.status, 201);
+        const agent = (await created.json()) as {
+          id: string;
+          latestVersion?: { config: { oaoTools?: unknown } };
+        };
+        const version = (await (
+          await app.request(`${projectPath}/agents/${agent.id}/versions`)
+        ).json()) as { data: { config: { oaoTools?: unknown } }[] };
+        assert.deepEqual(version.data[0]?.config.oaoTools, {
+          scopes: grant,
+          approval: "never",
+        });
+        // Agent summaries say which agents use OAO's own MCP server.
+        const summaries = (await (
+          await app.request(`${projectPath}/agents?limit=100`)
+        ).json()) as { data: { id: string; oaoTools: unknown }[] };
+        assert.deepEqual(
+          summaries.data.find((entry) => entry.id === agent.id)?.oaoTools,
+          { scopes: grant, approval: "never" },
+        );
+        assert.ok(
+          summaries.data.some(
+            (entry) => entry.id !== agent.id && entry.oaoTools === null,
+          ),
+        );
+
+        const startSession = async (key: string, headers = {}) => {
+          const response = await app.request(
+            `${projectPath}/sessions`,
+            jsonRequest(
+              { agentId: agent.id, initialMessage: "Check the other agents." },
+              key,
+              headers,
+            ),
+          );
+          assert.equal(response.status, 201, await response.clone().text());
+          return (await response.json()) as {
+            id: string;
+            latestRunId: string;
+          };
+        };
+        const issueToken = async (runId: string) => {
+          const token = `oao_run_${randomBytes(32).toString("base64url")}`;
+          await pool.query(
+            `INSERT INTO oao.run_access_tokens
+               (organization_id,project_id,id,run_id,token_hash,scopes,expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp() + interval '10 minutes')`,
+            [
+              integrationPrincipal.organizationId,
+              integrationPrincipal.projectId,
+              randomUUID(),
+              runId,
+              createHash("sha256").update(token).digest(),
+              grant,
+            ],
+          );
+          return { authorization: `Bearer ${token}` };
+        };
+
+        const session = await startSession("oao-tools-session-1");
+        const asRun = await issueToken(session.latestRunId);
+        const context = (await (
+          await app.request("/v1/context", { headers: asRun })
+        ).json()) as {
+          principal: {
+            id: string;
+            scopes: string[];
+            projectRestricted?: boolean;
+          };
+        };
+        assert.equal(context.principal.id, integrationPrincipal.id);
+        assert.equal(context.principal.projectRestricted, true);
+        assert.deepEqual(
+          [...context.principal.scopes].sort(),
+          [...grant].sort(),
+        );
+        assert.equal(
+          (
+            await app.request(`${projectPath}/agents?limit=1`, {
+              headers: asRun,
+            })
+          ).status,
+          200,
+        );
+        // Scopes outside the grant stay out of reach.
+        assert.equal(
+          (
+            await app.request(`${projectPath}/audit?limit=1`, {
+              headers: asRun,
+            })
+          ).status,
+          403,
+        );
+
+        // A session the agent starts records the asking run and its creator.
+        const asked = await startSession("oao-tools-session-2", asRun);
+        const askedRun = await pool.query<{
+          created_by_principal_id: string;
+          requested_by_run_id: string | null;
+        }>(
+          "SELECT created_by_principal_id,requested_by_run_id FROM oao.runs WHERE id=$1",
+          [asked.latestRunId],
+        );
+        assert.equal(
+          askedRun.rows[0]?.created_by_principal_id,
+          integrationPrincipal.id,
+        );
+        assert.equal(
+          askedRun.rows[0]?.requested_by_run_id,
+          session.latestRunId,
+        );
+        const audit = await pool.query<{ detail: { viaRunId?: string } }>(
+          `SELECT safe_detail AS detail FROM oao.audit_entries
+            WHERE organization_id=$1 AND project_id=$2 AND action='session.created'
+              AND resource_id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            asked.id,
+          ],
+        );
+        assert.equal(audit.rows[0]?.detail.viaRunId, session.latestRunId);
+
+        // That run reads only: it cannot ask further agents or change OAO.
+        const asAskedRun = await issueToken(asked.latestRunId);
+        const askedContext = (await (
+          await app.request("/v1/context", { headers: asAskedRun })
+        ).json()) as { principal: { scopes: string[] } };
+        assert.deepEqual([...askedContext.principal.scopes].sort(), [
+          "agent:read",
+          "run:read",
+          "session:read",
+        ]);
+
+        // A settled run's token stops working.
+        await pool.query(
+          "UPDATE oao.runs SET state='cancelled',settled_at=clock_timestamp() WHERE id=$1",
+          [session.latestRunId],
+        );
+        assert.equal(
+          (await app.request("/v1/context", { headers: asRun })).status,
+          401,
+        );
+        await app.request(`${projectPath}/api-keys/${publisherKey.id}`, {
+          method: "DELETE",
+          headers: { "idempotency-key": "oao-tools-publisher-revoke-1" },
+        });
+      },
+    );
+
     await t.test("audit export writes a tenant-scoped artifact", async () => {
       const exported = await app.request(
         `${projectPath}/audit/export`,
@@ -4327,6 +5642,577 @@ test(
           ),
         );
         assert.equal(recreated.status, 201, await recreated.clone().text());
+      },
+    );
+
+    // Runs last: it adds a project that earlier subtests would list.
+    await t.test(
+      "an MCP connection is removed only once no agent uses it",
+      async () => {
+        const post = async <T>(
+          path: string,
+          body: Readonly<Record<string, unknown>>,
+          key: string,
+        ): Promise<T> => {
+          const response = await app.request(
+            `${projectPath}${path}`,
+            jsonRequest(body, key),
+          );
+          assert.equal(response.status, path.endsWith("/discover") ? 200 : 201);
+          return (await response.json()) as T;
+        };
+        const connection = async (
+          name: string,
+          origin: string,
+          path: string,
+          attempt = "",
+        ) => {
+          const server = await post<{ id: string }>(
+            "/mcp-servers",
+            {
+              key: name,
+              displayName: name,
+              endpointUrl: `${origin}${path}`,
+              transport: "streamable_http",
+            },
+            `${name}-server${attempt}`,
+          );
+          return server.id;
+        };
+        const credential = async (
+          name: string,
+          origin: string,
+          prefix: string,
+          attempt = "",
+        ) => {
+          const created = await post<{ id: string }>(
+            "/mcp-credentials",
+            {
+              key: name,
+              displayName: name,
+              kind: "static_bearer",
+              destination: { origin, pathPrefix: prefix },
+              secret: `${name}-secret-value`,
+            },
+            `${name}-credential${attempt}`,
+          );
+          const policy = await post<{ id: string; latestVersionId: string }>(
+            "/mcp-credential-policies",
+            {
+              key: `${name}-egress`,
+              displayName: `${name} egress`,
+              credentialId: created.id,
+              exactOrigin: origin,
+              pathPrefix: prefix,
+            },
+            `${name}-policy${attempt}`,
+          );
+          return { credentialId: created.id, policy };
+        };
+
+        // A dedicated connection, bound to an agent.
+        const own = await credential(
+          "removal-token",
+          "https://removal.example.test",
+          "/mcp",
+        );
+        const serverId = await connection(
+          "removal-mcp",
+          "https://removal.example.test",
+          "/mcp",
+        );
+        const discovered = await post<{ latestVersionId: string }>(
+          `/mcp-servers/${serverId}/discover`,
+          { credentialPolicyVersionId: own.policy.latestVersionId },
+          "unused",
+        );
+        const toolset = await post<{ id: string; latestVersionId: string }>(
+          "/mcp-toolsets",
+          {
+            key: "removal-tools",
+            displayName: "Removal tools",
+            serverVersionId: discovered.latestVersionId,
+            tools: [{ remoteToolName: "lookup_trace", approval: "always" }],
+          },
+          "removal-toolset",
+        );
+        const agent = await post<{ id: string }>(
+          "/agents",
+          {
+            key: "removal-agent",
+            name: "Removal agent",
+            config: {
+              systemPrompt: "Use the removal tools.",
+              modelPreset: baseModelPresetKey,
+              tools: [],
+              mcpBindings: [
+                {
+                  toolsetVersionId: toolset.latestVersionId,
+                  credentialPolicyVersionId: own.policy.latestVersionId,
+                  namespace: "removal",
+                },
+              ],
+              sandbox: disabledSandbox,
+              limits: { maxTurns: 4, timeoutMs: 60_000 },
+            },
+          },
+          "removal-agent",
+        );
+
+        const usage = (await (
+          await app.request(`${projectPath}/mcp-servers/${serverId}/usage`)
+        ).json()) as {
+          agents: readonly { id: string }[];
+          otherProjects: readonly unknown[];
+          toolsets: readonly { id: string }[];
+          credentialPolicies: readonly { id: string }[];
+          credentials: readonly { id: string }[];
+        };
+        assert.deepEqual(
+          usage.agents.map((entry) => entry.id),
+          [agent.id],
+        );
+        assert.deepEqual(usage.otherProjects, []);
+        assert.deepEqual(
+          usage.toolsets.map((entry) => entry.id),
+          [toolset.id],
+        );
+        assert.deepEqual(
+          usage.credentialPolicies.map((entry) => entry.id),
+          [own.policy.id],
+        );
+        assert.deepEqual(
+          usage.credentials.map((entry) => entry.id),
+          [own.credentialId],
+        );
+
+        const remove = (id: string, key: string, query = "") =>
+          app.request(`${projectPath}/mcp-servers/${id}${query}`, {
+            method: "DELETE",
+            headers: { "idempotency-key": key },
+          });
+        const refused = await remove(serverId, "removal-refused-1");
+        assert.equal(refused.status, 409);
+        assert.match(
+          ((await refused.json()) as { error: { message: string } }).error
+            .message,
+          /1 agent still uses this MCP server \(Removal agent\)/u,
+        );
+
+        // Archive the agent; an agent in another project still uses it.
+        const archived = await app.request(
+          `${projectPath}/agents/${agent.id}`,
+          {
+            method: "DELETE",
+            headers: { "idempotency-key": "removal-archive" },
+          },
+        );
+        assert.equal(archived.status, 200);
+        const organizationId = integrationPrincipal.organizationId;
+        const otherProject = randomUUID();
+        const otherPrincipal = randomUUID();
+        const otherAgent = randomUUID();
+        const otherAgentVersion = randomUUID();
+        const otherToolset = randomUUID();
+        const otherToolsetVersion = randomUUID();
+        await pool.query(
+          "INSERT INTO oao.projects (organization_id,id,slug,name) VALUES ($1,$2,'removal-other','Removal other')",
+          [organizationId, otherProject],
+        );
+        await pool.query(
+          `INSERT INTO oao.principals (organization_id,project_id,id,kind,subject,scopes)
+           VALUES ($1,$2,$3,'service','removal-other',ARRAY['*'])`,
+          [organizationId, otherProject, otherPrincipal],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_toolsets (organization_id,project_id,id,toolset_key,display_name,created_by_principal_id)
+           VALUES ($1,$2,$3,'removal-other-tools','Other tools',$4)`,
+          [organizationId, otherProject, otherToolset, otherPrincipal],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_toolset_versions (
+             organization_id,project_id,id,toolset_id,version,server_version_id,
+             content_hash,created_by_principal_id
+           ) VALUES ($1,$2,$3,$4,1,$5,$6,$7)`,
+          [
+            organizationId,
+            otherProject,
+            otherToolsetVersion,
+            otherToolset,
+            discovered.latestVersionId,
+            createHash("sha256").update(otherToolsetVersion).digest(),
+            otherPrincipal,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_toolset_version_tools (
+             organization_id,project_id,toolset_version_id,server_version_id,
+             remote_tool_name,approval
+           ) VALUES ($1,$2,$3,$4,'lookup_trace','always')`,
+          [
+            organizationId,
+            otherProject,
+            otherToolsetVersion,
+            discovered.latestVersionId,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_toolset_version_lifecycle (
+             organization_id,project_id,toolset_version_id,updated_by_principal_id
+           ) VALUES ($1,$2,$3,$4)`,
+          [organizationId, otherProject, otherToolsetVersion, otherPrincipal],
+        );
+        await pool.query(
+          `INSERT INTO oao.agent_definitions (organization_id,project_id,id,agent_key,name)
+           VALUES ($1,$2,$3,'removal-other-agent','Other agent')`,
+          [organizationId, otherProject, otherAgent],
+        );
+        await pool.query(
+          `INSERT INTO oao.agent_versions (
+             organization_id,project_id,id,agent_definition_id,version,config,
+             content_hash,created_by_principal_id
+           ) VALUES ($1,$2,$3,$4,1,'{}',$5,$6)`,
+          [
+            organizationId,
+            otherProject,
+            otherAgentVersion,
+            otherAgent,
+            createHash("sha256").update(otherAgentVersion).digest(),
+            otherPrincipal,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.agent_version_mcp_bindings (
+             organization_id,project_id,agent_version_id,toolset_version_id,
+             credential_policy_version_id,namespace
+           ) VALUES ($1,$2,$3,$4,$5,'removal')`,
+          [
+            organizationId,
+            otherProject,
+            otherAgentVersion,
+            otherToolsetVersion,
+            own.policy.latestVersionId,
+          ],
+        );
+        await pool.query(
+          "UPDATE oao.agent_definitions SET latest_version_id=$3 WHERE organization_id=$1 AND id=$2",
+          [organizationId, otherAgent, otherAgentVersion],
+        );
+        const usedElsewhere = await remove(serverId, "removal-refused-2");
+        assert.equal(usedElsewhere.status, 409);
+        assert.match(
+          ((await usedElsewhere.json()) as { error: { message: string } }).error
+            .message,
+          /in removal-other/u,
+        );
+        // The usage names the other project, except to a project key.
+        const usageFor = async (headers: Record<string, string> = {}) =>
+          (
+            (await (
+              await app.request(
+                `${projectPath}/mcp-servers/${serverId}/usage`,
+                {
+                  headers,
+                },
+              )
+            ).json()) as { otherProjects: readonly { slug: string }[] }
+          ).otherProjects.map((project) => project.slug);
+        assert.deepEqual(await usageFor(), ["removal-other"]);
+        const usageKey = (await (
+          await app.request(
+            `${projectPath}/api-keys`,
+            jsonRequest(
+              { name: "Usage reader", scopes: ["mcp:read"], access: "project" },
+              "removal-usage-key",
+            ),
+          )
+        ).json()) as { id: string; secret: string };
+        assert.deepEqual(
+          await usageFor({ authorization: `Bearer ${usageKey.secret}` }),
+          [],
+        );
+        await pool.query(
+          "UPDATE oao.agent_definitions SET archived_at=clock_timestamp() WHERE organization_id=$1 AND id=$2",
+          [organizationId, otherAgent],
+        );
+
+        const removed = await remove(serverId, "removal-1");
+        assert.equal(removed.status, 200);
+        const result = (await removed.json()) as {
+          server: { status: string };
+          revokedToolsetIds: readonly string[];
+          revokedCredentialPolicyIds: readonly string[];
+          revokedCredentialIds: readonly string[];
+        };
+        assert.equal(result.server.status, "revoked");
+        assert.deepEqual(result.revokedToolsetIds, [toolset.id]);
+        assert.deepEqual(result.revokedCredentialPolicyIds, [own.policy.id]);
+        assert.deepEqual(result.revokedCredentialIds, [own.credentialId]);
+        // A removed connection leaves every list.
+        for (const [path, id] of [
+          ["/mcp-servers", serverId],
+          ["/mcp-credentials", own.credentialId],
+          ["/mcp-credential-policies", own.policy.id],
+          ["/mcp-toolsets", toolset.id],
+        ] as const)
+          assert.equal(
+            (
+              (await (await app.request(`${projectPath}${path}`)).json()) as {
+                data: readonly { id: string }[];
+              }
+            ).data.some((entry) => entry.id === id),
+            false,
+            path,
+          );
+        const statuses = await pool.query<{ kind: string; status: string }>(
+          `SELECT 'toolset' AS kind,status FROM oao.mcp_toolset_version_lifecycle
+            WHERE organization_id=$1 AND toolset_version_id=$2
+           UNION ALL
+           SELECT 'other_toolset',status FROM oao.mcp_toolset_version_lifecycle
+            WHERE organization_id=$1 AND toolset_version_id=$3
+           UNION ALL
+           SELECT 'policy',status FROM oao.mcp_credential_policy_version_lifecycle
+            WHERE organization_id=$1 AND policy_version_id=$4
+           ORDER BY 1`,
+          [
+            organizationId,
+            toolset.latestVersionId,
+            otherToolsetVersion,
+            own.policy.latestVersionId,
+          ],
+        );
+        assert.deepEqual(statuses.rows, [
+          // Another project's toolset is left to that project; it is inert
+          // because its server is revoked.
+          { kind: "other_toolset", status: "active" },
+          { kind: "policy", status: "revoked" },
+          { kind: "toolset", status: "revoked" },
+        ]);
+        const credentialStatus = await pool.query<{ status: string }>(
+          `SELECT lifecycle.status FROM oao.mcp_credentials credential
+             JOIN oao.mcp_credential_version_lifecycle lifecycle
+               ON lifecycle.organization_id=credential.organization_id
+              AND lifecycle.credential_version_id=credential.active_version_id
+            WHERE credential.organization_id=$1 AND credential.id=$2`,
+          [organizationId, own.credentialId],
+        );
+        assert.equal(credentialStatus.rows[0]?.status, "revoked");
+        assert.equal(
+          (await app.request(`${projectPath}/mcp-servers/${serverId}/usage`))
+            .status,
+          404,
+        );
+        assert.equal(
+          (
+            await app.request(
+              `${projectPath}/mcp-servers/${serverId}/discover`,
+              jsonRequest({}, "unused"),
+            )
+          ).status,
+          404,
+        );
+        // The same request replays; a new one finds nothing left to remove.
+        assert.equal((await remove(serverId, "removal-1")).status, 200);
+        assert.equal((await remove(serverId, "removal-2")).status, 404);
+
+        // Its keys are free again: the connection can be added back.
+        const again = await credential(
+          "removal-token",
+          "https://removal.example.test",
+          "/mcp",
+          "-again",
+        );
+        const againServer = await connection(
+          "removal-mcp",
+          "https://removal.example.test",
+          "/mcp",
+          "-again",
+        );
+        const againVersion = await post<{ latestVersionId: string }>(
+          `/mcp-servers/${againServer}/discover`,
+          { credentialPolicyVersionId: again.policy.latestVersionId },
+          "unused",
+        );
+        await post(
+          "/mcp-toolsets",
+          {
+            key: "removal-tools",
+            displayName: "Removal tools",
+            serverVersionId: againVersion.latestVersionId,
+            tools: [{ remoteToolName: "lookup_trace", approval: "always" }],
+          },
+          "removal-toolset-again",
+        );
+        const toolsets = (
+          (await (await app.request(`${projectPath}/mcp-toolsets`)).json()) as {
+            data: readonly { key: string; serverId: string }[];
+          }
+        ).data.filter((entry) => entry.key === "removal-tools");
+        assert.deepEqual(
+          toolsets.map((entry) => entry.serverId),
+          [againServer],
+        );
+
+        // A credential another live server still uses is kept.
+        const shared = await credential(
+          "removal-shared-token",
+          "https://shared.example.test",
+          "/",
+        );
+        const first = await connection(
+          "removal-shared-a",
+          "https://shared.example.test",
+          "/a",
+        );
+        const second = await connection(
+          "removal-shared-b",
+          "https://shared.example.test",
+          "/b",
+        );
+        const firstRemoved = (await (
+          await remove(first, "removal-shared-a")
+        ).json()) as {
+          revokedCredentialPolicyIds: readonly string[];
+          revokedCredentialIds: readonly string[];
+        };
+        assert.deepEqual(firstRemoved.revokedCredentialPolicyIds, []);
+        assert.deepEqual(firstRemoved.revokedCredentialIds, []);
+        // Removing the last server can keep the credential on request.
+        const secondRemoved = (await (
+          await remove(second, "removal-shared-b", "?keepCredentials=true")
+        ).json()) as {
+          revokedCredentialPolicyIds: readonly string[];
+          revokedCredentialIds: readonly string[];
+        };
+        assert.deepEqual(secondRemoved.revokedCredentialPolicyIds, []);
+        assert.deepEqual(secondRemoved.revokedCredentialIds, []);
+        const sharedStatus = (
+          (await (
+            await app.request(`${projectPath}/mcp-credentials`)
+          ).json()) as { data: readonly { id: string; status: string }[] }
+        ).data.find((entry) => entry.id === shared.credentialId)?.status;
+        assert.equal(sharedStatus, "active");
+
+        // A discovery in flight while the server is removed cannot bring it
+        // back, even when the tools changed.
+        const raced = await credential(
+          "removal-race-token",
+          "https://race.example.test",
+          "/mcp",
+        );
+        const racedServer = await connection(
+          "removal-race",
+          "https://race.example.test",
+          "/mcp",
+        );
+        await post(
+          `/mcp-servers/${racedServer}/discover`,
+          { credentialPolicyVersionId: raced.policy.latestVersionId },
+          "unused",
+        );
+        fakeDiscoveryHook = async () => {
+          fakeDiscoveryHook = undefined;
+          fakeMcpDiscoveryRevision += 1;
+          assert.equal(
+            (await remove(racedServer, "removal-race-1")).status,
+            200,
+          );
+        };
+        const resurrected = await app.request(
+          `${projectPath}/mcp-servers/${racedServer}/discover`,
+          jsonRequest(
+            { credentialPolicyVersionId: raced.policy.latestVersionId },
+            "unused",
+          ),
+        );
+        assert.equal(resurrected.status, 409);
+        const racedState = await pool.query<{
+          versions: number;
+          live: number;
+        }>(
+          `SELECT count(*)::int AS versions,
+                  count(*) FILTER (WHERE lifecycle.status<>'revoked')::int AS live
+             FROM oao.mcp_server_versions version
+             JOIN oao.mcp_server_version_lifecycle lifecycle
+               ON lifecycle.organization_id=version.organization_id
+              AND lifecycle.server_version_id=version.id
+            WHERE version.organization_id=$1 AND version.server_id=$2`,
+          [organizationId, racedServer],
+        );
+        assert.deepEqual(racedState.rows[0], { versions: 1, live: 0 });
+
+        // Publishing an agent with MCP bindings waits for a removal in the
+        // same organization, so their checks cannot interleave.
+        const locked = await credential(
+          "removal-lock-token",
+          "https://lock.example.test",
+          "/mcp",
+        );
+        const lockedServer = await connection(
+          "removal-lock",
+          "https://lock.example.test",
+          "/mcp",
+        );
+        const lockedVersion = await post<{ latestVersionId: string }>(
+          `/mcp-servers/${lockedServer}/discover`,
+          { credentialPolicyVersionId: locked.policy.latestVersionId },
+          "unused",
+        );
+        const lockedToolset = await post<{ latestVersionId: string }>(
+          "/mcp-toolsets",
+          {
+            key: "removal-lock-tools",
+            displayName: "Lock tools",
+            serverVersionId: lockedVersion.latestVersionId,
+            tools: [{ remoteToolName: "lookup_trace", approval: "always" }],
+          },
+          "removal-lock-toolset",
+        );
+        const holder = await pool.connect();
+        try {
+          await holder.query("BEGIN");
+          await holder.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            [`oao:mcp-bindings:${organizationId}`],
+          );
+          let settled = false;
+          const publication = Promise.resolve(
+            app.request(
+              `${projectPath}/agents`,
+              jsonRequest(
+                {
+                  key: "removal-lock-agent",
+                  name: "Lock agent",
+                  config: {
+                    systemPrompt: "Use the lock tools.",
+                    modelPreset: baseModelPresetKey,
+                    tools: [],
+                    mcpBindings: [
+                      {
+                        toolsetVersionId: lockedToolset.latestVersionId,
+                        credentialPolicyVersionId:
+                          locked.policy.latestVersionId,
+                        namespace: "lock",
+                      },
+                    ],
+                    sandbox: disabledSandbox,
+                    limits: { maxTurns: 4, timeoutMs: 60_000 },
+                  },
+                },
+                "removal-lock-agent",
+              ),
+            ),
+          ).finally(() => {
+            settled = true;
+          });
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          assert.equal(settled, false);
+          await holder.query("COMMIT");
+          assert.equal((await publication).status, 201);
+        } finally {
+          await holder.query("ROLLBACK").catch(() => undefined);
+          holder.release();
+        }
       },
     );
   },

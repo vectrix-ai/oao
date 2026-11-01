@@ -1,4 +1,5 @@
 import type {
+  ManagedAgentOaoTools,
   ModelCatalogEntry,
   ModelGenerationSettings,
   ModelPreset,
@@ -18,6 +19,11 @@ import type {
   ManagedHarnessOperation,
   CreateMcpServerInput,
   DiscoverMcpServerInput,
+  McpServerUsage,
+  RemoveMcpServerResult,
+  DiscoverMcpAuthorizationInput,
+  McpAuthorizationDiscovery,
+  McpCredentialTestResult,
   CreateMcpCredentialInput,
   RotateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
@@ -48,6 +54,11 @@ export type {
   ManagedHarnessOperation,
   CreateMcpServerInput,
   DiscoverMcpServerInput,
+  McpServerUsage,
+  RemoveMcpServerResult,
+  DiscoverMcpAuthorizationInput,
+  McpAuthorizationDiscovery,
+  McpCredentialTestResult,
   CreateMcpCredentialInput,
   RotateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
@@ -223,6 +234,8 @@ export interface AgentSummary {
   readonly latestVersionId: string | null;
   /** Draft and legacy Agent rows can legitimately have no published policy. */
   readonly sandbox: AgentVersionConfig["sandbox"] | null;
+  /** The latest version's grant of OAO's own MCP server, if any. */
+  readonly oaoTools?: ManagedAgentOaoTools | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -255,6 +268,8 @@ export interface AgentVersionConfig {
     readonly agentVersionId: string;
     readonly maxParallel: number;
   }[];
+  /** Lets the agent use the OAO MCP tools in its runs. */
+  readonly oaoTools?: ManagedAgentOaoTools;
   readonly sandbox: {
     readonly enabled: boolean;
     readonly provider: string;
@@ -589,17 +604,22 @@ export interface ProjectContext {
   readonly isIapDefaultProject?: boolean;
 }
 
+/** `project` keys work only in the current project; `organization` keys in every project. */
+export type ApiKeyAccess = "organization" | "project";
+
 export interface ApiKeySummary {
   readonly id: string;
   readonly name: string;
   readonly prefix: string;
   readonly scopes: readonly string[];
+  readonly access: ApiKeyAccess;
   readonly lastUsedAt: string | null;
 }
 
 export interface CreateApiKeyInput {
   readonly name: string;
   readonly scopes: readonly string[];
+  readonly access: ApiKeyAccess;
 }
 
 export type { CreateProjectInput };
@@ -733,6 +753,13 @@ export interface ConsoleApi {
     serverId: string,
     input: DiscoverMcpServerInput,
   ): Promise<McpServer>;
+  /** What still uses a server and what removing it would revoke. */
+  getMcpServerUsage(serverId: string): Promise<McpServerUsage>;
+  /** Retires a server; refused while a live agent still uses it. */
+  removeMcpServer(
+    serverId: string,
+    options?: { readonly keepCredentials?: boolean },
+  ): Promise<RemoveMcpServerResult>;
   listMcpCredentials(): Promise<McpCredentialList>;
   createMcpCredential(input: CreateMcpCredentialInput): Promise<McpCredential>;
   rotateMcpCredential(
@@ -740,6 +767,12 @@ export interface ConsoleApi {
     input: RotateMcpCredentialInput,
   ): Promise<McpCredential>;
   revokeMcpCredential(credentialId: string): Promise<McpCredential>;
+  /** Credential-free OAuth authorization discovery for an MCP endpoint. */
+  discoverMcpAuthorization(
+    input: DiscoverMcpAuthorizationInput,
+  ): Promise<McpAuthorizationDiscovery>;
+  /** Requests a fresh token for an OAuth credential; never returns it. */
+  testMcpCredential(credentialId: string): Promise<McpCredentialTestResult>;
   listMcpCredentialPolicies(): Promise<McpCredentialPolicyList>;
   createMcpCredentialPolicy(
     input: CreateMcpCredentialPolicyInput,

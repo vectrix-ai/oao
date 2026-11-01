@@ -26,6 +26,12 @@ import type {
   McpToolset,
 } from "../api/types";
 import { describePresetRouting } from "../model-presets";
+import {
+  OaoToolGrantFields,
+  defaultOaoToolGrant,
+  describeOaoToolGrant,
+  withoutOaoTools,
+} from "./oao-tools";
 import type { ComboboxOption } from "../components/ui";
 import {
   Alert,
@@ -1149,6 +1155,7 @@ function AgentEditor({
   const [mcpBindings, setMcpBindings] = useState(baseConfig.mcpBindings ?? []);
   const [delegates, setDelegates] = useState(baseConfig.delegates ?? []);
   const [delegatePicker, setDelegatePicker] = useState(false);
+  const [oaoTools, setOaoTools] = useState(baseConfig.oaoTools);
   const [tools, setTools] = useState<readonly ToolDefinition[]>(
     baseConfig.tools,
   );
@@ -1188,11 +1195,12 @@ function AgentEditor({
     setSkillVersionIds(next.config.skillVersionIds ?? []);
     setMcpBindings(next.config.mcpBindings ?? []);
     setDelegates(next.config.delegates ?? []);
+    setOaoTools(next.config.oaoTools);
     setTools(next.config.tools);
     setHarnessOperations(next.config.harnessOperations ?? []);
   };
   const config: AgentVersionConfig = {
-    ...baseConfig,
+    ...withoutOaoTools(baseConfig),
     systemPrompt: instructions,
     modelPreset,
     tools,
@@ -1200,6 +1208,7 @@ function AgentEditor({
     skillVersionIds,
     mcpBindings,
     delegates,
+    ...(oaoTools ? { oaoTools } : {}),
     sandbox: {
       enabled: sandboxEnabled,
       provider: sandboxProvider,
@@ -1877,6 +1886,36 @@ function AgentEditor({
               )}
             </div>
           )}
+        </Panel>
+        <Panel
+          title="OAO MCP server"
+          collapsible
+          defaultCollapsed
+          description={
+            oaoTools
+              ? `Built in: the agent uses OAO's own MCP server with ${describeOaoToolGrant(oaoTools)}.`
+              : "Built in: OAO's own MCP server needs no connection. The agent does not use it."
+          }
+        >
+          <div className="stack">
+            <CheckboxRow
+              label="Use OAO's own MCP server"
+              description="The agent can read other agents' sessions and runs and ask them questions. Reading never waits for approval."
+              checked={oaoTools !== undefined}
+              disabled={!isLatest}
+              onChange={(event) => {
+                const enabled = event.currentTarget.checked;
+                setOaoTools(enabled ? defaultOaoToolGrant() : undefined);
+              }}
+            />
+            {oaoTools ? (
+              <OaoToolGrantFields
+                grant={oaoTools}
+                disabled={!isLatest}
+                onChange={setOaoTools}
+              />
+            ) : null}
+          </div>
         </Panel>
         {delegatePicker ? (
           <DelegatePickerDialog

@@ -19,7 +19,10 @@ A small production topology has:
 Deploy the same immutable image to both application workloads. The public
 service runs the image's `api` entrypoint and the worker pool runs its
 `worker` entrypoint. Both workloads need the same `DATABASE_URL` and
-`OAO_CREDENTIAL_ENCRYPTION_KEY`. Do not give the worker a public endpoint. The
+`OAO_CREDENTIAL_ENCRYPTION_KEY`. Set `OAO_API_URL` on the worker to the API
+service's URL so agents can use
+[OAO tools](/integrations/oao-mcp-server#let-oao-agents-use-these-tools).
+Do not give the worker a public endpoint. The
 worker delivers [event webhooks](/integrations/event-webhooks), so give it
 outbound HTTPS access to their endpoints.
 

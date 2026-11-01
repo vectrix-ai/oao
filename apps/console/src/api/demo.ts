@@ -1,8 +1,11 @@
 import {
   CONFIGURATION_BACKUP_FORMAT,
   CONFIGURATION_BACKUP_FORMAT_VERSION,
+  canonicalMcpOrigin,
   checkConfigurationBackupReferences,
   configurationBackupCounts,
+  mcpDestinationContains,
+  mcpResourceDestination,
   parseConfigurationBackup,
   parseConfigurationRestoreInput,
   parseCreateEventWebhookInput,
@@ -55,6 +58,8 @@ import type {
   UpdateEventWebhookInput,
   UpdateSandboxProviderConfigurationInput,
   McpServer,
+  McpServerUsage,
+  RemoveMcpServerResult,
   McpCredential,
   McpCredentialPolicy,
   McpToolset,
@@ -909,6 +914,7 @@ const settingsSeed: SettingsData = {
       name: "Local integration",
       prefix: "oao_local_…c72f",
       scopes: ["agents:read", "sessions:write"],
+      access: "organization",
       lastUsedAt: "2026-08-20T06:51:00.000Z",
     },
   ],
@@ -1442,6 +1448,7 @@ export class DemoConsoleApi implements ConsoleApi {
       version: 1,
       latestVersionId: versionId,
       sandbox: config.sandbox,
+      oaoTools: config.oaoTools ?? null,
       createdAt: now,
       updatedAt: now,
       versions: [
@@ -1490,6 +1497,7 @@ export class DemoConsoleApi implements ConsoleApi {
       updatedAt: now,
       model: config.modelPreset,
       sandbox: config.sandbox,
+      oaoTools: config.oaoTools ?? null,
       versions: [
         {
           id: versionId,
@@ -1953,7 +1961,9 @@ export class DemoConsoleApi implements ConsoleApi {
 
   async listMcpServers() {
     return {
-      data: structuredClone(this.#mcpServers),
+      data: structuredClone(
+        this.#mcpServers.filter((item) => item.status !== "revoked"),
+      ),
       credentialEncryptionConfigured: true,
     };
   }
@@ -2045,9 +2055,137 @@ export class DemoConsoleApi implements ConsoleApi {
     return structuredClone(discovered);
   }
 
+  /** Every version ID a demo MCP server has had. */
+  #mcpServerVersionIds(server: McpServer): Set<string> {
+    return new Set([
+      server.latestVersionId,
+      ...(this.#restoredMcpServerVersions.get(server.id) ?? []).map(
+        (version) => version.id,
+      ),
+    ]);
+  }
+
+  #mcpPolicyCovers(policy: McpCredentialPolicy, endpointUrl: string): boolean {
+    const endpoint = new URL(endpointUrl);
+    return (
+      canonicalMcpOrigin(policy.exactOrigin) === endpoint.origin &&
+      endpoint.pathname.startsWith(policy.pathPrefix)
+    );
+  }
+
+  async getMcpServerUsage(serverId: string): Promise<McpServerUsage> {
+    const server = this.#mcpServers.find((item) => item.id === serverId);
+    if (!server || server.status === "revoked")
+      throw new Error("Active MCP server not found");
+    const versionIds = this.#mcpServerVersionIds(server);
+    const toolsets = this.#mcpToolsets.filter(
+      (toolset) =>
+        toolset.status !== "revoked" && versionIds.has(toolset.serverVersionId),
+    );
+    const toolsetVersionIds = new Set(
+      this.#mcpToolsets
+        .filter((toolset) => versionIds.has(toolset.serverVersionId))
+        .map((toolset) => toolset.latestVersionId),
+    );
+    const agents = this.#agents.filter((agent) =>
+      (
+        agent.versions.find((version) => version.id === agent.latestVersionId)
+          ?.config.mcpBindings ?? []
+      ).some((binding) => toolsetVersionIds.has(binding.toolsetVersionId)),
+    );
+    const otherEndpoints = this.#mcpServers
+      .filter((item) => item.id !== serverId && item.status !== "revoked")
+      .map((item) => item.endpointUrl);
+    const policies = this.#mcpPolicies.filter(
+      (policy) =>
+        policy.status !== "revoked" &&
+        this.#mcpPolicyCovers(policy, server.endpointUrl) &&
+        !otherEndpoints.some((endpoint) =>
+          this.#mcpPolicyCovers(policy, endpoint),
+        ),
+    );
+    const policyIds = new Set(policies.map((policy) => policy.id));
+    const credentials = this.#mcpCredentials.filter(
+      (credential) =>
+        credential.status === "active" &&
+        policies.some((policy) => policy.credentialId === credential.id) &&
+        !this.#mcpPolicies.some(
+          (policy) =>
+            policy.credentialId === credential.id &&
+            policy.status !== "revoked" &&
+            !policyIds.has(policy.id),
+        ),
+    );
+    const summary = (item: {
+      readonly id: string;
+      readonly key: string;
+      readonly displayName: string;
+    }) => ({ id: item.id, key: item.key, displayName: item.displayName });
+    return {
+      agents: agents.map((agent) => ({
+        id: agent.id,
+        key: agent.key,
+        name: agent.name,
+      })),
+      otherProjects: [],
+      toolsets: toolsets.map(summary),
+      credentialPolicies: policies.map(summary),
+      credentials: credentials.map(summary),
+    };
+  }
+
+  async removeMcpServer(
+    serverId: string,
+    options: { readonly keepCredentials?: boolean } = {},
+  ): Promise<RemoveMcpServerResult> {
+    const usage = await this.getMcpServerUsage(serverId);
+    if (usage.agents.length > 0)
+      throw new Error(
+        `${usage.agents.length} ${usage.agents.length === 1 ? "agent still uses" : "agents still use"} this MCP server (${usage.agents.map((agent) => agent.name).join(", ")}). Publish agent versions without it, or archive those agents, first.`,
+      );
+    const now = new Date().toISOString();
+    const toolsetIds = new Set(usage.toolsets.map((toolset) => toolset.id));
+    const policies = options.keepCredentials ? [] : usage.credentialPolicies;
+    const credentials = options.keepCredentials ? [] : usage.credentials;
+    const policyIds = new Set(policies.map((policy) => policy.id));
+    const credentialIds = new Set(
+      credentials.map((credential) => credential.id),
+    );
+    this.#mcpServers = this.#mcpServers.map((item) =>
+      item.id === serverId
+        ? { ...item, status: "revoked" as const, updatedAt: now }
+        : item,
+    );
+    this.#mcpToolsets = this.#mcpToolsets.map((item) =>
+      toolsetIds.has(item.id)
+        ? { ...item, status: "revoked" as const, updatedAt: now }
+        : item,
+    );
+    this.#mcpPolicies = this.#mcpPolicies.map((item) =>
+      policyIds.has(item.id)
+        ? { ...item, status: "revoked" as const, updatedAt: now }
+        : item,
+    );
+    this.#mcpCredentials = this.#mcpCredentials.map((item) =>
+      credentialIds.has(item.id)
+        ? { ...item, status: "revoked" as const, updatedAt: now }
+        : item,
+    );
+    return {
+      server: structuredClone(
+        this.#mcpServers.find((item) => item.id === serverId)!,
+      ),
+      revokedToolsetIds: [...toolsetIds],
+      revokedCredentialPolicyIds: [...policyIds],
+      revokedCredentialIds: [...credentialIds],
+    };
+  }
+
   async listMcpCredentials() {
     return {
-      data: structuredClone(this.#mcpCredentials),
+      data: structuredClone(
+        this.#mcpCredentials.filter((item) => item.status !== "revoked"),
+      ),
       credentialEncryptionConfigured: true,
     };
   }
@@ -2062,7 +2200,23 @@ export class DemoConsoleApi implements ConsoleApi {
       key: input.key,
       displayName: input.displayName,
       kind: input.kind,
-      headerName: input.headerName ?? null,
+      headerName: input.kind === "api_key_header" ? input.headerName : null,
+      destination:
+        input.kind === "oauth_client_credentials"
+          ? mcpResourceDestination(input.oauth.resource)
+          : {
+              origin: canonicalMcpOrigin(input.destination.origin),
+              pathPrefix: input.destination.pathPrefix,
+            },
+      oauth:
+        input.kind === "oauth_client_credentials"
+          ? {
+              ...input.oauth,
+              tokenEndpointAuthMethod:
+                input.oauth.tokenEndpointAuthMethod ?? "client_secret_post",
+              sendResource: input.oauth.sendResource ?? true,
+            }
+          : null,
       credentialConfigured: true,
       credentialFingerprint: "000000000000",
       credentialVersion: 1,
@@ -2075,13 +2229,45 @@ export class DemoConsoleApi implements ConsoleApi {
     return structuredClone(created);
   }
 
-  async rotateMcpCredential(credentialId: string) {
+  async rotateMcpCredential(
+    credentialId: string,
+    input: Parameters<ConsoleApi["rotateMcpCredential"]>[1],
+  ) {
     const credential = this.#mcpCredentials.find(
       (item) => item.id === credentialId,
     );
     if (!credential) throw new Error("MCP credential not found");
+    const requested = input.destination
+      ? {
+          origin: canonicalMcpOrigin(input.destination.origin),
+          pathPrefix: input.destination.pathPrefix,
+        }
+      : undefined;
+    if (
+      credential.destination &&
+      requested &&
+      (requested.origin !== credential.destination.origin ||
+        requested.pathPrefix !== credential.destination.pathPrefix)
+    )
+      throw new Error(
+        "MCP credential destination is pinned; create a new credential for another destination",
+      );
+    if (!credential.oauth && input.oauth)
+      throw new Error(
+        "Only an OAuth client-credentials credential has an OAuth configuration",
+      );
+    const change = input.oauth ?? {};
     const rotated = {
       ...credential,
+      destination: credential.destination ?? requested ?? null,
+      oauth: credential.oauth
+        ? {
+            ...credential.oauth,
+            ...Object.fromEntries(
+              Object.entries(change).filter(([, value]) => value !== undefined),
+            ),
+          }
+        : null,
       credentialVersion: credential.credentialVersion + 1,
       updatedAt: new Date().toISOString(),
     };
@@ -2107,13 +2293,83 @@ export class DemoConsoleApi implements ConsoleApi {
     return structuredClone(revoked);
   }
 
+  async discoverMcpAuthorization(
+    input: Parameters<ConsoleApi["discoverMcpAuthorization"]>[0],
+  ) {
+    const endpoint = new URL(input.endpointUrl);
+    if (endpoint.protocol !== "https:")
+      throw new Error("MCP endpoint must be an HTTPS URL");
+    const path = endpoint.pathname === "/" ? "" : endpoint.pathname;
+    return {
+      endpointUrl: endpoint.href,
+      resource: input.endpointUrl,
+      resourceName: null,
+      resourceMetadataUrl: `${endpoint.origin}/.well-known/oauth-protected-resource${path}`,
+      resourceMetadataSource: "www_authenticate" as const,
+      challengeScope: "mcp:tools",
+      scopesSupported: ["mcp:tools"],
+      authorizationServers: [
+        {
+          issuer: "https://auth.example.com",
+          tokenEndpoint: "https://auth.example.com/oauth2/token",
+          metadataSource: "oauth" as const,
+          tokenEndpointAuthMethodsSupported: [
+            "client_secret_post",
+            "client_secret_basic",
+          ],
+          grantTypesSupported: ["authorization_code", "refresh_token"],
+          scopesSupported: ["mcp:tools"],
+          problem: null,
+        },
+      ],
+    };
+  }
+
+  async testMcpCredential(credentialId: string) {
+    const credential = this.#mcpCredentials.find(
+      (item) => item.id === credentialId,
+    );
+    if (!credential || credential.status !== "active")
+      throw new Error("Active MCP credential not found");
+    if (!credential.oauth)
+      throw new Error(
+        "Only an OAuth client-credentials credential can be tested",
+      );
+    return {
+      ok: true as const,
+      expiresIn: 3600,
+      grantedScope: credential.oauth.scope,
+    };
+  }
+
   async listMcpCredentialPolicies() {
-    return { data: structuredClone(this.#mcpPolicies) };
+    return {
+      data: structuredClone(
+        this.#mcpPolicies.filter((item) => item.status !== "revoked"),
+      ),
+    };
   }
 
   async createMcpCredentialPolicy(
     input: Parameters<ConsoleApi["createMcpCredentialPolicy"]>[0],
   ) {
+    const credential = this.#mcpCredentials.find(
+      (item) => item.id === input.credentialId && item.status === "active",
+    );
+    if (!credential) throw new Error("MCP credential is unavailable");
+    if (!credential.destination)
+      throw new Error(
+        "MCP credential has no pinned destination; rotate it with a destination before creating a policy",
+      );
+    if (
+      !mcpDestinationContains(credential.destination, {
+        origin: input.exactOrigin,
+        pathPrefix: input.pathPrefix,
+      })
+    )
+      throw new Error(
+        "MCP credential policy origin and path prefix must lie inside the credential's pinned destination",
+      );
     const now = new Date().toISOString();
     const created: McpCredentialPolicy = {
       id: crypto.randomUUID(),
@@ -2127,6 +2383,7 @@ export class DemoConsoleApi implements ConsoleApi {
       pathPrefix: input.pathPrefix,
       timeoutMs: input.timeoutMs ?? 30_000,
       maximumResponseBytes: input.maximumResponseBytes ?? 1_048_576,
+      forwardCallContext: input.forwardCallContext ?? false,
       status: "active",
       createdByPrincipalId: principalId,
       createdAt: now,
@@ -2137,7 +2394,11 @@ export class DemoConsoleApi implements ConsoleApi {
   }
 
   async listMcpToolsets() {
-    return { data: structuredClone(this.#mcpToolsets) };
+    return {
+      data: structuredClone(
+        this.#mcpToolsets.filter((item) => item.status !== "revoked"),
+      ),
+    };
   }
 
   async createMcpToolset(input: Parameters<ConsoleApi["createMcpToolset"]>[0]) {
@@ -2154,6 +2415,7 @@ export class DemoConsoleApi implements ConsoleApi {
       displayName: input.displayName,
       latestVersionId: crypto.randomUUID(),
       version: 1,
+      serverId: server.id,
       serverVersionId: input.serverVersionId,
       status: "active",
       tools: input.tools.map((selected) => {
@@ -3312,6 +3574,8 @@ export class DemoConsoleApi implements ConsoleApi {
         displayName: credential.displayName,
         kind: credential.kind,
         headerName: credential.headerName,
+        destination: credential.destination,
+        oauth: credential.oauth,
         status: credential.status === "revoked" ? "revoked" : "active",
         credentialFingerprint:
           credential.status === "revoked"
@@ -3331,6 +3595,7 @@ export class DemoConsoleApi implements ConsoleApi {
             pathPrefix: policy.pathPrefix,
             timeoutMs: policy.timeoutMs,
             maximumResponseBytes: policy.maximumResponseBytes,
+            forwardCallContext: policy.forwardCallContext,
             status: policy.status,
             contentHash: demoContentHash(policy.latestVersionId),
           },
@@ -3710,6 +3975,8 @@ export class DemoConsoleApi implements ConsoleApi {
         displayName: entry.displayName,
         kind: entry.kind,
         headerName: entry.headerName,
+        destination: entry.destination,
+        oauth: entry.oauth,
         status: entry.status,
       });
     }
@@ -3731,6 +3998,7 @@ export class DemoConsoleApi implements ConsoleApi {
         pathPrefix: latest.pathPrefix,
         timeoutMs: latest.timeoutMs,
         maximumResponseBytes: latest.maximumResponseBytes,
+        forwardCallContext: latest.forwardCallContext,
         status: latest.status,
       });
     }
@@ -3784,6 +4052,7 @@ export class DemoConsoleApi implements ConsoleApi {
       name: input.name,
       prefix: `demo${suffix}`,
       scopes: [...input.scopes],
+      access: input.access,
       lastUsedAt: null,
     };
     this.#apiKeys = [key, ...this.#apiKeys];

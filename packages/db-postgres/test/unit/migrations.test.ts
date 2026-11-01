@@ -789,3 +789,192 @@ test("event webhooks keep cross-tenant claims to scheduling columns", async () =
   assert.match(sql, /FOR UPDATE OF w SKIP LOCKED/u);
   assert.doesNotMatch(sql, /DROP TABLE|DELETE FROM|BYPASSRLS/u);
 });
+
+test("MCP credential destinations are additive and restore forced row security", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0054_mcp_credential_destination.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(sql, /ADD COLUMN destination_origin text/u);
+  assert.match(sql, /ADD COLUMN destination_path_prefix text/u);
+  assert.match(sql, /CREATE FUNCTION oao\.mcp_canonical_origin/u);
+  assert.match(sql, /CREATE FUNCTION oao\.mcp_path_within/u);
+  assert.match(sql, /CREATE FUNCTION oao\.mcp_policy_within_destination/u);
+  // Every relaxation for the backfill is undone in the same migration.
+  for (const table of [
+    "mcp_credential_versions",
+    "mcp_credential_policy_versions",
+    "mcp_server_versions",
+  ]) {
+    assert.match(
+      sql,
+      new RegExp(`ALTER TABLE oao\\.${table} NO FORCE ROW LEVEL SECURITY`, "u"),
+    );
+    assert.match(
+      sql,
+      new RegExp(`ALTER TABLE oao\\.${table} FORCE ROW LEVEL SECURITY`, "u"),
+    );
+  }
+  assert.match(sql, /ENABLE TRIGGER mcp_credential_versions_immutable/u);
+  assert.doesNotMatch(sql, /DROP TABLE|DROP COLUMN|DELETE FROM|BYPASSRLS/u);
+});
+
+test("OAuth client-credentials MCP credentials pin their configuration on the version", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0055_mcp_oauth_client_credentials.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(sql, /'oauth_client_credentials'/u);
+  for (const column of [
+    "oauth_issuer",
+    "oauth_token_endpoint",
+    "oauth_client_id",
+    "oauth_token_endpoint_auth_method",
+    "oauth_scope",
+    "oauth_resource",
+    "oauth_resource_metadata_url",
+    "oauth_send_resource",
+  ])
+    assert.match(sql, new RegExp(`ADD COLUMN ${column} `, "u"));
+  assert.match(sql, /mcp_credential_versions_kind_fkey/u);
+  assert.match(sql, /mcp_credential_versions_oauth_check/u);
+  // The client secret stays in encrypted_secret; no plaintext secret column.
+  assert.doesNotMatch(sql, /client_secret text|oauth_client_secret/u);
+  assert.match(
+    sql,
+    /ALTER TABLE oao\.mcp_credentials FORCE ROW LEVEL SECURITY/u,
+  );
+  assert.match(
+    sql,
+    /ALTER TABLE oao\.mcp_credential_versions FORCE ROW LEVEL SECURITY/u,
+  );
+  assert.doesNotMatch(sql, /DROP TABLE|DROP COLUMN|DELETE FROM|BYPASSRLS/u);
+});
+
+test("MCP call context is opt-in per policy version and reserves x-oao-* headers", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0056_mcp_call_context.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    sql,
+    /ADD COLUMN forward_call_context boolean NOT NULL DEFAULT false/u,
+  );
+  assert.match(sql, /NOT LIKE 'x-oao-%'/u);
+  assert.match(sql, /NOT VALID/u);
+  assert.doesNotMatch(sql, /UPDATE |DROP TABLE|DROP COLUMN|DELETE FROM/u);
+});
+
+test("removed MCP resources free their keys and restore forced row security", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0057_mcp_reusable_keys.sql", import.meta.url),
+    "utf8",
+  );
+  for (const table of [
+    "mcp_servers",
+    "mcp_credentials",
+    "mcp_credential_policies",
+    "mcp_toolsets",
+  ]) {
+    assert.match(
+      sql,
+      new RegExp(
+        `ALTER TABLE oao\\.${table} ADD COLUMN revoked_at timestamptz`,
+        "u",
+      ),
+    );
+    assert.match(
+      sql,
+      new RegExp(
+        `CREATE UNIQUE INDEX ${table}_live_key_idx[\\s\\S]*?WHERE revoked_at IS NULL`,
+        "u",
+      ),
+    );
+    assert.match(
+      sql,
+      new RegExp(`ALTER TABLE oao\\.${table} FORCE ROW LEVEL SECURITY`, "u"),
+    );
+  }
+  assert.doesNotMatch(sql, /DROP TABLE|DROP COLUMN|DELETE FROM|BYPASSRLS/u);
+});
+
+test("a project API key authenticates only in its project and is revoked with it", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0058_api_key_project_restriction.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(sql, /ALTER TABLE oao\.api_keys ADD COLUMN project_id uuid;/u);
+  // Hard-deleted projects must neither block the purge nor widen their keys.
+  assert.doesNotMatch(sql, /REFERENCES oao\.projects/u);
+  assert.match(sql, /AFTER DELETE ON oao\.projects/u);
+  assert.match(
+    sql,
+    /IF key\.project_id IS NOT NULL THEN[\s\S]*?project\.id = key\.project_id/u,
+  );
+  // The function keeps its dedicated owner and grants.
+  assert.match(
+    sql,
+    /SET ROLE oao_auth;[\s\S]*CREATE FUNCTION oao\.authenticate_api_key/u,
+  );
+  assert.match(sql, /RESET ROLE;/u);
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.authenticate_api_key\(text, bytea, uuid, timestamptz\) TO oao_app;/u,
+  );
+});
+
+test("run tokens act as the run's creator, narrowed, and only while the run is unsettled", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0059_agent_oao_tools.sql", import.meta.url),
+    "utf8",
+  );
+  // Only a hash is stored, and tokens go with their run in a project purge.
+  assert.match(sql, /token_hash bytea NOT NULL UNIQUE/u);
+  assert.doesNotMatch(sql, /token text/u);
+  assert.match(
+    sql,
+    /REFERENCES oao\.runs\(organization_id, project_id, id\) ON DELETE CASCADE/u,
+  );
+  assert.match(sql, /run\.settled_at IS NULL/u);
+  assert.match(sql, /scope = ANY\(creator\.scopes\)/u);
+  assert.match(
+    sql,
+    /creator\.kind <> 'human' OR member\.principal_id IS NOT NULL/u,
+  );
+  assert.match(sql, /api_key\.revoked_at IS NULL/u);
+  // A run another agent started reads only.
+  assert.match(
+    sql,
+    /requested_by_run_id IS NULL[\s\S]*?ARRAY\['run:create','session:write','delegation:message'\]/u,
+  );
+  // Agents can never be granted approvals or project administration.
+  const grantable =
+    /scope #>> '\{\}' NOT IN \(([\s\S]*?)\)/u.exec(sql)?.[1] ?? "";
+  assert.doesNotMatch(grantable, /approval:resolve|project:admin|\*/u);
+  assert.match(
+    sql,
+    /SET ROLE oao_auth;[\s\S]*CREATE FUNCTION oao\.authenticate_run_token/u,
+  );
+});
+
+test("a run another agent started keeps only the read scopes of its grant", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0060_agent_run_reads_only.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE OR REPLACE FUNCTION oao\.authenticate_run_token/u);
+  const reads = /OR scope IN \(([\s\S]*?)\)/u.exec(sql)?.[1] ?? "";
+  for (const scope of reads.match(/'[^']+'/gu) ?? [])
+    assert.match(scope, /:read'|:read_metadata'/u);
+  assert.match(sql, /run\.requested_by_run_id IS NULL/u);
+  assert.match(sql, /SET ROLE oao_auth;[\s\S]*RESET ROLE;/u);
+});

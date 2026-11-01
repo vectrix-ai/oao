@@ -199,6 +199,38 @@ test("rich tool schemas guide the model and fail closed at execution", () => {
   assert.match(retryPrompt, /tool_retry_exhausted/u);
 });
 
+test("an agent's OAO grant mounts only the tools its scopes allow inside the project", () => {
+  const names = runtimeTesting
+    .oaoAgentTools({
+      scopes: ["session:read", "run:read", "run:create", "mcp:write"],
+      approval: "always",
+    })
+    .map((tool) => tool.name);
+  assert.ok(names.includes("get_session"));
+  assert.ok(names.includes("send_message"));
+  assert.ok(names.includes("create_mcp_toolset"));
+  // A run token is project-restricted, so shared connections stay out.
+  assert.ok(!names.includes("create_mcp_server"));
+  assert.ok(!names.includes("start_session"));
+  const prompt = runtimeTesting.managedSystemPrompt({
+    systemPrompt: "Coordinate.",
+    tools: [],
+    delegates: [],
+    oaoTools: { scopes: ["session:read"], approval: "always" },
+  } as never);
+  assert.match(prompt, /oao__send_message/u);
+  assert.match(prompt, /Never send a message to your own session/u);
+  // Messages for another agent stay out of the tool ledger.
+  assert.deepEqual(
+    runtimeTesting.oaoToolLedgerArguments({
+      sessionId: "s1",
+      message: "What did you find?",
+      config: { systemPrompt: "x" },
+    }),
+    { sessionId: "s1", messageCharacters: 18, configProvided: true },
+  );
+});
+
 test("Harness Operations use one durable structured prompt over the inherited sandbox", async () => {
   const files = new Map([
     ["/.oao/attachments/run-1/shipment.txt", "shipment_reference=SHP-4815"],

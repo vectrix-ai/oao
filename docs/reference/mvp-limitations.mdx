@@ -106,13 +106,31 @@ and should shape integrations:
 - **Project switching is cookie-scoped.** The console switches projects with
   `POST /auth/switch-project`, which sets an `oao_active_project` cookie for
   the browser; other devices and existing bearer sessions keep their own
-  active project. API keys act on any project through the URL path.
-- **Remote MCP is HTTPS and static-credential only.** OAO supports Streamable
-  HTTP and legacy SSE with static bearer or safe API-key headers, immutable
-  discovery snapshots, restricted toolsets, and exact-origin credential
-  injection. Stdio, OAuth/refresh, dynamic client registration, per-user
-  delegated credentials, automatic retry of outcome-unknown calls, and sandbox
-  secret substitution are deferred. Tool results are untrusted remote content;
+  active project. Organization API keys act on any project through the URL
+  path; project API keys act only in their own project.
+- **OAO's own MCP server accepts API keys only.** An external agent connects
+  with an OAO API key as a bearer token. There is no OAuth sign-in yet, so
+  connector UIs that require OAuth, such as claude.ai or ChatGPT connectors,
+  cannot connect. The server is stateless: it sends no notifications, offers
+  no resources or prompts, and waits at most 600 seconds for a run inside one
+  call. It never takes a plaintext secret, so credentials and API keys are
+  managed outside it. Agents using OAO tools cannot be granted
+  `approval:resolve` or `project:admin`, and a run another agent started can
+  only read, so agents cannot ask each other in chains.
+- **Remote MCP is HTTPS with static or client-credentials authentication.**
+  OAO supports Streamable HTTP and legacy SSE with static bearer or safe API-key
+  headers and OAuth client credentials with a client secret
+  (`client_secret_post` or `client_secret_basic`), immutable discovery
+  snapshots, restricted toolsets, and exact-origin credential injection inside
+  each credential's pinned destination. A credential the upgrade could not pin
+  keeps its existing policies but accepts no new policy until it is rotated
+  with a destination. Access tokens are cached in each process's memory, so a
+  restart requests new ones and the console's **Test** action is the only token
+  status. Stdio, `private_key_jwt`, the authorization code flow, per-user and
+  per-session delegated credentials, dynamic client registration, Client ID
+  Metadata Documents, automatic retry of outcome-unknown calls, and sandbox
+  secret substitution are deferred. Forwarded call context is plain headers
+  behind the credential; OAO does not sign it. Tool results are untrusted remote content;
   OAO bounds and validates them but cannot prove they are free of prompt
   injection.
 - **Workspace backup stores only the latest archive per thread.** OAO backs up

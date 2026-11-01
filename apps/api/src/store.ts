@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import type {
   AuthorizationAction,
   AuthorizationScope,
@@ -24,6 +24,8 @@ export interface ApiKeySecret {
   readonly prefix: string;
   readonly secret: string;
   readonly scopes: readonly string[];
+  /** Present when the key works only inside this project. */
+  readonly projectId?: string;
   readonly expiresAt?: string;
   readonly createdAt: string;
 }
@@ -34,6 +36,7 @@ interface ApiKeyAuthRow {
   principal_id: string;
   subject: string;
   scopes: string[];
+  project_restricted: boolean;
 }
 
 export class PostgresApiStore {
@@ -78,6 +81,39 @@ export class PostgresApiStore {
       kind: "api_key",
       subject: row.subject,
       scopes: new Set(row.scopes as AuthorizationScope[]),
+      ...(row.project_restricted ? { projectRestricted: true } : {}),
+    };
+  }
+
+  /**
+   * Resolves a run token minted by the runtime worker for an agent's OAO
+   * tool. The principal is the run's creator, limited to the run's project
+   * and to the scopes both the agent version and the creator hold now.
+   */
+  async authenticateRunToken(token: string): Promise<Principal | undefined> {
+    if (!/^oao_run_[A-Za-z0-9_-]{43}$/u.test(token)) return undefined;
+    const result = await this.pool.query<{
+      organization_id: string;
+      project_id: string;
+      principal_id: string;
+      principal_kind: Principal["kind"];
+      subject: string;
+      scopes: string[];
+      run_id: string;
+    }>("SELECT * FROM oao.authenticate_run_token($1,clock_timestamp())", [
+      createHash("sha256").update(token).digest(),
+    ]);
+    const row = result.rows[0];
+    if (!row) return undefined;
+    return {
+      id: brandedId<PrincipalId>(row.principal_id),
+      organizationId: row.organization_id as Principal["organizationId"],
+      projectId: row.project_id as Principal["projectId"],
+      kind: row.principal_kind,
+      subject: row.subject,
+      scopes: new Set(row.scopes as AuthorizationScope[]),
+      projectRestricted: true,
+      actingRunId: row.run_id,
     };
   }
 
@@ -190,7 +226,11 @@ export class PostgresApiStore {
       readonly detail?: Readonly<Record<string, PublicValue>>;
     },
   ): Promise<void> {
-    const detail = input.detail ?? {};
+    // An agent acting through a run token is recorded beside the principal
+    // it acts for.
+    const detail = principal.actingRunId
+      ? { ...input.detail, viaRunId: principal.actingRunId }
+      : (input.detail ?? {});
     assertPublicPayload(detail);
     await transaction.query(
       "SELECT oao.append_audit_entry($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp())",
@@ -231,6 +271,51 @@ export class PostgresApiStore {
         payload,
       ],
     );
+  }
+
+  /**
+   * The saved response of a request that already completed under this
+   * idempotency key, without claiming it. Lets a route that needs network
+   * work before its write transaction replay a completed request first.
+   */
+  async completedIdempotentResponse<T>(
+    transaction: PgClient,
+    principal: Principal,
+    input: {
+      readonly scope: string;
+      readonly method?: "POST" | "PATCH" | "DELETE";
+      readonly key: string;
+      readonly hash: Uint8Array;
+    },
+  ): Promise<{ readonly status: number; readonly body: T } | undefined> {
+    const result = await transaction.query<{
+      request_hash: Buffer;
+      status_code: number | null;
+      response_public: T | null;
+    }>(
+      `SELECT request_hash,status_code,response_public
+         FROM oao.api_request_idempotency
+        WHERE organization_id=$1 AND project_id=$2 AND principal_id=$3
+          AND http_method=$4 AND route_key=$5 AND idempotency_key=$6
+          AND completed_at IS NOT NULL`,
+      [
+        principal.organizationId,
+        principal.projectId,
+        principal.id,
+        input.method ?? "POST",
+        input.scope,
+        input.key,
+      ],
+    );
+    const row = result.rows[0];
+    if (!row || row.status_code === null || row.response_public === null)
+      return undefined;
+    if (!row.request_hash.equals(Buffer.from(input.hash)))
+      throw new HttpApiError(
+        "bad_request",
+        "idempotency key reused with different request",
+      );
+    return { status: row.status_code, body: row.response_public };
   }
 
   async idempotent<T extends Readonly<Record<string, unknown>>>(
@@ -313,6 +398,8 @@ export class PostgresApiStore {
       readonly name: string;
       readonly scopes: readonly string[];
       readonly expiresAt?: Date;
+      /** Restricts the key to the creating principal's project. */
+      readonly projectRestricted?: boolean;
     },
   ): Promise<ApiKeySecret> {
     const id = randomUUID();
@@ -321,7 +408,7 @@ export class PostgresApiStore {
     const created = await transaction.query<{ created_at: Date }>(
       `INSERT INTO oao.api_keys
          (organization_id,id,name,key_prefix,key_hash,scopes,created_by_principal_id,
-          created_by_iap_subject,created_by_api_key_id,expires_at)
+          created_by_iap_subject,created_by_api_key_id,expires_at,project_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7,
          (SELECT identity.provider_subject FROM oao.auth_identities identity
           WHERE identity.organization_id=$1 AND identity.project_id=$9
@@ -330,7 +417,7 @@ export class PostgresApiStore {
           WHERE creator.organization_id=$1 AND creator.project_id=$9
             AND creator.id=$7 AND creator.kind='api_key'
             AND creator.subject ~ '^api-key:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
-         $8)
+         $8,$10)
        RETURNING created_at`,
       [
         principal.organizationId,
@@ -342,6 +429,7 @@ export class PostgresApiStore {
         principal.id,
         input.expiresAt ?? null,
         principal.projectId,
+        input.projectRestricted ? principal.projectId : null,
       ],
     );
     return {
@@ -351,6 +439,7 @@ export class PostgresApiStore {
       prefix,
       secret: token,
       scopes: input.scopes,
+      ...(input.projectRestricted ? { projectId: principal.projectId } : {}),
       ...(input.expiresAt ? { expiresAt: input.expiresAt.toISOString() } : {}),
       createdAt:
         created.rows[0]?.created_at.toISOString() ?? new Date().toISOString(),

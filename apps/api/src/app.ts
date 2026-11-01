@@ -28,6 +28,7 @@ import {
   parseRotateProjectStorageProviderCredentialInput,
   parseRotateEventWebhookCredentialInput,
   parseRotateMcpCredentialInput,
+  parseDiscoverMcpAuthorizationInput,
   parseUpdateProjectSandboxProviderConfigurationInput,
   parseToolResultEnvelope,
   parseUpdateEventWebhookInput,
@@ -42,13 +43,15 @@ import {
   type CreateProjectModelProviderInput,
   type ManagedAgentPublicationConfig,
   type ModelCatalogEntry,
+  type McpCredential,
+  type McpCredentialTestResult,
   type ModelProviderType,
   type SandboxSnapshotEntry,
   type ToolResultEnvelope,
   type UpdateEventWebhookInput,
   type UpdateProjectSandboxProviderConfigurationInput,
 } from "@oao/contracts";
-import type { McpRemotePort } from "@oao/mcp-remote";
+import { McpRemoteError, type McpRemotePort } from "@oao/mcp-remote";
 import {
   validateWebhookEndpoint,
   WEBHOOK_RECONFIGURE_DRAIN_MS,
@@ -74,7 +77,8 @@ import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import type { PostgresApiStore } from "./store.js";
 import type { RuntimeCommandPort } from "./runtime-commands.js";
 import { errorEnvelope, HttpApiError } from "./errors.js";
-import { McpAdminService } from "./mcp.js";
+import { McpAdminService, lockMcpBindings } from "./mcp.js";
+import { registerOaoMcpRoute } from "./oao-mcp.js";
 import { registerConfigurationBackupRoutes } from "./configuration-backup.js";
 import {
   decodeListCursor,
@@ -185,6 +189,21 @@ type Variables = { principal: Principal; requestId: string };
 type ApiContext = Context<{ Variables: Variables }>;
 const ALLOWED_SCOPES = new Set<string>(["*", ...AUTHORIZATION_ACTIONS]);
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * Project route segments whose rows the whole organization shares. A
+ * principal restricted to one project may read them but not change them.
+ */
+const ORGANIZATION_SHARED_RESOURCES = new Set([
+  "members",
+  "model-providers",
+  "storage-providers",
+  "sandbox-providers",
+  "mcp-servers",
+  "mcp-credentials",
+  "mcp-credential-policies",
+  "mcp-authorization-discovery",
+]);
 const MAX_RUN_FILES = 8;
 const MAX_RUN_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_RUN_FILES_BYTES = 20 * 1024 * 1024;
@@ -228,6 +247,11 @@ function assertProject(c: ApiContext): Principal {
       "Project is outside the principal scope",
     );
   return value;
+}
+
+/** The only project a restricted principal may see, or null for all. */
+function visibleProject(actor: Principal): string | null {
+  return actor.projectRestricted ? actor.projectId : null;
 }
 
 function rows(result: { readonly rows: readonly unknown[] }): unknown[] {
@@ -1820,7 +1844,12 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   ) => {
     const authorization = c.req.header("authorization");
     let authenticated: Principal | undefined;
-    if (authorization?.startsWith("Bearer oao_")) {
+    if (authorization?.startsWith("Bearer oao_run_")) {
+      // An agent's OAO tool acts in its run's project, whatever the path.
+      authenticated = await dependencies.store.authenticateRunToken(
+        authorization.slice("Bearer ".length),
+      );
+    } else if (authorization?.startsWith("Bearer oao_")) {
       // Organization API keys act inside the project addressed by the URL,
       // falling back to the organization's earliest project. DELETE of a
       // project itself must not bind the key to its own target.
@@ -1853,7 +1882,8 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     request: Request,
     authenticated: Principal,
   ): Promise<Principal> => {
-    if (authenticated.kind !== "human") return authenticated;
+    if (authenticated.kind !== "human" || authenticated.projectRestricted)
+      return authenticated;
     const requested = readCookie(request, "oao_active_project");
     if (
       !requested ||
@@ -2095,6 +2125,40 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   app.use("/v1/organizations/*", authenticate);
   app.use("/v1/context", authenticate);
 
+  // A principal restricted to one project never reaches the organization
+  // around it: no other project, no project lifecycle, no organization
+  // backup, and no change to a connection or membership every project shares.
+  const restrictToProject: MiddlewareHandler<{ Variables: Variables }> = async (
+    c,
+    next,
+  ) => {
+    const actor = c.get("principal");
+    if (actor.projectRestricted) {
+      const pathname = new URL(c.req.url).pathname.replace(/\/+$/u, "");
+      const project = /^\/v1\/projects\/([^/]+)(?:\/([^/]+))?/u.exec(pathname);
+      const read = c.req.method === "GET" || c.req.method === "HEAD";
+      const outside =
+        /^\/v1\/organizations\/[^/]+\/.+/u.test(pathname) ||
+        (pathname === "/v1/projects" && !read) ||
+        (project !== null && project[1] !== actor.projectId) ||
+        (project !== null &&
+          project[2] === undefined &&
+          c.req.method === "DELETE") ||
+        (project?.[2] !== undefined &&
+          ORGANIZATION_SHARED_RESOURCES.has(project[2]) &&
+          !read);
+      if (outside)
+        throw new HttpApiError(
+          "forbidden",
+          "This credential is restricted to its project",
+        );
+    }
+    await next();
+  };
+  app.use("/v1/projects/*", restrictToProject);
+  app.use("/v1/projects", restrictToProject);
+  app.use("/v1/organizations/*", restrictToProject);
+
   app.get("/v1/context", async (c) => {
     const actor = principal(c);
     return dependencies.store.transaction(actor, undefined, async (tx) => {
@@ -2104,8 +2168,9 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       );
       const projectsResult = await tx.query(
         `SELECT id,organization_id,slug,name,created_at FROM oao.projects
-         WHERE organization_id=$1 ORDER BY created_at,id`,
-        [actor.organizationId],
+         WHERE organization_id=$1 AND ($2::uuid IS NULL OR id=$2)
+         ORDER BY created_at,id`,
+        [actor.organizationId, visibleProject(actor)],
       );
       const organization = publicValue(organizationResult.rows[0]);
       const projects = rows(projectsResult) as Readonly<
@@ -2196,8 +2261,9 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       async (tx) => {
         const result = await tx.query(
           `SELECT id,organization_id,slug,name,created_at FROM oao.projects
-         WHERE organization_id=$1 ORDER BY created_at,id`,
-          [actor.organizationId],
+         WHERE organization_id=$1 AND ($2::uuid IS NULL OR id=$2)
+         ORDER BY created_at,id`,
+          [actor.organizationId, visibleProject(actor)],
         );
         return c.json({
           data: rows(result),
@@ -2709,13 +2775,21 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
         const condition = dependencies.store.cursorCondition(
           cursor,
           "created_at",
-          2,
+          3,
         );
         const result = await tx.query(
-          `SELECT id,organization_id,name,key_prefix AS prefix,scopes,expires_at,revoked_at,last_used_at,created_at
-         FROM oao.api_keys WHERE organization_id=$1${condition.sql}
-         ORDER BY created_at DESC,id DESC LIMIT $${2 + condition.values.length}`,
-          [actor.organizationId, ...condition.values, limit + 1],
+          `SELECT id,organization_id,name,key_prefix AS prefix,scopes,
+                CASE WHEN project_id IS NULL THEN 'organization' ELSE 'project' END AS access,
+                project_id,expires_at,revoked_at,last_used_at,created_at
+         FROM oao.api_keys
+         WHERE organization_id=$1 AND ($2::uuid IS NULL OR project_id=$2)${condition.sql}
+         ORDER BY created_at DESC,id DESC LIMIT $${3 + condition.values.length}`,
+          [
+            actor.organizationId,
+            visibleProject(actor),
+            ...condition.values,
+            limit + 1,
+          ],
         );
         return c.json(pagination(rows(result), limit, "createdAt"));
       },
@@ -2728,6 +2802,25 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     const key = idempotencyKey(c.req.raw);
     const name = requiredString(body.name, "name", 200);
     const scopes = parseScopes(body.scopes);
+    if (
+      body.access !== undefined &&
+      body.access !== "organization" &&
+      body.access !== "project"
+    )
+      throw new HttpApiError(
+        "bad_request",
+        "access must be organization or project",
+      );
+    // A key created by a project-restricted principal stays inside that
+    // project; it cannot widen into the organization.
+    const access: "organization" | "project" =
+      (body.access as "organization" | "project" | undefined) ??
+      (actor.projectRestricted ? "project" : "organization");
+    if (actor.projectRestricted && access !== "project")
+      throw new HttpApiError(
+        "forbidden",
+        "This credential can create keys only for its own project",
+      );
     const expiresAt = body.expiresAt
       ? new Date(requiredString(body.expiresAt, "expiresAt", 50))
       : undefined;
@@ -2800,12 +2893,13 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           name,
           scopes,
           ...(expiresAt ? { expiresAt } : {}),
+          projectRestricted: access === "project",
         });
         await dependencies.store.appendAudit(tx, actor, {
           action: "api_key.created",
           resourceType: "api_key",
           resourceId: apiKey.id,
-          detail: { name, prefix: apiKey.prefix },
+          detail: { name, prefix: apiKey.prefix, access },
         });
         const storedResponse = {
           id: apiKey.id,
@@ -2813,6 +2907,8 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           name: apiKey.name,
           prefix: apiKey.prefix,
           scopes: apiKey.scopes,
+          access,
+          projectId: apiKey.projectId ?? null,
           ...(apiKey.expiresAt ? { expiresAt: apiKey.expiresAt } : {}),
           createdAt: apiKey.createdAt,
           shown: false,
@@ -2858,8 +2954,13 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           execute: async () => {
             const result = await tx.query(
               `UPDATE oao.api_keys SET revoked_at=COALESCE(revoked_at,clock_timestamp())
-             WHERE organization_id=$1 AND id=$2 RETURNING id`,
-              [actor.organizationId, c.req.param("apiKeyId")],
+             WHERE organization_id=$1 AND id=$2 AND ($3::uuid IS NULL OR project_id=$3)
+             RETURNING id`,
+              [
+                actor.organizationId,
+                c.req.param("apiKeyId"),
+                visibleProject(actor),
+              ],
             );
             if (!result.rowCount)
               throw new HttpApiError("not_found", "API key not found");
@@ -2895,6 +2996,10 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   });
   registerRunRoutes(app, dependencies);
   registerEventRoutes(app, dependencies);
+  registerOaoMcpRoute(
+    app,
+    dependencies.onError ? { onError: dependencies.onError } : {},
+  );
 
   app.notFound((c) => {
     const requestId = c.get("requestId") ?? randomUUID();
@@ -2931,6 +3036,7 @@ function publicPrincipal(value: Principal) {
     subject: value.subject,
     ...(value.displayName ? { displayName: value.displayName } : {}),
     scopes: [...value.scopes],
+    ...(value.projectRestricted ? { projectRestricted: true } : {}),
   };
 }
 
@@ -3078,6 +3184,67 @@ function registerMcpRoutes(
     });
   });
 
+  app.get("/v1/projects/:projectId/mcp-servers/:serverId/usage", async (c) => {
+    const actor = assertProject(c);
+    const service = requiredService();
+    return dependencies.store.transaction(actor, "mcp:read", async (tx) =>
+      c.json(await service.serverUsage(tx, actor, c.req.param("serverId"))),
+    );
+  });
+
+  // Retires a server instead of deleting it: versions are immutable and
+  // sessions, call attempts, and audit history keep referring to them.
+  app.delete("/v1/projects/:projectId/mcp-servers/:serverId", async (c) => {
+    const actor = assertProject(c);
+    const serverId = c.req.param("serverId");
+    const keepCredentials = c.req.query("keepCredentials") === "true";
+    const key = idempotencyKey(c.req.raw);
+    const service = requiredService();
+    return dependencies.store.transaction(
+      actor,
+      keepCredentials ? "mcp:write" : ["mcp:write", "credential:revoke"],
+      async (tx) => {
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: `DELETE:/mcp-servers/${serverId}`,
+          method: "DELETE",
+          key,
+          hash: requestHash({ serverId, keepCredentials }),
+          status: 200,
+          execute: async () => {
+            const removed = await service.removeServer(tx, actor, serverId, {
+              keepCredentials,
+            });
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "mcp.server_revoked",
+              resourceType: "mcp_server",
+              resourceId: serverId,
+              detail: {
+                toolsetIds: removed.revokedToolsetIds,
+                credentialPolicyIds: removed.revokedCredentialPolicyIds,
+                credentialIds: removed.revokedCredentialIds,
+              },
+            });
+            for (const credentialId of removed.revokedCredentialIds) {
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "mcp.credential_revoked",
+                resourceType: "mcp_credential",
+                resourceId: credentialId,
+                detail: { reason: "mcp_server_removed", serverId },
+              });
+              await dependencies.store.appendEvent(tx, actor, {
+                aggregateType: "mcp_credential",
+                aggregateId: credentialId,
+                kind: "mcp.credential_revoked",
+              });
+            }
+            return removed;
+          },
+        });
+        return c.json(response.body);
+      },
+    );
+  });
+
   app.post(
     "/v1/projects/:projectId/mcp-servers/:serverId/discover",
     async (c) => {
@@ -3099,7 +3266,11 @@ function registerMcpRoutes(
       let tools;
       try {
         tools = await service.discover(loaded.connection, c.req.raw.signal);
-      } catch {
+      } catch (error) {
+        const errorCode =
+          error instanceof McpRemoteError
+            ? error.code
+            : "remote_discovery_failed";
         await dependencies.store.transaction(
           actor,
           "mcp:discover",
@@ -3110,14 +3281,14 @@ function registerMcpRoutes(
               kind: "mcp.discovery_failed",
               payload: {
                 serverVersionId: loaded.serverVersionId,
-                errorCode: "remote_discovery_failed",
+                errorCode,
               },
             });
           },
         );
         throw new HttpApiError(
           "bad_request",
-          "MCP discovery failed; inspect the redacted discovery event and server configuration",
+          `MCP discovery failed (${errorCode}); inspect the redacted discovery event and server configuration`,
         );
       }
       return dependencies.store.transaction(
@@ -3191,12 +3362,60 @@ function registerMcpRoutes(
     );
   });
 
+  // Credential-free: reads only public authorization metadata. It needs no
+  // Idempotency-Key and holds no transaction during the network requests.
+  app.post("/v1/projects/:projectId/mcp-authorization-discovery", async (c) => {
+    const actor = assertProject(c);
+    const input = parseDiscoverMcpAuthorizationInput(
+      await readJsonObject(c.req.raw),
+    );
+    const service = requiredService();
+    await dependencies.store.transaction(actor, "mcp:discover", () =>
+      Promise.resolve(),
+    );
+    try {
+      return c.json(
+        await service.discoverAuthorization(
+          input.endpointUrl,
+          c.req.raw.signal,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof McpRemoteError)
+        throw new HttpApiError(
+          "bad_request",
+          `MCP authorization discovery failed (${error.code}): ${error.message}`,
+        );
+      throw new HttpApiError(
+        "bad_request",
+        "MCP authorization discovery failed",
+      );
+    }
+  });
+
   app.post("/v1/projects/:projectId/mcp-credentials", async (c) => {
     const actor = assertProject(c);
     const body = await readJsonObject(c.req.raw);
     const input = parseCreateMcpCredentialInput(body);
     const key = idempotencyKey(c.req.raw);
     const service = requiredService();
+    // OAO pins only an authorization configuration that live discovery
+    // confirms, checked before the write transaction opens. A retry of a
+    // request that already completed replays without new network work.
+    if (input.kind === "oauth_client_credentials") {
+      const completed = await dependencies.store.transaction(
+        actor,
+        "credential:write",
+        (tx) =>
+          dependencies.store.completedIdempotentResponse<McpCredential>(
+            tx,
+            actor,
+            { scope: "POST:/mcp-credentials", key, hash: requestHash(body) },
+          ),
+      );
+      if (completed) return c.json(completed.body, completed.status as 201);
+      await service.confirmOAuthConfiguration(input.oauth, c.req.raw.signal);
+    }
     return dependencies.store.transaction(
       actor,
       "credential:write",
@@ -3217,6 +3436,16 @@ function registerMcpRoutes(
                 kind: created.kind,
                 fingerprint: created.credentialFingerprint,
                 credentialVersion: created.credentialVersion,
+                destination: created.destination
+                  ? `${created.destination.origin}${created.destination.pathPrefix}`
+                  : null,
+                ...(created.oauth
+                  ? {
+                      issuer: created.oauth.issuer,
+                      tokenEndpoint: created.oauth.tokenEndpoint,
+                      scope: created.oauth.scope,
+                    }
+                  : {}),
               },
             });
             await dependencies.store.appendEvent(tx, actor, {
@@ -3245,46 +3474,122 @@ function registerMcpRoutes(
       const input = parseRotateMcpCredentialInput(body);
       const key = idempotencyKey(c.req.raw);
       const service = requiredService();
+      const scope = `POST:/mcp-credentials/${c.req.param("credentialId")}/rotate`;
+      const prior = await dependencies.store.transaction(
+        actor,
+        "credential:rotate",
+        async (tx) => ({
+          completed:
+            await dependencies.store.completedIdempotentResponse<McpCredential>(
+              tx,
+              actor,
+              { scope, key, hash: requestHash(body) },
+            ),
+          base: await service.rotationBase(
+            tx,
+            actor,
+            c.req.param("credentialId"),
+          ),
+        }),
+      );
+      // A completed rotation replays before any discovery or version check.
+      if (prior.completed) return c.json(prior.completed.body);
+      const base = prior.base;
+      const rotated = service.rotatedOAuth(base, input);
+      if (rotated.oauth && rotated.authorizationChanged)
+        await service.confirmOAuthConfiguration(
+          rotated.oauth,
+          c.req.raw.signal,
+        );
       return dependencies.store.transaction(
         actor,
         "credential:rotate",
         async (tx) => {
           const response = await dependencies.store.idempotent(tx, actor, {
-            scope: `POST:/mcp-credentials/${c.req.param("credentialId")}/rotate`,
+            scope,
             key,
             hash: requestHash(body),
             status: 200,
             execute: async () => {
-              const rotated = await service.rotateCredential(
+              const updated = await service.rotateCredential(
                 tx,
                 actor,
                 c.req.param("credentialId"),
-                input.secret,
+                input,
+                { activeVersionId: base.activeVersionId, oauth: rotated.oauth },
               );
               await dependencies.store.appendAudit(tx, actor, {
                 action: "mcp.credential_rotated",
                 resourceType: "mcp_credential",
-                resourceId: rotated.id,
+                resourceId: updated.id,
                 detail: {
-                  fingerprint: rotated.credentialFingerprint,
-                  credentialVersion: rotated.credentialVersion,
+                  fingerprint: updated.credentialFingerprint,
+                  credentialVersion: updated.credentialVersion,
+                  destination: updated.destination
+                    ? `${updated.destination.origin}${updated.destination.pathPrefix}`
+                    : null,
+                  ...(updated.oauth
+                    ? {
+                        issuer: updated.oauth.issuer,
+                        tokenEndpoint: updated.oauth.tokenEndpoint,
+                        scope: updated.oauth.scope,
+                      }
+                    : {}),
                 },
               });
               await dependencies.store.appendEvent(tx, actor, {
                 aggregateType: "mcp_credential",
-                aggregateId: rotated.id,
+                aggregateId: updated.id,
                 kind: "mcp.credential_rotated",
                 payload: {
-                  fingerprint: rotated.credentialFingerprint,
-                  credentialVersion: rotated.credentialVersion,
+                  fingerprint: updated.credentialFingerprint,
+                  credentialVersion: updated.credentialVersion,
                 },
               });
-              return rotated;
+              return updated;
             },
           });
           return c.json(response.body);
         },
       );
+    },
+  );
+
+  // Requests a fresh token from the pinned token endpoint, after re-checking
+  // the pinned authorization metadata. Returns only its lifetime and granted
+  // scope, or a safe error code; the token never leaves the API process.
+  app.post(
+    "/v1/projects/:projectId/mcp-credentials/:credentialId/test",
+    async (c) => {
+      const actor = assertProject(c);
+      const service = requiredService();
+      const credentialId = c.req.param("credentialId");
+      const material = await dependencies.store.transaction(
+        actor,
+        "mcp:discover",
+        (tx) => service.loadOAuthCredential(tx, actor, credentialId),
+      );
+      let result: McpCredentialTestResult;
+      try {
+        result = {
+          ok: true,
+          ...(await service.testCredential(material, c.req.raw.signal)),
+        };
+      } catch (error) {
+        if (!(error instanceof McpRemoteError)) throw error;
+        result = { ok: false, errorCode: error.code };
+      }
+      await dependencies.store.transaction(actor, "mcp:discover", (tx) =>
+        dependencies.store.appendAudit(tx, actor, {
+          action: "mcp.credential_tested",
+          resourceType: "mcp_credential",
+          resourceId: credentialId,
+          detail: result.ok
+            ? { ok: true, expiresIn: result.expiresIn }
+            : { ok: false, errorCode: result.errorCode },
+        }),
+      );
+      return c.json(result);
     },
   );
 
@@ -3358,6 +3663,7 @@ function registerMcpRoutes(
               credentialId: created.credentialId,
               exactOrigin: created.exactOrigin,
               pathPrefix: created.pathPrefix,
+              forwardCallContext: created.forwardCallContext,
             },
           });
           return created;
@@ -6484,7 +6790,7 @@ function registerAgentRoutes(
       const result = await tx.query(
         `SELECT d.id,d.organization_id,d.project_id,d.agent_key AS key,d.name,COALESCE(d.description,'') AS description,
                 d.latest_version_id,v.version,v.config->>'modelPreset' AS model,
-                v.config->'sandbox' AS sandbox,
+                v.config->'sandbox' AS sandbox,v.config->'oaoTools' AS oao_tools,
                 CASE WHEN v.id IS NULL THEN 'draft' ELSE 'published' END AS status,
                 d.created_at,COALESCE(v.created_at,d.created_at) AS updated_at
          FROM oao.agent_definitions d
@@ -6518,6 +6824,8 @@ function registerAgentRoutes(
         "agent:write",
         ...(config.skillVersionIds.length ? (["skill:bind"] as const) : []),
         ...(config.mcpBindings.length ? (["mcp:bind"] as const) : []),
+        // An agent's OAO tools may hold only scopes its publisher holds.
+        ...(config.oaoTools?.scopes ?? []),
       ],
       async (tx) => {
         await assertModelPresetApproved(
@@ -6559,6 +6867,8 @@ function registerAgentRoutes(
                 description ?? null,
               ],
             );
+            if (config.mcpBindings.length > 0)
+              await lockMcpBindings(tx, actor.organizationId);
             await tx.query(
               "SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7)",
               [
@@ -6574,7 +6884,7 @@ function registerAgentRoutes(
             const result = await tx.query(
               `SELECT d.id,d.organization_id,d.project_id,d.agent_key AS key,d.name,COALESCE(d.description,'') AS description,
                     d.latest_version_id,v.version,v.config->>'modelPreset' AS model,
-                    v.config->'sandbox' AS sandbox,'published' AS status,
+                    v.config->'sandbox' AS sandbox,v.config->'oaoTools' AS oao_tools,'published' AS status,
                     d.created_at,v.created_at AS updated_at
              FROM oao.agent_definitions d JOIN oao.agent_versions v
                ON v.organization_id=d.organization_id AND v.project_id=d.project_id
@@ -6612,7 +6922,7 @@ function registerAgentRoutes(
       const result = await tx.query(
         `SELECT d.id,d.organization_id,d.project_id,d.agent_key AS key,d.name,COALESCE(d.description,'') AS description,
                 d.latest_version_id,v.version,v.config->>'modelPreset' AS model,
-                v.config->'sandbox' AS sandbox,
+                v.config->'sandbox' AS sandbox,v.config->'oaoTools' AS oao_tools,
                 CASE WHEN v.id IS NULL THEN 'draft' ELSE 'published' END AS status,
                 d.created_at,COALESCE(v.created_at,d.created_at) AS updated_at
          FROM oao.agent_definitions d
@@ -6734,6 +7044,8 @@ function registerAgentRoutes(
         "agent:write",
         ...(config.skillVersionIds.length ? (["skill:bind"] as const) : []),
         ...(config.mcpBindings.length ? (["mcp:bind"] as const) : []),
+        // An agent's OAO tools may hold only scopes its publisher holds.
+        ...(config.oaoTools?.scopes ?? []),
       ],
       async (tx) => {
         await assertModelPresetApproved(
@@ -6774,6 +7086,8 @@ function registerAgentRoutes(
           hash: requestHash(body),
           status: 201,
           execute: async () => {
+            if (config.mcpBindings.length > 0)
+              await lockMcpBindings(tx, actor.organizationId);
             const result = await tx.query(
               `SELECT (published).*
              FROM (SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7) AS published) q`,
@@ -7064,8 +7378,8 @@ function registerRunRoutes(
                  VALUES ($1,$2,$5,$3,$6) RETURNING *
                ), run AS (
                  INSERT INTO oao.runs
-                   (organization_id,project_id,id,thread_id,session_id,agent_version_id,created_by_principal_id,idempotency_key,input_public)
-                 VALUES ($1,$2,$7,$3,$5,$6,$8,$9,$10) RETURNING *
+                   (organization_id,project_id,id,thread_id,session_id,agent_version_id,created_by_principal_id,idempotency_key,input_public,requested_by_run_id)
+                 VALUES ($1,$2,$7,$3,$5,$6,$8,$9,$10,$13) RETURNING *
                ), message AS (
                  INSERT INTO oao.messages
                    (organization_id,project_id,id,thread_id,run_id,role,redacted_content)
@@ -7090,6 +7404,7 @@ function registerRunRoutes(
                   },
                   messageId,
                   initialMessage,
+                  actor.actingRunId ?? null,
                 ],
               );
               const session = publicValue(result.rows[0]?.session) as Readonly<
@@ -7590,8 +7905,8 @@ function registerRunRoutes(
               await tx.query(
                 `INSERT INTO oao.runs (
                    organization_id,project_id,id,thread_id,session_id,agent_version_id,
-                   created_by_principal_id,idempotency_key,input_public
-                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+                   created_by_principal_id,idempotency_key,input_public,requested_by_run_id
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
                 [
                   actor.organizationId,
                   actor.projectId,
@@ -7602,6 +7917,7 @@ function registerRunRoutes(
                   actor.id,
                   idem,
                   { message },
+                  actor.actingRunId ?? null,
                 ],
               );
               await tx.query(
@@ -7952,8 +8268,8 @@ function registerRunRoutes(
               const result = await tx.query(
                 `WITH run AS (
                INSERT INTO oao.runs
-                 (organization_id,project_id,id,thread_id,session_id,agent_version_id,created_by_principal_id,idempotency_key,input_public)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
+                 (organization_id,project_id,id,thread_id,session_id,agent_version_id,created_by_principal_id,idempotency_key,input_public,requested_by_run_id)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$12) RETURNING *
              ), message AS (
                INSERT INTO oao.messages
                  (organization_id,project_id,id,thread_id,run_id,role,redacted_content)
@@ -7979,6 +8295,7 @@ function registerRunRoutes(
                   },
                   messageId,
                   redactedInput,
+                  actor.actingRunId ?? null,
                 ],
               );
               await dependencies.store.appendEvent(tx, actor, {

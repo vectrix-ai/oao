@@ -70,11 +70,20 @@ OTel SDK -> optional Collector -> configured OTLP backend
     one PostgreSQL-authoritative workspace identity. Tool replay is keyed and
     hashed; parent cancellation cascades to unsettled child runs.
 14. Remote MCP access is pinned by immutable server, toolset, and credential
-    policy versions. Session bindings copy those exact IDs. The runtime performs
-    live authorization/lifecycle checks before decrypting a credential, and the
+    policy versions. Session bindings copy those exact IDs. Each credential
+    version is pinned to one destination origin and path prefix, and a policy
+    may use it only inside that destination. The runtime performs live
+    authorization/lifecycle checks before decrypting a credential, and the
     egress broker injects it only for the policy's exact HTTPS origin and path
-    prefix. MCP secrets never enter Flue state, prompts, events, logs, or the
-    sandbox.
+    prefix inside the credential's destination. An OAuth client-credentials
+    version also pins its issuer, token endpoint, and resource: a separate
+    token broker sends the client secret only to that token endpoint, and the
+    resulting access token, cached per process and credential version, is
+    injected like a static bearer. The API process decrypts credentials for
+    discovery and credential tests as well. A policy version may opt in to
+    forwarding call identity as `X-OAO-*` headers; the broker strips inbound
+    ones and sets them only from trusted execution context. MCP secrets and
+    tokens never enter Flue state, prompts, events, logs, or the sandbox.
 15. API keys, model provider connections, storage provider connections,
     sandbox provider connections, and MCP servers/credentials/credential
     policies are organization-scoped rows shared by every project; their
@@ -105,6 +114,13 @@ OTel SDK -> optional Collector -> configured OTLP backend
     numbers and lifecycle states, revalidates agent and Skill versions, and
     encrypts the credentials the operator supplies for the target
     organization. It only fills new or empty projects.
+19. An agent's OAO tools reach the API only through a run token minted per
+    call by the runtime worker. PostgreSQL stores its SHA-256, never the
+    token. The API resolves it to the run's creator, restricted to the run's
+    project and to the agent version's granted scopes that the creator still
+    holds, and only while the run is unsettled. A run an agent started, and
+    any run it delegates to, keeps only read scopes: it cannot change OAO or
+    start or message further runs.
 
 ## Public run states
 
@@ -138,6 +154,9 @@ OTel SDK -> optional Collector -> configured OTLP backend
 - `@oao/artifact-s3`: tenant-keyed S3 artifact adapter plus encrypted project storage resolution and latest-thread workspace backup records.
 - `@oao/mcp-remote`: pinned MCP client adapter plus TLS-only, DNS/IP-pinned,
   exact-origin credential egress and bounded schema/result handling.
+- `@oao/mcp-server`: OAO's own MCP server. Each tool wraps one public API
+  operation through `@oao/sdk-js`, is offered only to callers holding its
+  scopes, and never takes a plaintext secret. The API serves it per project.
 
 ### Product surfaces
 

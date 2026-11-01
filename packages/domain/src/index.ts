@@ -37,6 +37,17 @@ export interface Principal extends TenantIdentity {
   /** Optional presentation metadata supplied by the active auth provider. */
   readonly displayName?: string;
   readonly scopes: ReadonlySet<AuthorizationScope>;
+  /**
+   * Set when the principal may act only inside its own project, such as an
+   * API key restricted to one project. It cannot see other projects or change
+   * resources the whole organization shares.
+   */
+  readonly projectRestricted?: boolean;
+  /**
+   * Set when an agent's OAO tool acts through a run token: the principal is
+   * the run's creator and this is the run acting for it.
+   */
+  readonly actingRunId?: string;
 }
 
 export const AUTHORIZATION_ACTIONS = [

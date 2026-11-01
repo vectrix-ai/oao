@@ -5,6 +5,7 @@ import type {
   ConfigurationRestorePlan,
   ConfigurationRestoreResult,
   ConsoleApi,
+  ApiKeyAccess,
   CreateApiKeyInput,
   CreateEventWebhookInput,
   CreateModelProviderInput,
@@ -182,6 +183,10 @@ function record(value: unknown): Readonly<Record<string, unknown>> {
 
 function text(value: unknown, fallback = ""): string {
   return value === null || value === undefined ? fallback : String(value);
+}
+
+function apiKeyAccess(value: unknown): ApiKeyAccess {
+  return value === "project" ? "project" : "organization";
 }
 
 function numeric(value: unknown): number {
@@ -1902,6 +1907,20 @@ export class HttpConsoleApi implements ConsoleApi {
       { method: "POST", body: JSON.stringify(input) },
     );
 
+  getMcpServerUsage = async (
+    serverId: string,
+  ): ReturnType<ConsoleApi["getMcpServerUsage"]> =>
+    this.#projectRequest(`/mcp-servers/${encodeURIComponent(serverId)}/usage`);
+
+  removeMcpServer = async (
+    serverId: string,
+    options: Parameters<ConsoleApi["removeMcpServer"]>[1] = {},
+  ): ReturnType<ConsoleApi["removeMcpServer"]> =>
+    this.#projectRequest(
+      `/mcp-servers/${encodeURIComponent(serverId)}${options.keepCredentials ? "?keepCredentials=true" : ""}`,
+      { method: "DELETE" },
+    );
+
   listMcpCredentials = async (): Promise<McpCredentialList> =>
     this.#projectRequest("/mcp-credentials");
 
@@ -1928,6 +1947,22 @@ export class HttpConsoleApi implements ConsoleApi {
       {
         method: "DELETE",
       },
+    );
+
+  discoverMcpAuthorization = async (
+    input: Parameters<ConsoleApi["discoverMcpAuthorization"]>[0],
+  ): ReturnType<ConsoleApi["discoverMcpAuthorization"]> =>
+    this.#projectRequest("/mcp-authorization-discovery", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+
+  testMcpCredential = async (
+    credentialId: string,
+  ): ReturnType<ConsoleApi["testMcpCredential"]> =>
+    this.#projectRequest(
+      `/mcp-credentials/${encodeURIComponent(credentialId)}/test`,
+      { method: "POST" },
     );
 
   listMcpCredentialPolicies = async (): Promise<McpCredentialPolicyList> =>
@@ -2379,6 +2414,7 @@ export class HttpConsoleApi implements ConsoleApi {
       name: text(response.name),
       prefix: text(response.prefix),
       scopes: Array.isArray(response.scopes) ? response.scopes.map(String) : [],
+      access: apiKeyAccess(response.access),
       lastUsedAt: null,
     };
     if (response.shown !== true) return { ...common, shown: false };
@@ -2457,6 +2493,7 @@ export class HttpConsoleApi implements ConsoleApi {
         name: String(key.name),
         prefix: String(key.prefix),
         scopes: Array.isArray(key.scopes) ? key.scopes.map(String) : [],
+        access: apiKeyAccess(key.access),
         lastUsedAt: key.lastUsedAt ? String(key.lastUsedAt) : null,
       })),
       hosting: [],

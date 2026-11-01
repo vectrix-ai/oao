@@ -37,7 +37,10 @@ results, sandbox environment, product events, audit details, or list responses.
 
 ## Add an MCP server in the console
 
-Open **MCP connections** and select **Add MCP server**. Complete every wizard
+**MCP connections** always lists **OAO**, the project's own MCP server. It is
+built in and needs no setup; see
+[Let OAO agents use these tools](/integrations/oao-mcp-server#let-oao-agents-use-these-tools).
+For a remote server, open **MCP connections** and select **Add MCP server**. Complete every wizard
 screen in order:
 
 <Steps>
@@ -48,11 +51,15 @@ screen in order:
   </Step>
 
 <Step title="Add authentication and review the policy">
-  Choose **Bearer token** or **API-key header** and enter the write-only secret.
-  For an API-key header, also enter its safe header name. Expand **Security
-  policy and limits** and confirm the exact HTTPS origin, allowed path prefix,
-  request timeout, and response-size limit. OAO never returns the secret after
-  saving it. Select **Next**.
+  Choose **Bearer token**, **API-key header**, or **OAuth client credentials**
+  and enter the write-only secret. For an API-key header, also enter its safe
+  header name. For OAuth client credentials, first discover and confirm the
+  authorization server; see [OAuth client
+  credentials](#oauth-client-credentials). Expand **Security policy and limits**
+  and confirm the exact HTTPS origin, allowed path prefix, request timeout, and
+  response-size limit. The credential is pinned to that origin and path prefix
+  when it is saved; see [Credential destinations](#credential-destinations). OAO
+  never returns the secret after saving it. Select **Next**.
 </Step>
 
 <Step title="Connect and discover">
@@ -81,22 +88,67 @@ screen in order:
   </Step>
 </Steps>
 
-The **Connections** view summarizes configured endpoints, discovery status, and
-restricted toolsets. The individual credential, policy, server, and toolset
-records remain available under **Advanced resources** for inspection, rotation,
-revocation, and manual administration. When manually creating an immutable
-toolset, choose whether all selected tools always require approval or may run
-without approval; use approval-free execution only for narrowly allowlisted,
-read-only tools.
+The **Connections** view lists one card per connection with its endpoint,
+discovery status, and toolsets. Select **Manage** on a card to see that
+connection only:
+
+- **Tools:** the discovered tools, and **Discover tools** with one of its
+  policies.
+- **Authentication:** each credential policy that covers the endpoint with its
+  credential, and **Test** (OAuth credentials), **Rotate**, and **Revoke**.
+  **Add policy** adds another policy for an existing credential.
+- **Toolsets:** this project's toolsets for the connection, and **Create
+  toolset**. When creating an immutable toolset, choose whether all selected
+  tools always require approval or may run without approval; use
+  approval-free execution only for narrowly allowlisted, read-only tools.
+- **Remove:** see [Remove a connection](#remove-a-connection).
 
 The wizard creates the server and server version, encrypted credential,
 exact-origin credential-policy version, and restricted toolset in dependency
 order. If testing fails after one of them is saved, retrying in the same open
 wizard continues from the first incomplete resource instead of duplicating it.
-Closing the wizard never rolls back already-saved resources; inspect them under
-**Advanced resources** before starting again with the same key. Secret input is
+Closing the wizard never rolls back already-saved resources; manage or remove
+the connection before starting again with the same key. Secret input is
 cleared as soon as the credential is encrypted and is never returned to the
 console.
+
+## Remove a connection
+
+Select **Manage** on a connection card, then **Remove**. OAO first checks what
+still uses the connection:
+
+- **An agent still uses it.** If the current version of any agent binds its
+  tools, in this project or another project of the organization, removal is
+  refused and the dialog lists those agents (agents in other projects by
+  count). Publish agent versions without the binding, or delete those agents,
+  then remove the connection.
+- **Nothing uses it.** Removal revokes every version of the server and this
+  project's toolsets for it. **Also revoke its credential and policy**, on by
+  default, also revokes the credential policies that cover no other active
+  server and the credentials only those policies use. A credential shared with
+  another connection stays active. A revoked credential cannot be restored; to
+  connect again, enter the secret again.
+
+A removed connection disappears from the console and from every API list, and
+its keys can be used again, so you can add it back under the same name. Like a
+deleted agent, its rows are kept: server, toolset, and policy versions are
+immutable and referenced by sessions, call attempts, and the audit trail.
+Sessions that were started with it keep running, but their calls to its tools
+fail. Toolsets for the server in other projects stay with those projects and can
+no longer be used. A credential revoked on its own also disappears from the
+lists and frees its key.
+
+A credential you keep stays active. While no connection uses it, the
+**Connections** view lists it under **Credentials not used by any connection**,
+where you can revoke it. Adding the connection back with the setup wizard
+skips keys a kept credential or policy still holds, for example
+`docs-search-credential-2`, and a kept policy for the same endpoint covers the
+new connection again.
+
+Through the API, `GET /mcp-servers/{id}/usage` returns what uses a server and
+what removal would revoke, and `DELETE /mcp-servers/{id}` removes it; add
+`?keepCredentials=true` to keep its credentials and policies. See [HTTP
+API](/reference/http-api#mcp-servers-credentials-and-toolsets).
 
 ## Add an MCP server through the API
 
@@ -119,6 +171,7 @@ credential_id="$(
       displayName: "Example MCP credential",
       kind: "static_bearer",
       headerName: null,
+      destination: {origin: "https://mcp.example.com", pathPrefix: "/mcp"},
       secret: $secret
     }')" \
     "$OAO_API_URL/projects/$OAO_PROJECT_ID/mcp-credentials" \
@@ -211,16 +264,278 @@ as the next immutable server version and makes it the latest version. Existing
 toolsets and sessions remain pinned to their prior server version until an
 operator deliberately publishes a replacement toolset and agent version.
 
+## Credential destinations
+
+Every credential version is pinned to one destination: an HTTPS origin and a
+path prefix, set when the credential is created. The secret is only ever sent
+inside that destination. A credential policy can use the credential only when
+the policy's exact origin equals the destination origin and its path prefix
+lies inside the destination path prefix. Prefixes are compared on path-segment
+boundaries: a destination of `/mcp` contains `/mcp` and `/mcp/v2`, but not
+`/mcpx` and not `/`.
+
+OAO checks this in three places, so no single path can bypass it:
+
+- Creating a credential policy outside the destination returns `400`.
+- Authenticated discovery refuses a policy that lies outside the destination.
+- At execution time the runtime only loads a credential for a policy inside the
+  destination, and the egress broker refuses any credential-bearing request
+  outside it.
+
+Without the pin, any principal with `mcp:write` and `mcp:discover` could point
+an organization-shared credential at their own server and receive the secret
+through discovery.
+
+Rotating a credential keeps its destination. To send a secret somewhere else,
+create a new credential.
+
+### Credentials stored before destinations existed
+
+Upgrading pins existing credentials from the policies that already use them,
+so no existing binding breaks:
+
+- If all of a credential's policies use one origin, the credential is pinned to
+  that origin. Its path prefix is the policies' path prefix when they all use
+  the same one, and `/` otherwise.
+- Policy prefixes used to match as plain string prefixes, so `/mcp` also
+  served an endpoint at `/mcpx`. When a server relied on that, or is a legacy
+  SSE server that may post messages to a sibling path, the credential is pinned
+  to the prefix's parent instead (`/mcp` becomes `/`, `/api/sse` becomes
+  `/api/`).
+- A credential without policies, or with policies on more than one origin,
+  stays unpinned. Its existing policies keep working, but no new policy can use
+  it. The console shows it as **Unpinned**.
+
+To pin an unpinned credential, rotate it with a destination. Policies outside
+that destination stop working at once; create replacement policies inside it
+and publish agent versions that use them.
+
+## OAuth client credentials
+
+For machine-to-machine access, OAO implements the MCP [OAuth Client
+Credentials
+extension](https://modelcontextprotocol.io/extensions/auth/oauth-client-credentials)
+(`io.modelcontextprotocol/oauth-client-credentials`, revision 2026-07-28). OAO
+holds a pre-registered client ID and client secret, obtains short-lived access
+tokens from the MCP server's authorization server, and sends only those tokens
+to the MCP server. Client authentication uses the client secret, sent in the
+request body (`client_secret_post`, the default) or with HTTP Basic
+(`client_secret_basic`). `private_key_jwt`, dynamic client registration, and
+Client ID Metadata Documents are not supported.
+
+### Discovery and confirmation
+
+Before a credential is created, OAO discovers the authorization setup without
+sending any credential:
+
+1. One unauthenticated request to the MCP endpoint, to read the
+   `resource_metadata` URL from its `WWW-Authenticate: Bearer` challenge. If the
+   server sends none, OAO uses the RFC 9728 well-known URI with the endpoint path
+   (`/.well-known/oauth-protected-resource/<path>`), then the root one.
+2. The protected resource metadata. Its `resource` must identify the endpoint,
+   and it must list at least one authorization server.
+3. Each authorization server's RFC 8414 metadata, falling back to OpenID Connect
+   discovery. The `issuer` must equal the listed server exactly, and the token
+   endpoint must be HTTPS on a public address. OAO reports
+   `grant_types_supported` but does not require `client_credentials` in it:
+   WorkOS AuthKit's RFC 8414 document omits it.
+
+Discovery follows no redirects, refuses private and special-purpose addresses,
+and caps every response at 64 KiB. An operator then confirms the resource, the
+authorization server, its token endpoint, the client authentication method, and
+the scope. OAO never picks an authorization server silently when several are
+listed.
+
+When the credential is created or re-pinned, OAO repeats discovery and refuses a
+configuration that no longer matches it. The immutable credential version pins
+the issuer, token endpoint, client ID, authentication method, scope, resource,
+and protected resource metadata URL next to the encrypted client secret. Its
+[destination](#credential-destinations) is the resource: policies for an OAuth
+credential must use the resource's origin and a path prefix inside the
+resource's path.
+
+### Tokens at run time
+
+- **Where secrets go.** The client secret is only ever sent to the pinned token
+  endpoint, through a token broker with the same HTTPS, DNS-pinning,
+  private-address, no-redirect, and size rules as the MCP broker. The broker
+  forwards only `Accept`, `Content-Type`, and, for HTTP Basic, `Authorization`;
+  no MCP or OAO header reaches the authorization server. The access token is
+  only ever sent to the MCP origin and path prefix, as `Authorization: Bearer`.
+- **The token request.** `grant_type=client_credentials`, the pinned `scope`,
+  and the RFC 8707 `resource` parameter set to the pinned resource. A
+  credential can turn off **Send the resource parameter** for an authorization
+  server that rejects it; that deviates from the MCP specification, which
+  requires it.
+- **Caching.** Each API and runtime-worker process caches tokens in memory,
+  keyed by organization, credential version, scope, and resource. A cached
+  token keeps an absolute expiry and is replaced early, at the expiry minus the
+  larger of 60 seconds and 10% of its lifetime (never later than half of it).
+  Concurrent calls share one token request. A token without `expires_in` is
+  treated as valid for 5 minutes. Rotating a credential creates a new version and so a new
+  token.
+- **Before a call is recorded.** The runtime obtains the token before it records
+  the call attempt. A refused token is recorded as a failed attempt that never
+  reached the MCP server, with the safe error code `credential_token_failed`.
+- **A 401 from the MCP server.** If its `WWW-Authenticate` challenge names a
+  different `resource_metadata` URL than the pinned one, the call fails with
+  `authorization_server_changed` and no new token is requested. Otherwise OAO
+  drops the cached token, requests a new one, and retries once; a second 401
+  fails with `credential_rejected`. A 401 is answered before the server runs
+  the tool, so the retry cannot repeat it.
+- **A 403.** `insufficient_scope` fails with `insufficient_scope`, and any other
+  403 fails with `remote_forbidden`. Neither requests a new token.
+- **Capability declaration.** OAO declares the extension in its client
+  capabilities: in the `io.modelcontextprotocol/clientCapabilities` `_meta` of
+  each request on 2026-07-28 connections, and in `initialize` on older ones.
+
+These codes appear on `mcp.call_failed` and `mcp.discovery_failed` events. They
+never include a token, a secret, or the authorization server's error
+description.
+
+### Test a credential
+
+Tokens are cached per process, so the console's **Test** action on an OAuth
+credential is the way to check one. It repeats discovery, refuses the
+credential with `authorization_server_changed` if the pinned metadata URL,
+resource, issuer, or token endpoint no longer match, and then requests a fresh
+token. It returns only `{ ok, expiresIn, grantedScope }` or `{ ok: false,
+errorCode }`; the token never leaves the API process.
+
+### Set it up in the console
+
+In **Add MCP server**, choose **OAuth client credentials** as the authentication
+type and select **Discover authorization**. Confirm the resource, the
+authorization server, and its token endpoint, supported authentication methods,
+and grant types. Enter the client ID and the write-only client secret, choose
+the client authentication method, and confirm the scope. The security policy
+is set to the resource and cannot be widened. Continue with **Test and
+discover**.
+
+### Set it up through the API
+
+Discover first, then create the credential with the confirmed values. The
+policy and server follow as in [Add an MCP server through the
+API](#add-an-mcp-server-through-the-api).
+
+```bash
+endpoint="https://app.example.com/api/integrations/oao/extraction/mcp"
+discovery="$(
+  curl --fail-with-body --silent \
+    --request POST \
+    --header "Authorization: Bearer $OAO_API_KEY" \
+    --header 'Content-Type: application/json' \
+    --data "$(jq -n --arg endpoint "$endpoint" '{endpointUrl: $endpoint}')" \
+    "$OAO_API_URL/projects/$OAO_PROJECT_ID/mcp-authorization-discovery"
+)"
+echo "$discovery" | jq '{resource, resourceMetadataUrl, authorizationServers}'
+
+read -r -s -p "OAuth client secret: " OAO_MCP_CLIENT_SECRET
+echo
+
+credential_id="$(
+  curl --fail-with-body --silent \
+    --request POST \
+    --header "Authorization: Bearer $OAO_API_KEY" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: create-extraction-mcp-credential-1' \
+    --data "$(jq -n \
+      --argjson discovery "$discovery" \
+      --arg secret "$OAO_MCP_CLIENT_SECRET" '{
+        key: "extraction-mcp",
+        displayName: "Extraction MCP",
+        kind: "oauth_client_credentials",
+        oauth: {
+          resource: $discovery.resource,
+          resourceMetadataUrl: $discovery.resourceMetadataUrl,
+          issuer: $discovery.authorizationServers[0].issuer,
+          tokenEndpoint: $discovery.authorizationServers[0].tokenEndpoint,
+          clientId: "client_01EXAMPLE",
+          tokenEndpointAuthMethod: "client_secret_post",
+          scope: "extraction:mcp",
+          sendResource: true
+        },
+        secret: $secret
+      }')" \
+    "$OAO_API_URL/projects/$OAO_PROJECT_ID/mcp-credentials" \
+  | jq -r '.id'
+)"
+unset OAO_MCP_CLIENT_SECRET
+
+curl --fail-with-body --silent \
+  --request POST \
+  --header "Authorization: Bearer $OAO_API_KEY" \
+  "$OAO_API_URL/projects/$OAO_PROJECT_ID/mcp-credentials/$credential_id/test"
+```
+
+Check `authorizationServers` before using the first one: pick the issuer that
+registered the client, and only one whose `problem` is `null`. Create the
+policy with `exactOrigin` set to the resource's origin and `pathPrefix` set to
+its path (here `https://app.example.com` and
+`/api/integrations/oao/extraction/mcp`).
+
+To rotate, send `{ secret }` with the new client secret. Add an `oauth` object
+with `clientId`, `tokenEndpointAuthMethod`, `scope`, `sendResource`, `issuer`,
+`tokenEndpoint`, or `resourceMetadataUrl` to change them; OAO repeats discovery
+when the issuer, token endpoint, or metadata URL changes. The resource never
+changes: create a new credential for another resource.
+
+## Call context headers
+
+A credential policy can forward OAO call identity to the server it approves.
+Set `forwardCallContext: true` on the policy (in the console: **Forward call
+context** under **Security policy and limits**). It is off by default, because
+it discloses OAO identifiers to that server. The flag is part of the immutable
+policy version, so a session keeps the setting it was created with.
+
+When it is on, the egress broker sets these headers after it strips every
+inbound `x-oao-*` header and injects the credential:
+
+| Header                  | Value                                                      | Sent on                            |
+| ----------------------- | ---------------------------------------------------------- | ---------------------------------- |
+| `X-OAO-Organization-Id` | Organization UUID                                          | Every request, including discovery |
+| `X-OAO-Project-Id`      | Project UUID                                               | Every request, including discovery |
+| `X-OAO-Session-Id`      | Session UUID                                               | The requests of a run's tool call  |
+| `X-OAO-Run-Id`          | Run UUID                                                   | The requests of a run's tool call  |
+| `X-OAO-Tool-Call-Id`    | OAO's deterministic tool-call UUID, stable across recovery | The requests of a run's tool call  |
+| `X-OAO-Run-Key-Sha256`  | Lowercase hex SHA-256 of the run's `Idempotency-Key`       | The requests of a run's tool call  |
+
+- **Discovery** runs outside any run, so it carries only the organization and
+  project. A server can allow `server/discover`, `initialize`, and `tools/list`
+  without the call headers and refuse a `tools/call` without them.
+- **Validation.** OAO checks every value's format before it sends a byte, and
+  never sends these headers to an OAuth token endpoint.
+- **Reserved names.** No credential may use an `x-oao-*` header name, so a
+  credential cannot spoof them either. A server should still treat them as
+  claims that the credential authenticates, not as authentication.
+- **Run key hash.** It lets a server bind tool calls to the run it created
+  with that `Idempotency-Key`, without OAO disclosing the key itself. A
+  follow-up run or a delegated child run has a different key, and so a
+  different hash.
+- **Tool-call ID.** It is the ID of the `tool_call` aggregate in OAO's product
+  events. It stays the same when a call is recovered, so a server can use it as
+  an idempotency key.
+
 ## Egress and credential boundary
 
 The broker requires TLS, resolves the hostname before each request, denies
 private and special-purpose addresses, and pins the request to the validated IP
 while retaining TLS server-name verification. This limits SSRF and DNS
-rebinding. It strips caller-supplied authorization, cookie, and proxy
-authorization headers before injecting the configured secret.
+rebinding. It strips caller-supplied authorization, cookie, proxy
+authorization, and `x-oao-*` headers before injecting the configured secret.
+
+<Tip>
+  To develop against an MCP server on your machine or tailnet, run the API and
+  runtime worker with `NODE_ENV=development` and
+  `OAO_MCP_ALLOW_PRIVATE_NETWORK=true`; see [Local
+  development](/getting-started/local-development#mcp-servers-on-your-machine-or-tailnet).
+  OAO refuses this setting outside development, and endpoints must still be
+  HTTPS.
+</Tip>
 
 Credential-bearing requests must retain the exact scheme, host, and port and
-remain under the policy path prefix. Redirects are not followed. Requests and
+remain under the policy path prefix and inside the credential's pinned
+destination. Redirects are not followed. Requests and
 responses are size-limited, and calls honor cancellation and the policy timeout.
 At execution time OAO rechecks the session binding, run creator's current
 authorization, project membership, and every resource lifecycle before it
@@ -238,8 +553,9 @@ rather than authority.
 
 ## Recovery behavior
 
-Every call has a deterministic tool-call identity and one PostgreSQL call-attempt
-record. A process crash after dispatch can leave the remote outcome unknowable;
+Every call has a deterministic tool-call identity, sent as
+`X-OAO-Tool-Call-Id` when the policy forwards [call
+context](#call-context-headers), and one PostgreSQL call-attempt record. A process crash after dispatch can leave the remote outcome unknowable;
 OAO marks that attempt `unknown` and refuses to replay it automatically. This
 fail-closed behavior avoids repeating a non-idempotent remote action. Product
 events contain resource IDs, safe error codes, duration/size metadata, and state,
@@ -247,10 +563,13 @@ never request arguments, results, credentials, or authorization headers.
 
 ## Current authentication support
 
-The MVP supports static bearer credentials and arbitrary safe API-key headers.
-OAuth, token refresh, dynamic client registration, stdio servers, per-user
-delegated credentials, configurable retries/reconnects, and secret substitution
-for sandbox commands are not implemented. OAO uses the MCP client pinned in
+OAO supports static bearer credentials, arbitrary safe API-key headers, and
+OAuth client credentials with a client secret (`client_secret_post` or
+`client_secret_basic`). `private_key_jwt`, the authorization code flow,
+per-user delegated credentials, per-session credentials, dynamic client
+registration, Client ID Metadata Documents, stdio servers, configurable
+retries/reconnects, and secret substitution for sandbox commands are not
+implemented. OAO uses the MCP client pinned in
 `@oao/mcp-remote`; compatibility tests lock behavior to that exact version.
 
 See [HTTP API](/reference/http-api), [Authentication](/reference/authentication),

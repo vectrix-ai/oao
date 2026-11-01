@@ -70,7 +70,42 @@ const SECRETS = {
 } as const;
 
 let discoveryRevision = 1;
+const oauthResource = "https://extraction.example.test/mcp";
+const oauthConfig = {
+  resource: oauthResource,
+  resourceMetadataUrl:
+    "https://extraction.example.test/.well-known/oauth-protected-resource/mcp",
+  issuer: "https://auth.example.test",
+  tokenEndpoint: "https://auth.example.test/oauth2/token",
+  clientId: "client_backup",
+  tokenEndpointAuthMethod: "client_secret_basic" as const,
+  scope: "extraction:mcp",
+  sendResource: false,
+};
+
 const mcpRemote: McpRemotePort = {
+  discoverAuthorization: (endpointUrl) =>
+    Promise.resolve({
+      endpointUrl,
+      resource: oauthResource,
+      resourceName: null,
+      resourceMetadataUrl: oauthConfig.resourceMetadataUrl,
+      resourceMetadataSource: "www_authenticate",
+      challengeScope: null,
+      scopesSupported: [oauthConfig.scope],
+      authorizationServers: [
+        {
+          issuer: oauthConfig.issuer,
+          tokenEndpoint: oauthConfig.tokenEndpoint,
+          metadataSource: "oauth",
+          tokenEndpointAuthMethodsSupported: null,
+          grantTypesSupported: null,
+          scopesSupported: null,
+          problem: null,
+        },
+      ],
+    }),
+  testCredential: () => Promise.resolve({ expiresIn: 60, grantedScope: null }),
   discover: () =>
     Promise.resolve([
       {
@@ -279,6 +314,20 @@ async function seedSource(
       displayName: "Trace token",
       kind: "static_bearer",
       headerName: null,
+      destination: { origin: "https://mcp.example.test", pathPrefix: "/mcp" },
+      secret: SECRETS.mcp,
+    },
+    201,
+  );
+  await call(
+    app,
+    "POST",
+    `${project}/mcp-credentials`,
+    {
+      key: "backup-extraction-oauth",
+      displayName: "Extraction OAuth",
+      kind: "oauth_client_credentials",
+      oauth: oauthConfig,
       secret: SECRETS.mcp,
     },
     201,
@@ -292,6 +341,7 @@ async function seedSource(
       displayName: "Old token",
       kind: "api_key_header",
       headerName: "x-api-key",
+      destination: { origin: "https://old.example.test", pathPrefix: "/" },
       secret: "backup-old-mcp-secret",
     },
     201,
@@ -315,6 +365,7 @@ async function seedSource(
       pathPrefix: "/mcp",
       timeoutMs: 10_000,
       maximumResponseBytes: 65_536,
+      forwardCallContext: true,
     },
     201,
   );
@@ -806,14 +857,39 @@ test(
         ],
       );
       assert.equal(backup.mcpServers[0]!.versions.length, 2);
+      assert.equal(
+        backup.mcpCredentialPolicies[0]!.versions[0]!.forwardCallContext,
+        true,
+      );
+      // The pinned OAuth configuration is kept; its client secret is not.
+      assert.deepEqual(
+        backup.mcpCredentials.find(
+          (credential) => credential.key === "backup-extraction-oauth",
+        )?.oauth,
+        oauthConfig,
+      );
       assert.deepEqual(
         backup.mcpCredentials.map((credential) => [
           credential.key,
           credential.status,
+          credential.destination,
         ]),
         [
-          ["backup-trace-token", "active"],
-          ["backup-old-token", "revoked"],
+          [
+            "backup-trace-token",
+            "active",
+            { origin: "https://mcp.example.test", pathPrefix: "/mcp" },
+          ],
+          [
+            "backup-extraction-oauth",
+            "active",
+            { origin: "https://extraction.example.test", pathPrefix: "/mcp" },
+          ],
+          [
+            "backup-old-token",
+            "revoked",
+            { origin: "https://old.example.test", pathPrefix: "/" },
+          ],
         ],
       );
     });
@@ -1084,6 +1160,7 @@ test(
             ["sandbox_provider", "backup-daytona"],
             ["storage_provider", "backup-s3"],
             ["mcp_credential", "backup-trace-token"],
+            ["mcp_credential", "backup-extraction-oauth"],
             ["event_webhook", "Order hook"],
             ["event_webhook", "Paused hook"],
           ],
