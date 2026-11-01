@@ -28,6 +28,7 @@ import {
   parseRotateProjectStorageProviderCredentialInput,
   parseRotateEventWebhookCredentialInput,
   parseRotateMcpCredentialInput,
+  parseDiscoverMcpAuthorizationInput,
   parseUpdateProjectSandboxProviderConfigurationInput,
   parseToolResultEnvelope,
   parseUpdateEventWebhookInput,
@@ -42,13 +43,15 @@ import {
   type CreateProjectModelProviderInput,
   type ManagedAgentPublicationConfig,
   type ModelCatalogEntry,
+  type McpCredential,
+  type McpCredentialTestResult,
   type ModelProviderType,
   type SandboxSnapshotEntry,
   type ToolResultEnvelope,
   type UpdateEventWebhookInput,
   type UpdateProjectSandboxProviderConfigurationInput,
 } from "@oao/contracts";
-import type { McpRemotePort } from "@oao/mcp-remote";
+import { McpRemoteError, type McpRemotePort } from "@oao/mcp-remote";
 import {
   validateWebhookEndpoint,
   WEBHOOK_RECONFIGURE_DRAIN_MS,
@@ -3099,7 +3102,11 @@ function registerMcpRoutes(
       let tools;
       try {
         tools = await service.discover(loaded.connection, c.req.raw.signal);
-      } catch {
+      } catch (error) {
+        const errorCode =
+          error instanceof McpRemoteError
+            ? error.code
+            : "remote_discovery_failed";
         await dependencies.store.transaction(
           actor,
           "mcp:discover",
@@ -3110,14 +3117,14 @@ function registerMcpRoutes(
               kind: "mcp.discovery_failed",
               payload: {
                 serverVersionId: loaded.serverVersionId,
-                errorCode: "remote_discovery_failed",
+                errorCode,
               },
             });
           },
         );
         throw new HttpApiError(
           "bad_request",
-          "MCP discovery failed; inspect the redacted discovery event and server configuration",
+          `MCP discovery failed (${errorCode}); inspect the redacted discovery event and server configuration`,
         );
       }
       return dependencies.store.transaction(
@@ -3191,12 +3198,60 @@ function registerMcpRoutes(
     );
   });
 
+  // Credential-free: reads only public authorization metadata. It needs no
+  // Idempotency-Key and holds no transaction during the network requests.
+  app.post("/v1/projects/:projectId/mcp-authorization-discovery", async (c) => {
+    const actor = assertProject(c);
+    const input = parseDiscoverMcpAuthorizationInput(
+      await readJsonObject(c.req.raw),
+    );
+    const service = requiredService();
+    await dependencies.store.transaction(actor, "mcp:discover", () =>
+      Promise.resolve(),
+    );
+    try {
+      return c.json(
+        await service.discoverAuthorization(
+          input.endpointUrl,
+          c.req.raw.signal,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof McpRemoteError)
+        throw new HttpApiError(
+          "bad_request",
+          `MCP authorization discovery failed (${error.code}): ${error.message}`,
+        );
+      throw new HttpApiError(
+        "bad_request",
+        "MCP authorization discovery failed",
+      );
+    }
+  });
+
   app.post("/v1/projects/:projectId/mcp-credentials", async (c) => {
     const actor = assertProject(c);
     const body = await readJsonObject(c.req.raw);
     const input = parseCreateMcpCredentialInput(body);
     const key = idempotencyKey(c.req.raw);
     const service = requiredService();
+    // OAO pins only an authorization configuration that live discovery
+    // confirms, checked before the write transaction opens. A retry of a
+    // request that already completed replays without new network work.
+    if (input.kind === "oauth_client_credentials") {
+      const completed = await dependencies.store.transaction(
+        actor,
+        "credential:write",
+        (tx) =>
+          dependencies.store.completedIdempotentResponse<McpCredential>(
+            tx,
+            actor,
+            { scope: "POST:/mcp-credentials", key, hash: requestHash(body) },
+          ),
+      );
+      if (completed) return c.json(completed.body, completed.status as 201);
+      await service.confirmOAuthConfiguration(input.oauth, c.req.raw.signal);
+    }
     return dependencies.store.transaction(
       actor,
       "credential:write",
@@ -3220,6 +3275,13 @@ function registerMcpRoutes(
                 destination: created.destination
                   ? `${created.destination.origin}${created.destination.pathPrefix}`
                   : null,
+                ...(created.oauth
+                  ? {
+                      issuer: created.oauth.issuer,
+                      tokenEndpoint: created.oauth.tokenEndpoint,
+                      scope: created.oauth.scope,
+                    }
+                  : {}),
               },
             });
             await dependencies.store.appendEvent(tx, actor, {
@@ -3248,49 +3310,122 @@ function registerMcpRoutes(
       const input = parseRotateMcpCredentialInput(body);
       const key = idempotencyKey(c.req.raw);
       const service = requiredService();
+      const scope = `POST:/mcp-credentials/${c.req.param("credentialId")}/rotate`;
+      const prior = await dependencies.store.transaction(
+        actor,
+        "credential:rotate",
+        async (tx) => ({
+          completed:
+            await dependencies.store.completedIdempotentResponse<McpCredential>(
+              tx,
+              actor,
+              { scope, key, hash: requestHash(body) },
+            ),
+          base: await service.rotationBase(
+            tx,
+            actor,
+            c.req.param("credentialId"),
+          ),
+        }),
+      );
+      // A completed rotation replays before any discovery or version check.
+      if (prior.completed) return c.json(prior.completed.body);
+      const base = prior.base;
+      const rotated = service.rotatedOAuth(base, input);
+      if (rotated.oauth && rotated.authorizationChanged)
+        await service.confirmOAuthConfiguration(
+          rotated.oauth,
+          c.req.raw.signal,
+        );
       return dependencies.store.transaction(
         actor,
         "credential:rotate",
         async (tx) => {
           const response = await dependencies.store.idempotent(tx, actor, {
-            scope: `POST:/mcp-credentials/${c.req.param("credentialId")}/rotate`,
+            scope,
             key,
             hash: requestHash(body),
             status: 200,
             execute: async () => {
-              const rotated = await service.rotateCredential(
+              const updated = await service.rotateCredential(
                 tx,
                 actor,
                 c.req.param("credentialId"),
                 input,
+                { activeVersionId: base.activeVersionId, oauth: rotated.oauth },
               );
               await dependencies.store.appendAudit(tx, actor, {
                 action: "mcp.credential_rotated",
                 resourceType: "mcp_credential",
-                resourceId: rotated.id,
+                resourceId: updated.id,
                 detail: {
-                  fingerprint: rotated.credentialFingerprint,
-                  credentialVersion: rotated.credentialVersion,
-                  destination: rotated.destination
-                    ? `${rotated.destination.origin}${rotated.destination.pathPrefix}`
+                  fingerprint: updated.credentialFingerprint,
+                  credentialVersion: updated.credentialVersion,
+                  destination: updated.destination
+                    ? `${updated.destination.origin}${updated.destination.pathPrefix}`
                     : null,
+                  ...(updated.oauth
+                    ? {
+                        issuer: updated.oauth.issuer,
+                        tokenEndpoint: updated.oauth.tokenEndpoint,
+                        scope: updated.oauth.scope,
+                      }
+                    : {}),
                 },
               });
               await dependencies.store.appendEvent(tx, actor, {
                 aggregateType: "mcp_credential",
-                aggregateId: rotated.id,
+                aggregateId: updated.id,
                 kind: "mcp.credential_rotated",
                 payload: {
-                  fingerprint: rotated.credentialFingerprint,
-                  credentialVersion: rotated.credentialVersion,
+                  fingerprint: updated.credentialFingerprint,
+                  credentialVersion: updated.credentialVersion,
                 },
               });
-              return rotated;
+              return updated;
             },
           });
           return c.json(response.body);
         },
       );
+    },
+  );
+
+  // Requests a fresh token from the pinned token endpoint, after re-checking
+  // the pinned authorization metadata. Returns only its lifetime and granted
+  // scope, or a safe error code; the token never leaves the API process.
+  app.post(
+    "/v1/projects/:projectId/mcp-credentials/:credentialId/test",
+    async (c) => {
+      const actor = assertProject(c);
+      const service = requiredService();
+      const credentialId = c.req.param("credentialId");
+      const material = await dependencies.store.transaction(
+        actor,
+        "mcp:discover",
+        (tx) => service.loadOAuthCredential(tx, actor, credentialId),
+      );
+      let result: McpCredentialTestResult;
+      try {
+        result = {
+          ok: true,
+          ...(await service.testCredential(material, c.req.raw.signal)),
+        };
+      } catch (error) {
+        if (!(error instanceof McpRemoteError)) throw error;
+        result = { ok: false, errorCode: error.code };
+      }
+      await dependencies.store.transaction(actor, "mcp:discover", (tx) =>
+        dependencies.store.appendAudit(tx, actor, {
+          action: "mcp.credential_tested",
+          resourceType: "mcp_credential",
+          resourceId: credentialId,
+          detail: result.ok
+            ? { ok: true, expiresIn: result.expiresIn }
+            : { ok: false, errorCode: result.errorCode },
+        }),
+      );
+      return c.json(result);
     },
   );
 

@@ -18,6 +18,9 @@ import type {
   ManagedHarnessOperation,
   CreateMcpServerInput,
   DiscoverMcpServerInput,
+  DiscoverMcpAuthorizationInput,
+  McpAuthorizationDiscovery,
+  McpCredentialTestResult,
   CreateMcpCredentialInput,
   RotateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
@@ -48,6 +51,9 @@ export type {
   ManagedHarnessOperation,
   CreateMcpServerInput,
   DiscoverMcpServerInput,
+  DiscoverMcpAuthorizationInput,
+  McpAuthorizationDiscovery,
+  McpCredentialTestResult,
   CreateMcpCredentialInput,
   RotateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
@@ -740,6 +746,12 @@ export interface ConsoleApi {
     input: RotateMcpCredentialInput,
   ): Promise<McpCredential>;
   revokeMcpCredential(credentialId: string): Promise<McpCredential>;
+  /** Credential-free OAuth authorization discovery for an MCP endpoint. */
+  discoverMcpAuthorization(
+    input: DiscoverMcpAuthorizationInput,
+  ): Promise<McpAuthorizationDiscovery>;
+  /** Requests a fresh token for an OAuth credential; never returns it. */
+  testMcpCredential(credentialId: string): Promise<McpCredentialTestResult>;
   listMcpCredentialPolicies(): Promise<McpCredentialPolicyList>;
   createMcpCredentialPolicy(
     input: CreateMcpCredentialPolicyInput,

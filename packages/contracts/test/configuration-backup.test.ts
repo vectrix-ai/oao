@@ -80,6 +80,7 @@ function fixture(): ConfigurationBackup {
         kind: "static_bearer",
         headerName: null,
         destination: { origin: "https://mcp.example.test", pathPrefix: "/" },
+        oauth: null,
         status: "active",
         credentialFingerprint: null,
       },

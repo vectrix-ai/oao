@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   canonicalMcpOrigin,
+  mcpResourceDestination,
   type CreateMcpCredentialInput,
   type CreateMcpCredentialPolicyInput,
   type CreateMcpServerInput,
@@ -8,17 +9,23 @@ import {
   type McpCredential,
   type McpCredentialDestination,
   type McpCredentialPolicy,
+  type McpOAuthClientCredentialsConfig,
   type McpServer,
   type McpToolset,
   type RotateMcpCredentialInput,
 } from "@oao/contracts";
 import type { Principal } from "@oao/domain";
 import type { PgClient } from "@oao/db-postgres";
-import type {
-  McpConnectionDefinition,
-  McpCredentialMaterial,
-  McpDiscoveredTool as RemoteMcpDiscoveredTool,
-  McpRemotePort,
+import {
+  McpRemoteError,
+  matchesPinnedAuthorization,
+  type McpAuthorizationDiscovery,
+  type McpConnectionDefinition,
+  type McpCredentialMaterial,
+  type McpCredentialTestResult,
+  type McpDiscoveredTool as RemoteMcpDiscoveredTool,
+  type McpOAuthClientCredentialsMaterial,
+  type McpRemotePort,
 } from "@oao/mcp-remote";
 import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { HttpApiError } from "./errors.js";
@@ -45,12 +52,28 @@ interface ServerRow {
   updated_at: Date;
 }
 
-interface CredentialRow {
+type CredentialKind =
+  "static_bearer" | "api_key_header" | "oauth_client_credentials";
+
+/** The pinned OAuth columns of a credential version; all null for other kinds. */
+interface OAuthColumns {
+  oauth_issuer: string | null;
+  oauth_token_endpoint: string | null;
+  oauth_client_id: string | null;
+  oauth_token_endpoint_auth_method:
+    "client_secret_post" | "client_secret_basic" | null;
+  oauth_scope: string | null;
+  oauth_resource: string | null;
+  oauth_resource_metadata_url: string | null;
+  oauth_send_resource: boolean | null;
+}
+
+interface CredentialRow extends OAuthColumns {
   id: string;
   organization_id: string;
   credential_key: string;
   display_name: string;
-  credential_kind: "static_bearer" | "api_key_header";
+  credential_kind: CredentialKind;
   header_name: string | null;
   destination_origin: string | null;
   destination_path_prefix: string | null;
@@ -96,7 +119,7 @@ interface ToolsetRow {
   updated_at: Date;
 }
 
-interface ConnectionRow {
+interface ConnectionRow extends OAuthColumns {
   endpoint_url: string;
   exact_origin: string;
   path_prefix: string;
@@ -104,7 +127,8 @@ interface ConnectionRow {
   timeout_ms: number;
   maximum_response_bytes: number;
   credential_id: string;
-  credential_kind: "static_bearer" | "api_key_header";
+  credential_version_id: string;
+  credential_kind: CredentialKind;
   header_name: string | null;
   destination_origin: string | null;
   destination_path_prefix: string | null;
@@ -170,6 +194,89 @@ function rotatedDestination(
   return destination;
 }
 
+/** The OAuth configuration pinned on a version, or null for other kinds. */
+function pinnedOAuth(
+  row: OAuthColumns,
+): McpOAuthClientCredentialsConfig | null {
+  if (
+    row.oauth_issuer === null ||
+    row.oauth_token_endpoint === null ||
+    row.oauth_client_id === null ||
+    row.oauth_token_endpoint_auth_method === null ||
+    row.oauth_scope === null ||
+    row.oauth_resource === null ||
+    row.oauth_resource_metadata_url === null ||
+    row.oauth_send_resource === null
+  )
+    return null;
+  return {
+    resource: row.oauth_resource,
+    resourceMetadataUrl: row.oauth_resource_metadata_url,
+    issuer: row.oauth_issuer,
+    tokenEndpoint: row.oauth_token_endpoint,
+    clientId: row.oauth_client_id,
+    tokenEndpointAuthMethod: row.oauth_token_endpoint_auth_method,
+    scope: row.oauth_scope,
+    sendResource: row.oauth_send_resource,
+  };
+}
+
+const OAUTH_VERSION_COLUMNS = `version.oauth_issuer,version.oauth_token_endpoint,
+         version.oauth_client_id,version.oauth_token_endpoint_auth_method,
+         version.oauth_scope,version.oauth_resource,
+         version.oauth_resource_metadata_url,version.oauth_send_resource`;
+
+function oauthValues(
+  oauth: McpOAuthClientCredentialsConfig | null,
+): readonly unknown[] {
+  return [
+    oauth?.issuer ?? null,
+    oauth?.tokenEndpoint ?? null,
+    oauth?.clientId ?? null,
+    oauth?.tokenEndpointAuthMethod ?? null,
+    oauth?.scope ?? null,
+    oauth?.resource ?? null,
+    oauth?.resourceMetadataUrl ?? null,
+    oauth?.sendResource ?? null,
+  ];
+}
+
+/**
+ * The fingerprint a credential version shows. For OAuth it covers the client
+ * secret together with the pinned configuration, so any re-pin changes it.
+ */
+export function mcpCredentialFingerprint(
+  secretFingerprint: string,
+  secret: string,
+  oauth: McpOAuthClientCredentialsConfig | null,
+): string {
+  if (!oauth) return secretFingerprint;
+  return digest({ clientSecret: secret, ...oauth }).toString("hex");
+}
+
+/** Decrypted OAuth material for a version, scoped to its organization. */
+function oauthMaterial(
+  organizationId: string,
+  credentialVersionId: string,
+  oauth: McpOAuthClientCredentialsConfig,
+  clientSecret: string,
+): McpOAuthClientCredentialsMaterial {
+  return {
+    kind: "oauth_client_credentials",
+    organizationId,
+    credentialVersionId,
+    issuer: oauth.issuer,
+    tokenEndpoint: oauth.tokenEndpoint,
+    clientId: oauth.clientId,
+    clientSecret,
+    tokenEndpointAuthMethod: oauth.tokenEndpointAuthMethod,
+    scope: oauth.scope,
+    resource: oauth.resource,
+    resourceMetadataUrl: oauth.resourceMetadataUrl,
+    sendResource: oauth.sendResource,
+  };
+}
+
 function server(row: ServerRow): McpServer {
   return {
     id: row.id,
@@ -206,6 +313,7 @@ function credential(row: CredentialRow): McpCredential {
             pathPrefix: row.destination_path_prefix,
           }
         : null,
+    oauth: pinnedOAuth(row),
     credentialConfigured: true,
     credentialFingerprint: row.credential_fingerprint.slice(0, 12),
     credentialVersion: row.credential_version,
@@ -289,6 +397,7 @@ const CREDENTIAL_SELECT = `
          resource.credential_key,resource.display_name,resource.credential_kind,
          resource.header_name,version.destination_origin,
          version.destination_path_prefix,version.credential_fingerprint,
+         ${OAUTH_VERSION_COLUMNS},
          version.version AS credential_version,lifecycle.status,
          resource.created_by_principal_id,resource.created_at,resource.updated_at
     FROM oao.mcp_credentials resource
@@ -433,6 +542,16 @@ export class McpAdminService {
   ): Promise<McpCredential> {
     const id = randomUUID();
     const versionId = randomUUID();
+    const oauth =
+      input.kind === "oauth_client_credentials" ? input.oauth : null;
+    // An OAuth credential may only reach the resource it was issued for.
+    const destination =
+      input.kind === "oauth_client_credentials"
+        ? mcpResourceDestination(input.oauth.resource)
+        : {
+            origin: canonicalMcpOrigin(input.destination.origin),
+            pathPrefix: input.destination.pathPrefix,
+          };
     const encrypted = this.cipher.encrypt(input.secret, {
       organizationId: actor.organizationId,
       providerId: id,
@@ -450,37 +569,24 @@ export class McpAdminService {
         input.key,
         input.displayName,
         input.kind,
-        input.headerName,
+        input.kind === "api_key_header" ? input.headerName : null,
         actor.id,
       ],
     );
-    await tx.query(
-      `INSERT INTO oao.mcp_credential_versions (
-         organization_id,id,credential_id,version,encrypted_secret,
-         encryption_nonce,encryption_tag,encryption_key_version,
-         credential_fingerprint,destination_origin,destination_path_prefix,
-         created_by_principal_id
-       ) VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [
-        actor.organizationId,
-        versionId,
-        id,
-        encrypted.ciphertext,
-        encrypted.nonce,
-        encrypted.tag,
-        encrypted.keyVersion,
+    await this.insertVersion(tx, actor, {
+      id: versionId,
+      credentialId: id,
+      version: 1,
+      kind: input.kind,
+      encrypted,
+      fingerprint: mcpCredentialFingerprint(
         encrypted.fingerprint,
-        canonicalMcpOrigin(input.destination.origin),
-        input.destination.pathPrefix,
-        actor.id,
-      ],
-    );
-    await tx.query(
-      `INSERT INTO oao.mcp_credential_version_lifecycle (
-         organization_id,credential_version_id,updated_by_principal_id
-       ) VALUES ($1,$2,$3)`,
-      [actor.organizationId, versionId, actor.id],
-    );
+        input.secret,
+        oauth,
+      ),
+      destination,
+      oauth,
+    });
     await tx.query(
       `UPDATE oao.mcp_credentials SET active_version_id=$3,updated_at=clock_timestamp()
        WHERE organization_id=$1 AND id=$2`,
@@ -494,20 +600,172 @@ export class McpAdminService {
     return credential(result.rows[0]!);
   }
 
+  /** Inserts an immutable credential version and its active lifecycle. */
+  private async insertVersion(
+    tx: PgClient,
+    actor: Principal,
+    version: {
+      readonly id: string;
+      readonly credentialId: string;
+      readonly version: number;
+      readonly kind: CredentialKind;
+      readonly encrypted: {
+        readonly ciphertext: Buffer;
+        readonly nonce: Buffer;
+        readonly tag: Buffer;
+        readonly keyVersion: number;
+      };
+      readonly fingerprint: string;
+      readonly destination: McpCredentialDestination | null;
+      readonly oauth: McpOAuthClientCredentialsConfig | null;
+    },
+  ): Promise<void> {
+    await tx.query(
+      `INSERT INTO oao.mcp_credential_versions (
+         organization_id,id,credential_id,version,credential_kind,
+         encrypted_secret,encryption_nonce,encryption_tag,encryption_key_version,
+         credential_fingerprint,destination_origin,destination_path_prefix,
+         oauth_issuer,oauth_token_endpoint,oauth_client_id,
+         oauth_token_endpoint_auth_method,oauth_scope,oauth_resource,
+         oauth_resource_metadata_url,oauth_send_resource,created_by_principal_id
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+      [
+        actor.organizationId,
+        version.id,
+        version.credentialId,
+        version.version,
+        version.kind,
+        version.encrypted.ciphertext,
+        version.encrypted.nonce,
+        version.encrypted.tag,
+        version.encrypted.keyVersion,
+        version.fingerprint,
+        version.destination?.origin ?? null,
+        version.destination?.pathPrefix ?? null,
+        ...oauthValues(version.oauth),
+        actor.id,
+      ],
+    );
+    await tx.query(
+      `INSERT INTO oao.mcp_credential_version_lifecycle (
+         organization_id,credential_version_id,updated_by_principal_id
+       ) VALUES ($1,$2,$3)`,
+      [actor.organizationId, version.id, actor.id],
+    );
+  }
+
+  /**
+   * The active version a rotation starts from, read before any network work
+   * so an OAuth re-pin can be confirmed outside the write transaction.
+   */
+  async rotationBase(
+    tx: PgClient,
+    actor: Principal,
+    credentialId: string,
+  ): Promise<{
+    readonly activeVersionId: string;
+    readonly kind: CredentialKind;
+    readonly oauth: McpOAuthClientCredentialsConfig | null;
+  }> {
+    const result = await tx.query<
+      OAuthColumns & {
+        active_version_id: string;
+        credential_kind: CredentialKind;
+      }
+    >(
+      `SELECT credential.active_version_id,credential.credential_kind,
+              ${OAUTH_VERSION_COLUMNS}
+         FROM oao.mcp_credentials credential
+         JOIN oao.mcp_credential_versions version
+           ON version.organization_id=credential.organization_id
+          AND version.id=credential.active_version_id
+        WHERE credential.organization_id=$1 AND credential.id=$2`,
+      [actor.organizationId, credentialId],
+    );
+    const row = result.rows[0];
+    if (!row) throw new HttpApiError("not_found", "MCP credential not found");
+    return {
+      activeVersionId: row.active_version_id,
+      kind: row.credential_kind,
+      oauth: pinnedOAuth(row),
+    };
+  }
+
+  /**
+   * The OAuth configuration a rotation pins: the current one with the
+   * requested changes. The resource, and so the destination, never moves.
+   */
+  rotatedOAuth(
+    base: {
+      readonly kind: CredentialKind;
+      readonly oauth: McpOAuthClientCredentialsConfig | null;
+    },
+    input: RotateMcpCredentialInput,
+  ): {
+    readonly oauth: McpOAuthClientCredentialsConfig | null;
+    /** True when the issuer, token endpoint, or metadata URL changes. */
+    readonly authorizationChanged: boolean;
+  } {
+    if (base.kind !== "oauth_client_credentials") {
+      if (input.oauth)
+        throw new HttpApiError(
+          "bad_request",
+          "Only an OAuth client-credentials credential has an OAuth configuration",
+        );
+      return { oauth: null, authorizationChanged: false };
+    }
+    if (input.destination)
+      throw new HttpApiError(
+        "bad_request",
+        "An OAuth credential's destination is its pinned resource",
+      );
+    if (!base.oauth)
+      throw new HttpApiError(
+        "conflict",
+        "MCP credential has no OAuth configuration",
+      );
+    const change = input.oauth ?? {};
+    const oauth: McpOAuthClientCredentialsConfig = {
+      resource: base.oauth.resource,
+      resourceMetadataUrl:
+        change.resourceMetadataUrl ?? base.oauth.resourceMetadataUrl,
+      issuer: change.issuer ?? base.oauth.issuer,
+      tokenEndpoint: change.tokenEndpoint ?? base.oauth.tokenEndpoint,
+      clientId: change.clientId ?? base.oauth.clientId,
+      tokenEndpointAuthMethod:
+        change.tokenEndpointAuthMethod ?? base.oauth.tokenEndpointAuthMethod,
+      scope: change.scope ?? base.oauth.scope,
+      sendResource: change.sendResource ?? base.oauth.sendResource,
+    };
+    return {
+      oauth,
+      authorizationChanged:
+        oauth.issuer !== base.oauth.issuer ||
+        oauth.tokenEndpoint !== base.oauth.tokenEndpoint ||
+        oauth.resourceMetadataUrl !== base.oauth.resourceMetadataUrl,
+    };
+  }
+
   async rotateCredential(
     tx: PgClient,
     actor: Principal,
     credentialId: string,
     input: RotateMcpCredentialInput,
+    expected?: {
+      readonly activeVersionId: string;
+      readonly oauth: McpOAuthClientCredentialsConfig | null;
+    },
   ): Promise<McpCredential> {
     const locked = await tx.query<{
       active_version_id: string;
+      credential_kind: CredentialKind;
       version: number;
       destination_origin: string | null;
       destination_path_prefix: string | null;
     }>(
-      `SELECT credential.active_version_id,version.version,
-              version.destination_origin,version.destination_path_prefix
+      `SELECT credential.active_version_id,credential.credential_kind,
+              version.version,version.destination_origin,
+              version.destination_path_prefix
          FROM oao.mcp_credentials credential
          JOIN oao.mcp_credential_versions version
            ON version.organization_id=credential.organization_id
@@ -519,7 +777,23 @@ export class McpAdminService {
     const current = locked.rows[0];
     if (!current)
       throw new HttpApiError("not_found", "MCP credential not found");
-    const destination = rotatedDestination(current, input.destination);
+    if (expected && expected.activeVersionId !== current.active_version_id)
+      throw new HttpApiError(
+        "conflict",
+        "MCP credential changed during rotation; retry",
+      );
+    const oauth = expected?.oauth ?? null;
+    if (
+      (current.credential_kind === "oauth_client_credentials") !==
+      (oauth !== null)
+    )
+      throw new HttpApiError(
+        "conflict",
+        "MCP credential changed during rotation; retry",
+      );
+    const destination = oauth
+      ? mcpResourceDestination(oauth.resource)
+      : rotatedDestination(current, input.destination);
     const version = current.version + 1;
     const versionId = randomUUID();
     const encrypted = this.cipher.encrypt(input.secret, {
@@ -534,34 +808,20 @@ export class McpAdminService {
         WHERE organization_id=$1 AND credential_version_id=$2`,
       [actor.organizationId, current.active_version_id, actor.id],
     );
-    await tx.query(
-      `INSERT INTO oao.mcp_credential_versions (
-         organization_id,id,credential_id,version,encrypted_secret,
-         encryption_nonce,encryption_tag,encryption_key_version,
-         credential_fingerprint,destination_origin,destination_path_prefix,
-         created_by_principal_id
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [
-        actor.organizationId,
-        versionId,
-        credentialId,
-        version,
-        encrypted.ciphertext,
-        encrypted.nonce,
-        encrypted.tag,
-        encrypted.keyVersion,
+    await this.insertVersion(tx, actor, {
+      id: versionId,
+      credentialId,
+      version,
+      kind: current.credential_kind,
+      encrypted,
+      fingerprint: mcpCredentialFingerprint(
         encrypted.fingerprint,
-        destination?.origin ?? null,
-        destination?.pathPrefix ?? null,
-        actor.id,
-      ],
-    );
-    await tx.query(
-      `INSERT INTO oao.mcp_credential_version_lifecycle (
-         organization_id,credential_version_id,updated_by_principal_id
-       ) VALUES ($1,$2,$3)`,
-      [actor.organizationId, versionId, actor.id],
-    );
+        input.secret,
+        oauth,
+      ),
+      destination,
+      oauth,
+    });
     await tx.query(
       `UPDATE oao.mcp_credentials SET active_version_id=$3,updated_at=clock_timestamp()
        WHERE organization_id=$1 AND id=$2`,
@@ -573,6 +833,107 @@ export class McpAdminService {
       [actor.organizationId, credentialId],
     );
     return credential(result.rows[0]!);
+  }
+
+  /**
+   * Confirms an OAuth configuration against live, credential-free discovery
+   * of its resource, so OAO only ever pins a validated issuer, token
+   * endpoint, and metadata URL.
+   */
+  async confirmOAuthConfiguration(
+    oauth: McpOAuthClientCredentialsConfig,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    let discovery: McpAuthorizationDiscovery;
+    try {
+      discovery = await this.remote.discoverAuthorization(
+        oauth.resource,
+        signal,
+      );
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new HttpApiError(
+        "bad_request",
+        error instanceof McpRemoteError
+          ? `OAuth authorization discovery failed (${error.code})`
+          : "OAuth authorization discovery failed",
+      );
+    }
+    if (!matchesPinnedAuthorization(discovery, oauth))
+      throw new HttpApiError(
+        "bad_request",
+        "The OAuth configuration does not match the MCP server's current authorization metadata; run discovery again",
+      );
+  }
+
+  discoverAuthorization(
+    endpointUrl: string,
+    signal?: AbortSignal,
+  ): Promise<McpAuthorizationDiscovery> {
+    return this.remote.discoverAuthorization(endpointUrl, signal);
+  }
+
+  /** Decrypts the active version of an active OAuth credential for a test. */
+  async loadOAuthCredential(
+    tx: PgClient,
+    actor: Principal,
+    credentialId: string,
+  ): Promise<McpOAuthClientCredentialsMaterial> {
+    const result = await tx.query<
+      OAuthColumns & {
+        version_id: string;
+        credential_kind: CredentialKind;
+        encrypted_secret: Buffer;
+        encryption_nonce: Buffer;
+        encryption_tag: Buffer;
+        encryption_key_version: number;
+      }
+    >(
+      `SELECT version.id AS version_id,credential.credential_kind,
+              ${OAUTH_VERSION_COLUMNS},version.encrypted_secret,
+              version.encryption_nonce,version.encryption_tag,
+              version.encryption_key_version
+         FROM oao.mcp_credentials credential
+         JOIN oao.mcp_credential_versions version
+           ON version.organization_id=credential.organization_id
+          AND version.id=credential.active_version_id
+         JOIN oao.mcp_credential_version_lifecycle lifecycle
+           ON lifecycle.organization_id=version.organization_id
+          AND lifecycle.credential_version_id=version.id
+          AND lifecycle.status='active'
+        WHERE credential.organization_id=$1 AND credential.id=$2`,
+      [actor.organizationId, credentialId],
+    );
+    const row = result.rows[0];
+    if (!row)
+      throw new HttpApiError("not_found", "Active MCP credential not found");
+    const oauth = pinnedOAuth(row);
+    if (row.credential_kind !== "oauth_client_credentials" || !oauth)
+      throw new HttpApiError(
+        "bad_request",
+        "Only an OAuth client-credentials credential can be tested",
+      );
+    const secret = this.cipher.decrypt(
+      {
+        ciphertext: row.encrypted_secret,
+        nonce: row.encryption_nonce,
+        tag: row.encryption_tag,
+        keyVersion: row.encryption_key_version,
+      },
+      {
+        organizationId: actor.organizationId,
+        providerId: credentialId,
+        providerType: "mcp",
+      },
+    );
+    return oauthMaterial(actor.organizationId, row.version_id, oauth, secret);
+  }
+
+  testCredential(
+    material: McpOAuthClientCredentialsMaterial,
+    signal?: AbortSignal,
+  ): Promise<McpCredentialTestResult> {
+    return this.remote.testCredential(material, signal);
   }
 
   async revokeCredential(
@@ -746,9 +1107,11 @@ export class McpAdminService {
       `SELECT server.id AS server_version_id,server.endpoint_url,server.transport,
               policy.exact_origin,policy.path_prefix,
               policy.timeout_ms,policy.maximum_response_bytes,
-              credential.id AS credential_id,credential.credential_kind,
+              credential.id AS credential_id,version.id AS credential_version_id,
+              credential.credential_kind,
               credential.header_name,version.destination_origin,
-              version.destination_path_prefix,version.encrypted_secret,
+              version.destination_path_prefix,${OAUTH_VERSION_COLUMNS},
+              version.encrypted_secret,
               version.encryption_nonce,version.encryption_tag,
               version.encryption_key_version
          FROM oao.mcp_servers resource
@@ -809,14 +1172,22 @@ export class McpAdminService {
         providerType: "mcp",
       },
     );
+    const oauth = pinnedOAuth(row);
     const material: McpCredentialMaterial =
-      row.credential_kind === "static_bearer"
-        ? { kind: "static_bearer", secret }
-        : {
-            kind: "api_key_header",
-            headerName: row.header_name!,
+      row.credential_kind === "oauth_client_credentials" && oauth
+        ? oauthMaterial(
+            actor.organizationId,
+            row.credential_version_id,
+            oauth,
             secret,
-          };
+          )
+        : row.credential_kind === "api_key_header"
+          ? {
+              kind: "api_key_header",
+              headerName: row.header_name!,
+              secret,
+            }
+          : { kind: "static_bearer", secret };
     return {
       serverVersionId: row.server_version_id,
       connection: {

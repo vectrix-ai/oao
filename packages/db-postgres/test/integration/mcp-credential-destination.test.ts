@@ -182,16 +182,23 @@ test(
     await serverVersion("https://six.example.test/api/sse", "legacy_sse");
 
     const result = await migrate(runtime);
-    assert.deepEqual(result.applied.at(0), DESTINATION_MIGRATION);
+    assert.equal(result.applied.at(0), DESTINATION_MIGRATION);
+    assert.ok(result.applied.includes("0055_mcp_oauth_client_credentials.sql"));
 
     const pinned = await seed.query<{
       id: string;
+      credential_kind: string;
       destination_origin: string | null;
       destination_path_prefix: string | null;
     }>(
-      `SELECT id,destination_origin,destination_path_prefix
+      `SELECT id,credential_kind,destination_origin,destination_path_prefix
          FROM oao.mcp_credential_versions WHERE organization_id=$1`,
       [organizationId],
+    );
+    // 0055 copies each credential's kind onto its versions.
+    assert.equal(pinned.rowCount, 7);
+    assert.ok(
+      pinned.rows.every((row) => row.credential_kind === "static_bearer"),
     );
     const destination = (key: string) =>
       credentialVersions

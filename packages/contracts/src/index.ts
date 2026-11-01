@@ -1904,6 +1904,13 @@ export const McpLifecycleStatusSchema = v.picklist([
 export const McpCredentialKindSchema = v.picklist([
   "static_bearer",
   "api_key_header",
+  "oauth_client_credentials",
+]);
+
+/** How OAO authenticates to the token endpoint. `client_secret_post` is the default. */
+export const McpTokenEndpointAuthMethodSchema = v.picklist([
+  "client_secret_post",
+  "client_secret_basic",
 ]);
 
 const McpCredentialHeaderSchema = v.pipe(
@@ -2019,6 +2026,24 @@ export function mcpPathWithin(path: string, prefix: string): boolean {
   );
 }
 
+/**
+ * The destination of an OAuth credential: the origin and path of its pinned
+ * resource, without a trailing slash.
+ */
+export function mcpResourceDestination(resource: string): {
+  readonly origin: string;
+  readonly pathPrefix: string;
+} {
+  const url = new URL(resource);
+  return {
+    origin: url.origin,
+    pathPrefix:
+      url.pathname.length > 1 && url.pathname.endsWith("/")
+        ? url.pathname.slice(0, -1)
+        : url.pathname,
+  };
+}
+
 /** True when a policy's origin and path prefix lie inside a credential destination. */
 export function mcpDestinationContains(
   destination: { readonly origin: string; readonly pathPrefix: string },
@@ -2031,6 +2056,84 @@ export function mcpDestinationContains(
   );
 }
 
+const McpHttpsUrlSchema = v.pipe(
+  v.string(),
+  v.maxLength(2_048),
+  v.url(),
+  v.check((value) => {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" && !url.username && !url.password && !url.hash
+    );
+  }, "must be an HTTPS URL without user information or a fragment"),
+);
+
+/** RFC 6749 §3.3: space-separated scope tokens. */
+const McpOAuthScopeSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(1_024),
+  v.regex(
+    /^[\x21\x23-\x5b\x5d-\x7e]+(?: [\x21\x23-\x5b\x5d-\x7e]+)*$/u,
+    "scope must be space-separated OAuth scope tokens",
+  ),
+);
+
+const McpOAuthClientIdSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(512),
+  v.regex(/^[\x20-\x7e]+$/u, "clientId must be printable ASCII"),
+);
+
+/**
+ * The OAuth client-credentials configuration pinned on a credential version,
+ * as confirmed from authorization discovery. `resource` is the protected
+ * resource metadata `resource`, which identifies the MCP endpoint.
+ */
+export const McpOAuthClientCredentialsConfigSchema = v.strictObject({
+  resource: McpEndpointSchema,
+  resourceMetadataUrl: McpHttpsUrlSchema,
+  issuer: McpHttpsUrlSchema,
+  tokenEndpoint: McpHttpsUrlSchema,
+  clientId: McpOAuthClientIdSchema,
+  tokenEndpointAuthMethod: v.optional(
+    McpTokenEndpointAuthMethodSchema,
+    "client_secret_post",
+  ),
+  scope: McpOAuthScopeSchema,
+  /**
+   * False omits the RFC 8707 `resource` token request parameter, a deliberate
+   * deviation for authorization servers that reject it.
+   */
+  sendResource: v.optional(v.boolean(), true),
+});
+
+/**
+ * Re-pins an OAuth credential on rotation. Every field is optional and keeps
+ * the current value when left out; the resource never changes.
+ */
+export const McpOAuthClientCredentialsRotationSchema = v.strictObject({
+  resourceMetadataUrl: v.optional(McpHttpsUrlSchema),
+  issuer: v.optional(McpHttpsUrlSchema),
+  tokenEndpoint: v.optional(McpHttpsUrlSchema),
+  clientId: v.optional(McpOAuthClientIdSchema),
+  tokenEndpointAuthMethod: v.optional(McpTokenEndpointAuthMethodSchema),
+  scope: v.optional(McpOAuthScopeSchema),
+  sendResource: v.optional(v.boolean()),
+});
+
+const McpCredentialOAuthSchema = v.object({
+  resource: v.string(),
+  resourceMetadataUrl: v.string(),
+  issuer: v.string(),
+  tokenEndpoint: v.string(),
+  clientId: v.string(),
+  tokenEndpointAuthMethod: McpTokenEndpointAuthMethodSchema,
+  scope: v.string(),
+  sendResource: v.boolean(),
+});
+
 export const McpCredentialSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
@@ -2042,6 +2145,8 @@ export const McpCredentialSchema = v.object({
   destination: v.nullable(
     v.object({ origin: v.string(), pathPrefix: v.string() }),
   ),
+  /** The pinned OAuth configuration of an `oauth_client_credentials` credential. */
+  oauth: v.nullable(McpCredentialOAuthSchema),
   credentialConfigured: v.literal(true),
   credentialFingerprint: v.pipe(v.string(), v.regex(/^[a-f0-9]{12}$/u)),
   credentialVersion: v.pipe(v.number(), v.integer(), v.minValue(1)),
@@ -2051,31 +2156,118 @@ export const McpCredentialSchema = v.object({
   updatedAt: TimestampSchema,
 });
 
-export const CreateMcpCredentialInputSchema = v.pipe(
+const McpCredentialSecretSchema = v.pipe(
+  v.string(),
+  v.minLength(8),
+  v.maxLength(16_384),
+);
+
+export const CreateMcpCredentialInputSchema = v.variant("kind", [
   v.strictObject({
     key: McpResourceKeySchema,
     displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
-    kind: McpCredentialKindSchema,
-    headerName: v.optional(v.nullable(McpCredentialHeaderSchema), null),
+    kind: v.literal("static_bearer"),
+    headerName: v.optional(
+      v.null("headerName is required only for API-key-header credentials"),
+      null,
+    ),
     destination: McpCredentialDestinationSchema,
-    secret: v.pipe(v.string(), v.minLength(8), v.maxLength(16_384)),
+    secret: McpCredentialSecretSchema,
   }),
-  v.check(
-    (value) =>
-      (value.kind === "static_bearer" && value.headerName === null) ||
-      (value.kind === "api_key_header" && value.headerName !== null),
-    "headerName is required only for API-key-header credentials",
-  ),
-);
+  v.strictObject({
+    key: McpResourceKeySchema,
+    displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+    kind: v.literal("api_key_header"),
+    headerName: McpCredentialHeaderSchema,
+    destination: McpCredentialDestinationSchema,
+    secret: McpCredentialSecretSchema,
+  }),
+  /**
+   * The destination is the pinned resource, and `secret` is the client
+   * secret: it is only ever sent to the pinned token endpoint.
+   */
+  v.strictObject({
+    key: McpResourceKeySchema,
+    displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
+    kind: v.literal("oauth_client_credentials"),
+    headerName: v.optional(v.null(), null),
+    oauth: McpOAuthClientCredentialsConfigSchema,
+    secret: McpCredentialSecretSchema,
+  }),
+]);
 
 export const RotateMcpCredentialInputSchema = v.strictObject({
-  secret: v.pipe(v.string(), v.minLength(8), v.maxLength(16_384)),
+  /** The new secret; for an OAuth credential, the new client secret. */
+  secret: McpCredentialSecretSchema,
   /**
    * Pins a credential stored before destinations existed. A pinned
    * credential keeps its destination; this must then be omitted or equal.
    */
   destination: v.optional(McpCredentialDestinationSchema),
+  /** Only for an OAuth credential: changes to its pinned configuration. */
+  oauth: v.optional(McpOAuthClientCredentialsRotationSchema),
 });
+
+export const DiscoverMcpAuthorizationInputSchema = v.strictObject({
+  endpointUrl: McpEndpointSchema,
+});
+
+const McpMetadataListSchema = v.nullable(v.array(v.string()));
+
+/**
+ * What credential-free discovery found for an MCP endpoint, for an operator
+ * to confirm before entering a client ID and secret.
+ */
+export const McpAuthorizationDiscoverySchema = v.object({
+  endpointUrl: v.string(),
+  resource: v.string(),
+  resourceName: v.nullable(v.string()),
+  resourceMetadataUrl: v.string(),
+  resourceMetadataSource: v.picklist(["www_authenticate", "well_known"]),
+  challengeScope: v.nullable(v.string()),
+  scopesSupported: v.array(v.string()),
+  authorizationServers: v.array(
+    v.object({
+      issuer: v.string(),
+      tokenEndpoint: v.nullable(v.string()),
+      metadataSource: v.nullable(v.picklist(["oauth", "oidc"])),
+      tokenEndpointAuthMethodsSupported: McpMetadataListSchema,
+      grantTypesSupported: McpMetadataListSchema,
+      scopesSupported: McpMetadataListSchema,
+      /** Null when OAO can request tokens from this server. */
+      problem: v.nullable(
+        v.picklist([
+          "metadata_unavailable",
+          "issuer_mismatch",
+          "token_endpoint_missing",
+          "token_endpoint_insecure",
+          "token_endpoint_unreachable",
+        ]),
+      ),
+    }),
+  ),
+});
+
+/** Safe error codes of OAuth MCP credential failures. */
+export const McpCredentialErrorCodeSchema = v.picklist([
+  "authorization_discovery_failed",
+  "resource_mismatch",
+  "authorization_server_changed",
+  "credential_token_failed",
+  "credential_rejected",
+  "insufficient_scope",
+  "remote_forbidden",
+]);
+
+/** The result of testing an OAuth credential. The token itself is never returned. */
+export const McpCredentialTestResultSchema = v.variant("ok", [
+  v.object({
+    ok: v.literal(true),
+    expiresIn: v.nullable(v.number()),
+    grantedScope: v.nullable(v.string()),
+  }),
+  v.object({ ok: v.literal(false), errorCode: McpCredentialErrorCodeSchema }),
+]);
 
 export const McpCredentialPolicySchema = v.object({
   id: IdSchema,
@@ -2661,6 +2853,12 @@ export function parseCreateMcpCredentialInput(
   return v.parse(CreateMcpCredentialInputSchema, input);
 }
 
+export function parseDiscoverMcpAuthorizationInput(
+  input: unknown,
+): DiscoverMcpAuthorizationInput {
+  return v.parse(DiscoverMcpAuthorizationInputSchema, input);
+}
+
 export function parseRotateMcpCredentialInput(
   input: unknown,
 ): RotateMcpCredentialInput {
@@ -2708,6 +2906,24 @@ export type RotateMcpCredentialInput = v.InferOutput<
 >;
 export type McpCredentialDestination = v.InferOutput<
   typeof McpCredentialDestinationSchema
+>;
+export type McpTokenEndpointAuthMethod = v.InferOutput<
+  typeof McpTokenEndpointAuthMethodSchema
+>;
+export type McpOAuthClientCredentialsConfig = v.InferOutput<
+  typeof McpOAuthClientCredentialsConfigSchema
+>;
+export type DiscoverMcpAuthorizationInput = v.InferOutput<
+  typeof DiscoverMcpAuthorizationInputSchema
+>;
+export type McpAuthorizationDiscovery = v.InferOutput<
+  typeof McpAuthorizationDiscoverySchema
+>;
+export type McpCredentialErrorCode = v.InferOutput<
+  typeof McpCredentialErrorCodeSchema
+>;
+export type McpCredentialTestResult = v.InferOutput<
+  typeof McpCredentialTestResultSchema
 >;
 export type McpCredentialPolicy = v.InferOutput<
   typeof McpCredentialPolicySchema
@@ -2876,6 +3092,17 @@ const BackupMcpCredentialSchema = v.strictObject({
   headerName: v.nullable(McpCredentialHeaderSchema),
   /** Absent in backups made before destinations were pinned. */
   destination: v.optional(v.nullable(McpCredentialDestinationSchema), null),
+  /** The pinned OAuth configuration; the client secret is never included. */
+  oauth: v.optional(
+    v.nullable(
+      v.strictObject({
+        ...McpOAuthClientCredentialsConfigSchema.entries,
+        tokenEndpointAuthMethod: McpTokenEndpointAuthMethodSchema,
+        sendResource: v.boolean(),
+      }),
+    ),
+    null,
+  ),
   status: v.picklist(["active", "revoked"]),
   credentialFingerprint: BackupFingerprintSchema,
 });
@@ -3350,6 +3577,13 @@ export function checkConfigurationBackupReferences(
     )
       problems.push(
         `MCP credential ${credential.key} needs a header name exactly when it is an API-key header`,
+      );
+    if (
+      (credential.kind === "oauth_client_credentials") !==
+      Boolean(credential.oauth)
+    )
+      problems.push(
+        `MCP credential ${credential.key} needs an OAuth configuration exactly when it uses OAuth client credentials`,
       );
   }
   const policyVersions = new Set<string>();

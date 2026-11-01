@@ -473,19 +473,21 @@ each project selects its own restricted tool sets from the shared servers. All
 writes require `Idempotency-Key`. Secret values are accepted only on credential
 create or rotation and never appear in a response.
 
-| Method   | Path                                                | Purpose                                     |
-| -------- | --------------------------------------------------- | ------------------------------------------- |
-| `GET`    | `/projects/{projectId}/mcp-servers`                 | List servers and discovered tool snapshots. |
-| `POST`   | `/projects/{projectId}/mcp-servers`                 | Create a server and immutable version 1.    |
-| `POST`   | `/projects/{projectId}/mcp-servers/{id}/discover`   | Discover and snapshot remote tools.         |
-| `GET`    | `/projects/{projectId}/mcp-credentials`             | List redacted credential metadata.          |
-| `POST`   | `/projects/{projectId}/mcp-credentials`             | Store an encrypted write-only credential.   |
-| `POST`   | `/projects/{projectId}/mcp-credentials/{id}/rotate` | Rotate the active encrypted version.        |
-| `DELETE` | `/projects/{projectId}/mcp-credentials/{id}`        | Revoke the active credential.               |
-| `GET`    | `/projects/{projectId}/mcp-credential-policies`     | List exact-origin policy versions.          |
-| `POST`   | `/projects/{projectId}/mcp-credential-policies`     | Publish a credential policy version.        |
-| `GET`    | `/projects/{projectId}/mcp-toolsets`                | List restricted toolsets.                   |
-| `POST`   | `/projects/{projectId}/mcp-toolsets`                | Publish selected discovered tools.          |
+| Method   | Path                                                | Purpose                                        |
+| -------- | --------------------------------------------------- | ---------------------------------------------- |
+| `GET`    | `/projects/{projectId}/mcp-servers`                 | List servers and discovered tool snapshots.    |
+| `POST`   | `/projects/{projectId}/mcp-servers`                 | Create a server and immutable version 1.       |
+| `POST`   | `/projects/{projectId}/mcp-servers/{id}/discover`   | Discover and snapshot remote tools.            |
+| `GET`    | `/projects/{projectId}/mcp-credentials`             | List redacted credential metadata.             |
+| `POST`   | `/projects/{projectId}/mcp-credentials`             | Store an encrypted write-only credential.      |
+| `POST`   | `/projects/{projectId}/mcp-credentials/{id}/rotate` | Rotate the active encrypted version.           |
+| `POST`   | `/projects/{projectId}/mcp-credentials/{id}/test`   | Request a fresh token for an OAuth credential. |
+| `POST`   | `/projects/{projectId}/mcp-authorization-discovery` | Discover an endpoint's OAuth metadata.         |
+| `DELETE` | `/projects/{projectId}/mcp-credentials/{id}`        | Revoke the active credential.                  |
+| `GET`    | `/projects/{projectId}/mcp-credential-policies`     | List exact-origin policy versions.             |
+| `POST`   | `/projects/{projectId}/mcp-credential-policies`     | Publish a credential policy version.           |
+| `GET`    | `/projects/{projectId}/mcp-toolsets`                | List restricted toolsets.                      |
+| `POST`   | `/projects/{projectId}/mcp-toolsets`                | Publish selected discovered tools.             |
 
 Create a server with `{ key, displayName, endpointUrl, transport }`, where the
 endpoint is HTTPS and transport is `streamable_http` or `legacy_sse`. Discover
@@ -497,13 +499,46 @@ existing toolsets remain pinned to their original server version.
 
 Create a credential with `{ key, displayName, kind, headerName, destination,
 secret }`. `static_bearer` requires `headerName: null`; `api_key_header`
-requires a safe header name. `destination` is `{ origin, pathPrefix }`: the
+requires a safe header name. An `oauth_client_credentials` credential takes `{
+key, displayName, kind, oauth, secret }` instead, where `secret` is the client
+secret and `oauth` is `{ resource, resourceMetadataUrl, issuer, tokenEndpoint,
+clientId, tokenEndpointAuthMethod, scope, sendResource }` as confirmed from
+discovery. `tokenEndpointAuthMethod` is `client_secret_post` (default) or
+`client_secret_basic`, and `sendResource` (default `true`) controls the RFC 8707
+`resource` token parameter. OAO repeats discovery on create and returns `400`
+when the values no longer match it; the destination is the resource, and
+responses include the pinned `oauth` configuration (`null` for other kinds). `destination` is `{ origin, pathPrefix }`: the
 only HTTPS origin and path prefix the secret may be sent to. Responses contain
 the destination, fingerprint, version, lifecycle, and `credentialConfigured:
 true`; `destination` is `null` for a credential stored before destinations were
 pinned. Rotate with `{ secret }`. The rotated version keeps the destination;
 rotation accepts `destination` only to pin an unpinned credential, or when it
-equals the pinned one.
+equals the pinned one. An OAuth credential also accepts `oauth` with any of
+`resourceMetadataUrl`, `issuer`, `tokenEndpoint`, `clientId`,
+`tokenEndpointAuthMethod`, `scope`, and `sendResource`; omitted fields keep
+their value, the resource never changes, and changing the issuer, token
+endpoint, or metadata URL repeats discovery.
+
+`POST /mcp-authorization-discovery` takes `{ endpointUrl }`, sends no
+credential, and returns `{ endpointUrl, resource, resourceName,
+resourceMetadataUrl, resourceMetadataSource, challengeScope, scopesSupported,
+authorizationServers }`. Each authorization server lists `issuer`,
+`tokenEndpoint`, `metadataSource` (`oauth` or `oidc`),
+`tokenEndpointAuthMethodsSupported`, `grantTypesSupported`, `scopesSupported`,
+and a `problem` that is `null` when OAO can request tokens from it (otherwise
+`metadata_unavailable`, `issuer_mismatch`, `token_endpoint_missing`,
+`token_endpoint_insecure`, or `token_endpoint_unreachable`). It requires
+`mcp:discover` and returns `400` when the endpoint has no valid protected
+resource metadata or the metadata names another resource.
+
+`POST /mcp-credentials/{id}/test` requires `mcp:discover`, repeats discovery
+against the pinned values, requests a fresh token, and returns `{ ok: true,
+expiresIn, grantedScope }` or `{ ok: false, errorCode }`. The token itself is
+never returned. Error codes are `authorization_discovery_failed`,
+`resource_mismatch`, `authorization_server_changed`, `credential_token_failed`,
+`credential_rejected`, `insufficient_scope`, and `remote_forbidden`; the same
+codes appear in `mcp.call_failed` and `mcp.discovery_failed` events. Neither
+route needs an `Idempotency-Key`.
 
 Create a policy with `{ key, displayName, credentialId, exactOrigin,
 pathPrefix, timeoutMs, maximumResponseBytes }`. The exact origin must equal the

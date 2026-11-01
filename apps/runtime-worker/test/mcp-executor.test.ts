@@ -8,7 +8,12 @@ import type {
   PrincipalId,
   RunId,
 } from "@oao/domain";
-import type { McpConnectionDefinition, McpRemotePort } from "@oao/mcp-remote";
+import {
+  McpRemoteError,
+  type McpConnectionDefinition,
+  type McpCredentialMaterial,
+  type McpRemotePort,
+} from "@oao/mcp-remote";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
 import {
   createPostgresMcpToolExecutor,
@@ -59,6 +64,8 @@ interface FixtureOptions {
     readonly origin: string;
     readonly pathPrefix: string;
   } | null;
+  /** Stores an OAuth client-credentials credential for the endpoint. */
+  readonly oauth?: boolean;
 }
 
 /** Seeds one bound MCP tool and one run the executor may call it for. */
@@ -150,29 +157,45 @@ async function seedMcpCall(
     "UPDATE oao.mcp_servers SET latest_version_id=$3 WHERE organization_id=$1 AND id=$2",
     [organizationId, ids.server, ids.serverVersion],
   );
+  const kind = options.oauth ? "oauth_client_credentials" : "static_bearer";
   await query(
     `INSERT INTO oao.mcp_credentials (
        organization_id,id,credential_key,display_name,credential_kind,header_name,
        created_by_principal_id
-     ) VALUES ($1,$2,'trace-token','Trace token','static_bearer',NULL,$3)`,
-    [organizationId, ids.credential, principalId],
+     ) VALUES ($1,$2,'trace-token','Trace token',$3,NULL,$4)`,
+    [organizationId, ids.credential, kind, principalId],
   );
   await query(
     `INSERT INTO oao.mcp_credential_versions (
-       organization_id,id,credential_id,version,encrypted_secret,encryption_nonce,
-       encryption_tag,encryption_key_version,credential_fingerprint,
-       destination_origin,destination_path_prefix,created_by_principal_id
-     ) VALUES ($1,$2,$3,1,$4,$5,$6,1,$7,$8,$9,$10)`,
+       organization_id,id,credential_id,version,credential_kind,encrypted_secret,
+       encryption_nonce,encryption_tag,encryption_key_version,credential_fingerprint,
+       destination_origin,destination_path_prefix,oauth_issuer,oauth_token_endpoint,
+       oauth_client_id,oauth_token_endpoint_auth_method,oauth_scope,oauth_resource,
+       oauth_resource_metadata_url,oauth_send_resource,created_by_principal_id
+     ) VALUES ($1,$2,$3,1,$4,$5,$6,$7,1,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
     [
       organizationId,
       ids.credentialVersion,
       ids.credential,
+      kind,
       encrypted.ciphertext,
       encrypted.nonce,
       encrypted.tag,
       encrypted.fingerprint,
       destination?.origin ?? null,
       destination?.pathPrefix ?? null,
+      ...(options.oauth
+        ? [
+            "https://auth.example.test",
+            "https://auth.example.test/oauth2/token",
+            "client_trace",
+            "client_secret_post",
+            "traces:read",
+            endpointUrl,
+            "https://mcp.example.test/.well-known/oauth-protected-resource/mcp",
+            true,
+          ]
+        : [null, null, null, null, null, null, null, null]),
       principalId,
     ],
   );
@@ -367,17 +390,39 @@ async function seedMcpCall(
   };
 }
 
-function recordingRemote(): {
+function recordingRemote(
+  failures: {
+    readonly prepare?: Error;
+    readonly call?: Error;
+  } = {},
+): {
   readonly remote: McpRemotePort;
   readonly calls: McpConnectionDefinition[];
+  readonly prepared: McpCredentialMaterial[];
+  readonly preparedTimeouts: (number | undefined)[];
 } {
   const calls: McpConnectionDefinition[] = [];
+  const prepared: McpCredentialMaterial[] = [];
+  const preparedTimeouts: (number | undefined)[] = [];
   return {
     calls,
+    prepared,
+    preparedTimeouts,
     remote: {
       discover: () => Promise.reject(new Error("discovery is not expected")),
+      discoverAuthorization: () =>
+        Promise.reject(new Error("discovery is not expected")),
+      testCredential: () => Promise.reject(new Error("tests are not expected")),
+      prepareCredential: (credential, _signal, timeoutMs) => {
+        prepared.push(credential);
+        preparedTimeouts.push(timeoutMs);
+        return failures.prepare
+          ? Promise.reject(failures.prepare)
+          : Promise.resolve();
+      },
       call: (connection) => {
         calls.push(connection);
+        if (failures.call) return Promise.reject(failures.call);
         return Promise.resolve({
           content: '{"found":true}',
           isError: false,
@@ -386,6 +431,25 @@ function recordingRemote(): {
       },
     },
   };
+}
+
+async function attempt(
+  admin: PgPool,
+  fixture: Fixture,
+): Promise<{ state: string; safe_error_code: string | null } | undefined> {
+  const result = await admin.query<{
+    state: string;
+    safe_error_code: string | null;
+  }>(
+    `SELECT state,safe_error_code FROM oao.mcp_call_attempts
+      WHERE organization_id=$1 AND project_id=$2 AND tool_call_id=$3`,
+    [
+      fixture.tenant.organizationId,
+      fixture.tenant.projectId,
+      fixture.toolCallId,
+    ],
+  );
+  return result.rows[0];
 }
 
 test(
@@ -518,3 +582,146 @@ function suffix(name: string): string {
     .digest("hex")
     .slice(0, 10);
 }
+
+test(
+  "the MCP executor obtains an OAuth token before it records the call attempt",
+  { skip: databaseUrl ? false : "DATABASE_URL is required" },
+  async (t) => {
+    assert.ok(databaseUrl);
+    assert.ok(testAdminDatabaseUrl);
+    const admin = createPool(testAdminDatabaseUrl);
+    const pool = createPool(databaseUrl);
+    t.after(async () => {
+      await pool.end();
+      await admin.end();
+    });
+    const run = suffix(t.name);
+
+    await t.test(
+      "the pinned OAuth version reaches the remote client",
+      async () => {
+        const fixture = await seedMcpCall(admin, `${run}-oauth`, {
+          oauth: true,
+        });
+        const { remote, calls, prepared, preparedTimeouts } = recordingRemote();
+        const executor = createPostgresMcpToolExecutor({
+          pool,
+          credentialCipher: cipher,
+          remote,
+        });
+        await executor.execute(fixture.tenant, fixture.tool, {
+          traceId: "trace-1",
+        });
+        const expected = {
+          kind: "oauth_client_credentials",
+          organizationId: fixture.tenant.organizationId,
+          credentialVersionId: fixture.credentialVersionId,
+          issuer: "https://auth.example.test",
+          tokenEndpoint: "https://auth.example.test/oauth2/token",
+          clientId: "client_trace",
+          clientSecret: `secret-for-${run}-oauth`,
+          tokenEndpointAuthMethod: "client_secret_post",
+          scope: "traces:read",
+          resource: "https://mcp.example.test/mcp",
+          resourceMetadataUrl:
+            "https://mcp.example.test/.well-known/oauth-protected-resource/mcp",
+          sendResource: true,
+        };
+        assert.deepEqual(prepared, [expected]);
+        // The token request respects the policy timeout.
+        assert.deepEqual(preparedTimeouts, [10_000]);
+        assert.deepEqual(calls[0]?.credential, expected);
+        assert.deepEqual(await attempt(admin, fixture), {
+          state: "completed",
+          safe_error_code: null,
+        });
+      },
+    );
+
+    await t.test(
+      "a refused token is a failed attempt that never reached the MCP server",
+      async () => {
+        const fixture = await seedMcpCall(admin, `${run}-token-refused`, {
+          oauth: true,
+        });
+        const { remote, calls } = recordingRemote({
+          prepare: new McpRemoteError(
+            "credential_token_failed",
+            "The authorization server refused the token request (invalid_client)",
+          ),
+        });
+        const executor = createPostgresMcpToolExecutor({
+          pool,
+          credentialCipher: cipher,
+          remote,
+        });
+        await assert.rejects(
+          executor.execute(fixture.tenant, fixture.tool, {
+            traceId: "trace-1",
+          }),
+          /invalid_client/u,
+        );
+        assert.equal(calls.length, 0);
+        assert.deepEqual(await attempt(admin, fixture), {
+          state: "failed",
+          safe_error_code: "credential_token_failed",
+        });
+        const event = await admin.query<{
+          payload: { errorCode?: string };
+        }>(
+          `SELECT public_payload AS payload FROM oao.product_events
+            WHERE organization_id=$1 AND project_id=$2
+              AND event_kind='mcp.call_failed' AND aggregate_id=$3`,
+          [
+            fixture.tenant.organizationId,
+            fixture.tenant.projectId,
+            fixture.toolCallId,
+          ],
+        );
+        assert.equal(
+          event.rows[0]?.payload.errorCode,
+          "credential_token_failed",
+        );
+        // The failed attempt is never replayed.
+        await assert.rejects(
+          createPostgresMcpToolExecutor({
+            pool,
+            credentialCipher: cipher,
+            remote: recordingRemote().remote,
+          }).execute(fixture.tenant, fixture.tool, { traceId: "trace-1" }),
+          /already been executed/u,
+        );
+      },
+    );
+
+    await t.test(
+      "a credential the MCP server rejects is recorded with its safe code",
+      async () => {
+        const fixture = await seedMcpCall(admin, `${run}-rejected`, {
+          oauth: true,
+        });
+        const { remote } = recordingRemote({
+          call: new McpRemoteError(
+            "credential_rejected",
+            "The MCP server rejected the credential",
+          ),
+        });
+        const executor = createPostgresMcpToolExecutor({
+          pool,
+          credentialCipher: cipher,
+          remote,
+        });
+        await assert.rejects(
+          executor.execute(fixture.tenant, fixture.tool, {
+            traceId: "trace-1",
+          }),
+          /rejected the credential/u,
+        );
+        assert.deepEqual(await attempt(admin, fixture), {
+          state: "failed",
+          safe_error_code: "credential_rejected",
+        });
+      },
+    );
+  },
+);

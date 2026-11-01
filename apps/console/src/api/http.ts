@@ -1930,6 +1930,22 @@ export class HttpConsoleApi implements ConsoleApi {
       },
     );
 
+  discoverMcpAuthorization = async (
+    input: Parameters<ConsoleApi["discoverMcpAuthorization"]>[0],
+  ): ReturnType<ConsoleApi["discoverMcpAuthorization"]> =>
+    this.#projectRequest("/mcp-authorization-discovery", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+
+  testMcpCredential = async (
+    credentialId: string,
+  ): ReturnType<ConsoleApi["testMcpCredential"]> =>
+    this.#projectRequest(
+      `/mcp-credentials/${encodeURIComponent(credentialId)}/test`,
+      { method: "POST" },
+    );
+
   listMcpCredentialPolicies = async (): Promise<McpCredentialPolicyList> =>
     this.#projectRequest("/mcp-credential-policies");
 

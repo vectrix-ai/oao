@@ -821,3 +821,38 @@ test("MCP credential destinations are additive and restore forced row security",
   assert.match(sql, /ENABLE TRIGGER mcp_credential_versions_immutable/u);
   assert.doesNotMatch(sql, /DROP TABLE|DROP COLUMN|DELETE FROM|BYPASSRLS/u);
 });
+
+test("OAuth client-credentials MCP credentials pin their configuration on the version", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0055_mcp_oauth_client_credentials.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(sql, /'oauth_client_credentials'/u);
+  for (const column of [
+    "oauth_issuer",
+    "oauth_token_endpoint",
+    "oauth_client_id",
+    "oauth_token_endpoint_auth_method",
+    "oauth_scope",
+    "oauth_resource",
+    "oauth_resource_metadata_url",
+    "oauth_send_resource",
+  ])
+    assert.match(sql, new RegExp(`ADD COLUMN ${column} `, "u"));
+  assert.match(sql, /mcp_credential_versions_kind_fkey/u);
+  assert.match(sql, /mcp_credential_versions_oauth_check/u);
+  // The client secret stays in encrypted_secret; no plaintext secret column.
+  assert.doesNotMatch(sql, /client_secret text|oauth_client_secret/u);
+  assert.match(
+    sql,
+    /ALTER TABLE oao\.mcp_credentials FORCE ROW LEVEL SECURITY/u,
+  );
+  assert.match(
+    sql,
+    /ALTER TABLE oao\.mcp_credential_versions FORCE ROW LEVEL SECURITY/u,
+  );
+  assert.doesNotMatch(sql, /DROP TABLE|DROP COLUMN|DELETE FROM|BYPASSRLS/u);
+});

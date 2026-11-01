@@ -233,6 +233,51 @@ export class PostgresApiStore {
     );
   }
 
+  /**
+   * The saved response of a request that already completed under this
+   * idempotency key, without claiming it. Lets a route that needs network
+   * work before its write transaction replay a completed request first.
+   */
+  async completedIdempotentResponse<T>(
+    transaction: PgClient,
+    principal: Principal,
+    input: {
+      readonly scope: string;
+      readonly method?: "POST" | "PATCH" | "DELETE";
+      readonly key: string;
+      readonly hash: Uint8Array;
+    },
+  ): Promise<{ readonly status: number; readonly body: T } | undefined> {
+    const result = await transaction.query<{
+      request_hash: Buffer;
+      status_code: number | null;
+      response_public: T | null;
+    }>(
+      `SELECT request_hash,status_code,response_public
+         FROM oao.api_request_idempotency
+        WHERE organization_id=$1 AND project_id=$2 AND principal_id=$3
+          AND http_method=$4 AND route_key=$5 AND idempotency_key=$6
+          AND completed_at IS NOT NULL`,
+      [
+        principal.organizationId,
+        principal.projectId,
+        principal.id,
+        input.method ?? "POST",
+        input.scope,
+        input.key,
+      ],
+    );
+    const row = result.rows[0];
+    if (!row || row.status_code === null || row.response_public === null)
+      return undefined;
+    if (!row.request_hash.equals(Buffer.from(input.hash)))
+      throw new HttpApiError(
+        "bad_request",
+        "idempotency key reused with different request",
+      );
+    return { status: row.status_code, body: row.response_public };
+  }
+
   async idempotent<T extends Readonly<Record<string, unknown>>>(
     transaction: PgClient,
     principal: Principal,

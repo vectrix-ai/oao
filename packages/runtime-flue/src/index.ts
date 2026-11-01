@@ -63,13 +63,19 @@ import {
   type ModelGenerationSettings,
   type ModelRoutingPolicy,
 } from "@oao/contracts";
-import type { PgPool, Queryable, TenantContext } from "@oao/db-postgres";
+import type {
+  PgClient,
+  PgPool,
+  Queryable,
+  TenantContext,
+} from "@oao/db-postgres";
 import { withTenantTransaction } from "@oao/db-postgres";
 import type { ProviderCredentialCipher } from "@oao/provider-credentials";
-import type {
-  McpCredentialMaterial,
-  McpRemotePort,
-  McpToolResult,
+import {
+  McpRemoteError,
+  type McpCredentialMaterial,
+  type McpRemotePort,
+  type McpToolResult,
 } from "@oao/mcp-remote";
 import type {
   OrganizationId,
@@ -4923,14 +4929,55 @@ interface McpExecutionRow {
   maximum_response_bytes: number;
   credential_id: string;
   credential_version_id: string;
-  credential_kind: "static_bearer" | "api_key_header";
+  credential_kind:
+    "static_bearer" | "api_key_header" | "oauth_client_credentials";
   header_name: string | null;
   destination_origin: string | null;
   destination_path_prefix: string | null;
+  oauth_issuer: string | null;
+  oauth_token_endpoint: string | null;
+  oauth_client_id: string | null;
+  oauth_token_endpoint_auth_method:
+    "client_secret_post" | "client_secret_basic" | null;
+  oauth_scope: string | null;
+  oauth_resource: string | null;
+  oauth_resource_metadata_url: string | null;
+  oauth_send_resource: boolean | null;
   encrypted_secret: Buffer;
   encryption_nonce: Buffer;
   encryption_tag: Buffer;
   encryption_key_version: number;
+}
+
+/** The decrypted material of the credential version an execution row pins. */
+function mcpCredentialMaterial(
+  row: McpExecutionRow,
+  organizationId: string,
+  secret: string,
+): McpCredentialMaterial {
+  if (row.credential_kind === "api_key_header")
+    return { kind: "api_key_header", headerName: row.header_name!, secret };
+  if (row.credential_kind === "static_bearer")
+    return { kind: "static_bearer", secret };
+  return {
+    kind: "oauth_client_credentials",
+    organizationId,
+    credentialVersionId: row.credential_version_id,
+    issuer: row.oauth_issuer!,
+    tokenEndpoint: row.oauth_token_endpoint!,
+    clientId: row.oauth_client_id!,
+    clientSecret: secret,
+    tokenEndpointAuthMethod: row.oauth_token_endpoint_auth_method!,
+    scope: row.oauth_scope!,
+    resource: row.oauth_resource!,
+    resourceMetadataUrl: row.oauth_resource_metadata_url!,
+    sendResource: row.oauth_send_resource!,
+  };
+}
+
+/** A safe error code for a failed remote call: never a remote message. */
+function mcpFailureCode(error: unknown): string {
+  return error instanceof McpRemoteError ? error.code : "remote_call_failed";
 }
 
 export function createPostgresMcpToolExecutor(input: {
@@ -4954,9 +5001,11 @@ export function createPostgresMcpToolExecutor(input: {
           arguments: arguments_,
         }),
       );
-      const row = await withTenantTransaction<
-        McpExecutionRow | { readonly blocked_state: string }
-      >(input.pool, tenant, async (transaction) => {
+      // Refuses a tool call that already has an attempt, after recording a
+      // started attempt's outcome as unknown.
+      const blockedByPriorAttempt = async (
+        transaction: PgClient,
+      ): Promise<{ readonly blocked_state: string } | undefined> => {
         const prior = await transaction.query<{ state: string }>(
           `SELECT state FROM oao.mcp_call_attempts
               WHERE organization_id=$1 AND project_id=$2
@@ -4992,6 +5041,11 @@ export function createPostgresMcpToolExecutor(input: {
           });
           return { blocked_state: prior.rows[0].state };
         }
+        return undefined;
+      };
+      const loadExecution = async (
+        transaction: PgClient,
+      ): Promise<McpExecutionRow> => {
         const result = await transaction.query<McpExecutionRow>(
           `SELECT server.endpoint_url,server.transport,policy.exact_origin,
                     policy.path_prefix,policy.timeout_ms,
@@ -4999,6 +5053,10 @@ export function createPostgresMcpToolExecutor(input: {
                     version.id AS credential_version_id,
                     credential.credential_kind,credential.header_name,
                     version.destination_origin,version.destination_path_prefix,
+                    version.oauth_issuer,version.oauth_token_endpoint,
+                    version.oauth_client_id,version.oauth_token_endpoint_auth_method,
+                    version.oauth_scope,version.oauth_resource,
+                    version.oauth_resource_metadata_url,version.oauth_send_resource,
                     version.encrypted_secret,version.encryption_nonce,
                     version.encryption_tag,version.encryption_key_version
                FROM oao.session_mcp_bindings binding
@@ -5091,48 +5149,76 @@ export function createPostgresMcpToolExecutor(input: {
           throw new Error(
             "MCP binding, authorization, or credential is no longer active",
           );
-        await transaction.query(
-          `INSERT INTO oao.mcp_call_attempts (
-               organization_id,project_id,tool_call_id,run_id,attempt,
-               server_version_id,toolset_version_id,
-               credential_policy_version_id,credential_version_id,
-               remote_tool_name,request_hash,state
-             ) VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10,'started')`,
-          [
-            tenant.organizationId,
-            tenant.projectId,
-            toolCallId,
-            tenant.runId,
-            tool.serverVersionId,
-            tool.toolsetVersionId,
-            tool.credentialPolicyVersionId,
-            execution.credential_version_id,
-            tool.remoteToolName,
-            requestHash,
-          ],
-        );
-        await appendEventOnce(transaction, {
-          organizationId: tenant.organizationId as OrganizationId,
-          projectId: tenant.projectId as ProjectId,
-          id: eventUuid(`event:mcp:${toolCallId}:started`),
-          aggregateType: "tool_call",
-          aggregateId: toolCallId,
-          kind: "mcp.call_started",
-          payload: {
-            runId: tenant.runId,
-            serverVersionId: tool.serverVersionId,
-            toolsetVersionId: tool.toolsetVersionId,
-            remoteToolName: tool.remoteToolName,
-          },
-        });
         return execution;
-      });
-      if ("blocked_state" in row)
-        throw new Error(
-          row.blocked_state === "started"
+      };
+      const recordStarted = async (
+        transaction: PgClient,
+        execution: McpExecutionRow,
+      ): Promise<void> => {
+        try {
+          await transaction.query(
+            `INSERT INTO oao.mcp_call_attempts (
+                 organization_id,project_id,tool_call_id,run_id,attempt,
+                 server_version_id,toolset_version_id,
+                 credential_policy_version_id,credential_version_id,
+                 remote_tool_name,request_hash,state
+               ) VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10,'started')`,
+            [
+              tenant.organizationId,
+              tenant.projectId,
+              toolCallId,
+              tenant.runId,
+              tool.serverVersionId,
+              tool.toolsetVersionId,
+              tool.credentialPolicyVersionId,
+              execution.credential_version_id,
+              tool.remoteToolName,
+              requestHash,
+            ],
+          );
+          await appendEventOnce(transaction, {
+            organizationId: tenant.organizationId as OrganizationId,
+            projectId: tenant.projectId as ProjectId,
+            id: eventUuid(`event:mcp:${toolCallId}:started`),
+            aggregateType: "tool_call",
+            aggregateId: toolCallId,
+            kind: "mcp.call_started",
+            payload: {
+              runId: tenant.runId,
+              serverVersionId: tool.serverVersionId,
+              toolsetVersionId: tool.toolsetVersionId,
+              remoteToolName: tool.remoteToolName,
+            },
+          });
+        } catch (error) {
+          // A concurrent executor recorded the attempt first.
+          if ((error as { readonly code?: unknown }).code === "23505")
+            throw new Error("MCP call attempt has already been executed", {
+              cause: error,
+            });
+          throw error;
+        }
+      };
+      const blockedError = (state: string) =>
+        new Error(
+          state === "started"
             ? "MCP call outcome is unknown after recovery"
             : "MCP call attempt has already been executed",
         );
+
+      const loaded = await withTenantTransaction<
+        McpExecutionRow | { readonly blocked_state: string }
+      >(input.pool, tenant, async (transaction) => {
+        const blocked = await blockedByPriorAttempt(transaction);
+        if (blocked) return blocked;
+        const execution = await loadExecution(transaction);
+        // An OAuth credential records its attempt only once it has a token.
+        if (execution.credential_kind !== "oauth_client_credentials")
+          await recordStarted(transaction, execution);
+        return execution;
+      });
+      if ("blocked_state" in loaded) throw blockedError(loaded.blocked_state);
+      let row = loaded;
       const secret = input.credentialCipher.decrypt(
         {
           ciphertext: row.encrypted_secret,
@@ -5146,14 +5232,97 @@ export function createPostgresMcpToolExecutor(input: {
           providerType: "mcp",
         },
       );
-      const credential: McpCredentialMaterial =
-        row.credential_kind === "static_bearer"
-          ? { kind: "static_bearer", secret }
-          : {
-              kind: "api_key_header",
-              headerName: row.header_name!,
-              secret,
-            };
+      const credential = mcpCredentialMaterial(
+        row,
+        tenant.organizationId,
+        secret,
+      );
+      if (credential.kind === "oauth_client_credentials") {
+        // The token is obtained before the attempt is recorded, outside any
+        // transaction: a crash while the authorization server answers leaves
+        // no outcome-unknown attempt, and a refused token is recorded as a
+        // failed attempt that never reached the MCP server.
+        try {
+          await input.remote.prepareCredential?.(
+            credential,
+            signal,
+            row.timeout_ms,
+          );
+        } catch (error) {
+          const cancelled = signal?.aborted === true;
+          const errorCode = cancelled
+            ? "request_cancelled"
+            : error instanceof McpRemoteError
+              ? error.code
+              : "credential_token_failed";
+          await withTenantTransaction(
+            input.pool,
+            tenant,
+            async (transaction) => {
+              const inserted = await transaction.query(
+                `INSERT INTO oao.mcp_call_attempts (
+                   organization_id,project_id,tool_call_id,run_id,attempt,
+                   server_version_id,toolset_version_id,
+                   credential_policy_version_id,credential_version_id,
+                   remote_tool_name,request_hash,state,safe_error_code,
+                   completed_at
+                 ) VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10,$11,$12,clock_timestamp())
+                 ON CONFLICT DO NOTHING`,
+                [
+                  tenant.organizationId,
+                  tenant.projectId,
+                  toolCallId,
+                  tenant.runId,
+                  tool.serverVersionId,
+                  tool.toolsetVersionId,
+                  tool.credentialPolicyVersionId,
+                  row.credential_version_id,
+                  tool.remoteToolName,
+                  requestHash,
+                  cancelled ? "cancelled" : "failed",
+                  errorCode,
+                ],
+              );
+              if (!inserted.rowCount) return;
+              await appendEventOnce(transaction, {
+                organizationId: tenant.organizationId as OrganizationId,
+                projectId: tenant.projectId as ProjectId,
+                id: eventUuid(
+                  `event:mcp:${toolCallId}:${cancelled ? "cancelled" : "failed"}`,
+                ),
+                aggregateType: "tool_call",
+                aggregateId: toolCallId,
+                kind: cancelled ? "mcp.call_cancelled" : "mcp.call_failed",
+                payload: {
+                  runId: tenant.runId,
+                  serverVersionId: tool.serverVersionId,
+                  remoteToolName: tool.remoteToolName,
+                  errorCode,
+                },
+              });
+            },
+          );
+          throw error;
+        }
+        // Authorization is re-checked against the same credential version
+        // the token was obtained for before the attempt is recorded.
+        const confirmed = await withTenantTransaction<
+          McpExecutionRow | { readonly blocked_state: string }
+        >(input.pool, tenant, async (transaction) => {
+          const blocked = await blockedByPriorAttempt(transaction);
+          if (blocked) return blocked;
+          const execution = await loadExecution(transaction);
+          if (execution.credential_version_id !== loaded.credential_version_id)
+            throw new Error(
+              "MCP credential was rotated while the call was being authorized",
+            );
+          await recordStarted(transaction, execution);
+          return execution;
+        });
+        if ("blocked_state" in confirmed)
+          throw blockedError(confirmed.blocked_state);
+        row = confirmed;
+      }
       let result: McpToolResult;
       try {
         result = await input.remote.call(
@@ -5187,6 +5356,9 @@ export function createPostgresMcpToolExecutor(input: {
         );
       } catch (error) {
         const cancelled = signal?.aborted === true;
+        const errorCode = cancelled
+          ? "request_cancelled"
+          : mcpFailureCode(error);
         await withTenantTransaction(input.pool, tenant, async (transaction) => {
           await transaction.query(
             `UPDATE oao.mcp_call_attempts
@@ -5198,7 +5370,7 @@ export function createPostgresMcpToolExecutor(input: {
               tenant.projectId,
               toolCallId,
               cancelled ? "cancelled" : "failed",
-              cancelled ? "request_cancelled" : "remote_call_failed",
+              errorCode,
             ],
           );
           await appendEventOnce(transaction, {
@@ -5214,7 +5386,7 @@ export function createPostgresMcpToolExecutor(input: {
               runId: tenant.runId,
               serverVersionId: tool.serverVersionId,
               remoteToolName: tool.remoteToolName,
-              errorCode: cancelled ? "request_cancelled" : "remote_call_failed",
+              errorCode,
             },
           });
         });

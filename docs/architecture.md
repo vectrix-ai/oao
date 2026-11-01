@@ -75,8 +75,13 @@ OTel SDK -> optional Collector -> configured OTLP backend
     may use it only inside that destination. The runtime performs live
     authorization/lifecycle checks before decrypting a credential, and the
     egress broker injects it only for the policy's exact HTTPS origin and path
-    prefix inside the credential's destination. MCP secrets never enter Flue state, prompts, events, logs, or the
-    sandbox.
+    prefix inside the credential's destination. An OAuth client-credentials
+    version also pins its issuer, token endpoint, and resource: a separate
+    token broker sends the client secret only to that token endpoint, and the
+    resulting access token, cached per process and credential version, is
+    injected like a static bearer. The API process decrypts credentials for
+    discovery and credential tests as well. MCP secrets and tokens never enter
+    Flue state, prompts, events, logs, or the sandbox.
 15. API keys, model provider connections, storage provider connections,
     sandbox provider connections, and MCP servers/credentials/credential
     policies are organization-scoped rows shared by every project; their

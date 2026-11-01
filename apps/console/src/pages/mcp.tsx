@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useRef, useState, type FormEvent } from "react";
 import { useApi } from "../api/context";
+import { mcpResourceDestination } from "@oao/contracts";
 import type {
   CreateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
@@ -11,10 +12,15 @@ import type {
   AgentVersionConfig,
   McpCredential,
   McpCredentialPolicy,
+  McpAuthorizationDiscovery,
   McpServer,
   McpToolset,
   RotateMcpCredentialInput,
 } from "../api/types";
+
+type McpTokenEndpointAuthMethod = NonNullable<
+  NonNullable<McpCredential["oauth"]>["tokenEndpointAuthMethod"]
+>;
 import {
   Alert,
   Button,
@@ -123,6 +129,17 @@ export function McpPage() {
       setRotatingCredential(null);
       notify("MCP credential rotated.");
     },
+  });
+  // Tokens are cached per worker, so a fresh test is the only token status.
+  const test = useMutation({
+    mutationFn: (credentialId: string) => api.testMcpCredential(credentialId),
+    onSuccess: (result) =>
+      notify(
+        result.ok
+          ? `Token issued${result.expiresIn === null ? "" : ` for ${result.expiresIn}s`}${result.grantedScope ? ` with scope ${result.grantedScope}` : ""}.`
+          : `Credential test failed: ${result.errorCode.replaceAll("_", " ")}.`,
+      ),
+    onError: (error) => notify(`Credential test failed: ${error.message}`),
   });
   const revoke = useMutation({
     mutationFn: (credentialId: string) => api.revokeMcpCredential(credentialId),
@@ -252,6 +269,19 @@ export function McpPage() {
                           </td>
                           <td>
                             <span className="row">
+                              {item.oauth ? (
+                                <Button
+                                  size="sm"
+                                  icon={<Check size={13} />}
+                                  aria-label={`Test ${item.displayName}`}
+                                  disabled={
+                                    item.status !== "active" || test.isPending
+                                  }
+                                  onClick={() => test.mutate(item.id)}
+                                >
+                                  Test
+                                </Button>
+                              ) : null}
                               <Button
                                 size="sm"
                                 icon={<RefreshCw size={13} />}
@@ -690,6 +720,22 @@ function McpSetupDialog({
     useState<CreateMcpCredentialInput["kind"]>("static_bearer");
   const [headerName, setHeaderName] = useState("X-API-Key");
   const [secret, setSecret] = useState("");
+  // Discovery is kept with the endpoint it was run for, so editing the
+  // endpoint afterwards can never pin the credential to the old resource.
+  const [discovered, setDiscovered] = useState<{
+    readonly endpointUrl: string;
+    readonly discovery: McpAuthorizationDiscovery;
+  } | null>(null);
+  const currentEndpoint = useRef(endpointUrl);
+  currentEndpoint.current = endpointUrl;
+  const authorization =
+    discovered?.endpointUrl === endpointUrl ? discovered.discovery : null;
+  const [issuer, setIssuer] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [tokenEndpointAuthMethod, setTokenEndpointAuthMethod] =
+    useState<McpTokenEndpointAuthMethod>("client_secret_post");
+  const [scope, setScope] = useState("");
+  const [sendResource, setSendResource] = useState(true);
   const [exactOrigin, setExactOrigin] = useState("");
   const [pathPrefix, setPathPrefix] = useState("/");
   const [timeoutMs, setTimeoutMs] = useState(30_000);
@@ -713,9 +759,21 @@ function McpSetupDialog({
     key.length <= 90 && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(key);
   const serverReady =
     displayName.trim().length > 0 && validKey && derivedPolicy !== null;
+  const oauthSelected = credentialKind === "oauth_client_credentials";
+  const authorizationServer = authorization?.authorizationServers.find(
+    (entry) => entry.issuer === issuer && entry.problem === null,
+  );
+  const oauthReady =
+    !oauthSelected ||
+    resources.credential !== undefined ||
+    (authorizationServer?.tokenEndpoint !== null &&
+      authorizationServer !== undefined &&
+      clientId.trim().length > 0 &&
+      /^[!#-[\]-~]+(?: [!#-[\]-~]+)*$/u.test(scope));
   const authenticationReady =
     encryptionConfigured &&
     (resources.credential !== undefined || secret.length >= 8) &&
+    oauthReady &&
     exactOrigin.startsWith("https://") &&
     pathPrefix.startsWith("/") &&
     timeoutMs >= 1_000 &&
@@ -723,6 +781,26 @@ function McpSetupDialog({
     maximumResponseKiB >= 1 &&
     maximumResponseKiB <= 10_240 &&
     (credentialKind !== "api_key_header" || headerName.trim().length > 0);
+
+  const discoverAuthorization = useMutation({
+    mutationFn: (endpoint: string) =>
+      api.discoverMcpAuthorization({ endpointUrl: endpoint }),
+    onSuccess: (discovery, endpoint) => {
+      // A reply for an endpoint the operator has since changed is ignored.
+      if (endpoint !== currentEndpoint.current) return;
+      setDiscovered({ endpointUrl: endpoint, discovery });
+      const usable = discovery.authorizationServers.filter(
+        (entry) => entry.problem === null,
+      );
+      // Never pick a server silently when several are listed.
+      setIssuer(usable.length === 1 ? usable[0]!.issuer : "");
+      setScope(discovery.challengeScope ?? discovery.scopesSupported.join(" "));
+      // The credential, and so the policy, is pinned to the resource.
+      const destination = mcpResourceDestination(discovery.resource);
+      setExactOrigin(destination.origin);
+      setPathPrefix(destination.pathPrefix);
+    },
+  });
   const steps = ["Server", "Authentication", "Connect", "Tools", "Agent"];
 
   const provision = useMutation({
@@ -738,15 +816,43 @@ function McpSetupDialog({
         current = remember({ server });
       }
       if (!current.credential) {
-        const credential = await api.createMcpCredential({
+        const base = {
           key: `${key}-credential`,
           displayName: `${displayName.trim()} credential`,
-          kind: credentialKind,
-          headerName:
-            credentialKind === "api_key_header" ? headerName.trim() : null,
-          destination: { origin: exactOrigin, pathPrefix },
           secret,
-        });
+        };
+        const destination = { origin: exactOrigin, pathPrefix };
+        const credential = await api.createMcpCredential(
+          credentialKind === "oauth_client_credentials"
+            ? {
+                ...base,
+                kind: credentialKind,
+                headerName: null,
+                oauth: {
+                  resource: authorization!.resource,
+                  resourceMetadataUrl: authorization!.resourceMetadataUrl,
+                  issuer: authorizationServer!.issuer,
+                  tokenEndpoint: authorizationServer!.tokenEndpoint!,
+                  clientId: clientId.trim(),
+                  tokenEndpointAuthMethod,
+                  scope,
+                  sendResource,
+                },
+              }
+            : credentialKind === "api_key_header"
+              ? {
+                  ...base,
+                  kind: credentialKind,
+                  headerName: headerName.trim(),
+                  destination,
+                }
+              : {
+                  ...base,
+                  kind: credentialKind,
+                  headerName: null,
+                  destination,
+                },
+        );
         current = remember({ credential });
         setSecret("");
       }
@@ -843,8 +949,15 @@ function McpSetupDialog({
   ];
   const next = () => {
     if (step === 0 && serverReady) {
-      const policy = derivedPolicy!;
-      setExactOrigin(policy.exactOrigin);
+      // An OAuth credential's policy is its resource; others follow the URL.
+      const policy =
+        oauthSelected && authorization
+          ? mcpResourceDestination(authorization.resource)
+          : {
+              origin: derivedPolicy!.exactOrigin,
+              pathPrefix: derivedPolicy!.pathPrefix,
+            };
+      setExactOrigin(policy.origin);
       setPathPrefix(policy.pathPrefix);
       setNamespace(key.replaceAll("-", "_").slice(0, 64));
       setStep(1);
@@ -1005,14 +1118,30 @@ function McpSetupDialog({
             <Select
               value={credentialKind}
               disabled={resources.credential !== undefined}
-              onChange={(event) =>
-                setCredentialKind(
-                  event.currentTarget.value as CreateMcpCredentialInput["kind"],
-                )
-              }
+              onChange={(event) => {
+                const next = event.currentTarget
+                  .value as CreateMcpCredentialInput["kind"];
+                setCredentialKind(next);
+                const destination =
+                  next === "oauth_client_credentials" && authorization
+                    ? mcpResourceDestination(authorization.resource)
+                    : derivedPolicy
+                      ? {
+                          origin: derivedPolicy.exactOrigin,
+                          pathPrefix: derivedPolicy.pathPrefix,
+                        }
+                      : null;
+                if (destination) {
+                  setExactOrigin(destination.origin);
+                  setPathPrefix(destination.pathPrefix);
+                }
+              }}
             >
               <option value="static_bearer">Bearer token</option>
               <option value="api_key_header">API-key header</option>
+              <option value="oauth_client_credentials">
+                OAuth client credentials
+              </option>
             </Select>
           </Field>
           {credentialKind === "api_key_header" ? (
@@ -1024,12 +1153,39 @@ function McpSetupDialog({
               />
             </Field>
           ) : null}
+          {oauthSelected ? (
+            <OAuthAuthorizationFields
+              discovery={authorization}
+              discovering={discoverAuthorization.isPending}
+              error={discoverAuthorization.error}
+              locked={resources.credential !== undefined}
+              issuer={issuer}
+              clientId={clientId}
+              tokenEndpointAuthMethod={tokenEndpointAuthMethod}
+              scope={scope}
+              sendResource={sendResource}
+              onDiscover={() => discoverAuthorization.mutate(endpointUrl)}
+              onIssuer={setIssuer}
+              onClientId={setClientId}
+              onTokenEndpointAuthMethod={setTokenEndpointAuthMethod}
+              onScope={setScope}
+              onSendResource={setSendResource}
+            />
+          ) : null}
           <Field
-            label={resources.credential ? "Secret stored" : "Secret"}
+            label={
+              resources.credential
+                ? "Secret stored"
+                : oauthSelected
+                  ? "Client secret"
+                  : "Secret"
+            }
             hint={
               resources.credential
                 ? "The encrypted credential was saved and cannot be displayed."
-                : "At least 8 characters."
+                : oauthSelected
+                  ? "Write-only. OAO only ever sends it to the confirmed token endpoint."
+                  : "At least 8 characters."
             }
           >
             <Input
@@ -1052,6 +1208,7 @@ function McpSetupDialog({
                   type="url"
                   value={exactOrigin}
                   disabled={
+                    oauthSelected ||
                     resources.credential !== undefined ||
                     resources.policy !== undefined
                   }
@@ -1071,6 +1228,7 @@ function McpSetupDialog({
                 <Input
                   value={pathPrefix}
                   disabled={
+                    oauthSelected ||
                     resources.credential !== undefined ||
                     resources.policy !== undefined
                   }
@@ -1134,9 +1292,40 @@ function McpSetupDialog({
               <dd>
                 {credentialKind === "static_bearer"
                   ? "Bearer token"
-                  : headerName}
+                  : credentialKind === "oauth_client_credentials"
+                    ? "OAuth client credentials"
+                    : headerName}
               </dd>
             </div>
+            {oauthSelected && authorizationServer ? (
+              <>
+                <div>
+                  <dt>Issuer</dt>
+                  <dd>
+                    <code>{authorizationServer.issuer}</code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Token endpoint</dt>
+                  <dd>
+                    <code>{authorizationServer.tokenEndpoint}</code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Client</dt>
+                  <dd>
+                    <code>{clientId}</code> ·{" "}
+                    {tokenEndpointAuthMethod.replaceAll("_", " ")}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Scope</dt>
+                  <dd>
+                    <code>{scope}</code>
+                  </dd>
+                </div>
+              </>
+            ) : null}
             <div>
               <dt>Destination</dt>
               <dd>
@@ -1259,6 +1448,192 @@ function McpSetupDialog({
   );
 }
 
+const AUTHORIZATION_SERVER_PROBLEMS: Record<
+  NonNullable<
+    McpAuthorizationDiscovery["authorizationServers"][number]["problem"]
+  >,
+  string
+> = {
+  metadata_unavailable: "metadata unavailable",
+  issuer_mismatch: "issuer does not match",
+  token_endpoint_missing: "no token endpoint",
+  token_endpoint_insecure: "token endpoint is not HTTPS",
+  token_endpoint_unreachable: "token endpoint is not public",
+};
+
+/**
+ * Runs credential-free authorization discovery and shows what it found for
+ * the operator to confirm before entering the client ID and secret.
+ */
+function OAuthAuthorizationFields({
+  discovery,
+  discovering,
+  error,
+  locked,
+  issuer,
+  clientId,
+  tokenEndpointAuthMethod,
+  scope,
+  sendResource,
+  onDiscover,
+  onIssuer,
+  onClientId,
+  onTokenEndpointAuthMethod,
+  onScope,
+  onSendResource,
+}: {
+  readonly discovery: McpAuthorizationDiscovery | null;
+  readonly discovering: boolean;
+  readonly error: Error | null;
+  readonly locked: boolean;
+  readonly issuer: string;
+  readonly clientId: string;
+  readonly tokenEndpointAuthMethod: McpTokenEndpointAuthMethod;
+  readonly scope: string;
+  readonly sendResource: boolean;
+  readonly onDiscover: () => void;
+  readonly onIssuer: (value: string) => void;
+  readonly onClientId: (value: string) => void;
+  readonly onTokenEndpointAuthMethod: (
+    value: McpTokenEndpointAuthMethod,
+  ) => void;
+  readonly onScope: (value: string) => void;
+  readonly onSendResource: (value: boolean) => void;
+}) {
+  const selected = discovery?.authorizationServers.find(
+    (server) => server.issuer === issuer,
+  );
+  return (
+    <div className="stack">
+      <span className="row">
+        <Button
+          icon={<RefreshCw size={14} />}
+          loading={discovering}
+          disabled={locked}
+          onClick={onDiscover}
+        >
+          {discovery ? "Discover again" : "Discover authorization"}
+        </Button>
+        <small>
+          Reads the server&apos;s public OAuth metadata. No credential is sent.
+        </small>
+      </span>
+      {error ? <FormError>{error.message}</FormError> : null}
+      {discovery ? (
+        <>
+          <dl className="wizard-review">
+            <div>
+              <dt>Resource</dt>
+              <dd>
+                <code>{discovery.resource}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Resource metadata</dt>
+              <dd>
+                <code>{discovery.resourceMetadataUrl}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Scopes supported</dt>
+              <dd>{discovery.scopesSupported.join(" ") || "Not listed"}</dd>
+            </div>
+          </dl>
+          <Field
+            label="Authorization server"
+            hint="Confirm the issuer that registered this client."
+          >
+            <Select
+              value={issuer}
+              disabled={locked}
+              onChange={(event) => onIssuer(event.currentTarget.value)}
+            >
+              <option value="">Select an authorization server</option>
+              {discovery.authorizationServers.map((server) => (
+                <option
+                  key={server.issuer}
+                  value={server.issuer}
+                  disabled={server.problem !== null}
+                >
+                  {server.problem
+                    ? `${server.issuer} (${AUTHORIZATION_SERVER_PROBLEMS[server.problem]})`
+                    : server.issuer}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          {selected && selected.problem === null ? (
+            <dl className="wizard-review">
+              <div>
+                <dt>Token endpoint</dt>
+                <dd>
+                  <code>{selected.tokenEndpoint}</code>
+                </dd>
+              </div>
+              <div>
+                <dt>Client authentication methods</dt>
+                <dd>
+                  {selected.tokenEndpointAuthMethodsSupported?.join(", ") ??
+                    "Not listed"}
+                </dd>
+              </div>
+              <div>
+                <dt>Grant types</dt>
+                <dd>
+                  {selected.grantTypesSupported?.join(", ") ?? "Not listed"}
+                </dd>
+              </div>
+            </dl>
+          ) : null}
+          <Field
+            label="Client ID"
+            hint="The pre-registered machine-to-machine client."
+          >
+            <Input
+              autoComplete="off"
+              value={clientId}
+              disabled={locked}
+              onChange={(event) => onClientId(event.currentTarget.value)}
+            />
+          </Field>
+          <Field label="Client authentication">
+            <Select
+              value={tokenEndpointAuthMethod}
+              disabled={locked}
+              onChange={(event) =>
+                onTokenEndpointAuthMethod(
+                  event.currentTarget.value as McpTokenEndpointAuthMethod,
+                )
+              }
+            >
+              <option value="client_secret_post">
+                Client secret in the request body
+              </option>
+              <option value="client_secret_basic">
+                Client secret in HTTP Basic
+              </option>
+            </Select>
+          </Field>
+          <Field label="Scope" hint="Space-separated OAuth scopes.">
+            <Input
+              value={scope}
+              disabled={locked}
+              onChange={(event) => onScope(event.currentTarget.value)}
+            />
+          </Field>
+          <CheckboxRow
+            label="Send the resource parameter"
+            description="MCP requires it (RFC 8707). Turn it off only for an authorization server that rejects it."
+            checked={sendResource}
+            disabled={locked}
+            onChange={(event) => onSendResource(event.currentTarget.checked)}
+          />
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function RotateCredentialDialog({
   credential,
   pending,
@@ -1275,10 +1650,12 @@ function RotateCredentialDialog({
   const [secret, setSecret] = useState("");
   const [origin, setOrigin] = useState("");
   const [pathPrefix, setPathPrefix] = useState("/");
+  const [clientId, setClientId] = useState(credential.oauth?.clientId ?? "");
   // A credential stored before destinations existed is pinned on rotation.
-  const pin = credential.destination === null;
+  const pin = credential.destination === null && credential.oauth === null;
   const invalid =
     secret.length < 8 ||
+    (credential.oauth !== null && clientId.trim().length === 0) ||
     (pin && (!origin.startsWith("https://") || !pathPrefix.startsWith("/")));
   return (
     <Dialog
@@ -1289,7 +1666,11 @@ function RotateCredentialDialog({
         event.preventDefault();
         if (invalid) return;
         onSubmit(
-          pin ? { secret, destination: { origin, pathPrefix } } : { secret },
+          pin
+            ? { secret, destination: { origin, pathPrefix } }
+            : credential.oauth && clientId.trim() !== credential.oauth.clientId
+              ? { secret, oauth: { clientId: clientId.trim() } }
+              : { secret },
         );
       }}
       footer={
@@ -1326,7 +1707,19 @@ function RotateCredentialDialog({
           </Field>
         </>
       ) : null}
-      <Field label="New secret">
+      {credential.oauth ? (
+        <Field
+          label="Client ID"
+          hint="Change it only when the authorization server issued a new client."
+        >
+          <Input
+            autoComplete="off"
+            value={clientId}
+            onChange={(event) => setClientId(event.target.value)}
+          />
+        </Field>
+      ) : null}
+      <Field label={credential.oauth ? "New client secret" : "New secret"}>
         <Input
           type="password"
           autoComplete="new-password"
@@ -1401,8 +1794,9 @@ function McpCreateDialog({
   const [key, setKey] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [secret, setSecret] = useState("");
-  const [credentialKind, setCredentialKind] =
-    useState<CreateMcpCredentialInput["kind"]>("static_bearer");
+  const [credentialKind, setCredentialKind] = useState<
+    "static_bearer" | "api_key_header"
+  >("static_bearer");
   const [headerName, setHeaderName] = useState("X-API-Key");
   const [endpointUrl, setEndpointUrl] = useState("");
   const [transport, setTransport] =
@@ -1452,14 +1846,24 @@ function McpCreateDialog({
     if (kind === "credential")
       onSubmit({
         kind,
-        value: {
-          key,
-          displayName: displayName.trim(),
-          kind: credentialKind,
-          headerName: credentialKind === "api_key_header" ? headerName : null,
-          destination: { origin: exactOrigin, pathPrefix },
-          secret,
-        },
+        value:
+          credentialKind === "api_key_header"
+            ? {
+                key,
+                displayName: displayName.trim(),
+                kind: credentialKind,
+                headerName,
+                destination: { origin: exactOrigin, pathPrefix },
+                secret,
+              }
+            : {
+                key,
+                displayName: displayName.trim(),
+                kind: credentialKind,
+                headerName: null,
+                destination: { origin: exactOrigin, pathPrefix },
+                secret,
+              },
       });
     if (kind === "server")
       onSubmit({
@@ -1533,7 +1937,7 @@ function McpCreateDialog({
                 value={credentialKind}
                 onChange={(event) =>
                   setCredentialKind(
-                    event.target.value as CreateMcpCredentialInput["kind"],
+                    event.target.value as "static_bearer" | "api_key_header",
                   )
                 }
               >
@@ -1541,6 +1945,10 @@ function McpCreateDialog({
                 <option value="api_key_header">API key header</option>
               </Select>
             </Field>
+            <small>
+              Use <strong>Add MCP server</strong> for OAuth client credentials:
+              it discovers and confirms the authorization server first.
+            </small>
             {credentialKind === "api_key_header" ? (
               <Field label="Header name">
                 <Input

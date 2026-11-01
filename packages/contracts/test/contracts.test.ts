@@ -27,6 +27,8 @@ import {
   parseCreateMcpCredentialInput,
   parseCreateMcpCredentialPolicyInput,
   parseRotateMcpCredentialInput,
+  parseDiscoverMcpAuthorizationInput,
+  McpCredentialTestResultSchema,
   mcpDestinationContains,
   mcpPathWithin,
   CreateProjectInputSchema,
@@ -789,16 +791,15 @@ test("MCP credentials pin an HTTPS destination that policies must lie inside", (
     origin: "https://mcp.example.test",
     pathPrefix: "/mcp",
   };
-  assert.deepEqual(
-    parseCreateMcpCredentialInput({
-      key: "pinned",
-      displayName: "Pinned",
-      kind: "static_bearer",
-      destination,
-      secret: "secret-value",
-    }).destination,
+  const pinned = parseCreateMcpCredentialInput({
+    key: "pinned",
+    displayName: "Pinned",
+    kind: "static_bearer",
     destination,
-  );
+    secret: "secret-value",
+  });
+  assert.ok(pinned.kind === "static_bearer");
+  assert.deepEqual(pinned.destination, destination);
   assert.throws(() =>
     parseCreateMcpCredentialInput({
       key: "unpinned",
@@ -855,6 +856,87 @@ test("MCP credentials pin an HTTPS destination that policies must lie inside", (
       pathPrefix: "/",
     }),
     false,
+  );
+});
+
+test("OAuth client-credentials MCP credentials pin a confirmed authorization configuration", () => {
+  const oauth = {
+    resource: "https://app.example.test/api/integrations/oao/extraction/mcp",
+    resourceMetadataUrl:
+      "https://app.example.test/.well-known/oauth-protected-resource/api/integrations/oao/extraction/mcp",
+    issuer: "https://auth.example.test",
+    tokenEndpoint: "https://auth.example.test/oauth2/token",
+    clientId: "client_01EXAMPLE",
+    scope: "extraction:mcp",
+  };
+  const parsed = parseCreateMcpCredentialInput({
+    key: "extraction",
+    displayName: "Extraction",
+    kind: "oauth_client_credentials",
+    oauth,
+    secret: "client-secret-value",
+  });
+  assert.ok(parsed.kind === "oauth_client_credentials");
+  assert.deepEqual(parsed.oauth, {
+    ...oauth,
+    tokenEndpointAuthMethod: "client_secret_post",
+    sendResource: true,
+  });
+  for (const unsafe of [
+    { tokenEndpoint: "http://auth.example.test/oauth2/token" },
+    { issuer: "https://user@auth.example.test" },
+    { scope: "extraction:mcp  extra" },
+    { scope: 'quoted"scope' },
+    { tokenEndpointAuthMethod: "private_key_jwt" },
+    { clientId: "" },
+  ])
+    assert.throws(
+      () =>
+        parseCreateMcpCredentialInput({
+          key: "extraction",
+          displayName: "Extraction",
+          kind: "oauth_client_credentials",
+          oauth: { ...oauth, ...unsafe },
+          secret: "client-secret-value",
+        }),
+      JSON.stringify(unsafe),
+    );
+  // The destination is the pinned resource; it cannot be given separately.
+  assert.throws(() =>
+    parseCreateMcpCredentialInput({
+      key: "extraction",
+      displayName: "Extraction",
+      kind: "oauth_client_credentials",
+      oauth,
+      destination: { origin: "https://attacker.example.test", pathPrefix: "/" },
+      secret: "client-secret-value",
+    }),
+  );
+  assert.deepEqual(
+    parseRotateMcpCredentialInput({
+      secret: "next-client-secret",
+      oauth: { clientId: "client_02EXAMPLE" },
+    }).oauth,
+    { clientId: "client_02EXAMPLE" },
+  );
+  assert.throws(() =>
+    parseRotateMcpCredentialInput({
+      secret: "next-client-secret",
+      oauth: { resource: "https://attacker.example.test/mcp" },
+    }),
+  );
+  assert.throws(() =>
+    parseDiscoverMcpAuthorizationInput({ endpointUrl: "http://app.test/mcp" }),
+  );
+  assert.deepEqual(
+    v.parse(McpCredentialTestResultSchema, {
+      ok: false,
+      errorCode: "credential_rejected",
+    }),
+    { ok: false, errorCode: "credential_rejected" },
+  );
+  assert.throws(() =>
+    v.parse(McpCredentialTestResultSchema, { ok: false, errorCode: "leak" }),
   );
 });
 

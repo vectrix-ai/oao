@@ -96,6 +96,9 @@ import type {
   McpToolsetList,
   CreateMcpServerInput,
   DiscoverMcpServerInput,
+  DiscoverMcpAuthorizationInput,
+  McpAuthorizationDiscovery,
+  McpCredentialTestResult,
   CreateMcpCredentialInput,
   RotateMcpCredentialInput,
   CreateMcpCredentialPolicyInput,
@@ -1043,6 +1046,38 @@ export class OaoClient {
       "POST",
       input,
       options,
+    );
+  }
+
+  /**
+   * Reads an MCP endpoint's OAuth authorization metadata without sending a
+   * credential, for an operator to confirm before creating an
+   * `oauth_client_credentials` credential.
+   */
+  discoverMcpAuthorization(
+    projectId: string,
+    input: DiscoverMcpAuthorizationInput,
+    options?: RequestOptions,
+  ): Promise<McpAuthorizationDiscovery> {
+    return this.#request(this.routes.mcpAuthorizationDiscovery(projectId), {
+      ...options,
+      method: "POST",
+      body: input,
+    });
+  }
+
+  /**
+   * Requests a fresh token for an OAuth credential and returns only its
+   * lifetime and granted scope, or a safe error code.
+   */
+  testMcpCredential(
+    projectId: string,
+    credentialId: string,
+    options?: RequestOptions,
+  ): Promise<McpCredentialTestResult> {
+    return this.#request(
+      this.routes.testMcpCredential(projectId, credentialId),
+      { ...options, method: "POST" },
     );
   }
 

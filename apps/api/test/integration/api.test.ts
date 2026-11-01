@@ -15,7 +15,13 @@ import {
   listApprovedModelCatalog,
 } from "@oao/models-openrouter";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
-import type { McpConnectionDefinition, McpRemotePort } from "@oao/mcp-remote";
+import {
+  McpRemoteError,
+  type McpAuthorizationDiscovery,
+  type McpConnectionDefinition,
+  type McpOAuthClientCredentialsMaterial,
+  type McpRemotePort,
+} from "@oao/mcp-remote";
 import {
   brandedId,
   type AuthorizationScope,
@@ -132,9 +138,53 @@ class TransactionalTestRuntimeCommands implements RuntimeCommandPort {
 
 let fakeMcpDiscoveryRevision = 1;
 const fakeMcpConnections: McpConnectionDefinition[] = [];
+const extractionEndpoint =
+  "https://extraction.example.test/api/integrations/oao/extraction/mcp";
+const fakeAuthorization: McpAuthorizationDiscovery = {
+  endpointUrl: extractionEndpoint,
+  resource: extractionEndpoint,
+  resourceName: null,
+  resourceMetadataUrl:
+    "https://extraction.example.test/.well-known/oauth-protected-resource/api/integrations/oao/extraction/mcp",
+  resourceMetadataSource: "www_authenticate",
+  challengeScope: "extraction:mcp",
+  scopesSupported: ["extraction:mcp"],
+  authorizationServers: [
+    {
+      issuer: "https://auth.example.test",
+      tokenEndpoint: "https://auth.example.test/oauth2/token",
+      metadataSource: "oauth",
+      tokenEndpointAuthMethodsSupported: [
+        "client_secret_post",
+        "client_secret_basic",
+      ],
+      grantTypesSupported: ["authorization_code"],
+      scopesSupported: null,
+      problem: null,
+    },
+  ],
+};
+const fakeAuthorizationRequests: string[] = [];
+const fakeCredentialTests: McpOAuthClientCredentialsMaterial[] = [];
+let fakeDiscoveryFailure: McpRemoteError | undefined;
+let fakeAuthorizationFailure: McpRemoteError | undefined;
+let fakeCredentialTestFailure: McpRemoteError | undefined;
 const fakeMcpRemote: McpRemotePort = {
+  discoverAuthorization: (endpointUrl) => {
+    fakeAuthorizationRequests.push(endpointUrl);
+    if (fakeAuthorizationFailure)
+      return Promise.reject(fakeAuthorizationFailure);
+    return Promise.resolve({ ...fakeAuthorization, endpointUrl });
+  },
+  testCredential: (credential) => {
+    fakeCredentialTests.push(credential);
+    return fakeCredentialTestFailure
+      ? Promise.reject(fakeCredentialTestFailure)
+      : Promise.resolve({ expiresIn: 3600, grantedScope: credential.scope });
+  },
   discover: (connection) => {
     fakeMcpConnections.push(connection);
+    if (fakeDiscoveryFailure) return Promise.reject(fakeDiscoveryFailure);
     return Promise.resolve([
       {
         name: "lookup_trace",
@@ -751,10 +801,10 @@ test(
         );
         await pool.query(
           `INSERT INTO oao.mcp_credential_versions (
-             organization_id,id,credential_id,version,encrypted_secret,
-             encryption_nonce,encryption_tag,encryption_key_version,
-             credential_fingerprint,created_by_principal_id
-           ) VALUES ($1,$2,$3,1,$4,$5,$6,1,$7,$8)`,
+             organization_id,id,credential_id,version,credential_kind,
+             encrypted_secret,encryption_nonce,encryption_tag,
+             encryption_key_version,credential_fingerprint,created_by_principal_id
+           ) VALUES ($1,$2,$3,1,'static_bearer',$4,$5,$6,1,$7,$8)`,
           [
             organizationId,
             versionId,
@@ -904,6 +954,338 @@ test(
           ),
         );
         assert.equal(inside.status, 201);
+      },
+    );
+
+    await t.test(
+      "OAuth client-credentials MCP credentials pin confirmed authorization metadata",
+      async () => {
+        const discovered = await app.request(
+          `${projectPath}/mcp-authorization-discovery`,
+          jsonRequest({ endpointUrl: extractionEndpoint }, "unused"),
+        );
+        assert.equal(discovered.status, 200);
+        assert.deepEqual(await discovered.json(), fakeAuthorization);
+        const authorizationServer = fakeAuthorization.authorizationServers[0]!;
+        const oauth = {
+          resource: fakeAuthorization.resource,
+          resourceMetadataUrl: fakeAuthorization.resourceMetadataUrl,
+          issuer: authorizationServer.issuer,
+          tokenEndpoint: authorizationServer.tokenEndpoint!,
+          clientId: "client_integration_extraction",
+          scope: "extraction:mcp",
+        };
+
+        // A configuration discovery does not confirm is never pinned.
+        const unconfirmed = await app.request(
+          `${projectPath}/mcp-credentials`,
+          jsonRequest(
+            {
+              key: "integration-extraction-unconfirmed",
+              displayName: "Unconfirmed extraction",
+              kind: "oauth_client_credentials",
+              oauth: {
+                ...oauth,
+                tokenEndpoint: "https://attacker.example.test/token",
+              },
+              secret: "integration-oauth-client-secret",
+            },
+            "mcp-oauth-credential-unconfirmed-1",
+          ),
+        );
+        assert.equal(unconfirmed.status, 400);
+
+        const createdResponse = await app.request(
+          `${projectPath}/mcp-credentials`,
+          jsonRequest(
+            {
+              key: "integration-extraction",
+              displayName: "Integration extraction",
+              kind: "oauth_client_credentials",
+              oauth,
+              secret: "integration-oauth-client-secret",
+            },
+            "mcp-oauth-credential-1",
+          ),
+        );
+        assert.equal(createdResponse.status, 201);
+        const createdText = await createdResponse.text();
+        assert.doesNotMatch(createdText, /integration-oauth-client-secret/u);
+        const created = JSON.parse(createdText) as {
+          id: string;
+          kind: string;
+          destination: unknown;
+          oauth: unknown;
+          credentialFingerprint: string;
+        };
+        assert.equal(created.kind, "oauth_client_credentials");
+        assert.deepEqual(created.destination, {
+          origin: "https://extraction.example.test",
+          pathPrefix: "/api/integrations/oao/extraction/mcp",
+        });
+        assert.deepEqual(created.oauth, {
+          ...oauth,
+          tokenEndpointAuthMethod: "client_secret_post",
+          sendResource: true,
+        });
+        // The fingerprint covers the secret and the pinned configuration.
+        assert.notEqual(
+          created.credentialFingerprint,
+          createHash("sha256")
+            .update("integration-oauth-client-secret")
+            .digest("hex")
+            .slice(0, 12),
+        );
+
+        // A retry of the completed create replays its saved response even
+        // when the metadata server is unavailable.
+        fakeAuthorizationFailure = new McpRemoteError(
+          "authorization_discovery_failed",
+          "The MCP server publishes no OAuth protected resource metadata",
+        );
+        const replayed = await app.request(
+          `${projectPath}/mcp-credentials`,
+          jsonRequest(
+            {
+              key: "integration-extraction",
+              displayName: "Integration extraction",
+              kind: "oauth_client_credentials",
+              oauth,
+              secret: "integration-oauth-client-secret",
+            },
+            "mcp-oauth-credential-1",
+          ),
+        );
+        fakeAuthorizationFailure = undefined;
+        assert.equal(replayed.status, 201);
+        assert.equal(
+          ((await replayed.json()) as { id: string }).id,
+          created.id,
+        );
+
+        const outside = await app.request(
+          `${projectPath}/mcp-credential-policies`,
+          jsonRequest(
+            {
+              key: "integration-extraction-outside",
+              displayName: "Outside the resource",
+              credentialId: created.id,
+              exactOrigin: "https://extraction.example.test",
+              pathPrefix: "/api/",
+            },
+            "mcp-oauth-policy-outside-1",
+          ),
+        );
+        assert.equal(outside.status, 400);
+        const policy = (await (
+          await app.request(
+            `${projectPath}/mcp-credential-policies`,
+            jsonRequest(
+              {
+                key: "integration-extraction-egress",
+                displayName: "Extraction egress",
+                credentialId: created.id,
+                exactOrigin: "https://extraction.example.test",
+                pathPrefix: "/api/integrations/oao/extraction/mcp",
+              },
+              "mcp-oauth-policy-1",
+            ),
+          )
+        ).json()) as { latestVersionId: string };
+        const server = (await (
+          await app.request(
+            `${projectPath}/mcp-servers`,
+            jsonRequest(
+              {
+                key: "integration-extraction",
+                displayName: "Integration extraction",
+                endpointUrl: extractionEndpoint,
+                transport: "streamable_http",
+              },
+              "mcp-oauth-server-1",
+            ),
+          )
+        ).json()) as { id: string };
+        const discovery = await app.request(
+          `${projectPath}/mcp-servers/${server.id}/discover`,
+          jsonRequest(
+            { credentialPolicyVersionId: policy.latestVersionId },
+            "unused",
+          ),
+        );
+        assert.equal(discovery.status, 200);
+        const connection = fakeMcpConnections.at(-1)!;
+        assert.equal(connection.credential?.kind, "oauth_client_credentials");
+        assert.ok(connection.credential?.kind === "oauth_client_credentials");
+        assert.equal(
+          connection.credential.organizationId,
+          integrationPrincipal.organizationId,
+        );
+        assert.equal(
+          connection.credential.clientSecret,
+          "integration-oauth-client-secret",
+        );
+        assert.equal(connection.credential.resource, extractionEndpoint);
+        const firstVersionId = connection.credential.credentialVersionId;
+
+        // A remote OAuth failure surfaces only its safe code.
+        fakeDiscoveryFailure = new McpRemoteError(
+          "credential_token_failed",
+          "The authorization server refused the token request (invalid_client)",
+        );
+        const failed = await app.request(
+          `${projectPath}/mcp-servers/${server.id}/discover`,
+          jsonRequest(
+            { credentialPolicyVersionId: policy.latestVersionId },
+            "unused",
+          ),
+        );
+        fakeDiscoveryFailure = undefined;
+        assert.equal(failed.status, 400);
+        assert.match(
+          ((await failed.json()) as { error: { message: string } }).error
+            .message,
+          /credential_token_failed/u,
+        );
+        const failureEvent = await pool.query<{ payload: unknown }>(
+          `SELECT public_payload AS payload FROM oao.product_events
+            WHERE organization_id=$1 AND project_id=$2
+              AND event_kind='mcp.discovery_failed' AND aggregate_id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            server.id,
+          ],
+        );
+        assert.equal(
+          (failureEvent.rows.at(-1)?.payload as { errorCode?: string })
+            .errorCode,
+          "credential_token_failed",
+        );
+
+        const tested = await app.request(
+          `${projectPath}/mcp-credentials/${created.id}/test`,
+          { method: "POST" },
+        );
+        assert.equal(tested.status, 200);
+        assert.deepEqual(await tested.json(), {
+          ok: true,
+          expiresIn: 3600,
+          grantedScope: "extraction:mcp",
+        });
+        fakeCredentialTestFailure = new McpRemoteError(
+          "credential_rejected",
+          "The MCP server rejected the credential",
+        );
+        const rejected = await app.request(
+          `${projectPath}/mcp-credentials/${created.id}/test`,
+          { method: "POST" },
+        );
+        fakeCredentialTestFailure = undefined;
+        assert.deepEqual(await rejected.json(), {
+          ok: false,
+          errorCode: "credential_rejected",
+        });
+
+        // Rotating the secret and client ID keeps the pinned metadata and
+        // needs no new discovery.
+        const requestsBefore = fakeAuthorizationRequests.length;
+        const rotatedResponse = await app.request(
+          `${projectPath}/mcp-credentials/${created.id}/rotate`,
+          jsonRequest(
+            {
+              secret: "rotated-integration-oauth-client-secret",
+              oauth: {
+                clientId: "client_integration_extraction_2",
+                tokenEndpointAuthMethod: "client_secret_basic",
+              },
+            },
+            "mcp-oauth-rotate-1",
+          ),
+        );
+        assert.equal(rotatedResponse.status, 200);
+        const rotated = (await rotatedResponse.json()) as {
+          credentialVersion: number;
+          destination: unknown;
+          oauth: { clientId: string; tokenEndpointAuthMethod: string };
+        };
+        assert.equal(fakeAuthorizationRequests.length, requestsBefore);
+        assert.equal(rotated.credentialVersion, 2);
+        assert.deepEqual(rotated.destination, created.destination);
+        assert.equal(rotated.oauth.clientId, "client_integration_extraction_2");
+        assert.equal(
+          rotated.oauth.tokenEndpointAuthMethod,
+          "client_secret_basic",
+        );
+        await app.request(`${projectPath}/mcp-credentials/${created.id}/test`, {
+          method: "POST",
+        });
+        assert.notEqual(
+          fakeCredentialTests.at(-1)?.credentialVersionId,
+          firstVersionId,
+        );
+        assert.equal(
+          fakeCredentialTests.at(-1)?.clientSecret,
+          "rotated-integration-oauth-client-secret",
+        );
+
+        // A retry of the completed rotation replays, not rotates again.
+        const replayedRotation = await app.request(
+          `${projectPath}/mcp-credentials/${created.id}/rotate`,
+          jsonRequest(
+            {
+              secret: "rotated-integration-oauth-client-secret",
+              oauth: {
+                clientId: "client_integration_extraction_2",
+                tokenEndpointAuthMethod: "client_secret_basic",
+              },
+            },
+            "mcp-oauth-rotate-1",
+          ),
+        );
+        assert.equal(replayedRotation.status, 200);
+        assert.equal(
+          ((await replayedRotation.json()) as { credentialVersion: number })
+            .credentialVersion,
+          2,
+        );
+
+        for (const [index, body] of [
+          {
+            secret: "rotated-integration-oauth-client-secret-2",
+            oauth: { tokenEndpoint: "https://attacker.example.test/token" },
+          },
+          {
+            secret: "rotated-integration-oauth-client-secret-2",
+            destination: {
+              origin: "https://attacker.example.test",
+              pathPrefix: "/",
+            },
+          },
+        ].entries()) {
+          const refused = await app.request(
+            `${projectPath}/mcp-credentials/${created.id}/rotate`,
+            jsonRequest(body, `mcp-oauth-rotate-refused-${index}`),
+          );
+          assert.equal(refused.status, 400, JSON.stringify(body));
+        }
+
+        const staticTest = await app.request(
+          `${projectPath}/mcp-credentials/${
+            (
+              (await (
+                await app.request(`${projectPath}/mcp-credentials`)
+              ).json()) as { data: readonly { id: string; kind: string }[] }
+            ).data.find((item) => item.kind === "static_bearer")!.id
+          }/test`,
+          { method: "POST" },
+        );
+        assert.equal(staticTest.status, 400);
+
+        const audit = await app.request(`${projectPath}/audit?limit=200`);
+        const auditText = await audit.text();
+        assert.doesNotMatch(auditText, /integration-oauth-client-secret/u);
+        assert.match(auditText, /mcp\.credential_tested/u);
       },
     );
 

@@ -1,22 +1,51 @@
-import { lookup } from "node:dns/promises";
-import { isIP, type LookupFunction } from "node:net";
-import { request as httpRequest } from "node:http";
-import { request as httpsRequest } from "node:https";
-import { Readable, Transform } from "node:stream";
 import {
   Client,
   SSEClientTransport,
   StreamableHTTPClientTransport,
+  extractWWWAuthenticateParams,
   type FetchLike,
   type Tool,
 } from "@modelcontextprotocol/client";
 import { validateToolJsonSchema, validateToolJsonValue } from "@oao/contracts";
+import {
+  requestBody,
+  requestedUrl,
+  sendPinned,
+  type McpEgressOptions,
+} from "./egress.js";
+import {
+  McpRemoteError,
+  McpTokenBroker,
+  OAUTH_CLIENT_CREDENTIALS_EXTENSION,
+  discoverMcpAuthorization,
+  matchesPinnedAuthorization,
+  sameMcpUrl,
+  type McpAuthorizationDiscovery,
+  type McpCredentialTestResult,
+  type McpOAuthClientCredentialsMaterial,
+} from "./oauth.js";
+
+export { isPublicNetworkAddress, type McpEgressOptions } from "./egress.js";
+export {
+  McpRemoteError,
+  McpTokenBroker,
+  OAUTH_CLIENT_CREDENTIALS_EXTENSION,
+  createBrokeredTokenFetch,
+  discoverMcpAuthorization,
+  matchesPinnedAuthorization,
+  sameResource,
+  type McpAuthorizationDiscovery,
+  type McpAuthorizationServerDiscovery,
+  type McpCredentialTestResult,
+  type McpOAuthClientCredentialsMaterial,
+  type McpRemoteErrorCode,
+  type McpTokenEndpointAuthMethod,
+} from "./oauth.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAXIMUM_RESPONSE_BYTES = 1_048_576;
 const MAXIMUM_DISCOVERED_TOOLS = 256;
 const MAXIMUM_DESCRIPTION_CHARACTERS = 2_000;
-const MAXIMUM_REQUEST_BYTES = 262_144;
 const FORBIDDEN_SECRET_HEADERS = new Set([
   "connection",
   "content-length",
@@ -37,7 +66,8 @@ export type McpCredentialMaterial =
       readonly kind: "api_key_header";
       readonly headerName: string;
       readonly secret: string;
-    };
+    }
+  | McpOAuthClientCredentialsMaterial;
 
 export interface McpCredentialDestination {
   readonly origin: string;
@@ -87,16 +117,29 @@ export interface McpRemotePort {
     },
     signal?: AbortSignal,
   ): Promise<McpToolResult>;
-}
-
-export interface McpEgressOptions {
-  /** Test-only escape hatch. Production callers must leave this disabled. */
-  readonly allowPrivateNetwork?: boolean;
-  readonly resolve?: (
-    hostname: string,
-  ) => Promise<
-    readonly { readonly address: string; readonly family: number }[]
-  >;
+  /** Credential-free authorization discovery for a new OAuth credential. */
+  discoverAuthorization(
+    endpointUrl: string,
+    signal?: AbortSignal,
+  ): Promise<McpAuthorizationDiscovery>;
+  /**
+   * Re-checks the pinned authorization metadata and requests a fresh token.
+   * Returns only its lifetime and granted scope, never the token.
+   */
+  testCredential(
+    credential: McpOAuthClientCredentialsMaterial,
+    signal?: AbortSignal,
+  ): Promise<McpCredentialTestResult>;
+  /**
+   * Obtains the access token a later call will use, so token failures are
+   * known before a call attempt is recorded. A no-op for static credentials.
+   */
+  prepareCredential?(
+    credential: McpCredentialMaterial,
+    signal?: AbortSignal,
+    /** The policy timeout the token request must also respect. */
+    timeoutMs?: number,
+  ): Promise<void>;
 }
 
 function canonicalEndpoint(value: string): URL {
@@ -109,56 +152,6 @@ function canonicalEndpoint(value: string): URL {
     throw new TypeError("MCP endpoint must use HTTPS");
   endpoint.hostname = endpoint.hostname.toLowerCase();
   return endpoint;
-}
-
-function isBlockedIpv4(address: string): boolean {
-  const bytes = address.split(".").map(Number);
-  if (bytes.length !== 4 || bytes.some((part) => !Number.isInteger(part)))
-    return true;
-  const [a = 0, b = 0] = bytes;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 0) ||
-    (a === 192 && b === 168) ||
-    (a === 198 && (b === 18 || b === 19)) ||
-    (a === 198 && b === 51 && bytes[2] === 100) ||
-    (a === 203 && b === 0 && bytes[2] === 113) ||
-    a >= 224
-  );
-}
-
-function isBlockedIpv6(address: string): boolean {
-  const normalized = address.toLowerCase().split("%")[0] ?? "";
-  if (
-    normalized === "::" ||
-    normalized === "::1" ||
-    normalized.startsWith("::ffff:") ||
-    normalized.includes(".") ||
-    normalized.startsWith("64:ff9b:") ||
-    normalized.startsWith("100:") ||
-    normalized.startsWith("2001:2:") ||
-    normalized.startsWith("2001:db8:") ||
-    normalized.startsWith("2002:") ||
-    normalized.startsWith("fc") ||
-    normalized.startsWith("fd") ||
-    /^fe[89ab]/u.test(normalized) ||
-    normalized.startsWith("ff") ||
-    !/^[23]/u.test(normalized)
-  )
-    return true;
-  return false;
-}
-
-export function isPublicNetworkAddress(address: string): boolean {
-  const family = isIP(address);
-  if (family === 4) return !isBlockedIpv4(address);
-  if (family === 6) return !isBlockedIpv6(address);
-  return false;
 }
 
 /**
@@ -191,24 +184,6 @@ export function validateCredentialHeaderName(value: string): string {
   if (FORBIDDEN_SECRET_HEADERS.has(header))
     throw new TypeError("MCP credential header is not allowed");
   return header;
-}
-
-async function requestBody(
-  value: BodyInit | null | undefined,
-): Promise<Buffer> {
-  if (value === null || value === undefined) return Buffer.alloc(0);
-  let body: Buffer;
-  if (typeof value === "string") body = Buffer.from(value);
-  else if (value instanceof URLSearchParams)
-    body = Buffer.from(value.toString());
-  else if (value instanceof ArrayBuffer) body = Buffer.from(value);
-  else if (ArrayBuffer.isView(value))
-    body = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-  else if (value instanceof Blob) body = Buffer.from(await value.arrayBuffer());
-  else throw new TypeError("Streaming MCP request bodies are not supported");
-  if (body.byteLength > MAXIMUM_REQUEST_BYTES)
-    throw new Error("MCP request exceeds the configured size limit");
-  return body;
 }
 
 function cleanDescription(value: unknown): string {
@@ -326,39 +301,20 @@ function resultText(result: Awaited<ReturnType<Client["callTool"]>>): string {
   return "";
 }
 
-async function resolvedAddresses(
-  endpoint: URL,
-  options: McpEgressOptions,
-): Promise<readonly { readonly address: string; readonly family: number }[]> {
-  if (endpoint.protocol !== "https:" && !options.allowPrivateNetwork)
-    throw new Error("MCP egress requires HTTPS");
-  const addresses = options.resolve
-    ? await options.resolve(endpoint.hostname)
-    : await lookup(endpoint.hostname, { all: true, verbatim: true });
-  if (addresses.length === 0) throw new Error("MCP endpoint did not resolve");
-  if (
-    !options.allowPrivateNetwork &&
-    addresses.some((entry) => !isPublicNetworkAddress(entry.address))
-  )
-    throw new Error("MCP endpoint resolves to a prohibited network address");
-  return addresses;
-}
-
-function pinnedLookup(
-  selected: Readonly<{ address: string; family: number }>,
-): LookupFunction {
-  return (_hostname, lookupOptions, callback) => {
-    if (lookupOptions.all) {
-      callback(null, [selected]);
-      return;
-    }
-    callback(null, selected.address, selected.family);
-  };
+/**
+ * What one connection attempt sends and observes beyond the static
+ * definition: the OAuth access token to inject, and a callback that sees each
+ * response before the SDK does.
+ */
+export interface McpFetchSession {
+  readonly accessToken?: string;
+  readonly observe?: (response: Response) => void;
 }
 
 export function createBrokeredMcpFetch(
   definition: McpConnectionDefinition,
   options: McpEgressOptions = {},
+  session: McpFetchSession = {},
 ): FetchLike {
   const endpoint = canonicalEndpoint(definition.endpointUrl);
   const exactOrigin = definition.exactOrigin
@@ -381,30 +337,28 @@ export function createBrokeredMcpFetch(
     maximumResponseBytes > 10_485_760
   )
     throw new TypeError("MCP response limit must be between 1 KiB and 10 MiB");
+  const credential = definition.credential;
+  // The client secret never travels to the MCP server; only the access token
+  // obtained from the pinned token endpoint does.
+  if (credential?.kind === "oauth_client_credentials" && !session.accessToken)
+    throw new TypeError("An OAuth MCP connection requires an access token");
 
   return async (input, init = {}) => {
     if (init.signal?.aborted)
       throw init.signal.reason instanceof Error
         ? init.signal.reason
         : new Error("MCP request was cancelled");
-    const requested =
-      input instanceof Request
-        ? new URL(input.url)
-        : input instanceof URL
-          ? new URL(input.href)
-          : new URL(String(input));
+    const requested = requestedUrl(input);
     if (
       (requested.protocol !== "https:" && !options.allowPrivateNetwork) ||
       requested.origin !== exactOrigin ||
       !requested.pathname.startsWith(pathPrefix) ||
-      (definition.credential &&
+      (credential &&
         !withinDestination(requested, definition.credentialDestination))
     )
       throw new Error(
         "MCP request destination is outside the credential policy",
       );
-    const addresses = await resolvedAddresses(requested, options);
-    const selected = addresses[0]!;
     const headers = new Headers(
       input instanceof Request ? input.headers : undefined,
     );
@@ -413,105 +367,106 @@ export function createBrokeredMcpFetch(
     );
     for (const name of FORBIDDEN_SECRET_HEADERS) headers.delete(name);
     headers.delete("authorization");
-    if (definition.credential?.kind === "static_bearer")
-      headers.set("authorization", `Bearer ${definition.credential.secret}`);
-    else if (definition.credential?.kind === "api_key_header")
+    if (credential?.kind === "static_bearer")
+      headers.set("authorization", `Bearer ${credential.secret}`);
+    else if (credential?.kind === "api_key_header")
       headers.set(
-        validateCredentialHeaderName(definition.credential.headerName),
-        definition.credential.secret,
+        validateCredentialHeaderName(credential.headerName),
+        credential.secret,
       );
+    else if (credential?.kind === "oauth_client_credentials")
+      headers.set("authorization", `Bearer ${session.accessToken!}`);
     const method =
       init.method ?? (input instanceof Request ? input.method : "GET");
     const inheritedBody =
       input instanceof Request && method !== "GET" && method !== "HEAD"
         ? await input.arrayBuffer()
         : undefined;
-    const body = await requestBody(init.body ?? inheritedBody);
-    const makeRequest =
-      requested.protocol === "https:" ? httpsRequest : httpRequest;
-    return new Promise<Response>((resolve, reject) => {
-      const abort = new AbortController();
-      const timeout = setTimeout(
-        () => abort.abort(new Error("MCP request timed out")),
-        definition.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      );
-      const onCallerAbort = () => abort.abort(init.signal?.reason);
-      init.signal?.addEventListener("abort", onCallerAbort, { once: true });
-      const cleanup = () => {
-        clearTimeout(timeout);
-        init.signal?.removeEventListener("abort", onCallerAbort);
-      };
-      const outgoing = makeRequest(
-        requested,
-        {
-          method,
-          headers: Object.fromEntries(headers.entries()),
-          signal: abort.signal,
-          lookup: pinnedLookup(selected),
-          ...(requested.protocol === "https:"
-            ? { servername: requested.hostname }
-            : {}),
-        },
-        (incoming) => {
-          const responseHeaders = new Headers();
-          for (const [name, value] of Object.entries(incoming.headers)) {
-            if (Array.isArray(value))
-              for (const item of value) responseHeaders.append(name, item);
-            else if (value !== undefined) responseHeaders.set(name, value);
-          }
-          let received = 0;
-          const limiter = new Transform({
-            transform(chunk: Buffer, _encoding, callback) {
-              received += chunk.byteLength;
-              if (received > maximumResponseBytes) {
-                callback(
-                  new Error("MCP response exceeds the configured size limit"),
-                );
-                return;
-              }
-              callback(null, chunk);
-            },
-          });
-          limiter.once("end", cleanup);
-          limiter.once("error", cleanup);
-          incoming.once("aborted", cleanup);
-          incoming.pipe(limiter);
-          const status = incoming.statusCode ?? 502;
-          resolve(
-            new Response(
-              status === 204 || status === 304
-                ? null
-                : (Readable.toWeb(limiter) as ReadableStream<Uint8Array>),
-              {
-                status,
-                ...(incoming.statusMessage
-                  ? { statusText: incoming.statusMessage }
-                  : {}),
-                headers: responseHeaders,
-              },
-            ),
-          );
-        },
-      );
-      outgoing.once("error", (error: Error) => {
-        cleanup();
-        reject(error);
-      });
-      if (body.byteLength > 0) outgoing.write(body);
-      outgoing.end();
-    });
+    const response = await sendPinned(
+      requested,
+      {
+        method,
+        headers,
+        body: await requestBody(init.body ?? inheritedBody),
+        signal: init.signal,
+        timeoutMs: definition.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        maximumResponseBytes,
+      },
+      options,
+    );
+    session.observe?.(response);
+    return response;
   };
 }
 
-export class McpRemoteClient implements McpRemotePort {
-  constructor(private readonly egressOptions: McpEgressOptions = {}) {}
+/** What the brokered fetch saw of the server's authorization decisions. */
+interface AuthorizationObservation {
+  unauthorized?: { readonly resourceMetadataUrl: string | undefined };
+  forbidden?: { readonly error: string | undefined };
+}
 
-  private client(connection: McpConnectionDefinition): {
+function observeAuthorization(
+  observation: AuthorizationObservation,
+): (response: Response) => void {
+  return (response) => {
+    if (response.status === 401 && !observation.unauthorized)
+      observation.unauthorized = {
+        resourceMetadataUrl:
+          extractWWWAuthenticateParams(response).resourceMetadataUrl?.href,
+      };
+    else if (response.status === 403 && !observation.forbidden)
+      observation.forbidden = {
+        error: extractWWWAuthenticateParams(response).error,
+      };
+  };
+}
+
+/** Replaces a failure the server explained with a safe, coded error. */
+function authorizationFailure(
+  observation: AuthorizationObservation,
+  error: unknown,
+): unknown {
+  if (error instanceof McpRemoteError) return error;
+  if (observation.unauthorized)
+    return new McpRemoteError(
+      "credential_rejected",
+      "The MCP server rejected the credential",
+    );
+  if (observation.forbidden?.error === "insufficient_scope")
+    return new McpRemoteError(
+      "insufficient_scope",
+      "The MCP server requires a scope the credential was not granted",
+    );
+  if (observation.forbidden)
+    return new McpRemoteError(
+      "remote_forbidden",
+      "The MCP server refused the request",
+    );
+  return error;
+}
+
+export class McpRemoteClient implements McpRemotePort {
+  readonly #tokens: McpTokenBroker;
+
+  constructor(private readonly egressOptions: McpEgressOptions = {}) {
+    this.#tokens = new McpTokenBroker(egressOptions);
+  }
+
+  private client(
+    connection: McpConnectionDefinition,
+    session: McpFetchSession,
+  ): {
     readonly client: Client;
     readonly transport: StreamableHTTPClientTransport | SSEClientTransport;
   } {
-    const fetch = createBrokeredMcpFetch(connection, this.egressOptions);
+    const fetch = createBrokeredMcpFetch(
+      connection,
+      this.egressOptions,
+      session,
+    );
     const endpoint = canonicalEndpoint(connection.endpointUrl);
+    // No authProvider: the SDK would send OAuth traffic through the MCP
+    // broker. OAO obtains tokens itself and the broker only injects them.
     const transport =
       connection.transport === "legacy_sse"
         ? new SSEClientTransport(endpoint, { fetch })
@@ -522,18 +477,128 @@ export class McpRemoteClient implements McpRemotePort {
     const client = new Client(
       { name: "oao", version: "0.10.0" }, // x-release-please-version
       {
-        capabilities: {},
+        capabilities:
+          connection.credential?.kind === "oauth_client_credentials"
+            ? { extensions: { [OAUTH_CLIENT_CREDENTIALS_EXTENSION]: {} } }
+            : {},
         versionNegotiation: { mode: "auto", probe: { maxRetries: 0 } },
       },
     );
     return { client, transport };
   }
 
-  async discover(
+  /**
+   * Runs one connection attempt with the credential's authorization. For an
+   * OAuth credential a 401 drops the cached token and retries once with a new
+   * one, unless the challenge names other resource metadata than the pinned
+   * one; a second 401 fails as credential_rejected.
+   */
+  private async authorized<T>(
+    connection: McpConnectionDefinition,
+    signal: AbortSignal | undefined,
+    attempt: (session: McpFetchSession) => Promise<T>,
+  ): Promise<T> {
+    const credential = connection.credential;
+    if (credential?.kind !== "oauth_client_credentials") {
+      const observation: AuthorizationObservation = {};
+      try {
+        return await attempt({ observe: observeAuthorization(observation) });
+      } catch (error) {
+        throw authorizationFailure(observation, error);
+      }
+    }
+    for (let retry = 0; ; retry += 1) {
+      const token = await this.#tokens.token(credential, {
+        ...(signal ? { signal } : {}),
+        timeoutMs: connection.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      });
+      const observation: AuthorizationObservation = {};
+      try {
+        return await attempt({
+          accessToken: token.accessToken,
+          observe: observeAuthorization(observation),
+        });
+      } catch (error) {
+        if (!observation.unauthorized)
+          throw authorizationFailure(observation, error);
+        const advertised = observation.unauthorized.resourceMetadataUrl;
+        if (
+          advertised &&
+          !sameMcpUrl(advertised, credential.resourceMetadataUrl)
+        )
+          throw new McpRemoteError(
+            "authorization_server_changed",
+            "The MCP server now names different authorization metadata than the credential pinned",
+          );
+        this.#tokens.invalidate(credential, token.accessToken);
+        if (retry >= 1) throw authorizationFailure(observation, error);
+      }
+    }
+  }
+
+  discoverAuthorization(
+    endpointUrl: string,
+    signal?: AbortSignal,
+  ): Promise<McpAuthorizationDiscovery> {
+    return discoverMcpAuthorization(endpointUrl, {
+      ...this.egressOptions,
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  async testCredential(
+    credential: McpOAuthClientCredentialsMaterial,
+    signal?: AbortSignal,
+  ): Promise<McpCredentialTestResult> {
+    let discovery: McpAuthorizationDiscovery;
+    try {
+      discovery = await this.discoverAuthorization(credential.resource, signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new McpRemoteError(
+        "authorization_server_changed",
+        "The MCP server's authorization metadata could not be confirmed",
+      );
+    }
+    if (!matchesPinnedAuthorization(discovery, credential))
+      throw new McpRemoteError(
+        "authorization_server_changed",
+        "The MCP server's authorization metadata no longer matches the credential",
+      );
+    const token = await this.#tokens.token(credential, {
+      ...(signal ? { signal } : {}),
+      fresh: true,
+    });
+    return { expiresIn: token.expiresIn, grantedScope: token.grantedScope };
+  }
+
+  async prepareCredential(
+    credential: McpCredentialMaterial,
+    signal?: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<void> {
+    if (credential.kind !== "oauth_client_credentials") return;
+    await this.#tokens.token(credential, {
+      ...(signal ? { signal } : {}),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    });
+  }
+
+  discover(
     connection: McpConnectionDefinition,
     signal?: AbortSignal,
   ): Promise<readonly McpDiscoveredTool[]> {
-    const { client, transport } = this.client(connection);
+    return this.authorized(connection, signal, (session) =>
+      this.discoverOnce(connection, session, signal),
+    );
+  }
+
+  private async discoverOnce(
+    connection: McpConnectionDefinition,
+    session: McpFetchSession,
+    signal: AbortSignal | undefined,
+  ): Promise<readonly McpDiscoveredTool[]> {
+    const { client, transport } = this.client(connection, session);
     try {
       await client.connect(transport, {
         timeout: connection.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -627,7 +692,23 @@ export class McpRemoteClient implements McpRemotePort {
     );
     if (!validation.valid)
       throw new TypeError("MCP tool arguments are invalid");
-    const { client, transport } = this.client(connection);
+    // A 401 is answered before the server runs the tool, so retrying the
+    // call once with a new token cannot repeat it.
+    return this.authorized(connection, signal, (session) =>
+      this.callOnce(connection, input, session, signal),
+    );
+  }
+
+  private async callOnce(
+    connection: McpConnectionDefinition,
+    input: {
+      readonly tool: McpDiscoveredTool;
+      readonly arguments: Readonly<Record<string, unknown>>;
+    },
+    session: McpFetchSession,
+    signal: AbortSignal | undefined,
+  ): Promise<McpToolResult> {
+    const { client, transport } = this.client(connection, session);
     try {
       await client.connect(transport, {
         timeout: connection.timeoutMs ?? DEFAULT_TIMEOUT_MS,

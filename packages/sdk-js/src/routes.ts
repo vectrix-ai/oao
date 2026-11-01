@@ -144,6 +144,10 @@ export function createRoutes(apiPrefix = "/v1") {
       `${project(projectId)}/mcp-credentials/${segment(credentialId)}`,
     rotateMcpCredential: (projectId: string, credentialId: string) =>
       `${project(projectId)}/mcp-credentials/${segment(credentialId)}/rotate`,
+    testMcpCredential: (projectId: string, credentialId: string) =>
+      `${project(projectId)}/mcp-credentials/${segment(credentialId)}/test`,
+    mcpAuthorizationDiscovery: (projectId: string) =>
+      `${project(projectId)}/mcp-authorization-discovery`,
     mcpCredentialPolicies: (projectId: string) =>
       `${project(projectId)}/mcp-credential-policies`,
     mcpToolsets: (projectId: string) => `${project(projectId)}/mcp-toolsets`,

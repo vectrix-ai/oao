@@ -5,6 +5,7 @@ import {
   checkConfigurationBackupReferences,
   configurationBackupCounts,
   mcpDestinationContains,
+  mcpResourceDestination,
   parseConfigurationBackup,
   parseConfigurationRestoreInput,
   parseCreateEventWebhookInput,
@@ -2064,11 +2065,23 @@ export class DemoConsoleApi implements ConsoleApi {
       key: input.key,
       displayName: input.displayName,
       kind: input.kind,
-      headerName: input.headerName ?? null,
-      destination: {
-        origin: canonicalMcpOrigin(input.destination.origin),
-        pathPrefix: input.destination.pathPrefix,
-      },
+      headerName: input.kind === "api_key_header" ? input.headerName : null,
+      destination:
+        input.kind === "oauth_client_credentials"
+          ? mcpResourceDestination(input.oauth.resource)
+          : {
+              origin: canonicalMcpOrigin(input.destination.origin),
+              pathPrefix: input.destination.pathPrefix,
+            },
+      oauth:
+        input.kind === "oauth_client_credentials"
+          ? {
+              ...input.oauth,
+              tokenEndpointAuthMethod:
+                input.oauth.tokenEndpointAuthMethod ?? "client_secret_post",
+              sendResource: input.oauth.sendResource ?? true,
+            }
+          : null,
       credentialConfigured: true,
       credentialFingerprint: "000000000000",
       credentialVersion: 1,
@@ -2104,9 +2117,22 @@ export class DemoConsoleApi implements ConsoleApi {
       throw new Error(
         "MCP credential destination is pinned; create a new credential for another destination",
       );
+    if (!credential.oauth && input.oauth)
+      throw new Error(
+        "Only an OAuth client-credentials credential has an OAuth configuration",
+      );
+    const change = input.oauth ?? {};
     const rotated = {
       ...credential,
       destination: credential.destination ?? requested ?? null,
+      oauth: credential.oauth
+        ? {
+            ...credential.oauth,
+            ...Object.fromEntries(
+              Object.entries(change).filter(([, value]) => value !== undefined),
+            ),
+          }
+        : null,
       credentialVersion: credential.credentialVersion + 1,
       updatedAt: new Date().toISOString(),
     };
@@ -2130,6 +2156,55 @@ export class DemoConsoleApi implements ConsoleApi {
       item.id === credentialId ? revoked : item,
     );
     return structuredClone(revoked);
+  }
+
+  async discoverMcpAuthorization(
+    input: Parameters<ConsoleApi["discoverMcpAuthorization"]>[0],
+  ) {
+    const endpoint = new URL(input.endpointUrl);
+    if (endpoint.protocol !== "https:")
+      throw new Error("MCP endpoint must be an HTTPS URL");
+    const path = endpoint.pathname === "/" ? "" : endpoint.pathname;
+    return {
+      endpointUrl: endpoint.href,
+      resource: input.endpointUrl,
+      resourceName: null,
+      resourceMetadataUrl: `${endpoint.origin}/.well-known/oauth-protected-resource${path}`,
+      resourceMetadataSource: "www_authenticate" as const,
+      challengeScope: "mcp:tools",
+      scopesSupported: ["mcp:tools"],
+      authorizationServers: [
+        {
+          issuer: "https://auth.example.com",
+          tokenEndpoint: "https://auth.example.com/oauth2/token",
+          metadataSource: "oauth" as const,
+          tokenEndpointAuthMethodsSupported: [
+            "client_secret_post",
+            "client_secret_basic",
+          ],
+          grantTypesSupported: ["authorization_code", "refresh_token"],
+          scopesSupported: ["mcp:tools"],
+          problem: null,
+        },
+      ],
+    };
+  }
+
+  async testMcpCredential(credentialId: string) {
+    const credential = this.#mcpCredentials.find(
+      (item) => item.id === credentialId,
+    );
+    if (!credential || credential.status !== "active")
+      throw new Error("Active MCP credential not found");
+    if (!credential.oauth)
+      throw new Error(
+        "Only an OAuth client-credentials credential can be tested",
+      );
+    return {
+      ok: true as const,
+      expiresIn: 3600,
+      grantedScope: credential.oauth.scope,
+    };
   }
 
   async listMcpCredentialPolicies() {
@@ -3355,6 +3430,7 @@ export class DemoConsoleApi implements ConsoleApi {
         kind: credential.kind,
         headerName: credential.headerName,
         destination: credential.destination,
+        oauth: credential.oauth,
         status: credential.status === "revoked" ? "revoked" : "active",
         credentialFingerprint:
           credential.status === "revoked"
@@ -3754,6 +3830,7 @@ export class DemoConsoleApi implements ConsoleApi {
         kind: entry.kind,
         headerName: entry.headerName,
         destination: entry.destination,
+        oauth: entry.oauth,
         status: entry.status,
       });
     }

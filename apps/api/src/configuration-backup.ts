@@ -6,6 +6,7 @@ import {
   agentVersionPublicationOrder,
   canonicalMcpOrigin,
   checkConfigurationBackupReferences,
+  mcpResourceDestination,
   configurationBackupCounts,
   parseConfigurationBackup,
   parseConfigurationRestoreInput,
@@ -24,6 +25,7 @@ import {
 import { validateWebhookEndpoint } from "@oao/event-webhooks";
 import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { HttpApiError, mapPostgresError } from "./errors.js";
+import { mcpCredentialFingerprint } from "./mcp.js";
 import { idempotencyKey, readJsonObject, requestHash } from "./http.js";
 
 /** What the backup routes need from the API that owns them. */
@@ -383,7 +385,11 @@ export async function exportOrganizationConfiguration(
     `SELECT credential.id,credential.credential_key,credential.display_name,
             credential.credential_kind,credential.header_name,lifecycle.status,
             version.credential_fingerprint,version.destination_origin,
-            version.destination_path_prefix
+            version.destination_path_prefix,version.oauth_issuer,
+            version.oauth_token_endpoint,version.oauth_client_id,
+            version.oauth_token_endpoint_auth_method,version.oauth_scope,
+            version.oauth_resource,version.oauth_resource_metadata_url,
+            version.oauth_send_resource
        FROM oao.mcp_credentials credential
        LEFT JOIN oao.mcp_credential_versions version
          ON version.organization_id=credential.organization_id
@@ -511,8 +517,27 @@ export async function exportOrganizationConfiguration(
       kind:
         row.credential_kind === "api_key_header"
           ? ("api_key_header" as const)
-          : ("static_bearer" as const),
+          : row.credential_kind === "oauth_client_credentials"
+            ? ("oauth_client_credentials" as const)
+            : ("static_bearer" as const),
       headerName: (row.header_name as string | null) ?? null,
+      oauth:
+        row.credential_kind === "oauth_client_credentials" &&
+        typeof row.oauth_issuer === "string"
+          ? {
+              resource: String(row.oauth_resource),
+              resourceMetadataUrl: String(row.oauth_resource_metadata_url),
+              issuer: row.oauth_issuer,
+              tokenEndpoint: String(row.oauth_token_endpoint),
+              clientId: String(row.oauth_client_id),
+              tokenEndpointAuthMethod:
+                row.oauth_token_endpoint_auth_method === "client_secret_basic"
+                  ? ("client_secret_basic" as const)
+                  : ("client_secret_post" as const),
+              scope: String(row.oauth_scope),
+              sendResource: row.oauth_send_resource === true,
+            }
+          : null,
       destination:
         typeof row.destination_origin === "string" &&
         typeof row.destination_path_prefix === "string"
@@ -1232,6 +1257,18 @@ async function restoreConnections(
         providerType: "mcp",
         keyVersion: 1,
       });
+      const oauth =
+        credential.kind === "oauth_client_credentials"
+          ? credential.oauth
+          : null;
+      const destination = oauth
+        ? mcpResourceDestination(oauth.resource)
+        : credential.destination
+          ? {
+              origin: canonicalMcpOrigin(credential.destination.origin),
+              pathPrefix: credential.destination.pathPrefix,
+            }
+          : null;
       await transaction.query(
         `INSERT INTO oao.mcp_credentials (
            organization_id,id,credential_key,display_name,
@@ -1249,24 +1286,33 @@ async function restoreConnections(
       );
       await transaction.query(
         `INSERT INTO oao.mcp_credential_versions (
-           organization_id,id,credential_id,version,encrypted_secret,
-           encryption_nonce,encryption_tag,encryption_key_version,
+           organization_id,id,credential_id,version,credential_kind,
+           encrypted_secret,encryption_nonce,encryption_tag,encryption_key_version,
            credential_fingerprint,destination_origin,destination_path_prefix,
-           created_by_principal_id
-         ) VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9,$10,$11)`,
+           oauth_issuer,oauth_token_endpoint,oauth_client_id,
+           oauth_token_endpoint_auth_method,oauth_scope,oauth_resource,
+           oauth_resource_metadata_url,oauth_send_resource,created_by_principal_id
+         ) VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
         [
           org,
           versionId,
           credentialId,
+          credential.kind,
           encrypted.ciphertext,
           encrypted.nonce,
           encrypted.tag,
           encrypted.keyVersion,
-          encrypted.fingerprint,
-          credential.destination
-            ? canonicalMcpOrigin(credential.destination.origin)
-            : null,
-          credential.destination?.pathPrefix ?? null,
+          mcpCredentialFingerprint(encrypted.fingerprint, secret, oauth),
+          destination?.origin ?? null,
+          destination?.pathPrefix ?? null,
+          oauth?.issuer ?? null,
+          oauth?.tokenEndpoint ?? null,
+          oauth?.clientId ?? null,
+          oauth?.tokenEndpointAuthMethod ?? null,
+          oauth?.scope ?? null,
+          oauth?.resource ?? null,
+          oauth?.resourceMetadataUrl ?? null,
+          oauth?.sendResource ?? null,
           actor.id,
         ],
       );

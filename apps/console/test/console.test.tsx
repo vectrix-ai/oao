@@ -427,6 +427,7 @@ describe("management console", () => {
         kind: "static_bearer",
         headerName: null,
         destination: { origin: "https://mcp.acme.test", pathPrefix: "/" },
+        oauth: null,
         status: "active",
         credentialFingerprint: null,
       },
@@ -1322,6 +1323,117 @@ describe("management console", () => {
       await policyDialog.findByText(
         /inside the credential's pinned destination/u,
       ),
+    ).toBeInTheDocument();
+  });
+
+  it("sets up an MCP server with OAuth client credentials after confirming discovery", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/mcp", api);
+    await user.click(
+      (await screen.findAllByRole("button", { name: "Add MCP server" }))[0]!,
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "Add MCP server" }),
+    );
+    await user.type(dialog.getByLabelText("Display name"), "Order extraction");
+    await user.type(
+      dialog.getByLabelText("HTTPS MCP endpoint"),
+      "https://app.example.test/api/integrations/oao/extraction/mcp",
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    await user.selectOptions(
+      dialog.getByLabelText("Authentication type"),
+      "oauth_client_credentials",
+    );
+    // Nothing can be saved before the authorization server is confirmed.
+    await user.type(
+      dialog.getByLabelText("Client secret"),
+      "demo-client-secret",
+    );
+    expect(dialog.getByRole("button", { name: "Next" })).toBeDisabled();
+    await user.click(
+      dialog.getByRole("button", { name: "Discover authorization" }),
+    );
+    expect(
+      await dialog.findByText(
+        "https://app.example.test/.well-known/oauth-protected-resource/api/integrations/oao/extraction/mcp",
+      ),
+    ).toBeInTheDocument();
+    expect(dialog.getByLabelText("Authorization server")).toHaveValue(
+      "https://auth.example.com",
+    );
+    expect(
+      dialog.getByText("https://auth.example.com/oauth2/token"),
+    ).toBeInTheDocument();
+    expect(dialog.getByLabelText("Scope")).toHaveValue("mcp:tools");
+    expect(dialog.getByLabelText("Client authentication")).toHaveValue(
+      "client_secret_post",
+    );
+    // Changing the endpoint drops the discovery made for the old one.
+    await user.click(dialog.getByRole("button", { name: "Back" }));
+    await user.clear(dialog.getByLabelText("HTTPS MCP endpoint"));
+    await user.type(
+      dialog.getByLabelText("HTTPS MCP endpoint"),
+      "https://app.example.test/api/integrations/oao/extraction/mcp-v2",
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    expect(
+      dialog.getByRole("button", { name: "Discover authorization" }),
+    ).toBeInTheDocument();
+    expect(dialog.queryByLabelText("Client ID")).not.toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "Back" }));
+    await user.clear(dialog.getByLabelText("HTTPS MCP endpoint"));
+    await user.type(
+      dialog.getByLabelText("HTTPS MCP endpoint"),
+      "https://app.example.test/api/integrations/oao/extraction/mcp",
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    // The discovery made for this endpoint applies again.
+    await user.click(dialog.getByRole("button", { name: "Discover again" }));
+    expect(await dialog.findByLabelText("Client ID")).toBeInTheDocument();
+    await user.type(dialog.getByLabelText("Client ID"), "client_demo");
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    expect(dialog.getByText("OAuth client credentials")).toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "Test and discover" }));
+    await user.click(
+      await dialog.findByRole("checkbox", { name: /Look up trace/u }),
+    );
+    await user.click(dialog.getByRole("button", { name: "Next" }));
+    await user.click(dialog.getByRole("button", { name: "Finish setup" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(document.body.textContent).not.toContain("demo-client-secret");
+
+    const credential = (await api.listMcpCredentials()).data[0]!;
+    expect(credential.kind).toBe("oauth_client_credentials");
+    expect(credential.destination).toEqual({
+      origin: "https://app.example.test",
+      pathPrefix: "/api/integrations/oao/extraction/mcp",
+    });
+    expect(credential.oauth).toEqual({
+      resource: "https://app.example.test/api/integrations/oao/extraction/mcp",
+      resourceMetadataUrl:
+        "https://app.example.test/.well-known/oauth-protected-resource/api/integrations/oao/extraction/mcp",
+      issuer: "https://auth.example.com",
+      tokenEndpoint: "https://auth.example.com/oauth2/token",
+      clientId: "client_demo",
+      tokenEndpointAuthMethod: "client_secret_post",
+      scope: "mcp:tools",
+      sendResource: true,
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Advanced resources" }),
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: "Test Order extraction credential",
+      }),
+    );
+    expect(
+      await screen.findByText("Token issued for 3600s with scope mcp:tools."),
     ).toBeInTheDocument();
   });
 
