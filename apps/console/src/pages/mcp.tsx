@@ -37,7 +37,6 @@ import {
   Button,
   CheckboxRow,
   Dialog,
-  EmptyState,
   ErrorState,
   Field,
   FormError,
@@ -203,7 +202,7 @@ export function McpPage() {
       <PageHeader
         eyebrow="Configure"
         title="MCP connections"
-        description="Add a remote MCP server, test it, choose its tools, and optionally attach it to an agent."
+        description="Connect remote MCP servers and choose which agents may use their tools. OAO's own server is built in."
         actions={
           <Button
             variant="primary"
@@ -221,15 +220,6 @@ export function McpPage() {
       {error ? <ErrorState error={error} retry={() => void refresh()} /> : null}
       {!pending && !error ? (
         <div className="stack">
-          <Alert
-            tone="info"
-            role="status"
-            title="Secrets stay outside the agent"
-          >
-            OAO injects credentials only at the approved HTTPS destination.
-            Agents, prompts, tool arguments, events, and sandboxes receive no
-            secret value.
-          </Alert>
           {!encryptionConfigured ? (
             <Alert tone="danger" role="alert" title="Encryption key required">
               Configure OAO_CREDENTIAL_ENCRYPTION_KEY before adding MCP
@@ -260,6 +250,11 @@ export function McpPage() {
             )}
             onRevoke={setRevokingCredential}
           />
+          <p className="muted mcp-secrets-note">
+            Secrets stay outside the agent: OAO injects a credential only at its
+            approved HTTPS destination. Agents, prompts, tool arguments, events,
+            and sandboxes never receive a secret value.
+          </p>
         </div>
       ) : null}
       {managingOao ? (
@@ -773,109 +768,114 @@ function ConnectionsPanel({
   readonly onManage: (server: McpServer) => void;
   readonly onManageOao: () => void;
 }) {
-  const builtIn = (
-    <article className="resource-card mcp-connection-card">
-      <header className="row">
-        <h2>OAO</h2>
-        <StatusChip value="built in" />
-        <Button size="sm" aria-label="Manage OAO" onClick={onManageOao}>
-          Manage
-        </Button>
-      </header>
-      <span>This project&apos;s own MCP server. Nothing to connect.</span>
-      <dl>
-        <div>
-          <dt>Tools</dt>
-          <dd>{OAO_MCP_TOOL_CATALOG.length}</dd>
-        </div>
-        <div>
-          <dt>Agents using it</dt>
-          <dd>{oaoAgents}</dd>
-        </div>
-      </dl>
-    </article>
-  );
   return (
     <Panel
       title="Connections"
-      description="Each connection combines one remote server with discovered tools and one or more restricted toolsets."
-      actions={
-        <Button
-          size="sm"
-          variant="primary"
-          icon={<Plus size={14} />}
-          disabled={disabled}
-          onClick={onAdd}
-        >
-          Add MCP server
-        </Button>
-      }
+      description="OAO's own server is built in. Each remote server pairs an endpoint with its discovered tools and the restricted toolsets agents bind."
     >
-      <div className="cards-grid">{builtIn}</div>
-      {servers.length === 0 ? (
-        <EmptyState
-          icon="⌁"
-          title="No remote MCP servers"
-          description="Use the guided setup to connect a server, test authentication, and choose the tools agents may use."
-          action={
-            <Button variant="primary" disabled={disabled} onClick={onAdd}>
-              Add MCP server
-            </Button>
-          }
+      <div className="mcp-connections-grid">
+        <ConnectionCard
+          name="OAO"
+          status="built in"
+          subtitle="This project's own MCP server"
+          stats={[
+            ["Tools", OAO_MCP_TOOL_CATALOG.length],
+            ["Agents using it", oaoAgents],
+          ]}
+          footer="Built in: nothing to connect, test, or store."
+          onManage={onManageOao}
         />
-      ) : (
-        <div className="cards-grid">
-          {servers.map((server) => {
-            const connectionToolsets = toolsets.filter(
-              (toolset) => toolset.serverId === server.id,
-            );
-            return (
-              <article
-                className="resource-card mcp-connection-card"
-                key={server.id}
-              >
-                <header className="row">
-                  <h2>{server.displayName}</h2>
-                  <StatusChip
-                    value={server.tools.length > 0 ? "ready" : server.status}
-                  />
-                  <Button
-                    size="sm"
-                    aria-label={`Manage ${server.displayName}`}
-                    onClick={() => onManage(server)}
-                  >
-                    Manage
-                  </Button>
-                </header>
-                <code>{server.endpointUrl}</code>
-                <dl>
-                  <div>
-                    <dt>Transport</dt>
-                    <dd>{server.transport.replaceAll("_", " ")}</dd>
-                  </div>
-                  <div>
-                    <dt>Discovered tools</dt>
-                    <dd>{server.tools.length}</dd>
-                  </div>
-                  <div>
-                    <dt>Restricted toolsets</dt>
-                    <dd>{connectionToolsets.length}</dd>
-                  </div>
-                </dl>
-                {server.lastDiscoveredAt ? (
-                  <small>
-                    Last tested{" "}
-                    {new Date(server.lastDiscoveredAt).toLocaleString()}
-                  </small>
-                ) : (
-                  <small>Run discovery to finish this connection.</small>
-                )}
-              </article>
-            );
-          })}
-        </div>
-      )}
+        {servers.map((server) => (
+          <ConnectionCard
+            key={server.id}
+            name={server.displayName}
+            status={server.tools.length > 0 ? "ready" : server.status}
+            subtitle={server.endpointUrl}
+            code
+            stats={[
+              ["Transport", server.transport.replaceAll("_", " ")],
+              ["Discovered tools", server.tools.length],
+              [
+                "Restricted toolsets",
+                toolsets.filter((toolset) => toolset.serverId === server.id)
+                  .length,
+              ],
+            ]}
+            footer={
+              server.lastDiscoveredAt
+                ? `Last tested ${new Date(server.lastDiscoveredAt).toLocaleString()}`
+                : "Run discovery to finish this connection."
+            }
+            onManage={() => onManage(server)}
+          />
+        ))}
+        {servers.length === 0 ? (
+          <button
+            type="button"
+            className="mcp-connection-add"
+            disabled={disabled}
+            onClick={onAdd}
+          >
+            <Plus size={18} aria-hidden="true" />
+            <strong>Add MCP server</strong>
+            <span>
+              Connect a remote server, test its authentication, and choose the
+              tools agents may use.
+            </span>
+          </button>
+        ) : null}
+      </div>
     </Panel>
+  );
+}
+
+/** One connection: what it is, its numbers, and its Manage action. */
+function ConnectionCard({
+  name,
+  status,
+  subtitle,
+  code = false,
+  stats,
+  footer,
+  onManage,
+}: {
+  readonly name: string;
+  readonly status: string;
+  readonly subtitle: string;
+  /** Shows the subtitle as a single truncated line of code, like a URL. */
+  readonly code?: boolean;
+  readonly stats: readonly (readonly [string, string | number])[];
+  readonly footer: string;
+  readonly onManage: () => void;
+}) {
+  return (
+    <article className="mcp-connection-card">
+      <header>
+        <div className="mcp-connection-card-title">
+          <h2>{name}</h2>
+          <StatusChip value={status} />
+        </div>
+        <Button size="sm" aria-label={`Manage ${name}`} onClick={onManage}>
+          Manage
+        </Button>
+      </header>
+      {code ? (
+        <code className="mcp-connection-card-subtitle" title={subtitle}>
+          {subtitle}
+        </code>
+      ) : (
+        <span className="mcp-connection-card-subtitle">{subtitle}</span>
+      )}
+      <dl>
+        {stats.map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <small>{footer}</small>
+    </article>
   );
 }
 
@@ -977,7 +977,7 @@ function OaoServerDialog({
           <thead>
             <tr>
               <th>Agent</th>
-              <th>OAO</th>
+              <th>Uses OAO</th>
               <th aria-label="Actions" />
             </tr>
           </thead>
