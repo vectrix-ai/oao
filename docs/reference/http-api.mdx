@@ -541,7 +541,11 @@ codes appear in `mcp.call_failed` and `mcp.discovery_failed` events. Neither
 route needs an `Idempotency-Key`.
 
 Create a policy with `{ key, displayName, credentialId, exactOrigin,
-pathPrefix, timeoutMs, maximumResponseBytes }`. The exact origin must equal the
+pathPrefix, timeoutMs, maximumResponseBytes, forwardCallContext }`.
+`forwardCallContext` (default `false`) sends the organization, project,
+session, run, tool-call, and run-key-hash identity as `X-OAO-*` headers; see
+[Call context headers](/integrations/mcp#call-context-headers). Credential
+header names starting with `x-oao-` are refused. The exact origin must equal the
 credential's destination origin and the path prefix must lie inside its
 destination path prefix on a path-segment boundary; otherwise the request
 returns `400`, as it does for an unpinned credential. Create a toolset with `{ key,

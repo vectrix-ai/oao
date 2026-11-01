@@ -74,6 +74,24 @@ export interface McpCredentialDestination {
   readonly pathPrefix: string;
 }
 
+/**
+ * OAO identity a policy opted in to forward. The broker sends the
+ * organization and project on every request, and the call fields on the
+ * requests made for one tool call.
+ */
+export interface McpCallContext {
+  readonly organizationId: string;
+  readonly projectId: string;
+  readonly call?: {
+    readonly sessionId: string;
+    readonly runId: string;
+    /** The deterministic OAO tool-call ID, stable across recovery. */
+    readonly toolCallId: string;
+    /** Lowercase hex SHA-256 of the run's idempotency key. */
+    readonly runKeySha256: string;
+  };
+}
+
 export interface McpConnectionDefinition {
   readonly endpointUrl: string;
   /** Credential-bearing requests may target only this origin and path prefix. */
@@ -88,6 +106,8 @@ export interface McpConnectionDefinition {
   readonly timeoutMs?: number;
   readonly maximumResponseBytes?: number;
   readonly credential?: McpCredentialMaterial;
+  /** Absent unless the credential policy forwards call context. */
+  readonly context?: McpCallContext;
 }
 
 export interface McpDiscoveredTool {
@@ -183,7 +203,40 @@ export function validateCredentialHeaderName(value: string): string {
     throw new TypeError("MCP credential header name is invalid");
   if (FORBIDDEN_SECRET_HEADERS.has(header))
     throw new TypeError("MCP credential header is not allowed");
+  if (header.startsWith(CALL_CONTEXT_HEADER_PREFIX))
+    throw new TypeError("x-oao-* headers are reserved for OAO call context");
   return header;
+}
+
+const CALL_CONTEXT_HEADER_PREFIX = "x-oao-";
+const CALL_CONTEXT_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+const CALL_CONTEXT_SHA256 = /^[0-9a-f]{64}$/u;
+
+/**
+ * The X-OAO-* headers for a call context, validated so a malformed value
+ * fails before any byte is sent.
+ */
+export function callContextHeaders(
+  context: McpCallContext,
+): readonly (readonly [string, string])[] {
+  const identifiers: (readonly [string, string])[] = [
+    ["x-oao-organization-id", context.organizationId],
+    ["x-oao-project-id", context.projectId],
+  ];
+  if (context.call)
+    identifiers.push(
+      ["x-oao-session-id", context.call.sessionId],
+      ["x-oao-run-id", context.call.runId],
+      ["x-oao-tool-call-id", context.call.toolCallId],
+    );
+  for (const [, value] of identifiers)
+    if (!CALL_CONTEXT_UUID.test(value))
+      throw new TypeError("MCP call context identifier is invalid");
+  if (!context.call) return identifiers;
+  if (!CALL_CONTEXT_SHA256.test(context.call.runKeySha256))
+    throw new TypeError("MCP call context run key hash is invalid");
+  return [...identifiers, ["x-oao-run-key-sha256", context.call.runKeySha256]];
 }
 
 function cleanDescription(value: unknown): string {
@@ -342,6 +395,9 @@ export function createBrokeredMcpFetch(
   // obtained from the pinned token endpoint does.
   if (credential?.kind === "oauth_client_credentials" && !session.accessToken)
     throw new TypeError("An OAuth MCP connection requires an access token");
+  const contextHeaders = definition.context
+    ? callContextHeaders(definition.context)
+    : [];
 
   return async (input, init = {}) => {
     if (init.signal?.aborted)
@@ -367,6 +423,9 @@ export function createBrokeredMcpFetch(
     );
     for (const name of FORBIDDEN_SECRET_HEADERS) headers.delete(name);
     headers.delete("authorization");
+    // Only the broker sets OAO call identity; nothing upstream may.
+    for (const name of [...headers.keys()])
+      if (name.startsWith(CALL_CONTEXT_HEADER_PREFIX)) headers.delete(name);
     if (credential?.kind === "static_bearer")
       headers.set("authorization", `Bearer ${credential.secret}`);
     else if (credential?.kind === "api_key_header")
@@ -376,6 +435,7 @@ export function createBrokeredMcpFetch(
       );
     else if (credential?.kind === "oauth_client_credentials")
       headers.set("authorization", `Bearer ${session.accessToken!}`);
+    for (const [name, value] of contextHeaders) headers.set(name, value);
     const method =
       init.method ?? (input instanceof Request ? input.method : "GET");
     const inheritedBody =

@@ -3499,6 +3499,7 @@ function registerMcpRoutes(
               credentialId: created.credentialId,
               exactOrigin: created.exactOrigin,
               pathPrefix: created.pathPrefix,
+              forwardCallContext: created.forwardCallContext,
             },
           });
           return created;

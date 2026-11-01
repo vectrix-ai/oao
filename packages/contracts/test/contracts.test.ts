@@ -940,6 +940,43 @@ test("OAuth client-credentials MCP credentials pin a confirmed authorization con
   );
 });
 
+test("MCP call context is opt-in and its header namespace is reserved", () => {
+  assert.equal(
+    parseCreateMcpCredentialPolicyInput({
+      key: "egress",
+      displayName: "Egress",
+      credentialId: id,
+      exactOrigin: "https://mcp.example.test",
+      pathPrefix: "/mcp",
+    }).forwardCallContext,
+    false,
+  );
+  assert.equal(
+    parseCreateMcpCredentialPolicyInput({
+      key: "egress",
+      displayName: "Egress",
+      credentialId: id,
+      exactOrigin: "https://mcp.example.test",
+      pathPrefix: "/mcp",
+      forwardCallContext: true,
+    }).forwardCallContext,
+    true,
+  );
+  for (const headerName of ["X-OAO-Session-Id", "x-oao-anything"])
+    assert.throws(
+      () =>
+        parseCreateMcpCredentialInput({
+          key: "reserved",
+          displayName: "Reserved",
+          kind: "api_key_header",
+          headerName,
+          destination: { origin: "https://mcp.example.test", pathPrefix: "/" },
+          secret: "secret-value",
+        }),
+      headerName,
+    );
+});
+
 test("MCP contracts require HTTPS, safe credential headers, and unique bindings", () => {
   assert.equal(
     parseCreateMcpServerInput({

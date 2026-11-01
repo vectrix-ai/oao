@@ -409,6 +409,7 @@ export async function exportOrganizationConfiguration(
   const policyVersions = await transaction.query<Row>(
     `SELECT v.id,v.policy_id,v.version,v.credential_id,v.exact_origin,
             v.path_prefix,v.timeout_ms,v.maximum_response_bytes,
+            v.forward_call_context,
             encode(v.content_hash,'hex') AS content_hash,lifecycle.status
        FROM oao.mcp_credential_policy_versions v
        JOIN oao.mcp_credential_policy_version_lifecycle lifecycle
@@ -565,6 +566,7 @@ export async function exportOrganizationConfiguration(
         pathPrefix: String(version.path_prefix),
         timeoutMs: Number(version.timeout_ms),
         maximumResponseBytes: Number(version.maximum_response_bytes),
+        forwardCallContext: version.forward_call_context === true,
         status: lifecycle(version.status),
         contentHash: String(version.content_hash),
       })),
@@ -1345,8 +1347,8 @@ async function restoreConnections(
           `INSERT INTO oao.mcp_credential_policy_versions (
              organization_id,id,policy_id,version,credential_id,
              exact_origin,path_prefix,timeout_ms,maximum_response_bytes,
-             content_hash,created_by_principal_id
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,decode($10,'hex'),$11)`,
+             forward_call_context,content_hash,created_by_principal_id
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,decode($11,'hex'),$12)`,
           [
             org,
             latest,
@@ -1360,6 +1362,7 @@ async function restoreConnections(
             version.pathPrefix,
             version.timeoutMs,
             version.maximumResponseBytes,
+            version.forwardCallContext,
             version.contentHash,
             actor.id,
           ],

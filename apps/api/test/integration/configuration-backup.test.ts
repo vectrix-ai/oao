@@ -365,6 +365,7 @@ async function seedSource(
       pathPrefix: "/mcp",
       timeoutMs: 10_000,
       maximumResponseBytes: 65_536,
+      forwardCallContext: true,
     },
     201,
   );
@@ -856,6 +857,10 @@ test(
         ],
       );
       assert.equal(backup.mcpServers[0]!.versions.length, 2);
+      assert.equal(
+        backup.mcpCredentialPolicies[0]!.versions[0]!.forwardCallContext,
+        true,
+      );
       // The pinned OAuth configuration is kept; its client secret is not.
       assert.deepEqual(
         backup.mcpCredentials.find(

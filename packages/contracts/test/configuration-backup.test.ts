@@ -99,6 +99,7 @@ function fixture(): ConfigurationBackup {
             pathPrefix: "/",
             timeoutMs: 10_000,
             maximumResponseBytes: 65_536,
+            forwardCallContext: false,
             status: "active",
             contentHash: HASH,
           },

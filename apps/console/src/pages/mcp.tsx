@@ -349,6 +349,12 @@ export function McpPage() {
                           <td>
                             {item.timeoutMs / 1000}s ·{" "}
                             {Math.round(item.maximumResponseBytes / 1024)} KiB
+                            {item.forwardCallContext ? (
+                              <>
+                                <br />
+                                <small>Forwards call context</small>
+                              </>
+                            ) : null}
                           </td>
                           <td>
                             <StatusChip value={item.status} />
@@ -740,6 +746,7 @@ function McpSetupDialog({
   const [pathPrefix, setPathPrefix] = useState("/");
   const [timeoutMs, setTimeoutMs] = useState(30_000);
   const [maximumResponseKiB, setMaximumResponseKiB] = useState(1024);
+  const [forwardCallContext, setForwardCallContext] = useState(false);
   const [selectedTools, setSelectedTools] = useState<readonly string[]>([]);
   const [approvals, setApprovals] = useState<
     Record<string, "never" | "always">
@@ -865,6 +872,7 @@ function McpSetupDialog({
           pathPrefix,
           timeoutMs,
           maximumResponseBytes: maximumResponseKiB * 1024,
+          forwardCallContext,
         });
         current = remember({ policy });
       }
@@ -1261,6 +1269,11 @@ function McpSetupDialog({
                   />
                 </Field>
               </div>
+              <CallContextToggle
+                checked={forwardCallContext}
+                disabled={resources.policy !== undefined}
+                onChange={setForwardCallContext}
+              />
             </div>
           </details>
         </div>
@@ -1634,6 +1647,27 @@ function OAuthAuthorizationFields({
   );
 }
 
+/** Opt-in for the X-OAO-* call identity headers on one policy version. */
+function CallContextToggle({
+  checked,
+  disabled,
+  onChange,
+}: {
+  readonly checked: boolean;
+  readonly disabled: boolean;
+  readonly onChange: (value: boolean) => void;
+}) {
+  return (
+    <CheckboxRow
+      label="Forward call context"
+      description="Sends the organization, project, session, run, tool-call ID, and a hash of the run key as X-OAO-* headers, so the server can bind calls to work it started. The server sees these OAO identifiers."
+      checked={checked}
+      disabled={disabled}
+      onChange={(event) => onChange(event.currentTarget.checked)}
+    />
+  );
+}
+
 function RotateCredentialDialog({
   credential,
   pending,
@@ -1802,6 +1836,8 @@ function McpCreateDialog({
   const [transport, setTransport] =
     useState<CreateMcpServerInput["transport"]>("streamable_http");
   const [credentialId, setCredentialId] = useState(credentials[0]?.id ?? "");
+  const [policyForwardCallContext, setPolicyForwardCallContext] =
+    useState(false);
   const initialDestination =
     kind === "policy" ? credentials[0]?.destination : undefined;
   const [exactOrigin, setExactOrigin] = useState(
@@ -1881,6 +1917,7 @@ function McpCreateDialog({
           pathPrefix,
           timeoutMs: 30_000,
           maximumResponseBytes: 1_048_576,
+          forwardCallContext: policyForwardCallContext,
         },
       });
     if (kind === "toolset")
@@ -2049,6 +2086,11 @@ function McpCreateDialog({
                 onChange={(event) => setPathPrefix(event.target.value)}
               />
             </Field>
+            <CallContextToggle
+              checked={policyForwardCallContext}
+              disabled={false}
+              onChange={setPolicyForwardCallContext}
+            />
           </>
         ) : null}
         {kind === "toolset" ? (

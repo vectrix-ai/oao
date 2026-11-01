@@ -1934,6 +1934,10 @@ const McpCredentialHeaderSchema = v.pipe(
       ]).has(value.toLowerCase()),
     "credential header is not allowed",
   ),
+  v.check(
+    (value) => !value.toLowerCase().startsWith("x-oao-"),
+    "x-oao-* headers are reserved for OAO call context",
+  ),
 );
 
 export const McpDiscoveredToolSchema = v.object({
@@ -2281,6 +2285,8 @@ export const McpCredentialPolicySchema = v.object({
   pathPrefix: v.pipe(v.string(), v.minLength(1), v.maxLength(1_024)),
   timeoutMs: v.pipe(v.number(), v.integer(), v.minValue(1_000)),
   maximumResponseBytes: v.pipe(v.number(), v.integer(), v.minValue(1_024)),
+  /** Whether requests carry the X-OAO-* call identity headers. */
+  forwardCallContext: v.boolean(),
   status: McpLifecycleStatusSchema,
   createdByPrincipalId: IdSchema,
   createdAt: TimestampSchema,
@@ -2320,6 +2326,12 @@ export const CreateMcpCredentialPolicyInputSchema = v.strictObject({
     v.pipe(v.number(), v.integer(), v.minValue(1_024), v.maxValue(10_485_760)),
     1_048_576,
   ),
+  /**
+   * Sends the organization, project, session, run, tool-call, and run-key
+   * identity to the approved MCP server as X-OAO-* headers. Off by default:
+   * opting in discloses OAO identifiers to that server.
+   */
+  forwardCallContext: v.optional(v.boolean(), false),
 });
 
 export const McpToolsetToolSchema = v.object({
@@ -3125,6 +3137,8 @@ const BackupMcpCredentialPolicySchema = v.strictObject({
           v.integer(),
           v.minValue(1_024),
         ),
+        /** Absent in backups made before call context could be forwarded. */
+        forwardCallContext: v.optional(v.boolean(), false),
         status: BackupLifecycleSchema,
         contentHash: BackupHashSchema,
       }),

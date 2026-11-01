@@ -97,6 +97,7 @@ interface PolicyRow {
   path_prefix: string;
   timeout_ms: number;
   maximum_response_bytes: number;
+  forward_call_context: boolean;
   status: "active" | "deprecated" | "revoked";
   created_by_principal_id: string;
   created_at: Date;
@@ -126,6 +127,7 @@ interface ConnectionRow extends OAuthColumns {
   transport: "streamable_http" | "legacy_sse";
   timeout_ms: number;
   maximum_response_bytes: number;
+  forward_call_context: boolean;
   credential_id: string;
   credential_version_id: string;
   credential_kind: CredentialKind;
@@ -337,6 +339,7 @@ function policy(row: PolicyRow): McpCredentialPolicy {
     pathPrefix: row.path_prefix,
     timeoutMs: row.timeout_ms,
     maximumResponseBytes: row.maximum_response_bytes,
+    forwardCallContext: row.forward_call_context,
     status: row.status,
     createdByPrincipalId: row.created_by_principal_id,
     createdAt: timestamp(row.created_at),
@@ -413,6 +416,7 @@ const POLICY_SELECT = `
          resource.policy_key,resource.display_name,resource.latest_version_id,
          version.version,version.credential_id,version.exact_origin,
          version.path_prefix,version.timeout_ms,version.maximum_response_bytes,
+         version.forward_call_context,
          lifecycle.status,resource.created_by_principal_id,
          resource.created_at,resource.updated_at
     FROM oao.mcp_credential_policies resource
@@ -1032,8 +1036,8 @@ export class McpAdminService {
       `INSERT INTO oao.mcp_credential_policy_versions (
          organization_id,id,policy_id,version,credential_id,
          exact_origin,path_prefix,timeout_ms,maximum_response_bytes,
-         content_hash,created_by_principal_id
-       ) VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9,$10)`,
+         forward_call_context,content_hash,created_by_principal_id
+       ) VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [
         actor.organizationId,
         versionId,
@@ -1043,6 +1047,7 @@ export class McpAdminService {
         input.pathPrefix,
         input.timeoutMs,
         input.maximumResponseBytes,
+        input.forwardCallContext,
         digest(input),
         actor.id,
       ],
@@ -1107,6 +1112,7 @@ export class McpAdminService {
       `SELECT server.id AS server_version_id,server.endpoint_url,server.transport,
               policy.exact_origin,policy.path_prefix,
               policy.timeout_ms,policy.maximum_response_bytes,
+              policy.forward_call_context,
               credential.id AS credential_id,version.id AS credential_version_id,
               credential.credential_kind,
               credential.header_name,version.destination_origin,
@@ -1198,6 +1204,15 @@ export class McpAdminService {
         timeoutMs: row.timeout_ms,
         maximumResponseBytes: row.maximum_response_bytes,
         credential: material,
+        // Discovery has no run, so it carries only the tenant.
+        ...(row.forward_call_context
+          ? {
+              context: {
+                organizationId: actor.organizationId,
+                projectId: actor.projectId,
+              },
+            }
+          : {}),
         ...(row.destination_origin && row.destination_path_prefix
           ? {
               credentialDestination: {

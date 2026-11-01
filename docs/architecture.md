@@ -80,8 +80,10 @@ OTel SDK -> optional Collector -> configured OTLP backend
     token broker sends the client secret only to that token endpoint, and the
     resulting access token, cached per process and credential version, is
     injected like a static bearer. The API process decrypts credentials for
-    discovery and credential tests as well. MCP secrets and tokens never enter
-    Flue state, prompts, events, logs, or the sandbox.
+    discovery and credential tests as well. A policy version may opt in to
+    forwarding call identity as `X-OAO-*` headers; the broker strips inbound
+    ones and sets them only from trusted execution context. MCP secrets and
+    tokens never enter Flue state, prompts, events, logs, or the sandbox.
 15. API keys, model provider connections, storage provider connections,
     sandbox provider connections, and MCP servers/credentials/credential
     policies are organization-scoped rows shared by every project; their

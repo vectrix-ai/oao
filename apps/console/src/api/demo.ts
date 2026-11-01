@@ -2244,6 +2244,7 @@ export class DemoConsoleApi implements ConsoleApi {
       pathPrefix: input.pathPrefix,
       timeoutMs: input.timeoutMs ?? 30_000,
       maximumResponseBytes: input.maximumResponseBytes ?? 1_048_576,
+      forwardCallContext: input.forwardCallContext ?? false,
       status: "active",
       createdByPrincipalId: principalId,
       createdAt: now,
@@ -3450,6 +3451,7 @@ export class DemoConsoleApi implements ConsoleApi {
             pathPrefix: policy.pathPrefix,
             timeoutMs: policy.timeoutMs,
             maximumResponseBytes: policy.maximumResponseBytes,
+            forwardCallContext: policy.forwardCallContext,
             status: policy.status,
             contentHash: demoContentHash(policy.latestVersionId),
           },
@@ -3852,6 +3854,7 @@ export class DemoConsoleApi implements ConsoleApi {
         pathPrefix: latest.pathPrefix,
         timeoutMs: latest.timeoutMs,
         maximumResponseBytes: latest.maximumResponseBytes,
+        forwardCallContext: latest.forwardCallContext,
         status: latest.status,
       });
     }

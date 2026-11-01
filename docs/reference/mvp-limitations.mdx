@@ -119,7 +119,8 @@ and should shape integrations:
   status. Stdio, `private_key_jwt`, the authorization code flow, per-user and
   per-session delegated credentials, dynamic client registration, Client ID
   Metadata Documents, automatic retry of outcome-unknown calls, and sandbox
-  secret substitution are deferred. Tool results are untrusted remote content;
+  secret substitution are deferred. Forwarded call context is plain headers
+  behind the credential; OAO does not sign it. Tool results are untrusted remote content;
   OAO bounds and validates them but cannot prove they are free of prompt
   injection.
 - **Workspace backup stores only the latest archive per thread.** OAO backs up

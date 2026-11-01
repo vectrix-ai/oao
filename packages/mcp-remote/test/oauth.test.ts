@@ -342,7 +342,11 @@ async function codeOf(promise: Promise<unknown>): Promise<string> {
 test("the client secret reaches only the token endpoint and the access token only the MCP server", async (t) => {
   const server = await fixture(t);
   const client = new McpRemoteClient(server.egress);
-  const tools = await client.discover(server.connection());
+  const context = {
+    organizationId: "00000000-0000-4000-8000-000000000001",
+    projectId: "00000000-0000-4000-8000-000000000002",
+  };
+  const tools = await client.discover({ ...server.connection(), context });
   assert.deepEqual(
     tools.map((entry) => entry.name),
     ["extract_order"],
@@ -362,6 +366,15 @@ test("the client secret reaches only the token endpoint and the access token onl
   assert.equal(form.get("scope"), SCOPE);
   assert.equal(form.get("resource"), server.endpointUrl);
   assert.equal(server.tokenRequests[0]!.headers.authorization, undefined);
+  // Call context goes to the MCP server and never to the token endpoint.
+  for (const request of server.authorizationRequests)
+    assert.ok(
+      Object.keys(request.headers).every((name) => !name.startsWith("x-oao-")),
+    );
+  assert.equal(
+    server.mcpRequests[0]!.headers["x-oao-project-id"],
+    context.projectId,
+  );
 
   const mcpTraffic = JSON.stringify(server.mcpRequests);
   assert.doesNotMatch(mcpTraffic, new RegExp(CLIENT_SECRET, "u"));

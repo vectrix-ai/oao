@@ -657,6 +657,7 @@ test(
           origin: "https://mcp.example.test",
           pathPrefix: "/mcp",
         });
+        assert.equal(fakeMcpConnections.at(-1)?.context, undefined);
 
         const toolsetResponse = await app.request(
           `${projectPath}/mcp-toolsets`,
@@ -1087,11 +1088,13 @@ test(
                 credentialId: created.id,
                 exactOrigin: "https://extraction.example.test",
                 pathPrefix: "/api/integrations/oao/extraction/mcp",
+                forwardCallContext: true,
               },
               "mcp-oauth-policy-1",
             ),
           )
-        ).json()) as { latestVersionId: string };
+        ).json()) as { latestVersionId: string; forwardCallContext: boolean };
+        assert.equal(policy.forwardCallContext, true);
         const server = (await (
           await app.request(
             `${projectPath}/mcp-servers`,
@@ -1126,6 +1129,11 @@ test(
           "integration-oauth-client-secret",
         );
         assert.equal(connection.credential.resource, extractionEndpoint);
+        // Discovery has no run: only the tenant is forwarded.
+        assert.deepEqual(connection.context, {
+          organizationId: integrationPrincipal.organizationId,
+          projectId: integrationPrincipal.projectId,
+        });
         const firstVersionId = connection.credential.credentialVersionId;
 
         // A remote OAuth failure surfaces only its safe code.

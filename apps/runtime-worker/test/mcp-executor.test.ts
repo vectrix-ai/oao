@@ -66,6 +66,7 @@ interface FixtureOptions {
   } | null;
   /** Stores an OAuth client-credentials credential for the endpoint. */
   readonly oauth?: boolean;
+  readonly forwardCallContext?: boolean;
 }
 
 /** Seeds one bound MCP tool and one run the executor may call it for. */
@@ -218,8 +219,9 @@ async function seedMcpCall(
   await query(
     `INSERT INTO oao.mcp_credential_policy_versions (
        organization_id,id,policy_id,version,credential_id,exact_origin,path_prefix,
-       timeout_ms,maximum_response_bytes,content_hash,created_by_principal_id
-     ) VALUES ($1,$2,$3,1,$4,$5,$6,10000,65536,$7,$8)`,
+       timeout_ms,maximum_response_bytes,forward_call_context,content_hash,
+       created_by_principal_id
+     ) VALUES ($1,$2,$3,1,$4,$5,$6,10000,65536,$7,$8,$9)`,
     [
       organizationId,
       ids.policyVersion,
@@ -227,6 +229,7 @@ async function seedMcpCall(
       ids.credential,
       options.policyOrigin ?? "https://mcp.example.test",
       options.policyPathPrefix ?? "/mcp",
+      options.forwardCallContext ?? false,
       hash(`${label}:policy`),
       principalId,
     ],
@@ -487,6 +490,8 @@ test(
         kind: "static_bearer",
         secret: `secret-for-${run}-inside`,
       });
+      // Call context is opt-in per policy version.
+      assert.equal(calls[0]?.context, undefined);
       const attempt = await admin.query<{
         state: string;
         credential_version_id: string;
@@ -722,6 +727,53 @@ test(
           safe_error_code: "credential_rejected",
         });
       },
+    );
+  },
+);
+
+test(
+  "the MCP executor forwards call context only for a policy that opts in",
+  { skip: databaseUrl ? false : "DATABASE_URL is required" },
+  async (t) => {
+    assert.ok(databaseUrl);
+    assert.ok(testAdminDatabaseUrl);
+    const admin = createPool(testAdminDatabaseUrl);
+    const pool = createPool(databaseUrl);
+    t.after(async () => {
+      await pool.end();
+      await admin.end();
+    });
+    const run = suffix(t.name);
+    const contexts = [];
+    for (const label of [`${run}-first`, `${run}-second`]) {
+      const fixture = await seedMcpCall(admin, label, {
+        forwardCallContext: true,
+      });
+      const { remote, calls } = recordingRemote();
+      await createPostgresMcpToolExecutor({
+        pool,
+        credentialCipher: cipher,
+        remote,
+      }).execute(fixture.tenant, fixture.tool, { traceId: "trace-1" });
+      assert.deepEqual(calls[0]?.context, {
+        organizationId: fixture.tenant.organizationId,
+        projectId: fixture.tenant.projectId,
+        call: {
+          sessionId: fixture.tenant.sessionId,
+          runId: fixture.tenant.runId,
+          // The derived OAO tool-call ID, never Flue's own.
+          toolCallId: fixture.toolCallId,
+          runKeySha256: createHash("sha256")
+            .update(`run-key-${label}`)
+            .digest("hex"),
+        },
+      });
+      contexts.push(calls[0]!.context!);
+    }
+    // Runs created with different idempotency keys carry different hashes.
+    assert.notEqual(
+      contexts[0]!.call!.runKeySha256,
+      contexts[1]!.call!.runKeySha256,
     );
   },
 );

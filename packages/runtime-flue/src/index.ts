@@ -4927,6 +4927,8 @@ interface McpExecutionRow {
   transport: "streamable_http" | "legacy_sse";
   timeout_ms: number;
   maximum_response_bytes: number;
+  forward_call_context: boolean;
+  run_idempotency_key: string;
   credential_id: string;
   credential_version_id: string;
   credential_kind:
@@ -5049,7 +5051,9 @@ export function createPostgresMcpToolExecutor(input: {
         const result = await transaction.query<McpExecutionRow>(
           `SELECT server.endpoint_url,server.transport,policy.exact_origin,
                     policy.path_prefix,policy.timeout_ms,
-                    policy.maximum_response_bytes,credential.id AS credential_id,
+                    policy.maximum_response_bytes,policy.forward_call_context,
+                    run.idempotency_key AS run_idempotency_key,
+                    credential.id AS credential_id,
                     version.id AS credential_version_id,
                     credential.credential_kind,credential.header_name,
                     version.destination_origin,version.destination_path_prefix,
@@ -5334,6 +5338,24 @@ export function createPostgresMcpToolExecutor(input: {
             timeoutMs: row.timeout_ms,
             maximumResponseBytes: row.maximum_response_bytes,
             credential,
+            // Opted in per policy version. The tool-call ID is OAO's
+            // derived one, so it is stable across recovery.
+            ...(row.forward_call_context
+              ? {
+                  context: {
+                    organizationId: tenant.organizationId,
+                    projectId: tenant.projectId,
+                    call: {
+                      sessionId: tenant.sessionId,
+                      runId: tenant.runId,
+                      toolCallId,
+                      runKeySha256: createHash("sha256")
+                        .update(row.run_idempotency_key)
+                        .digest("hex"),
+                    },
+                  },
+                }
+              : {}),
             ...(row.destination_origin && row.destination_path_prefix
               ? {
                   credentialDestination: {

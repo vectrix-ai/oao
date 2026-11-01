@@ -856,3 +856,17 @@ test("OAuth client-credentials MCP credentials pin their configuration on the ve
   );
   assert.doesNotMatch(sql, /DROP TABLE|DROP COLUMN|DELETE FROM|BYPASSRLS/u);
 });
+
+test("MCP call context is opt-in per policy version and reserves x-oao-* headers", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0056_mcp_call_context.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    sql,
+    /ADD COLUMN forward_call_context boolean NOT NULL DEFAULT false/u,
+  );
+  assert.match(sql, /NOT LIKE 'x-oao-%'/u);
+  assert.match(sql, /NOT VALID/u);
+  assert.doesNotMatch(sql, /UPDATE |DROP TABLE|DROP COLUMN|DELETE FROM/u);
+});

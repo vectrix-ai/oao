@@ -432,13 +432,49 @@ with `clientId`, `tokenEndpointAuthMethod`, `scope`, `sendResource`, `issuer`,
 when the issuer, token endpoint, or metadata URL changes. The resource never
 changes: create a new credential for another resource.
 
+## Call context headers
+
+A credential policy can forward OAO call identity to the server it approves.
+Set `forwardCallContext: true` on the policy (in the console: **Forward call
+context** under **Security policy and limits**). It is off by default, because
+it discloses OAO identifiers to that server. The flag is part of the immutable
+policy version, so a session keeps the setting it was created with.
+
+When it is on, the egress broker sets these headers after it strips every
+inbound `x-oao-*` header and injects the credential:
+
+| Header                  | Value                                                      | Sent on                            |
+| ----------------------- | ---------------------------------------------------------- | ---------------------------------- |
+| `X-OAO-Organization-Id` | Organization UUID                                          | Every request, including discovery |
+| `X-OAO-Project-Id`      | Project UUID                                               | Every request, including discovery |
+| `X-OAO-Session-Id`      | Session UUID                                               | The requests of a run's tool call  |
+| `X-OAO-Run-Id`          | Run UUID                                                   | The requests of a run's tool call  |
+| `X-OAO-Tool-Call-Id`    | OAO's deterministic tool-call UUID, stable across recovery | The requests of a run's tool call  |
+| `X-OAO-Run-Key-Sha256`  | Lowercase hex SHA-256 of the run's `Idempotency-Key`       | The requests of a run's tool call  |
+
+- **Discovery** runs outside any run, so it carries only the organization and
+  project. A server can allow `server/discover`, `initialize`, and `tools/list`
+  without the call headers and refuse a `tools/call` without them.
+- **Validation.** OAO checks every value's format before it sends a byte, and
+  never sends these headers to an OAuth token endpoint.
+- **Reserved names.** No credential may use an `x-oao-*` header name, so a
+  credential cannot spoof them either. A server should still treat them as
+  claims that the credential authenticates, not as authentication.
+- **Run key hash.** It lets a server bind tool calls to the run it created
+  with that `Idempotency-Key`, without OAO disclosing the key itself. A
+  follow-up run or a delegated child run has a different key, and so a
+  different hash.
+- **Tool-call ID.** It is the ID of the `tool_call` aggregate in OAO's product
+  events. It stays the same when a call is recovered, so a server can use it as
+  an idempotency key.
+
 ## Egress and credential boundary
 
 The broker requires TLS, resolves the hostname before each request, denies
 private and special-purpose addresses, and pins the request to the validated IP
 while retaining TLS server-name verification. This limits SSRF and DNS
-rebinding. It strips caller-supplied authorization, cookie, and proxy
-authorization headers before injecting the configured secret.
+rebinding. It strips caller-supplied authorization, cookie, proxy
+authorization, and `x-oao-*` headers before injecting the configured secret.
 
 Credential-bearing requests must retain the exact scheme, host, and port and
 remain under the policy path prefix and inside the credential's pinned
@@ -460,8 +496,9 @@ rather than authority.
 
 ## Recovery behavior
 
-Every call has a deterministic tool-call identity and one PostgreSQL call-attempt
-record. A process crash after dispatch can leave the remote outcome unknowable;
+Every call has a deterministic tool-call identity, sent as
+`X-OAO-Tool-Call-Id` when the policy forwards [call
+context](#call-context-headers), and one PostgreSQL call-attempt record. A process crash after dispatch can leave the remote outcome unknowable;
 OAO marks that attempt `unknown` and refuses to replay it automatically. This
 fail-closed behavior avoids repeating a non-idempotent remote action. Product
 events contain resource IDs, safe error codes, duration/size metadata, and state,

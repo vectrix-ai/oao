@@ -405,6 +405,7 @@ describe("management console", () => {
       pathPrefix: "/",
       timeoutMs: 10_000,
       maximumResponseBytes: 65_536,
+      forwardCallContext: false,
       status: "active" as const,
     };
     const backup = parseConfigurationBackup(acmeBackup());
@@ -1393,6 +1394,9 @@ describe("management console", () => {
     await user.click(dialog.getByRole("button", { name: "Discover again" }));
     expect(await dialog.findByLabelText("Client ID")).toBeInTheDocument();
     await user.type(dialog.getByLabelText("Client ID"), "client_demo");
+    await user.click(
+      dialog.getByRole("checkbox", { name: /Forward call context/u }),
+    );
     await user.click(dialog.getByRole("button", { name: "Next" }));
     expect(dialog.getByText("OAuth client credentials")).toBeInTheDocument();
     await user.click(dialog.getByRole("button", { name: "Test and discover" }));
@@ -1408,6 +1412,9 @@ describe("management console", () => {
 
     const credential = (await api.listMcpCredentials()).data[0]!;
     expect(credential.kind).toBe("oauth_client_credentials");
+    expect(
+      (await api.listMcpCredentialPolicies()).data[0]?.forwardCallContext,
+    ).toBe(true);
     expect(credential.destination).toEqual({
       origin: "https://app.example.test",
       pathPrefix: "/api/integrations/oao/extraction/mcp",
