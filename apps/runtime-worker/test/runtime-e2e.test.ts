@@ -1211,6 +1211,11 @@ async function runRuntimeScenario() {
           [],
           { timeoutMs: 60_000, delegates: delegate(middle.versionId) },
         );
+        // Mark the tree as started by another agent's OAO tool.
+        await admin.query(
+          "UPDATE oao.runs SET requested_by_run_id=id WHERE organization_id=$1 AND project_id=$2 AND id=$3",
+          [tenant.organizationId, tenant.projectId, root.runId],
+        );
       }
       await enqueue(worker, root);
       const gates = await waitFor(
@@ -1233,6 +1238,17 @@ async function runRuntimeScenario() {
       );
       assert.equal(tree.rowCount, delegated ? 3 : 1);
       const runIds = tree.rows.map((row) => row.run_id);
+      if (delegated) {
+        // Delegated children keep that origin, so they only read OAO.
+        const origins = await admin.query<{ origin: string | null }>(
+          "SELECT requested_by_run_id AS origin FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])",
+          [tenant.organizationId, tenant.projectId, runIds],
+        );
+        assert.deepEqual(
+          origins.rows.map((row) => row.origin),
+          runIds.map(() => root.runId),
+        );
+      }
       // Advance only this disposable tree by 23 hours, without a real-day sleep.
       await admin.query(
         "UPDATE oao.approvals SET created_at=created_at-interval '23 hours',expires_at=expires_at-interval '23 hours' WHERE organization_id=$1 AND project_id=$2 AND id=$3",

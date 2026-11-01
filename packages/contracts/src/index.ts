@@ -1522,7 +1522,7 @@ export const OAO_MCP_TOOL_CATALOG: readonly OaoMcpToolDescriptor[] = [
     title: "Start session",
     description:
       "Starts a new session on an agent with a first message and, by default, waits for the agent's answer.",
-    scopes: ["session:write", "run:create"],
+    scopes: ["session:write", "run:create", "run:read"],
     readOnly: false,
   },
   {
@@ -1530,7 +1530,7 @@ export const OAO_MCP_TOOL_CATALOG: readonly OaoMcpToolDescriptor[] = [
     title: "Send message",
     description:
       "Sends a message to an existing session as a new run, for example a question about an earlier run. The agent answers with the whole session in context. The session's latest run must have settled. By default waits for the answer.",
-    scopes: ["run:create"],
+    scopes: ["run:create", "run:read"],
     readOnly: false,
   },
   {
@@ -1606,7 +1606,7 @@ export const OAO_MCP_TOOL_CATALOG: readonly OaoMcpToolDescriptor[] = [
     title: "Message delegation",
     description:
       "Sends a follow-up to a delegated child agent's session and, by default, waits for its answer.",
-    scopes: ["delegation:message", "run:create"],
+    scopes: ["delegation:message", "run:create", "run:read"],
     readOnly: false,
   },
   {

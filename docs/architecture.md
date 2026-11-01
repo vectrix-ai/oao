@@ -118,8 +118,9 @@ OTel SDK -> optional Collector -> configured OTLP backend
     call by the runtime worker. PostgreSQL stores its SHA-256, never the
     token. The API resolves it to the run's creator, restricted to the run's
     project and to the agent version's granted scopes that the creator still
-    holds, and only while the run is unsettled. A run an agent started reads
-    only; it cannot start or message further runs.
+    holds, and only while the run is unsettled. A run an agent started, and
+    any run it delegates to, keeps only read scopes: it cannot change OAO or
+    start or message further runs.
 
 ## Public run states
 

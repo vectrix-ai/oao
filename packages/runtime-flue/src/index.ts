@@ -2325,10 +2325,14 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
           ],
         );
         await transaction.query(
+          // A child of a run another agent started keeps that origin, so
+          // delegation cannot lift the rule that such runs only read.
           `INSERT INTO oao.runs
              (organization_id,project_id,id,thread_id,session_id,agent_version_id,
-              created_by_principal_id,idempotency_key,input_public)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+              created_by_principal_id,idempotency_key,input_public,requested_by_run_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
+             (SELECT requested_by_run_id FROM oao.runs
+               WHERE organization_id=$1 AND project_id=$2 AND id=$10))`,
           [
             input.organizationId,
             input.projectId,
@@ -2339,6 +2343,7 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
             parent.created_by_principal_id,
             input.idempotencyKey,
             { message: prompt },
+            input.parentRunId,
           ],
         );
         await transaction.query(
@@ -2582,8 +2587,10 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
         await transaction.query(
           `INSERT INTO oao.runs
              (organization_id,project_id,id,thread_id,session_id,agent_version_id,
-              created_by_principal_id,idempotency_key,input_public)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+              created_by_principal_id,idempotency_key,input_public,requested_by_run_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
+             (SELECT requested_by_run_id FROM oao.runs
+               WHERE organization_id=$1 AND project_id=$2 AND id=$10))`,
           [
             input.organizationId,
             input.projectId,
@@ -2594,6 +2601,7 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
             delegation.created_by_principal_id,
             input.idempotencyKey,
             { message: prompt },
+            input.parentRunId,
           ],
         );
         await transaction.query(

@@ -965,3 +965,16 @@ test("run tokens act as the run's creator, narrowed, and only while the run is u
     /SET ROLE oao_auth;[\s\S]*CREATE FUNCTION oao\.authenticate_run_token/u,
   );
 });
+
+test("a run another agent started keeps only the read scopes of its grant", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0060_agent_run_reads_only.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE OR REPLACE FUNCTION oao\.authenticate_run_token/u);
+  const reads = /OR scope IN \(([\s\S]*?)\)/u.exec(sql)?.[1] ?? "";
+  for (const scope of reads.match(/'[^']+'/gu) ?? [])
+    assert.match(scope, /:read'|:read_metadata'/u);
+  assert.match(sql, /run\.requested_by_run_id IS NULL/u);
+  assert.match(sql, /SET ROLE oao_auth;[\s\S]*RESET ROLE;/u);
+});

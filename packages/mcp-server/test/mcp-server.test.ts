@@ -200,7 +200,14 @@ test("tools are offered only to callers holding all their scopes", () => {
   assert.ok(!reader.includes("send_message"));
   assert.ok(!reader.includes("create_agent"));
   assert.ok(!names(["session:write"]).includes("start_session"));
-  assert.ok(names(["session:write", "run:create"]).includes("start_session"));
+  // Waiting for the answer reads the run.
+  assert.ok(!names(["session:write", "run:create"]).includes("start_session"));
+  assert.ok(!names(["run:create"]).includes("send_message"));
+  assert.ok(
+    names(["session:write", "run:create", "run:read"]).includes(
+      "start_session",
+    ),
+  );
   assert.equal(names(["*"]).length, OAO_TOOLS.length);
   // A project-restricted caller cannot change organization-shared resources.
   const restricted = names(["*"], true);
@@ -264,7 +271,7 @@ test("send_message asks the agent in its session and returns its answer", async 
 });
 
 test("a write without its own key still sends a fresh Idempotency-Key", async () => {
-  const { client, api } = await connect(["run:create"]);
+  const { client, api } = await connect(["run:create", "run:read"]);
   for (let attempt = 0; attempt < 2; attempt += 1)
     await client.callTool({
       name: "send_message",

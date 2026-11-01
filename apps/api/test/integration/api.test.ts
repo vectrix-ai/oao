@@ -4341,6 +4341,7 @@ test(
 
         const grant = [
           "agent:read",
+          "agent:write",
           "session:read",
           "session:write",
           "run:create",
@@ -4480,7 +4481,7 @@ test(
         );
         assert.equal(audit.rows[0]?.detail.viaRunId, session.latestRunId);
 
-        // That run reads only: it cannot ask further agents.
+        // That run reads only: it cannot ask further agents or change OAO.
         const asAskedRun = await issueToken(asked.latestRunId);
         const askedContext = (await (
           await app.request("/v1/context", { headers: asAskedRun })
@@ -5903,6 +5904,32 @@ test(
           ((await usedElsewhere.json()) as { error: { message: string } }).error
             .message,
           /in removal-other/u,
+        );
+        // The usage names the other project, except to a project key.
+        const usageFor = async (headers: Record<string, string> = {}) =>
+          (
+            (await (
+              await app.request(
+                `${projectPath}/mcp-servers/${serverId}/usage`,
+                {
+                  headers,
+                },
+              )
+            ).json()) as { otherProjects: readonly { slug: string }[] }
+          ).otherProjects.map((project) => project.slug);
+        assert.deepEqual(await usageFor(), ["removal-other"]);
+        const usageKey = (await (
+          await app.request(
+            `${projectPath}/api-keys`,
+            jsonRequest(
+              { name: "Usage reader", scopes: ["mcp:read"], access: "project" },
+              "removal-usage-key",
+            ),
+          )
+        ).json()) as { id: string; secret: string };
+        assert.deepEqual(
+          await usageFor({ authorization: `Bearer ${usageKey.secret}` }),
+          [],
         );
         await pool.query(
           "UPDATE oao.agent_definitions SET archived_at=clock_timestamp() WHERE organization_id=$1 AND id=$2",

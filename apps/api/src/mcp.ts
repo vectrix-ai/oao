@@ -577,12 +577,15 @@ export class McpAdminService {
       actor.projectId,
       serverId,
     );
-    const projects = await tx.query<{ id: string; slug: string; name: string }>(
-      `SELECT id,slug,name FROM oao.projects
-        WHERE organization_id=$1 AND id<>$2
-        ORDER BY created_at,id`,
-      [actor.organizationId, actor.projectId],
-    );
+    // A project-restricted caller learns nothing about other projects.
+    const projects = actor.projectRestricted
+      ? { rows: [] }
+      : await tx.query<{ id: string; slug: string; name: string }>(
+          `SELECT id,slug,name FROM oao.projects
+            WHERE organization_id=$1 AND id<>$2
+            ORDER BY created_at,id`,
+          [actor.organizationId, actor.projectId],
+        );
     const otherProjects: McpServerUsage["otherProjects"][number][] = [];
     try {
       for (const project of projects.rows) {
