@@ -193,8 +193,13 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
+/**
+ * Drops a response body by reading it to the end, which the response size
+ * limit bounds. Cancelling it instead trips a Node 22 stream bug: a body
+ * cancelled while data still arrives throws an uncaught exception.
+ */
 async function discard(response: Response): Promise<void> {
-  await response.body?.cancel().catch(() => undefined);
+  await response.arrayBuffer().catch(() => undefined);
 }
 
 /**
