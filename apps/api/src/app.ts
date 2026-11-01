@@ -78,6 +78,7 @@ import type { PostgresApiStore } from "./store.js";
 import type { RuntimeCommandPort } from "./runtime-commands.js";
 import { errorEnvelope, HttpApiError } from "./errors.js";
 import { McpAdminService, lockMcpBindings } from "./mcp.js";
+import { registerOaoMcpRoute } from "./oao-mcp.js";
 import { registerConfigurationBackupRoutes } from "./configuration-backup.js";
 import {
   decodeListCursor,
@@ -2989,6 +2990,10 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   });
   registerRunRoutes(app, dependencies);
   registerEventRoutes(app, dependencies);
+  registerOaoMcpRoute(
+    app,
+    dependencies.onError ? { onError: dependencies.onError } : {},
+  );
 
   app.notFound((c) => {
     const requestId = c.get("requestId") ?? randomUUID();

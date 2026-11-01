@@ -27,6 +27,10 @@ own project and gets `403` for any other. See
 [Authentication](/reference/authentication) for how per-project principals are
 resolved and what a project key may not do.
 
+`/projects/{projectId}/mcp` serves the project's MCP server over Streamable
+HTTP for external agents. It accepts only an API key as a bearer token; see
+[Manage OAO through MCP](/integrations/oao-mcp-server).
+
 ## TypeScript SDK helpers
 
 The workspace SDK exposes the same context and run-settling operations used by

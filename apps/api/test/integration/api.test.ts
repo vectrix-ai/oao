@@ -1,3 +1,7 @@
+import {
+  Client as McpClient,
+  StreamableHTTPClientTransport,
+} from "@modelcontextprotocol/client";
 import { AUTHORIZATION_SCOPE_CATALOG } from "@oao/contracts";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
@@ -4117,6 +4121,170 @@ test(
           await app.request(`${projectPath}/api-keys/${projectKey.id}`, {
             method: "DELETE",
             headers: { "idempotency-key": "project-key-revoke-4" },
+          });
+        }
+      },
+    );
+
+    await t.test(
+      "the OAO MCP server acts in the project with the caller's own key",
+      async () => {
+        const agent = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "mcp-managed-agent",
+              name: "MCP managed agent",
+              config: {
+                systemPrompt: "Answer questions about invoices.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "mcp-managed-agent-1",
+          ),
+        );
+        assert.equal(agent.status, 201);
+        const agentId = ((await agent.json()) as { id: string }).id;
+        const created = await app.request(
+          `${projectPath}/api-keys`,
+          jsonRequest(
+            {
+              name: "MCP client",
+              access: "project",
+              scopes: [
+                "agent:read",
+                "session:read",
+                "session:write",
+                "run:create",
+                "run:read",
+              ],
+            },
+            "mcp-client-key-1",
+          ),
+        );
+        const key = (await created.json()) as { id: string; secret: string };
+        const endpoint = new URL(`http://oao.test${projectPath}/mcp`);
+        const connect = async (authorization?: string) => {
+          const client = new McpClient({ name: "test", version: "1.0.0" });
+          await client.connect(
+            new StreamableHTTPClientTransport(endpoint, {
+              fetch: async (input, init) => app.fetch(new Request(input, init)),
+              ...(authorization
+                ? { requestInit: { headers: { authorization } } }
+                : {}),
+            }),
+          );
+          return client;
+        };
+        const textOf = (result: { readonly content?: unknown }) =>
+          (result.content as { text: string }[])[0]!.text;
+        try {
+          const client = await connect(`Bearer ${key.secret}`);
+          const names = (await client.listTools()).tools.map(
+            (tool) => tool.name,
+          );
+          assert.ok(names.includes("list_agents"));
+          assert.ok(names.includes("start_session"));
+          assert.ok(names.includes("send_message"));
+          assert.ok(!names.includes("create_agent"));
+          assert.ok(!names.includes("decide_approval"));
+
+          const context = JSON.parse(
+            textOf(
+              await client.callTool({ name: "get_context", arguments: {} }),
+            ),
+          ) as { principal: { kind: string; projectRestricted?: boolean } };
+          assert.equal(context.principal.kind, "api_key");
+          assert.equal(context.principal.projectRestricted, true);
+
+          const agents = JSON.parse(
+            textOf(
+              await client.callTool({
+                name: "list_agents",
+                arguments: { limit: 100 },
+              }),
+            ),
+          ) as { data: { id: string }[] };
+          assert.ok(agents.data.some((entry) => entry.id === agentId));
+
+          // A write goes through the REST route, idempotency included.
+          const start = () =>
+            client.callTool({
+              name: "start_session",
+              arguments: {
+                agentId,
+                message: "What was the invoice total?",
+                waitSeconds: 0,
+                idempotencyKey: "mcp-start-1",
+              },
+            });
+          const started = JSON.parse(textOf(await start())) as {
+            session: { id: string };
+            run: { id: string; state: string; createdByPrincipalId: string };
+            settled: boolean;
+          };
+          assert.equal(started.settled, false);
+          assert.equal(started.run.state, "queued");
+          const replayed = JSON.parse(textOf(await start())) as {
+            session: { id: string };
+          };
+          assert.equal(replayed.session.id, started.session.id);
+          const creator = await pool.query<{ subject: string }>(
+            "SELECT subject FROM oao.principals WHERE id=$1",
+            [started.run.createdByPrincipalId],
+          );
+          assert.equal(creator.rows[0]?.subject, `api-key:${key.id}`);
+
+          // The session is busy, so a follow-up is refused as the API does.
+          const busy = await client.callTool({
+            name: "send_message",
+            arguments: {
+              sessionId: started.session.id,
+              message: "And the due date?",
+              waitSeconds: 0,
+            },
+          });
+          assert.equal(busy.isError, true);
+          assert.match(textOf(busy), /"code":"conflict"/u);
+          await client.close();
+
+          // Browser sessions and other projects are refused.
+          const cookieOnly = await app.fetch(
+            new Request(endpoint, {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                accept: "application/json, text/event-stream",
+              },
+              body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: 1,
+                method: "tools/list",
+              }),
+            }),
+          );
+          assert.equal(cookieOnly.status, 401);
+          const elsewhere = await app.fetch(
+            new Request(
+              "http://oao.test/v1/projects/00000000-0000-4000-8000-00000000beef/mcp",
+              {
+                method: "POST",
+                headers: {
+                  authorization: `Bearer ${key.secret}`,
+                  "content-type": "application/json",
+                },
+                body: "{}",
+              },
+            ),
+          );
+          assert.equal(elsewhere.status, 403);
+        } finally {
+          await app.request(`${projectPath}/api-keys/${key.id}`, {
+            method: "DELETE",
+            headers: { "idempotency-key": "mcp-client-key-revoke-1" },
           });
         }
       },

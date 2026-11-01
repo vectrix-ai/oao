@@ -147,6 +147,9 @@ OTel SDK -> optional Collector -> configured OTLP backend
 - `@oao/artifact-s3`: tenant-keyed S3 artifact adapter plus encrypted project storage resolution and latest-thread workspace backup records.
 - `@oao/mcp-remote`: pinned MCP client adapter plus TLS-only, DNS/IP-pinned,
   exact-origin credential egress and bounded schema/result handling.
+- `@oao/mcp-server`: OAO's own MCP server. Each tool wraps one public API
+  operation through `@oao/sdk-js`, is offered only to callers holding its
+  scopes, and never takes a plaintext secret. The API serves it per project.
 
 ### Product surfaces
 

@@ -106,7 +106,15 @@ and should shape integrations:
 - **Project switching is cookie-scoped.** The console switches projects with
   `POST /auth/switch-project`, which sets an `oao_active_project` cookie for
   the browser; other devices and existing bearer sessions keep their own
-  active project. API keys act on any project through the URL path.
+  active project. Organization API keys act on any project through the URL
+  path; project API keys act only in their own project.
+- **OAO's own MCP server accepts API keys only.** An external agent connects
+  with an OAO API key as a bearer token. There is no OAuth sign-in yet, so
+  connector UIs that require OAuth, such as claude.ai or ChatGPT connectors,
+  cannot connect. The server is stateless: it sends no notifications, offers
+  no resources or prompts, and waits at most 600 seconds for a run inside one
+  call. It never takes a plaintext secret, so credentials and API keys are
+  managed outside it.
 - **Remote MCP is HTTPS with static or client-credentials authentication.**
   OAO supports Streamable HTTP and legacy SSE with static bearer or safe API-key
   headers and OAuth client credentials with a client secret

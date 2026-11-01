@@ -33,13 +33,16 @@
     "@oao/event-webhooks": "workspace:*",
     "@oao/events": "workspace:*",
     "@oao/mcp-remote": "workspace:*",
+    "@oao/mcp-server": "workspace:*",
     "@oao/models-openrouter": "workspace:*",
     "@oao/provider-credentials": "workspace:*",
     "@oao/sandbox-daytona": "workspace:*",
+    "@oao/sdk-js": "workspace:*",
     "hono": "4.13.13",
     "pg": "8.23.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
     "@oao/testkit": "workspace:*",
     "@types/pg": "8.20.0"
   }

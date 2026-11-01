@@ -66,7 +66,8 @@
           "integrations/files",
           "integrations/codebase",
           "integrations/event-webhooks",
-          "integrations/mcp"
+          "integrations/mcp",
+          "integrations/oao-mcp-server"
         ]
       },
       {

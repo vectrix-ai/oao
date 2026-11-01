@@ -3155,6 +3155,10 @@ describe("management console", () => {
     await user.click(
       await screen.findByRole("button", { name: "Create API key" }),
     );
+    // The page names the project's OAO MCP endpoint for external agents.
+    expect(
+      screen.getByText(/^http:\/\/[^ ]+\/v1\/projects\/[0-9a-f-]{36}\/mcp$/u),
+    ).toBeInTheDocument();
     const create = within(
       screen.getByRole("dialog", { name: "Create API key" }),
     );

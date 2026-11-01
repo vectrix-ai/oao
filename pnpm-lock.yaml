@@ -71,6 +71,9 @@ importers:
       '@oao/mcp-remote':
         specifier: workspace:*
         version: link:../../packages/mcp-remote
+      '@oao/mcp-server':
+        specifier: workspace:*
+        version: link:../../packages/mcp-server
       '@oao/models-openrouter':
         specifier: workspace:*
         version: link:../../packages/models-openrouter
@@ -80,6 +83,9 @@ importers:
       '@oao/sandbox-daytona':
         specifier: workspace:*
         version: link:../../packages/sandbox-daytona
+      '@oao/sdk-js':
+        specifier: workspace:*
+        version: link:../../packages/sdk-js
       hono:
         specifier: 4.13.13
         version: 4.13.13
@@ -87,6 +93,9 @@ importers:
         specifier: 8.23.0
         version: 8.23.0
     devDependencies:
+      '@modelcontextprotocol/client':
+        specifier: 2.3.1
+        version: 2.3.1
       '@oao/testkit':
         specifier: workspace:*
         version: link:../../packages/testkit
@@ -325,6 +334,28 @@ importers:
       '@oao/contracts':
         specifier: workspace:*
         version: link:../contracts
+
+  packages/mcp-server:
+    dependencies:
+      '@modelcontextprotocol/server':
+        specifier: 2.3.1
+        version: 2.3.1
+      '@oao/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@oao/sdk-js':
+        specifier: workspace:*
+        version: link:../sdk-js
+      '@valibot/to-json-schema':
+        specifier: 1.7.1
+        version: 1.7.1(valibot@1.4.2(typescript@5.9.3))
+      valibot:
+        specifier: 1.4.2
+        version: 1.4.2(typescript@5.9.3)
+    devDependencies:
+      '@modelcontextprotocol/client':
+        specifier: 2.3.1
+        version: 2.3.1
 
   packages/model-images:
     dependencies:
@@ -1390,6 +1421,10 @@ packages:
 
   '@modelcontextprotocol/core@2.3.1':
     resolution: {integrity: sha512-laVmIhPGpWi7rG9q+0UigblRN0Hws/Yjlb6qLFtVqryXVLkc4h+yN8z731POD2LnAGQlFe7/tXhUm7Bi0YB91g==}
+    engines: {node: '>=20'}
+
+  '@modelcontextprotocol/server@2.3.1':
+    resolution: {integrity: sha512-e59MfWuSssj6DoQ96JCTqdW1AXT5/XtnTl0WWd6MU1Ka434fFUGGosCLJbGNySDhHGvxQWoRWK137FXYFkYNWw==}
     engines: {node: '>=20'}
 
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
@@ -4654,6 +4689,11 @@ snapshots:
 
   '@modelcontextprotocol/core@2.3.1':
     dependencies:
+      zod: 4.6.7
+
+  '@modelcontextprotocol/server@2.3.1':
+    dependencies:
+      '@modelcontextprotocol/core': 2.3.1
       zod: 4.6.7
 
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
