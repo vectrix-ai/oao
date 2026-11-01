@@ -3843,6 +3843,285 @@ test(
       },
     );
 
+    await t.test(
+      "a project API key stays inside its project and out of organization administration",
+      async () => {
+        const created = await app.request(
+          `${projectPath}/api-keys`,
+          jsonRequest(
+            { name: "Project key", scopes: ["*"], access: "project" },
+            "project-key-create-1",
+          ),
+        );
+        assert.equal(created.status, 201);
+        const projectKey = (await created.json()) as {
+          id: string;
+          secret: string;
+          access: string;
+          projectId: string;
+        };
+        assert.equal(projectKey.access, "project");
+        assert.equal(projectKey.projectId, integrationPrincipal.projectId);
+        const bearer = { authorization: `Bearer ${projectKey.secret}` };
+
+        const otherCreated = await app.request(
+          "/v1/projects",
+          jsonRequest(
+            { slug: "restricted-other", name: "Other project" },
+            "project-key-other-project-1",
+          ),
+        );
+        assert.equal(otherCreated.status, 201);
+        const other = (await otherCreated.json()) as { id: string };
+        try {
+          assert.equal(
+            (
+              await app.request(`${projectPath}/agents?limit=1`, {
+                headers: bearer,
+              })
+            ).status,
+            200,
+          );
+          const outside = await app.request(
+            `/v1/projects/${other.id}/agents?limit=1`,
+            { headers: bearer },
+          );
+          assert.equal(outside.status, 403);
+          assert.match(await outside.text(), /restricted to its project/u);
+
+          // Lists name only the key's own project.
+          const projects = (await (
+            await app.request("/v1/projects?limit=100", { headers: bearer })
+          ).json()) as { data: { id: string }[] };
+          assert.deepEqual(
+            projects.data.map((project) => project.id),
+            [integrationPrincipal.projectId],
+          );
+          const context = (await (
+            await app.request("/v1/context", { headers: bearer })
+          ).json()) as {
+            principal: { projectRestricted?: boolean };
+            projects: { id: string }[];
+          };
+          assert.equal(context.principal.projectRestricted, true);
+          assert.deepEqual(
+            context.projects.map((project) => project.id),
+            [integrationPrincipal.projectId],
+          );
+
+          // Organization administration and shared connections are refused,
+          // while reads of shared connections still work.
+          for (const [path, init] of [
+            [
+              "/v1/projects",
+              jsonRequest(
+                { slug: "key-made", name: "Key made" },
+                "project-key-made-1",
+                bearer,
+              ),
+            ],
+            [
+              `/v1/projects/${other.id}`,
+              {
+                method: "DELETE",
+                headers: {
+                  ...bearer,
+                  "idempotency-key": "project-key-delete-1",
+                },
+              },
+            ],
+            [
+              `/v1/organizations/${integrationPrincipal.organizationId}/configuration-backup`,
+              { headers: bearer },
+            ],
+            [
+              `${projectPath}/mcp-servers`,
+              jsonRequest(
+                {
+                  key: "restricted-server",
+                  name: "Restricted server",
+                  endpointUrl: "https://mcp.example.test/rpc",
+                },
+                "project-key-server-1",
+                bearer,
+              ),
+            ],
+            [
+              `${projectPath}/model-providers`,
+              jsonRequest(
+                { key: "restricted-provider", provider: "openrouter" },
+                "project-key-provider-1",
+                bearer,
+              ),
+            ],
+            [
+              `${projectPath}/members`,
+              jsonRequest(
+                { email: "restricted@example.test", role: "member" },
+                "project-key-member-1",
+                bearer,
+              ),
+            ],
+          ] as const) {
+            const response = await app.request(path, init);
+            assert.equal(response.status, 403, path);
+          }
+          assert.equal(
+            (
+              await app.request(`${projectPath}/mcp-servers`, {
+                headers: bearer,
+              })
+            ).status,
+            200,
+          );
+
+          // Keys it creates stay restricted to the same project.
+          const widened = await app.request(
+            `${projectPath}/api-keys`,
+            jsonRequest(
+              {
+                name: "Widened",
+                scopes: ["agent:read"],
+                access: "organization",
+              },
+              "project-key-widen-1",
+              bearer,
+            ),
+          );
+          assert.equal(widened.status, 403);
+          const child = await app.request(
+            `${projectPath}/api-keys`,
+            jsonRequest(
+              { name: "Child key", scopes: ["agent:read"] },
+              "project-key-child-1",
+              bearer,
+            ),
+          );
+          assert.equal(child.status, 201);
+          const childKey = (await child.json()) as {
+            id: string;
+            access: string;
+          };
+          assert.equal(childKey.access, "project");
+
+          // It lists and revokes only keys of its own project.
+          const listed = (await (
+            await app.request(`${projectPath}/api-keys?limit=100`, {
+              headers: bearer,
+            })
+          ).json()) as { data: { id: string; access: string }[] };
+          assert.ok(listed.data.length >= 2);
+          assert.ok(listed.data.every((key) => key.access === "project"));
+          const organizationKey = (await (
+            await app.request(
+              `${projectPath}/api-keys`,
+              jsonRequest(
+                { name: "Organization key", scopes: ["agent:read"] },
+                "project-key-org-1",
+              ),
+            )
+          ).json()) as { id: string; access: string };
+          assert.equal(organizationKey.access, "organization");
+          const foreignRevoke = await app.request(
+            `${projectPath}/api-keys/${organizationKey.id}`,
+            {
+              method: "DELETE",
+              headers: { ...bearer, "idempotency-key": "project-key-revoke-1" },
+            },
+          );
+          assert.equal(foreignRevoke.status, 404);
+          assert.equal(
+            (
+              await app.request(`${projectPath}/api-keys/${childKey.id}`, {
+                method: "DELETE",
+                headers: {
+                  ...bearer,
+                  "idempotency-key": "project-key-revoke-2",
+                },
+              })
+            ).status,
+            200,
+          );
+          assert.equal(
+            (
+              await app.request(
+                `${projectPath}/api-keys/${organizationKey.id}`,
+                {
+                  method: "DELETE",
+                  headers: { "idempotency-key": "project-key-revoke-3" },
+                },
+              )
+            ).status,
+            200,
+          );
+
+          // Deleting a project revokes the keys restricted to it. An
+          // organization key issues one inside the other project.
+          const issuer = (await (
+            await app.request(
+              `${projectPath}/api-keys`,
+              jsonRequest(
+                { name: "Issuer", scopes: ["*"] },
+                "project-key-issuer-1",
+              ),
+            )
+          ).json()) as { id: string; secret: string };
+          const otherKey = await app.request(
+            `/v1/projects/${other.id}/api-keys`,
+            jsonRequest(
+              {
+                name: "Other project key",
+                scopes: ["agent:read"],
+                access: "project",
+              },
+              "project-key-other-1",
+              { authorization: `Bearer ${issuer.secret}` },
+            ),
+          );
+          await app.request(`${projectPath}/api-keys/${issuer.id}`, {
+            method: "DELETE",
+            headers: { "idempotency-key": "project-key-issuer-revoke-1" },
+          });
+          assert.equal(otherKey.status, 201);
+          const otherKeyBody = (await otherKey.json()) as {
+            id: string;
+            secret: string;
+          };
+          assert.equal(
+            (
+              await app.request(`/v1/projects/${other.id}`, {
+                method: "DELETE",
+                headers: { "idempotency-key": "project-key-other-delete-1" },
+              })
+            ).status,
+            200,
+          );
+          const revoked = await pool.query<{ revoked: boolean }>(
+            "SELECT revoked_at IS NOT NULL AS revoked FROM oao.api_keys WHERE id=$1",
+            [otherKeyBody.id],
+          );
+          assert.equal(revoked.rows[0]?.revoked, true);
+          assert.equal(
+            (
+              await app.request("/v1/context", {
+                headers: { authorization: `Bearer ${otherKeyBody.secret}` },
+              })
+            ).status,
+            401,
+          );
+        } finally {
+          await app.request(`/v1/projects/${other.id}`, {
+            method: "DELETE",
+            headers: { "idempotency-key": "project-key-other-delete-2" },
+          });
+          await app.request(`${projectPath}/api-keys/${projectKey.id}`, {
+            method: "DELETE",
+            headers: { "idempotency-key": "project-key-revoke-4" },
+          });
+        }
+      },
+    );
+
     await t.test("audit export writes a tenant-scoped artifact", async () => {
       const exported = await app.request(
         `${projectPath}/audit/export`,

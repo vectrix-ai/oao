@@ -107,12 +107,17 @@ A human principal needs both `project:admin` (or `*`) and an organization
 Project membership and wildcard scopes alone do not grant that organization role.
 The console label **All scopes** describes permissions, not organization ownership.
 
-Enter a descriptive name, select the least-privilege scopes, and save the secret
-from the acknowledgement dialog. The console removes the plaintext
-when that dialog closes and cannot reveal it later.
+Enter a descriptive name, choose its access, select the least-privilege scopes,
+and save the secret from the acknowledgement dialog. The console removes the
+plaintext when that dialog closes and cannot reveal it later.
+
+**Access** decides where the key works. The console defaults to **Only this
+project**; choose **All projects in the organization** only for an integration
+that must reach every project. See [Project keys](#project-keys).
 
 API keys are stored per organization. The key list and revocation act on the
-same organization-wide pool from any project.
+same organization-wide pool from any project, except that a project key sees
+and revokes only keys of its own project.
 
 For automated setup, a caller authenticated with an API key has principal kind
 `api_key` and qualifies through `project:admin` or `*`, without an organization
@@ -171,7 +176,9 @@ rotation, and revocation use `credential:read_metadata`, `credential:write`,
 `credential:rotate`, and `credential:revoke`. A run creator needs `mcp:execute`
 at call time; OAO rechecks this live before decrypting the bound credential.
 
-Create and capture the key once:
+Create and capture the key once. `access` is `project` or `organization`; the
+API defaults to `organization` for compatibility, so pass `project` for a key
+that should stay in this project:
 
 ```bash
 curl -sS -b "$COOKIE_JAR" -X POST \
@@ -181,6 +188,7 @@ curl -sS -b "$COOKIE_JAR" -X POST \
   "$API/v1/projects/$PROJECT_ID/api-keys" \
   --data-binary '{
     "name": "Codebase integration",
+    "access": "project",
     "scopes": [
       "agent:read",
       "session:read",
@@ -202,10 +210,36 @@ Send the key as a bearer credential:
 Authorization: Bearer oao_your_secret
 ```
 
+Key responses and the key list carry `access` and `projectId` (`null` for an
+organization key).
+
+## Project keys
+
+A project key works only in the project it was created in. Whatever project
+the request path names, the key acts in its own project, so a path naming any
+other project returns `403 This credential is restricted to its project`.
+`GET /projects` and `GET /context` list only its project, and
+`GET /context` reports `principal.projectRestricted: true`.
+
+Its scopes still apply inside the project. On top of them, a project key
+cannot:
+
+- create or delete projects;
+- download or restore the organization's configuration backup;
+- add, change, or remove members;
+- create, change, or remove anything the organization shares: model, storage,
+  and sandbox providers, and MCP servers, credentials, and credential
+  policies. It can still read them, so it can bind them to its project's
+  agents and toolsets;
+- create an organization key. Keys it creates are project keys for the same
+  project, and it lists and revokes only those.
+
+Deleting a project revokes its project keys.
+
 ## Cross-project key resolution
 
-An API key resolves its organization and scopes from the key record, then
-selects the acting project per request: a `/v1/projects/{projectId}/...` path
+An organization API key resolves its organization and scopes from the key
+record, then selects the acting project per request: a `/v1/projects/{projectId}/...` path
 picks that project (it must belong to the key's organization); any other path
 falls back to the organization's earliest-created project. On first use inside
 a project, OAO materialises a per-project mirror principal of kind `api_key`

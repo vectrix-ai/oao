@@ -174,11 +174,24 @@ export interface PlatformApiKey {
   readonly name: string;
   readonly prefix: string;
   readonly scopes: readonly string[];
+  /** `project` keys work only inside `projectId`; `organization` keys in every project. */
+  readonly access: ApiKeyAccess;
+  readonly projectId: string | null;
   readonly createdAt: string;
   readonly lastUsedAt?: string | null;
   readonly revokedAt?: string | null;
   readonly expiresAt?: string;
   readonly shown?: boolean;
+}
+
+export type ApiKeyAccess = "organization" | "project";
+
+export interface CreateApiKeyInput {
+  readonly name: string;
+  readonly scopes: readonly string[];
+  /** Defaults to `organization`, or to `project` for a project-restricted caller. */
+  readonly access?: ApiKeyAccess;
+  readonly expiresAt?: string;
 }
 
 /** The secret is present only on the first successful create response. */

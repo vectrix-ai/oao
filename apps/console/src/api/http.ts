@@ -5,6 +5,7 @@ import type {
   ConfigurationRestorePlan,
   ConfigurationRestoreResult,
   ConsoleApi,
+  ApiKeyAccess,
   CreateApiKeyInput,
   CreateEventWebhookInput,
   CreateModelProviderInput,
@@ -182,6 +183,10 @@ function record(value: unknown): Readonly<Record<string, unknown>> {
 
 function text(value: unknown, fallback = ""): string {
   return value === null || value === undefined ? fallback : String(value);
+}
+
+function apiKeyAccess(value: unknown): ApiKeyAccess {
+  return value === "project" ? "project" : "organization";
 }
 
 function numeric(value: unknown): number {
@@ -2409,6 +2414,7 @@ export class HttpConsoleApi implements ConsoleApi {
       name: text(response.name),
       prefix: text(response.prefix),
       scopes: Array.isArray(response.scopes) ? response.scopes.map(String) : [],
+      access: apiKeyAccess(response.access),
       lastUsedAt: null,
     };
     if (response.shown !== true) return { ...common, shown: false };
@@ -2487,6 +2493,7 @@ export class HttpConsoleApi implements ConsoleApi {
         name: String(key.name),
         prefix: String(key.prefix),
         scopes: Array.isArray(key.scopes) ? key.scopes.map(String) : [],
+        access: apiKeyAccess(key.access),
         lastUsedAt: key.lastUsedAt ? String(key.lastUsedAt) : null,
       })),
       hosting: [],

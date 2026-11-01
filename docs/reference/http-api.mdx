@@ -19,11 +19,13 @@ Idempotency-Key: unique-key-for-this-logical-write
 
 `Idempotency-Key` is required for operations that change application state.
 
-An OAO API key authenticates against any project of its organization: the
-project addressed in the URL path selects the acting project, and requests
-without a project in the path act in the organization's earliest-created
-project. See [Authentication](/reference/authentication) for how per-project
-principals are resolved.
+An organization API key authenticates against any project of its
+organization: the project addressed in the URL path selects the acting
+project, and requests without a project in the path act in the
+organization's earliest-created project. A project API key acts only in its
+own project and gets `403` for any other. See
+[Authentication](/reference/authentication) for how per-project principals are
+resolved and what a project key may not do.
 
 ## TypeScript SDK helpers
 

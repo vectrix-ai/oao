@@ -27,6 +27,7 @@ import type {
   AuthLogoutResult,
   AuthSession,
   CreateAgentInput,
+  CreateApiKeyInput,
   CreateProjectInput,
   CreateProjectMemberInput,
   CreatedSession,
@@ -390,7 +391,7 @@ export class OaoClient {
 
   createApiKey(
     projectId: string,
-    input: { readonly name: string; readonly scopes: readonly string[] },
+    input: CreateApiKeyInput,
     options: WriteOptions,
   ): Promise<CreatedPlatformApiKey> {
     return this.#write(this.routes.apiKeys(projectId), "POST", input, options);

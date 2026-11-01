@@ -599,17 +599,22 @@ export interface ProjectContext {
   readonly isIapDefaultProject?: boolean;
 }
 
+/** `project` keys work only in the current project; `organization` keys in every project. */
+export type ApiKeyAccess = "organization" | "project";
+
 export interface ApiKeySummary {
   readonly id: string;
   readonly name: string;
   readonly prefix: string;
   readonly scopes: readonly string[];
+  readonly access: ApiKeyAccess;
   readonly lastUsedAt: string | null;
 }
 
 export interface CreateApiKeyInput {
   readonly name: string;
   readonly scopes: readonly string[];
+  readonly access: ApiKeyAccess;
 }
 
 export type { CreateProjectInput };

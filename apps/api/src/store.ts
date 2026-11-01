@@ -24,6 +24,8 @@ export interface ApiKeySecret {
   readonly prefix: string;
   readonly secret: string;
   readonly scopes: readonly string[];
+  /** Present when the key works only inside this project. */
+  readonly projectId?: string;
   readonly expiresAt?: string;
   readonly createdAt: string;
 }
@@ -34,6 +36,7 @@ interface ApiKeyAuthRow {
   principal_id: string;
   subject: string;
   scopes: string[];
+  project_restricted: boolean;
 }
 
 export class PostgresApiStore {
@@ -78,6 +81,7 @@ export class PostgresApiStore {
       kind: "api_key",
       subject: row.subject,
       scopes: new Set(row.scopes as AuthorizationScope[]),
+      ...(row.project_restricted ? { projectRestricted: true } : {}),
     };
   }
 
@@ -358,6 +362,8 @@ export class PostgresApiStore {
       readonly name: string;
       readonly scopes: readonly string[];
       readonly expiresAt?: Date;
+      /** Restricts the key to the creating principal's project. */
+      readonly projectRestricted?: boolean;
     },
   ): Promise<ApiKeySecret> {
     const id = randomUUID();
@@ -366,7 +372,7 @@ export class PostgresApiStore {
     const created = await transaction.query<{ created_at: Date }>(
       `INSERT INTO oao.api_keys
          (organization_id,id,name,key_prefix,key_hash,scopes,created_by_principal_id,
-          created_by_iap_subject,created_by_api_key_id,expires_at)
+          created_by_iap_subject,created_by_api_key_id,expires_at,project_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7,
          (SELECT identity.provider_subject FROM oao.auth_identities identity
           WHERE identity.organization_id=$1 AND identity.project_id=$9
@@ -375,7 +381,7 @@ export class PostgresApiStore {
           WHERE creator.organization_id=$1 AND creator.project_id=$9
             AND creator.id=$7 AND creator.kind='api_key'
             AND creator.subject ~ '^api-key:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
-         $8)
+         $8,$10)
        RETURNING created_at`,
       [
         principal.organizationId,
@@ -387,6 +393,7 @@ export class PostgresApiStore {
         principal.id,
         input.expiresAt ?? null,
         principal.projectId,
+        input.projectRestricted ? principal.projectId : null,
       ],
     );
     return {
@@ -396,6 +403,7 @@ export class PostgresApiStore {
       prefix,
       secret: token,
       scopes: input.scopes,
+      ...(input.projectRestricted ? { projectId: principal.projectId } : {}),
       ...(input.expiresAt ? { expiresAt: input.expiresAt.toISOString() } : {}),
       createdAt:
         created.rows[0]?.created_at.toISOString() ?? new Date().toISOString(),

@@ -914,6 +914,7 @@ const settingsSeed: SettingsData = {
       name: "Local integration",
       prefix: "oao_local_…c72f",
       scopes: ["agents:read", "sessions:write"],
+      access: "organization",
       lastUsedAt: "2026-08-20T06:51:00.000Z",
     },
   ],
@@ -4049,6 +4050,7 @@ export class DemoConsoleApi implements ConsoleApi {
       name: input.name,
       prefix: `demo${suffix}`,
       scopes: [...input.scopes],
+      access: input.access,
       lastUsedAt: null,
     };
     this.#apiKeys = [key, ...this.#apiKeys];

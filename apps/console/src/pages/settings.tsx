@@ -18,6 +18,7 @@ import { useApi } from "../api/context";
 import { ConfigurationBackupPanel } from "./configuration-backup";
 import { EventWebhookConnections } from "./event-webhooks";
 import type {
+  ApiKeyAccess,
   CreateApiKeyInput,
   CreateProjectInput,
   CreateSandboxProviderInput,
@@ -668,6 +669,7 @@ function SettingsBody({
           <tr>
             <th>Name</th>
             <th>Prefix</th>
+            <th>Access</th>
             <th>Scopes</th>
             <th>Last used</th>
           </tr>
@@ -685,6 +687,9 @@ function SettingsBody({
               </td>
               <td>
                 <span className="key-mask">{key.prefix}</span>
+              </td>
+              <td>
+                {key.access === "project" ? "This project" : "All projects"}
               </td>
               <td>
                 {key.scopes.map((scope) => (
@@ -1953,6 +1958,7 @@ function CreateApiKeyDialog({
   readonly onSubmit: (input: CreateApiKeyInput) => void;
 }) {
   const [name, setName] = useState("");
+  const [access, setAccess] = useState<ApiKeyAccess>("project");
   const [scopes, setScopes] = useState(
     () => new Set<string>(DEFAULT_API_KEY_SCOPES),
   );
@@ -1973,7 +1979,7 @@ function CreateApiKeyDialog({
       onSubmit={(event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
         if (!nameError && !scopesError)
-          onSubmit({ name: name.trim(), scopes: [...scopes] });
+          onSubmit({ name: name.trim(), scopes: [...scopes], access });
       }}
       footer={
         <>
@@ -2003,13 +2009,35 @@ function CreateApiKeyDialog({
           onChange={(event) => setName(event.target.value)}
         />
       </Field>
+      <Field
+        label="Access"
+        hint={
+          access === "project"
+            ? "The key works only in this project. It can read the connections the organization shares but cannot change them, other projects, members, or keys outside this project."
+            : "The key works in every project of the organization."
+        }
+      >
+        <Select
+          value={access}
+          onChange={(event) =>
+            setAccess(
+              event.currentTarget.value === "organization"
+                ? "organization"
+                : "project",
+            )
+          }
+        >
+          <option value="project">Only this project</option>
+          <option value="organization">All projects in the organization</option>
+        </Select>
+      </Field>
       <fieldset className="scope-picker">
         <legend>Project scopes</legend>
         <span className="hint">
-          Keys apply across the organization. Select only scopes you hold.
-          Creating keys requires project:admin or *. Signed-in users also need
-          organization owner or admin membership. API-key callers qualify
-          through their scopes. Replace an existing key to change its scopes.
+          Select only scopes you hold. Creating keys requires project:admin or
+          *. Signed-in users also need organization owner or admin membership.
+          API-key callers qualify through their scopes. Replace an existing key
+          to change its scopes.
         </span>
         <div className="scope-picker-grid">
           {AUTHORIZATION_SCOPE_CATALOG.map(([scope, description]) => (

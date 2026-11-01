@@ -3159,6 +3159,8 @@ describe("management console", () => {
       screen.getByRole("dialog", { name: "Create API key" }),
     );
     await user.type(create.getByLabelText("Name"), "Session integration");
+    // A new key works only in this project unless widened on purpose.
+    expect(create.getByLabelText("Access")).toHaveValue("project");
     expect(
       create.getByRole("checkbox", { name: /^agent:write/u }),
     ).not.toBeChecked();
@@ -3178,6 +3180,7 @@ describe("management console", () => {
       scopes: expect.arrayContaining(
         AUTHORIZATION_SCOPE_CATALOG.map(([scope]) => scope),
       ),
+      access: "project",
     });
     expect(createKey.mock.calls[0]?.[0].scopes).toHaveLength(
       AUTHORIZATION_SCOPE_CATALOG.length,
@@ -3189,7 +3192,8 @@ describe("management console", () => {
       (save.getByLabelText("API key secret") as HTMLInputElement).value,
     ).toMatch(/^oao_/u);
     await user.click(save.getByRole("button", { name: "I’ve saved it" }));
-    expect(await screen.findByText("Session integration")).toBeInTheDocument();
+    const row = (await screen.findByText("Session integration")).closest("tr")!;
+    expect(within(row).getByText("This project")).toBeInTheDocument();
     expect(screen.queryByLabelText("API key secret")).not.toBeInTheDocument();
   });
 

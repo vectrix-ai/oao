@@ -903,3 +903,31 @@ test("removed MCP resources free their keys and restore forced row security", as
   }
   assert.doesNotMatch(sql, /DROP TABLE|DROP COLUMN|DELETE FROM|BYPASSRLS/u);
 });
+
+test("a project API key authenticates only in its project and is revoked with it", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0058_api_key_project_restriction.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(sql, /ALTER TABLE oao\.api_keys ADD COLUMN project_id uuid;/u);
+  // Hard-deleted projects must neither block the purge nor widen their keys.
+  assert.doesNotMatch(sql, /REFERENCES oao\.projects/u);
+  assert.match(sql, /AFTER DELETE ON oao\.projects/u);
+  assert.match(
+    sql,
+    /IF key\.project_id IS NOT NULL THEN[\s\S]*?project\.id = key\.project_id/u,
+  );
+  // The function keeps its dedicated owner and grants.
+  assert.match(
+    sql,
+    /SET ROLE oao_auth;[\s\S]*CREATE FUNCTION oao\.authenticate_api_key/u,
+  );
+  assert.match(sql, /RESET ROLE;/u);
+  assert.match(
+    sql,
+    /GRANT EXECUTE ON FUNCTION oao\.authenticate_api_key\(text, bytea, uuid, timestamptz\) TO oao_app;/u,
+  );
+});

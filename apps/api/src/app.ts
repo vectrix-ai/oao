@@ -188,6 +188,21 @@ type Variables = { principal: Principal; requestId: string };
 type ApiContext = Context<{ Variables: Variables }>;
 const ALLOWED_SCOPES = new Set<string>(["*", ...AUTHORIZATION_ACTIONS]);
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * Project route segments whose rows the whole organization shares. A
+ * principal restricted to one project may read them but not change them.
+ */
+const ORGANIZATION_SHARED_RESOURCES = new Set([
+  "members",
+  "model-providers",
+  "storage-providers",
+  "sandbox-providers",
+  "mcp-servers",
+  "mcp-credentials",
+  "mcp-credential-policies",
+  "mcp-authorization-discovery",
+]);
 const MAX_RUN_FILES = 8;
 const MAX_RUN_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_RUN_FILES_BYTES = 20 * 1024 * 1024;
@@ -231,6 +246,11 @@ function assertProject(c: ApiContext): Principal {
       "Project is outside the principal scope",
     );
   return value;
+}
+
+/** The only project a restricted principal may see, or null for all. */
+function visibleProject(actor: Principal): string | null {
+  return actor.projectRestricted ? actor.projectId : null;
 }
 
 function rows(result: { readonly rows: readonly unknown[] }): unknown[] {
@@ -2098,6 +2118,40 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   app.use("/v1/organizations/*", authenticate);
   app.use("/v1/context", authenticate);
 
+  // A principal restricted to one project never reaches the organization
+  // around it: no other project, no project lifecycle, no organization
+  // backup, and no change to a connection or membership every project shares.
+  const restrictToProject: MiddlewareHandler<{ Variables: Variables }> = async (
+    c,
+    next,
+  ) => {
+    const actor = c.get("principal");
+    if (actor.projectRestricted) {
+      const pathname = new URL(c.req.url).pathname.replace(/\/+$/u, "");
+      const project = /^\/v1\/projects\/([^/]+)(?:\/([^/]+))?/u.exec(pathname);
+      const read = c.req.method === "GET" || c.req.method === "HEAD";
+      const outside =
+        /^\/v1\/organizations\/[^/]+\/.+/u.test(pathname) ||
+        (pathname === "/v1/projects" && !read) ||
+        (project !== null && project[1] !== actor.projectId) ||
+        (project !== null &&
+          project[2] === undefined &&
+          c.req.method === "DELETE") ||
+        (project?.[2] !== undefined &&
+          ORGANIZATION_SHARED_RESOURCES.has(project[2]) &&
+          !read);
+      if (outside)
+        throw new HttpApiError(
+          "forbidden",
+          "This credential is restricted to its project",
+        );
+    }
+    await next();
+  };
+  app.use("/v1/projects/*", restrictToProject);
+  app.use("/v1/projects", restrictToProject);
+  app.use("/v1/organizations/*", restrictToProject);
+
   app.get("/v1/context", async (c) => {
     const actor = principal(c);
     return dependencies.store.transaction(actor, undefined, async (tx) => {
@@ -2107,8 +2161,9 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       );
       const projectsResult = await tx.query(
         `SELECT id,organization_id,slug,name,created_at FROM oao.projects
-         WHERE organization_id=$1 ORDER BY created_at,id`,
-        [actor.organizationId],
+         WHERE organization_id=$1 AND ($2::uuid IS NULL OR id=$2)
+         ORDER BY created_at,id`,
+        [actor.organizationId, visibleProject(actor)],
       );
       const organization = publicValue(organizationResult.rows[0]);
       const projects = rows(projectsResult) as Readonly<
@@ -2199,8 +2254,9 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
       async (tx) => {
         const result = await tx.query(
           `SELECT id,organization_id,slug,name,created_at FROM oao.projects
-         WHERE organization_id=$1 ORDER BY created_at,id`,
-          [actor.organizationId],
+         WHERE organization_id=$1 AND ($2::uuid IS NULL OR id=$2)
+         ORDER BY created_at,id`,
+          [actor.organizationId, visibleProject(actor)],
         );
         return c.json({
           data: rows(result),
@@ -2712,13 +2768,21 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
         const condition = dependencies.store.cursorCondition(
           cursor,
           "created_at",
-          2,
+          3,
         );
         const result = await tx.query(
-          `SELECT id,organization_id,name,key_prefix AS prefix,scopes,expires_at,revoked_at,last_used_at,created_at
-         FROM oao.api_keys WHERE organization_id=$1${condition.sql}
-         ORDER BY created_at DESC,id DESC LIMIT $${2 + condition.values.length}`,
-          [actor.organizationId, ...condition.values, limit + 1],
+          `SELECT id,organization_id,name,key_prefix AS prefix,scopes,
+                CASE WHEN project_id IS NULL THEN 'organization' ELSE 'project' END AS access,
+                project_id,expires_at,revoked_at,last_used_at,created_at
+         FROM oao.api_keys
+         WHERE organization_id=$1 AND ($2::uuid IS NULL OR project_id=$2)${condition.sql}
+         ORDER BY created_at DESC,id DESC LIMIT $${3 + condition.values.length}`,
+          [
+            actor.organizationId,
+            visibleProject(actor),
+            ...condition.values,
+            limit + 1,
+          ],
         );
         return c.json(pagination(rows(result), limit, "createdAt"));
       },
@@ -2731,6 +2795,25 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     const key = idempotencyKey(c.req.raw);
     const name = requiredString(body.name, "name", 200);
     const scopes = parseScopes(body.scopes);
+    if (
+      body.access !== undefined &&
+      body.access !== "organization" &&
+      body.access !== "project"
+    )
+      throw new HttpApiError(
+        "bad_request",
+        "access must be organization or project",
+      );
+    // A key created by a project-restricted principal stays inside that
+    // project; it cannot widen into the organization.
+    const access: "organization" | "project" =
+      (body.access as "organization" | "project" | undefined) ??
+      (actor.projectRestricted ? "project" : "organization");
+    if (actor.projectRestricted && access !== "project")
+      throw new HttpApiError(
+        "forbidden",
+        "This credential can create keys only for its own project",
+      );
     const expiresAt = body.expiresAt
       ? new Date(requiredString(body.expiresAt, "expiresAt", 50))
       : undefined;
@@ -2803,12 +2886,13 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           name,
           scopes,
           ...(expiresAt ? { expiresAt } : {}),
+          projectRestricted: access === "project",
         });
         await dependencies.store.appendAudit(tx, actor, {
           action: "api_key.created",
           resourceType: "api_key",
           resourceId: apiKey.id,
-          detail: { name, prefix: apiKey.prefix },
+          detail: { name, prefix: apiKey.prefix, access },
         });
         const storedResponse = {
           id: apiKey.id,
@@ -2816,6 +2900,8 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           name: apiKey.name,
           prefix: apiKey.prefix,
           scopes: apiKey.scopes,
+          access,
+          projectId: apiKey.projectId ?? null,
           ...(apiKey.expiresAt ? { expiresAt: apiKey.expiresAt } : {}),
           createdAt: apiKey.createdAt,
           shown: false,
@@ -2861,8 +2947,13 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
           execute: async () => {
             const result = await tx.query(
               `UPDATE oao.api_keys SET revoked_at=COALESCE(revoked_at,clock_timestamp())
-             WHERE organization_id=$1 AND id=$2 RETURNING id`,
-              [actor.organizationId, c.req.param("apiKeyId")],
+             WHERE organization_id=$1 AND id=$2 AND ($3::uuid IS NULL OR project_id=$3)
+             RETURNING id`,
+              [
+                actor.organizationId,
+                c.req.param("apiKeyId"),
+                visibleProject(actor),
+              ],
             );
             if (!result.rowCount)
               throw new HttpApiError("not_found", "API key not found");
@@ -2934,6 +3025,7 @@ function publicPrincipal(value: Principal) {
     subject: value.subject,
     ...(value.displayName ? { displayName: value.displayName } : {}),
     scopes: [...value.scopes],
+    ...(value.projectRestricted ? { projectRestricted: true } : {}),
   };
 }
 

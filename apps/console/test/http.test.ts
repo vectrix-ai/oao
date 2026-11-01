@@ -1104,9 +1104,10 @@ describe("HTTP console adapter", () => {
       name: "Session integration",
       prefix: "a1b2c3d4e5f6",
       scopes: AUTHORIZATION_SCOPE_CATALOG.map(([scope]) => scope),
+      access: "project",
       shown: true,
       secret: "oao_a1b2c3d4e5f6_one-time-secret-value",
-    };
+    } as const;
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(CONTEXT))
@@ -1115,7 +1116,11 @@ describe("HTTP console adapter", () => {
     const api = new HttpConsoleApi();
 
     await expect(
-      api.createApiKey({ name: created.name, scopes: created.scopes }),
+      api.createApiKey({
+        name: created.name,
+        scopes: created.scopes,
+        access: "project",
+      }),
     ).resolves.toEqual({ ...created, lastUsedAt: null });
 
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
@@ -1129,6 +1134,7 @@ describe("HTTP console adapter", () => {
     expect(JSON.parse(String(init.body))).toEqual({
       name: created.name,
       scopes: created.scopes,
+      access: "project",
     });
   });
 
