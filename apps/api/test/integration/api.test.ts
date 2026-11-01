@@ -168,6 +168,8 @@ const fakeAuthorizationRequests: string[] = [];
 const fakeCredentialTests: McpOAuthClientCredentialsMaterial[] = [];
 let fakeDiscoveryFailure: McpRemoteError | undefined;
 let fakeAuthorizationFailure: McpRemoteError | undefined;
+/** Runs while a discovery is in flight, between its load and its save. */
+let fakeDiscoveryHook: (() => Promise<void>) | undefined;
 let fakeCredentialTestFailure: McpRemoteError | undefined;
 const fakeMcpRemote: McpRemotePort = {
   discoverAuthorization: (endpointUrl) => {
@@ -182,9 +184,10 @@ const fakeMcpRemote: McpRemotePort = {
       ? Promise.reject(fakeCredentialTestFailure)
       : Promise.resolve({ expiresIn: 3600, grantedScope: credential.scope });
   },
-  discover: (connection) => {
+  discover: async (connection) => {
     fakeMcpConnections.push(connection);
-    if (fakeDiscoveryFailure) return Promise.reject(fakeDiscoveryFailure);
+    if (fakeDiscoveryFailure) throw fakeDiscoveryFailure;
+    await fakeDiscoveryHook?.();
     return Promise.resolve([
       {
         name: "lookup_trace",
@@ -4974,6 +4977,551 @@ test(
           ),
         );
         assert.equal(recreated.status, 201, await recreated.clone().text());
+      },
+    );
+
+    // Runs last: it adds a project that earlier subtests would list.
+    await t.test(
+      "an MCP connection is removed only once no agent uses it",
+      async () => {
+        const post = async <T>(
+          path: string,
+          body: Readonly<Record<string, unknown>>,
+          key: string,
+        ): Promise<T> => {
+          const response = await app.request(
+            `${projectPath}${path}`,
+            jsonRequest(body, key),
+          );
+          assert.equal(response.status, path.endsWith("/discover") ? 200 : 201);
+          return (await response.json()) as T;
+        };
+        const connection = async (
+          name: string,
+          origin: string,
+          path: string,
+          attempt = "",
+        ) => {
+          const server = await post<{ id: string }>(
+            "/mcp-servers",
+            {
+              key: name,
+              displayName: name,
+              endpointUrl: `${origin}${path}`,
+              transport: "streamable_http",
+            },
+            `${name}-server${attempt}`,
+          );
+          return server.id;
+        };
+        const credential = async (
+          name: string,
+          origin: string,
+          prefix: string,
+          attempt = "",
+        ) => {
+          const created = await post<{ id: string }>(
+            "/mcp-credentials",
+            {
+              key: name,
+              displayName: name,
+              kind: "static_bearer",
+              destination: { origin, pathPrefix: prefix },
+              secret: `${name}-secret-value`,
+            },
+            `${name}-credential${attempt}`,
+          );
+          const policy = await post<{ id: string; latestVersionId: string }>(
+            "/mcp-credential-policies",
+            {
+              key: `${name}-egress`,
+              displayName: `${name} egress`,
+              credentialId: created.id,
+              exactOrigin: origin,
+              pathPrefix: prefix,
+            },
+            `${name}-policy${attempt}`,
+          );
+          return { credentialId: created.id, policy };
+        };
+
+        // A dedicated connection, bound to an agent.
+        const own = await credential(
+          "removal-token",
+          "https://removal.example.test",
+          "/mcp",
+        );
+        const serverId = await connection(
+          "removal-mcp",
+          "https://removal.example.test",
+          "/mcp",
+        );
+        const discovered = await post<{ latestVersionId: string }>(
+          `/mcp-servers/${serverId}/discover`,
+          { credentialPolicyVersionId: own.policy.latestVersionId },
+          "unused",
+        );
+        const toolset = await post<{ id: string; latestVersionId: string }>(
+          "/mcp-toolsets",
+          {
+            key: "removal-tools",
+            displayName: "Removal tools",
+            serverVersionId: discovered.latestVersionId,
+            tools: [{ remoteToolName: "lookup_trace", approval: "always" }],
+          },
+          "removal-toolset",
+        );
+        const agent = await post<{ id: string }>(
+          "/agents",
+          {
+            key: "removal-agent",
+            name: "Removal agent",
+            config: {
+              systemPrompt: "Use the removal tools.",
+              modelPreset: baseModelPresetKey,
+              tools: [],
+              mcpBindings: [
+                {
+                  toolsetVersionId: toolset.latestVersionId,
+                  credentialPolicyVersionId: own.policy.latestVersionId,
+                  namespace: "removal",
+                },
+              ],
+              sandbox: disabledSandbox,
+              limits: { maxTurns: 4, timeoutMs: 60_000 },
+            },
+          },
+          "removal-agent",
+        );
+
+        const usage = (await (
+          await app.request(`${projectPath}/mcp-servers/${serverId}/usage`)
+        ).json()) as {
+          agents: readonly { id: string }[];
+          otherProjects: readonly unknown[];
+          toolsets: readonly { id: string }[];
+          credentialPolicies: readonly { id: string }[];
+          credentials: readonly { id: string }[];
+        };
+        assert.deepEqual(
+          usage.agents.map((entry) => entry.id),
+          [agent.id],
+        );
+        assert.deepEqual(usage.otherProjects, []);
+        assert.deepEqual(
+          usage.toolsets.map((entry) => entry.id),
+          [toolset.id],
+        );
+        assert.deepEqual(
+          usage.credentialPolicies.map((entry) => entry.id),
+          [own.policy.id],
+        );
+        assert.deepEqual(
+          usage.credentials.map((entry) => entry.id),
+          [own.credentialId],
+        );
+
+        const remove = (id: string, key: string, query = "") =>
+          app.request(`${projectPath}/mcp-servers/${id}${query}`, {
+            method: "DELETE",
+            headers: { "idempotency-key": key },
+          });
+        const refused = await remove(serverId, "removal-refused-1");
+        assert.equal(refused.status, 409);
+        assert.match(
+          ((await refused.json()) as { error: { message: string } }).error
+            .message,
+          /1 agent still uses this MCP server \(Removal agent\)/u,
+        );
+
+        // Archive the agent; an agent in another project still uses it.
+        const archived = await app.request(
+          `${projectPath}/agents/${agent.id}`,
+          {
+            method: "DELETE",
+            headers: { "idempotency-key": "removal-archive" },
+          },
+        );
+        assert.equal(archived.status, 200);
+        const organizationId = integrationPrincipal.organizationId;
+        const otherProject = randomUUID();
+        const otherPrincipal = randomUUID();
+        const otherAgent = randomUUID();
+        const otherAgentVersion = randomUUID();
+        const otherToolset = randomUUID();
+        const otherToolsetVersion = randomUUID();
+        await pool.query(
+          "INSERT INTO oao.projects (organization_id,id,slug,name) VALUES ($1,$2,'removal-other','Removal other')",
+          [organizationId, otherProject],
+        );
+        await pool.query(
+          `INSERT INTO oao.principals (organization_id,project_id,id,kind,subject,scopes)
+           VALUES ($1,$2,$3,'service','removal-other',ARRAY['*'])`,
+          [organizationId, otherProject, otherPrincipal],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_toolsets (organization_id,project_id,id,toolset_key,display_name,created_by_principal_id)
+           VALUES ($1,$2,$3,'removal-other-tools','Other tools',$4)`,
+          [organizationId, otherProject, otherToolset, otherPrincipal],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_toolset_versions (
+             organization_id,project_id,id,toolset_id,version,server_version_id,
+             content_hash,created_by_principal_id
+           ) VALUES ($1,$2,$3,$4,1,$5,$6,$7)`,
+          [
+            organizationId,
+            otherProject,
+            otherToolsetVersion,
+            otherToolset,
+            discovered.latestVersionId,
+            createHash("sha256").update(otherToolsetVersion).digest(),
+            otherPrincipal,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_toolset_version_tools (
+             organization_id,project_id,toolset_version_id,server_version_id,
+             remote_tool_name,approval
+           ) VALUES ($1,$2,$3,$4,'lookup_trace','always')`,
+          [
+            organizationId,
+            otherProject,
+            otherToolsetVersion,
+            discovered.latestVersionId,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.mcp_toolset_version_lifecycle (
+             organization_id,project_id,toolset_version_id,updated_by_principal_id
+           ) VALUES ($1,$2,$3,$4)`,
+          [organizationId, otherProject, otherToolsetVersion, otherPrincipal],
+        );
+        await pool.query(
+          `INSERT INTO oao.agent_definitions (organization_id,project_id,id,agent_key,name)
+           VALUES ($1,$2,$3,'removal-other-agent','Other agent')`,
+          [organizationId, otherProject, otherAgent],
+        );
+        await pool.query(
+          `INSERT INTO oao.agent_versions (
+             organization_id,project_id,id,agent_definition_id,version,config,
+             content_hash,created_by_principal_id
+           ) VALUES ($1,$2,$3,$4,1,'{}',$5,$6)`,
+          [
+            organizationId,
+            otherProject,
+            otherAgentVersion,
+            otherAgent,
+            createHash("sha256").update(otherAgentVersion).digest(),
+            otherPrincipal,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO oao.agent_version_mcp_bindings (
+             organization_id,project_id,agent_version_id,toolset_version_id,
+             credential_policy_version_id,namespace
+           ) VALUES ($1,$2,$3,$4,$5,'removal')`,
+          [
+            organizationId,
+            otherProject,
+            otherAgentVersion,
+            otherToolsetVersion,
+            own.policy.latestVersionId,
+          ],
+        );
+        await pool.query(
+          "UPDATE oao.agent_definitions SET latest_version_id=$3 WHERE organization_id=$1 AND id=$2",
+          [organizationId, otherAgent, otherAgentVersion],
+        );
+        const usedElsewhere = await remove(serverId, "removal-refused-2");
+        assert.equal(usedElsewhere.status, 409);
+        assert.match(
+          ((await usedElsewhere.json()) as { error: { message: string } }).error
+            .message,
+          /in removal-other/u,
+        );
+        await pool.query(
+          "UPDATE oao.agent_definitions SET archived_at=clock_timestamp() WHERE organization_id=$1 AND id=$2",
+          [organizationId, otherAgent],
+        );
+
+        const removed = await remove(serverId, "removal-1");
+        assert.equal(removed.status, 200);
+        const result = (await removed.json()) as {
+          server: { status: string };
+          revokedToolsetIds: readonly string[];
+          revokedCredentialPolicyIds: readonly string[];
+          revokedCredentialIds: readonly string[];
+        };
+        assert.equal(result.server.status, "revoked");
+        assert.deepEqual(result.revokedToolsetIds, [toolset.id]);
+        assert.deepEqual(result.revokedCredentialPolicyIds, [own.policy.id]);
+        assert.deepEqual(result.revokedCredentialIds, [own.credentialId]);
+        // A removed connection leaves every list.
+        for (const [path, id] of [
+          ["/mcp-servers", serverId],
+          ["/mcp-credentials", own.credentialId],
+          ["/mcp-credential-policies", own.policy.id],
+          ["/mcp-toolsets", toolset.id],
+        ] as const)
+          assert.equal(
+            (
+              (await (await app.request(`${projectPath}${path}`)).json()) as {
+                data: readonly { id: string }[];
+              }
+            ).data.some((entry) => entry.id === id),
+            false,
+            path,
+          );
+        const statuses = await pool.query<{ kind: string; status: string }>(
+          `SELECT 'toolset' AS kind,status FROM oao.mcp_toolset_version_lifecycle
+            WHERE organization_id=$1 AND toolset_version_id=$2
+           UNION ALL
+           SELECT 'other_toolset',status FROM oao.mcp_toolset_version_lifecycle
+            WHERE organization_id=$1 AND toolset_version_id=$3
+           UNION ALL
+           SELECT 'policy',status FROM oao.mcp_credential_policy_version_lifecycle
+            WHERE organization_id=$1 AND policy_version_id=$4
+           ORDER BY 1`,
+          [
+            organizationId,
+            toolset.latestVersionId,
+            otherToolsetVersion,
+            own.policy.latestVersionId,
+          ],
+        );
+        assert.deepEqual(statuses.rows, [
+          // Another project's toolset is left to that project; it is inert
+          // because its server is revoked.
+          { kind: "other_toolset", status: "active" },
+          { kind: "policy", status: "revoked" },
+          { kind: "toolset", status: "revoked" },
+        ]);
+        const credentialStatus = await pool.query<{ status: string }>(
+          `SELECT lifecycle.status FROM oao.mcp_credentials credential
+             JOIN oao.mcp_credential_version_lifecycle lifecycle
+               ON lifecycle.organization_id=credential.organization_id
+              AND lifecycle.credential_version_id=credential.active_version_id
+            WHERE credential.organization_id=$1 AND credential.id=$2`,
+          [organizationId, own.credentialId],
+        );
+        assert.equal(credentialStatus.rows[0]?.status, "revoked");
+        assert.equal(
+          (await app.request(`${projectPath}/mcp-servers/${serverId}/usage`))
+            .status,
+          404,
+        );
+        assert.equal(
+          (
+            await app.request(
+              `${projectPath}/mcp-servers/${serverId}/discover`,
+              jsonRequest({}, "unused"),
+            )
+          ).status,
+          404,
+        );
+        // The same request replays; a new one finds nothing left to remove.
+        assert.equal((await remove(serverId, "removal-1")).status, 200);
+        assert.equal((await remove(serverId, "removal-2")).status, 404);
+
+        // Its keys are free again: the connection can be added back.
+        const again = await credential(
+          "removal-token",
+          "https://removal.example.test",
+          "/mcp",
+          "-again",
+        );
+        const againServer = await connection(
+          "removal-mcp",
+          "https://removal.example.test",
+          "/mcp",
+          "-again",
+        );
+        const againVersion = await post<{ latestVersionId: string }>(
+          `/mcp-servers/${againServer}/discover`,
+          { credentialPolicyVersionId: again.policy.latestVersionId },
+          "unused",
+        );
+        await post(
+          "/mcp-toolsets",
+          {
+            key: "removal-tools",
+            displayName: "Removal tools",
+            serverVersionId: againVersion.latestVersionId,
+            tools: [{ remoteToolName: "lookup_trace", approval: "always" }],
+          },
+          "removal-toolset-again",
+        );
+        const toolsets = (
+          (await (await app.request(`${projectPath}/mcp-toolsets`)).json()) as {
+            data: readonly { key: string; serverId: string }[];
+          }
+        ).data.filter((entry) => entry.key === "removal-tools");
+        assert.deepEqual(
+          toolsets.map((entry) => entry.serverId),
+          [againServer],
+        );
+
+        // A credential another live server still uses is kept.
+        const shared = await credential(
+          "removal-shared-token",
+          "https://shared.example.test",
+          "/",
+        );
+        const first = await connection(
+          "removal-shared-a",
+          "https://shared.example.test",
+          "/a",
+        );
+        const second = await connection(
+          "removal-shared-b",
+          "https://shared.example.test",
+          "/b",
+        );
+        const firstRemoved = (await (
+          await remove(first, "removal-shared-a")
+        ).json()) as {
+          revokedCredentialPolicyIds: readonly string[];
+          revokedCredentialIds: readonly string[];
+        };
+        assert.deepEqual(firstRemoved.revokedCredentialPolicyIds, []);
+        assert.deepEqual(firstRemoved.revokedCredentialIds, []);
+        // Removing the last server can keep the credential on request.
+        const secondRemoved = (await (
+          await remove(second, "removal-shared-b", "?keepCredentials=true")
+        ).json()) as {
+          revokedCredentialPolicyIds: readonly string[];
+          revokedCredentialIds: readonly string[];
+        };
+        assert.deepEqual(secondRemoved.revokedCredentialPolicyIds, []);
+        assert.deepEqual(secondRemoved.revokedCredentialIds, []);
+        const sharedStatus = (
+          (await (
+            await app.request(`${projectPath}/mcp-credentials`)
+          ).json()) as { data: readonly { id: string; status: string }[] }
+        ).data.find((entry) => entry.id === shared.credentialId)?.status;
+        assert.equal(sharedStatus, "active");
+
+        // A discovery in flight while the server is removed cannot bring it
+        // back, even when the tools changed.
+        const raced = await credential(
+          "removal-race-token",
+          "https://race.example.test",
+          "/mcp",
+        );
+        const racedServer = await connection(
+          "removal-race",
+          "https://race.example.test",
+          "/mcp",
+        );
+        await post(
+          `/mcp-servers/${racedServer}/discover`,
+          { credentialPolicyVersionId: raced.policy.latestVersionId },
+          "unused",
+        );
+        fakeDiscoveryHook = async () => {
+          fakeDiscoveryHook = undefined;
+          fakeMcpDiscoveryRevision += 1;
+          assert.equal(
+            (await remove(racedServer, "removal-race-1")).status,
+            200,
+          );
+        };
+        const resurrected = await app.request(
+          `${projectPath}/mcp-servers/${racedServer}/discover`,
+          jsonRequest(
+            { credentialPolicyVersionId: raced.policy.latestVersionId },
+            "unused",
+          ),
+        );
+        assert.equal(resurrected.status, 409);
+        const racedState = await pool.query<{
+          versions: number;
+          live: number;
+        }>(
+          `SELECT count(*)::int AS versions,
+                  count(*) FILTER (WHERE lifecycle.status<>'revoked')::int AS live
+             FROM oao.mcp_server_versions version
+             JOIN oao.mcp_server_version_lifecycle lifecycle
+               ON lifecycle.organization_id=version.organization_id
+              AND lifecycle.server_version_id=version.id
+            WHERE version.organization_id=$1 AND version.server_id=$2`,
+          [organizationId, racedServer],
+        );
+        assert.deepEqual(racedState.rows[0], { versions: 1, live: 0 });
+
+        // Publishing an agent with MCP bindings waits for a removal in the
+        // same organization, so their checks cannot interleave.
+        const locked = await credential(
+          "removal-lock-token",
+          "https://lock.example.test",
+          "/mcp",
+        );
+        const lockedServer = await connection(
+          "removal-lock",
+          "https://lock.example.test",
+          "/mcp",
+        );
+        const lockedVersion = await post<{ latestVersionId: string }>(
+          `/mcp-servers/${lockedServer}/discover`,
+          { credentialPolicyVersionId: locked.policy.latestVersionId },
+          "unused",
+        );
+        const lockedToolset = await post<{ latestVersionId: string }>(
+          "/mcp-toolsets",
+          {
+            key: "removal-lock-tools",
+            displayName: "Lock tools",
+            serverVersionId: lockedVersion.latestVersionId,
+            tools: [{ remoteToolName: "lookup_trace", approval: "always" }],
+          },
+          "removal-lock-toolset",
+        );
+        const holder = await pool.connect();
+        try {
+          await holder.query("BEGIN");
+          await holder.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            [`oao:mcp-bindings:${organizationId}`],
+          );
+          let settled = false;
+          const publication = Promise.resolve(
+            app.request(
+              `${projectPath}/agents`,
+              jsonRequest(
+                {
+                  key: "removal-lock-agent",
+                  name: "Lock agent",
+                  config: {
+                    systemPrompt: "Use the lock tools.",
+                    modelPreset: baseModelPresetKey,
+                    tools: [],
+                    mcpBindings: [
+                      {
+                        toolsetVersionId: lockedToolset.latestVersionId,
+                        credentialPolicyVersionId:
+                          locked.policy.latestVersionId,
+                        namespace: "lock",
+                      },
+                    ],
+                    sandbox: disabledSandbox,
+                    limits: { maxTurns: 4, timeoutMs: 60_000 },
+                  },
+                },
+                "removal-lock-agent",
+              ),
+            ),
+          ).finally(() => {
+            settled = true;
+          });
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          assert.equal(settled, false);
+          await holder.query("COMMIT");
+          assert.equal((await publication).status, 201);
+        } finally {
+          await holder.query("ROLLBACK").catch(() => undefined);
+          holder.release();
+        }
       },
     );
   },

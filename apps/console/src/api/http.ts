@@ -1902,6 +1902,20 @@ export class HttpConsoleApi implements ConsoleApi {
       { method: "POST", body: JSON.stringify(input) },
     );
 
+  getMcpServerUsage = async (
+    serverId: string,
+  ): ReturnType<ConsoleApi["getMcpServerUsage"]> =>
+    this.#projectRequest(`/mcp-servers/${encodeURIComponent(serverId)}/usage`);
+
+  removeMcpServer = async (
+    serverId: string,
+    options: Parameters<ConsoleApi["removeMcpServer"]>[1] = {},
+  ): ReturnType<ConsoleApi["removeMcpServer"]> =>
+    this.#projectRequest(
+      `/mcp-servers/${encodeURIComponent(serverId)}${options.keepCredentials ? "?keepCredentials=true" : ""}`,
+      { method: "DELETE" },
+    );
+
   listMcpCredentials = async (): Promise<McpCredentialList> =>
     this.#projectRequest("/mcp-credentials");
 

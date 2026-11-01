@@ -58,6 +58,8 @@ import type {
   UpdateEventWebhookInput,
   UpdateSandboxProviderConfigurationInput,
   McpServer,
+  McpServerUsage,
+  RemoveMcpServerResult,
   McpCredential,
   McpCredentialPolicy,
   McpToolset,
@@ -1956,7 +1958,9 @@ export class DemoConsoleApi implements ConsoleApi {
 
   async listMcpServers() {
     return {
-      data: structuredClone(this.#mcpServers),
+      data: structuredClone(
+        this.#mcpServers.filter((item) => item.status !== "revoked"),
+      ),
       credentialEncryptionConfigured: true,
     };
   }
@@ -2048,9 +2052,137 @@ export class DemoConsoleApi implements ConsoleApi {
     return structuredClone(discovered);
   }
 
+  /** Every version ID a demo MCP server has had. */
+  #mcpServerVersionIds(server: McpServer): Set<string> {
+    return new Set([
+      server.latestVersionId,
+      ...(this.#restoredMcpServerVersions.get(server.id) ?? []).map(
+        (version) => version.id,
+      ),
+    ]);
+  }
+
+  #mcpPolicyCovers(policy: McpCredentialPolicy, endpointUrl: string): boolean {
+    const endpoint = new URL(endpointUrl);
+    return (
+      canonicalMcpOrigin(policy.exactOrigin) === endpoint.origin &&
+      endpoint.pathname.startsWith(policy.pathPrefix)
+    );
+  }
+
+  async getMcpServerUsage(serverId: string): Promise<McpServerUsage> {
+    const server = this.#mcpServers.find((item) => item.id === serverId);
+    if (!server || server.status === "revoked")
+      throw new Error("Active MCP server not found");
+    const versionIds = this.#mcpServerVersionIds(server);
+    const toolsets = this.#mcpToolsets.filter(
+      (toolset) =>
+        toolset.status !== "revoked" && versionIds.has(toolset.serverVersionId),
+    );
+    const toolsetVersionIds = new Set(
+      this.#mcpToolsets
+        .filter((toolset) => versionIds.has(toolset.serverVersionId))
+        .map((toolset) => toolset.latestVersionId),
+    );
+    const agents = this.#agents.filter((agent) =>
+      (
+        agent.versions.find((version) => version.id === agent.latestVersionId)
+          ?.config.mcpBindings ?? []
+      ).some((binding) => toolsetVersionIds.has(binding.toolsetVersionId)),
+    );
+    const otherEndpoints = this.#mcpServers
+      .filter((item) => item.id !== serverId && item.status !== "revoked")
+      .map((item) => item.endpointUrl);
+    const policies = this.#mcpPolicies.filter(
+      (policy) =>
+        policy.status !== "revoked" &&
+        this.#mcpPolicyCovers(policy, server.endpointUrl) &&
+        !otherEndpoints.some((endpoint) =>
+          this.#mcpPolicyCovers(policy, endpoint),
+        ),
+    );
+    const policyIds = new Set(policies.map((policy) => policy.id));
+    const credentials = this.#mcpCredentials.filter(
+      (credential) =>
+        credential.status === "active" &&
+        policies.some((policy) => policy.credentialId === credential.id) &&
+        !this.#mcpPolicies.some(
+          (policy) =>
+            policy.credentialId === credential.id &&
+            policy.status !== "revoked" &&
+            !policyIds.has(policy.id),
+        ),
+    );
+    const summary = (item: {
+      readonly id: string;
+      readonly key: string;
+      readonly displayName: string;
+    }) => ({ id: item.id, key: item.key, displayName: item.displayName });
+    return {
+      agents: agents.map((agent) => ({
+        id: agent.id,
+        key: agent.key,
+        name: agent.name,
+      })),
+      otherProjects: [],
+      toolsets: toolsets.map(summary),
+      credentialPolicies: policies.map(summary),
+      credentials: credentials.map(summary),
+    };
+  }
+
+  async removeMcpServer(
+    serverId: string,
+    options: { readonly keepCredentials?: boolean } = {},
+  ): Promise<RemoveMcpServerResult> {
+    const usage = await this.getMcpServerUsage(serverId);
+    if (usage.agents.length > 0)
+      throw new Error(
+        `${usage.agents.length} ${usage.agents.length === 1 ? "agent still uses" : "agents still use"} this MCP server (${usage.agents.map((agent) => agent.name).join(", ")}). Publish agent versions without it, or archive those agents, first.`,
+      );
+    const now = new Date().toISOString();
+    const toolsetIds = new Set(usage.toolsets.map((toolset) => toolset.id));
+    const policies = options.keepCredentials ? [] : usage.credentialPolicies;
+    const credentials = options.keepCredentials ? [] : usage.credentials;
+    const policyIds = new Set(policies.map((policy) => policy.id));
+    const credentialIds = new Set(
+      credentials.map((credential) => credential.id),
+    );
+    this.#mcpServers = this.#mcpServers.map((item) =>
+      item.id === serverId
+        ? { ...item, status: "revoked" as const, updatedAt: now }
+        : item,
+    );
+    this.#mcpToolsets = this.#mcpToolsets.map((item) =>
+      toolsetIds.has(item.id)
+        ? { ...item, status: "revoked" as const, updatedAt: now }
+        : item,
+    );
+    this.#mcpPolicies = this.#mcpPolicies.map((item) =>
+      policyIds.has(item.id)
+        ? { ...item, status: "revoked" as const, updatedAt: now }
+        : item,
+    );
+    this.#mcpCredentials = this.#mcpCredentials.map((item) =>
+      credentialIds.has(item.id)
+        ? { ...item, status: "revoked" as const, updatedAt: now }
+        : item,
+    );
+    return {
+      server: structuredClone(
+        this.#mcpServers.find((item) => item.id === serverId)!,
+      ),
+      revokedToolsetIds: [...toolsetIds],
+      revokedCredentialPolicyIds: [...policyIds],
+      revokedCredentialIds: [...credentialIds],
+    };
+  }
+
   async listMcpCredentials() {
     return {
-      data: structuredClone(this.#mcpCredentials),
+      data: structuredClone(
+        this.#mcpCredentials.filter((item) => item.status !== "revoked"),
+      ),
       credentialEncryptionConfigured: true,
     };
   }
@@ -2208,7 +2340,11 @@ export class DemoConsoleApi implements ConsoleApi {
   }
 
   async listMcpCredentialPolicies() {
-    return { data: structuredClone(this.#mcpPolicies) };
+    return {
+      data: structuredClone(
+        this.#mcpPolicies.filter((item) => item.status !== "revoked"),
+      ),
+    };
   }
 
   async createMcpCredentialPolicy(
@@ -2255,7 +2391,11 @@ export class DemoConsoleApi implements ConsoleApi {
   }
 
   async listMcpToolsets() {
-    return { data: structuredClone(this.#mcpToolsets) };
+    return {
+      data: structuredClone(
+        this.#mcpToolsets.filter((item) => item.status !== "revoked"),
+      ),
+    };
   }
 
   async createMcpToolset(input: Parameters<ConsoleApi["createMcpToolset"]>[0]) {
@@ -2272,6 +2412,7 @@ export class DemoConsoleApi implements ConsoleApi {
       displayName: input.displayName,
       latestVersionId: crypto.randomUUID(),
       version: 1,
+      serverId: server.id,
       serverVersionId: input.serverVersionId,
       status: "active",
       tools: input.tools.map((selected) => {

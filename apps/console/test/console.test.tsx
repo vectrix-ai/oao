@@ -1271,10 +1271,34 @@ describe("management console", () => {
       pathPrefix: "/rpc",
     });
 
+    // Everything about one connection opens from its card.
     await user.click(
-      screen.getByRole("button", { name: "Advanced resources" }),
+      screen.getByRole("button", { name: "Manage Trace observability" }),
     );
-    await user.click(screen.getByRole("button", { name: "Create toolset" }));
+    const details = within(
+      await screen.findByRole("dialog", { name: "Trace observability" }),
+    );
+    expect(details.getByText("lookup_trace, search_runs")).toBeInTheDocument();
+
+    // A connection an agent still uses cannot be removed.
+    await user.click(details.getByRole("button", { name: "Remove" }));
+    const removal = within(
+      await screen.findByRole("dialog", {
+        name: "Remove Trace observability",
+      }),
+    );
+    expect(
+      await removal.findByText(/These agents still use this connection/u),
+    ).toBeInTheDocument();
+    expect(
+      removal.queryByRole("button", { name: "Remove connection" }),
+    ).not.toBeInTheDocument();
+    await user.click(removal.getByRole("button", { name: "Close" }));
+
+    const reopened = within(
+      await screen.findByRole("dialog", { name: "Trace observability" }),
+    );
+    await user.click(reopened.getByRole("button", { name: "Create toolset" }));
     const toolsetDialog = within(
       await screen.findByRole("dialog", { name: "Create MCP toolset" }),
     );
@@ -1291,9 +1315,10 @@ describe("management console", () => {
       toolsetDialog.getByRole("checkbox", { name: /Look up trace/u }),
     );
     await user.click(toolsetDialog.getByRole("button", { name: "Save" }));
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    const withToolset = within(
+      await screen.findByRole("dialog", { name: "Trace observability" }),
     );
+    expect(await withToolset.findByText("Trace read only")).toBeInTheDocument();
     const manualToolset = (await api.listMcpToolsets()).data.find(
       (toolset) => toolset.key === "trace-read-only",
     );
@@ -1305,7 +1330,7 @@ describe("management console", () => {
     ]);
 
     // A policy can never point the pinned credential at another server.
-    await user.click(screen.getByRole("button", { name: "Add policy" }));
+    await user.click(withToolset.getByRole("button", { name: "Add policy" }));
     const policyDialog = within(
       await screen.findByRole("dialog", { name: "Add credential policy" }),
     );
@@ -1321,9 +1346,7 @@ describe("management console", () => {
     );
     await user.click(policyDialog.getByRole("button", { name: "Save" }));
     expect(
-      await policyDialog.findByText(
-        /inside the credential's pinned destination/u,
-      ),
+      await policyDialog.findByText(/path prefix must lie inside/u),
     ).toBeInTheDocument();
   });
 
@@ -1432,16 +1455,124 @@ describe("management console", () => {
     });
 
     await user.click(
-      screen.getByRole("button", { name: "Advanced resources" }),
+      screen.getByRole("button", { name: "Manage Order extraction" }),
+    );
+    const details = within(
+      await screen.findByRole("dialog", { name: "Order extraction" }),
     );
     await user.click(
-      screen.getByRole("button", {
+      details.getByRole("button", {
         name: "Test Order extraction credential",
       }),
     );
     expect(
       await screen.findByText("Token issued for 3600s with scope mcp:tools."),
     ).toBeInTheDocument();
+
+    // No agent uses it, so it can be removed with its credential.
+    await user.click(details.getByRole("button", { name: "Remove" }));
+    const removal = within(
+      await screen.findByRole("dialog", { name: "Remove Order extraction" }),
+    );
+    expect(
+      await removal.findByRole("checkbox", {
+        name: /Also revoke its credential and policy/u,
+      }),
+    ).toBeChecked();
+    await user.click(
+      removal.getByRole("button", { name: "Remove connection" }),
+    );
+    expect(
+      await screen.findByText("Order extraction was removed."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Order extraction" }),
+    ).not.toBeInTheDocument();
+    // A removed connection leaves every list.
+    expect((await api.listMcpServers()).data).toEqual([]);
+    expect((await api.listMcpCredentials()).data).toEqual([]);
+    expect((await api.listMcpCredentialPolicies()).data).toEqual([]);
+    expect((await api.listMcpToolsets()).data).toEqual([]);
+  });
+
+  it("adds a connection back after removing it but keeping its credential", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/mcp", api);
+    const addDocsSearch = async (secret: string) => {
+      await user.click(
+        (await screen.findAllByRole("button", { name: "Add MCP server" }))[0]!,
+      );
+      const dialog = within(
+        await screen.findByRole("dialog", { name: "Add MCP server" }),
+      );
+      await user.type(dialog.getByLabelText("Display name"), "Docs search");
+      await user.type(
+        dialog.getByLabelText("HTTPS MCP endpoint"),
+        "https://docs.example.test/mcp",
+      );
+      await user.click(dialog.getByRole("button", { name: "Next" }));
+      await user.type(dialog.getByLabelText("Secret"), secret);
+      await user.click(dialog.getByRole("button", { name: "Next" }));
+      await user.click(
+        dialog.getByRole("button", { name: "Test and discover" }),
+      );
+      await user.click(
+        await dialog.findByRole("checkbox", { name: /Look up trace/u }),
+      );
+      await user.click(dialog.getByRole("button", { name: "Next" }));
+      await user.click(dialog.getByRole("button", { name: "Finish setup" }));
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      );
+    };
+    await addDocsSearch("docs-secret-one");
+
+    await user.click(
+      screen.getByRole("button", { name: "Manage Docs search" }),
+    );
+    const details = within(
+      await screen.findByRole("dialog", { name: "Docs search" }),
+    );
+    await user.click(details.getByRole("button", { name: "Remove" }));
+    const removal = within(
+      await screen.findByRole("dialog", { name: "Remove Docs search" }),
+    );
+    await user.click(
+      await removal.findByRole("checkbox", {
+        name: /Also revoke its credential and policy/u,
+      }),
+    );
+    await user.click(
+      removal.getByRole("button", { name: "Remove connection" }),
+    );
+    expect(
+      await screen.findByText("Docs search was removed."),
+    ).toBeInTheDocument();
+    // The kept credential stays reachable.
+    expect(
+      await screen.findByRole("heading", {
+        name: "Credentials not used by any connection",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Revoke Docs search credential" }),
+    ).toBeInTheDocument();
+
+    // The same name works again; the kept credential's key is skipped.
+    await addDocsSearch("docs-secret-two");
+    expect(
+      (await api.listMcpCredentials()).data.map((item) => item.key).sort(),
+    ).toEqual(["docs-search-credential", "docs-search-credential-2"]);
+    expect((await api.listMcpServers()).data.map((item) => item.key)).toEqual([
+      "docs-search",
+    ]);
+    // Its kept policy covers the new connection again.
+    expect(
+      screen.queryByRole("heading", {
+        name: "Credentials not used by any connection",
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("uploads multiple Markdown files into the selected package folder", async () => {

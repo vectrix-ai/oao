@@ -870,3 +870,36 @@ test("MCP call context is opt-in per policy version and reserves x-oao-* headers
   assert.match(sql, /NOT VALID/u);
   assert.doesNotMatch(sql, /UPDATE |DROP TABLE|DROP COLUMN|DELETE FROM/u);
 });
+
+test("removed MCP resources free their keys and restore forced row security", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0057_mcp_reusable_keys.sql", import.meta.url),
+    "utf8",
+  );
+  for (const table of [
+    "mcp_servers",
+    "mcp_credentials",
+    "mcp_credential_policies",
+    "mcp_toolsets",
+  ]) {
+    assert.match(
+      sql,
+      new RegExp(
+        `ALTER TABLE oao\\.${table} ADD COLUMN revoked_at timestamptz`,
+        "u",
+      ),
+    );
+    assert.match(
+      sql,
+      new RegExp(
+        `CREATE UNIQUE INDEX ${table}_live_key_idx[\\s\\S]*?WHERE revoked_at IS NULL`,
+        "u",
+      ),
+    );
+    assert.match(
+      sql,
+      new RegExp(`ALTER TABLE oao\\.${table} FORCE ROW LEVEL SECURITY`, "u"),
+    );
+  }
+  assert.doesNotMatch(sql, /DROP TABLE|DROP COLUMN|DELETE FROM|BYPASSRLS/u);
+});

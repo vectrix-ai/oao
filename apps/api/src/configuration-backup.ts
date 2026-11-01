@@ -672,19 +672,19 @@ export async function planConfigurationRestore(
     [
       "mcp_server",
       `SELECT server_key AS key FROM oao.mcp_servers
-        WHERE organization_id=$1 AND server_key=ANY($2)`,
+        WHERE organization_id=$1 AND server_key=ANY($2) AND revoked_at IS NULL`,
       backup.mcpServers.map((p) => p.key),
     ],
     [
       "mcp_credential",
       `SELECT credential_key AS key FROM oao.mcp_credentials
-        WHERE organization_id=$1 AND credential_key=ANY($2)`,
+        WHERE organization_id=$1 AND credential_key=ANY($2) AND revoked_at IS NULL`,
       backup.mcpCredentials.map((p) => p.key),
     ],
     [
       "mcp_credential_policy",
       `SELECT policy_key AS key FROM oao.mcp_credential_policies
-        WHERE organization_id=$1 AND policy_key=ANY($2)`,
+        WHERE organization_id=$1 AND policy_key=ANY($2) AND revoked_at IS NULL`,
       backup.mcpCredentialPolicies.map((p) => p.key),
     ],
   ];
@@ -1189,9 +1189,17 @@ async function restoreConnections(
       const serverId = ids.add(server.id);
       await transaction.query(
         `INSERT INTO oao.mcp_servers (
-           organization_id,id,server_key,display_name,created_by_principal_id
-         ) VALUES ($1,$2,$3,$4,$5)`,
-        [org, serverId, server.key, server.displayName, actor.id],
+           organization_id,id,server_key,display_name,created_by_principal_id,
+           revoked_at
+         ) VALUES ($1,$2,$3,$4,$5,CASE WHEN $6 THEN clock_timestamp() END)`,
+        [
+          org,
+          serverId,
+          server.key,
+          server.displayName,
+          actor.id,
+          server.versions.at(-1)?.status === "revoked",
+        ],
       );
       let latest = "";
       for (const version of server.versions) {
@@ -1274,8 +1282,8 @@ async function restoreConnections(
       await transaction.query(
         `INSERT INTO oao.mcp_credentials (
            organization_id,id,credential_key,display_name,
-           credential_kind,header_name,created_by_principal_id
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+           credential_kind,header_name,created_by_principal_id,revoked_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,CASE WHEN $8 THEN clock_timestamp() END)`,
         [
           org,
           credentialId,
@@ -1284,6 +1292,7 @@ async function restoreConnections(
           credential.kind,
           credential.headerName,
           actor.id,
+          credential.status === "revoked",
         ],
       );
       await transaction.query(
@@ -1336,9 +1345,17 @@ async function restoreConnections(
       const policyId = ids.add(policy.id);
       await transaction.query(
         `INSERT INTO oao.mcp_credential_policies (
-           organization_id,id,policy_key,display_name,created_by_principal_id
-         ) VALUES ($1,$2,$3,$4,$5)`,
-        [org, policyId, policy.key, policy.displayName, actor.id],
+           organization_id,id,policy_key,display_name,created_by_principal_id,
+           revoked_at
+         ) VALUES ($1,$2,$3,$4,$5,CASE WHEN $6 THEN clock_timestamp() END)`,
+        [
+          org,
+          policyId,
+          policy.key,
+          policy.displayName,
+          actor.id,
+          policy.versions.at(-1)?.status === "revoked",
+        ],
       );
       let latest = "";
       for (const version of policy.versions) {
@@ -1512,14 +1529,16 @@ async function restoreProject(
       const toolsetId = ids.add(toolset.id);
       await transaction.query(
         `INSERT INTO oao.mcp_toolsets (
-           organization_id,project_id,id,toolset_key,display_name,created_by_principal_id
-         ) VALUES ($1,$2,$3,$4,$5,$6)`,
+           organization_id,project_id,id,toolset_key,display_name,created_by_principal_id,
+           revoked_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,CASE WHEN $7 THEN clock_timestamp() END)`,
         [
           ...scope,
           toolsetId,
           toolset.key,
           toolset.displayName,
           projectActor.id,
+          toolset.versions.at(-1)?.status === "revoked",
         ],
       );
       let latest = "";

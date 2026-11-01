@@ -85,22 +85,67 @@ screen in order:
   </Step>
 </Steps>
 
-The **Connections** view summarizes configured endpoints, discovery status, and
-restricted toolsets. The individual credential, policy, server, and toolset
-records remain available under **Advanced resources** for inspection, rotation,
-revocation, and manual administration. When manually creating an immutable
-toolset, choose whether all selected tools always require approval or may run
-without approval; use approval-free execution only for narrowly allowlisted,
-read-only tools.
+The **Connections** view lists one card per connection with its endpoint,
+discovery status, and toolsets. Select **Manage** on a card to see that
+connection only:
+
+- **Tools:** the discovered tools, and **Discover tools** with one of its
+  policies.
+- **Authentication:** each credential policy that covers the endpoint with its
+  credential, and **Test** (OAuth credentials), **Rotate**, and **Revoke**.
+  **Add policy** adds another policy for an existing credential.
+- **Toolsets:** this project's toolsets for the connection, and **Create
+  toolset**. When creating an immutable toolset, choose whether all selected
+  tools always require approval or may run without approval; use
+  approval-free execution only for narrowly allowlisted, read-only tools.
+- **Remove:** see [Remove a connection](#remove-a-connection).
 
 The wizard creates the server and server version, encrypted credential,
 exact-origin credential-policy version, and restricted toolset in dependency
 order. If testing fails after one of them is saved, retrying in the same open
 wizard continues from the first incomplete resource instead of duplicating it.
-Closing the wizard never rolls back already-saved resources; inspect them under
-**Advanced resources** before starting again with the same key. Secret input is
+Closing the wizard never rolls back already-saved resources; manage or remove
+the connection before starting again with the same key. Secret input is
 cleared as soon as the credential is encrypted and is never returned to the
 console.
+
+## Remove a connection
+
+Select **Manage** on a connection card, then **Remove**. OAO first checks what
+still uses the connection:
+
+- **An agent still uses it.** If the current version of any agent binds its
+  tools, in this project or another project of the organization, removal is
+  refused and the dialog lists those agents (agents in other projects by
+  count). Publish agent versions without the binding, or delete those agents,
+  then remove the connection.
+- **Nothing uses it.** Removal revokes every version of the server and this
+  project's toolsets for it. **Also revoke its credential and policy**, on by
+  default, also revokes the credential policies that cover no other active
+  server and the credentials only those policies use. A credential shared with
+  another connection stays active. A revoked credential cannot be restored; to
+  connect again, enter the secret again.
+
+A removed connection disappears from the console and from every API list, and
+its keys can be used again, so you can add it back under the same name. Like a
+deleted agent, its rows are kept: server, toolset, and policy versions are
+immutable and referenced by sessions, call attempts, and the audit trail.
+Sessions that were started with it keep running, but their calls to its tools
+fail. Toolsets for the server in other projects stay with those projects and can
+no longer be used. A credential revoked on its own also disappears from the
+lists and frees its key.
+
+A credential you keep stays active. While no connection uses it, the
+**Connections** view lists it under **Credentials not used by any connection**,
+where you can revoke it. Adding the connection back with the setup wizard
+skips keys a kept credential or policy still holds, for example
+`docs-search-credential-2`, and a kept policy for the same endpoint covers the
+new connection again.
+
+Through the API, `GET /mcp-servers/{id}/usage` returns what uses a server and
+what removal would revoke, and `DELETE /mcp-servers/{id}` removes it; add
+`?keepCredentials=true` to keep its credentials and policies. See [HTTP
+API](/reference/http-api#mcp-servers-credentials-and-toolsets).
 
 ## Add an MCP server through the API
 

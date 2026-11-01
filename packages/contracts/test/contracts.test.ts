@@ -29,6 +29,8 @@ import {
   parseRotateMcpCredentialInput,
   parseDiscoverMcpAuthorizationInput,
   McpCredentialTestResultSchema,
+  McpServerUsageSchema,
+  RemoveMcpServerResultSchema,
   mcpDestinationContains,
   mcpPathWithin,
   CreateProjectInputSchema,
@@ -937,6 +939,24 @@ test("OAuth client-credentials MCP credentials pin a confirmed authorization con
   );
   assert.throws(() =>
     v.parse(McpCredentialTestResultSchema, { ok: false, errorCode: "leak" }),
+  );
+});
+
+test("MCP server usage and removal results carry only identifiers and names", () => {
+  const usage = v.parse(McpServerUsageSchema, {
+    agents: [{ id, key: "triage", name: "Triage" }],
+    otherProjects: [{ id, slug: "support", name: "Support", agentCount: 2 }],
+    toolsets: [],
+    credentialPolicies: [{ id, key: "egress", displayName: "Egress" }],
+    credentials: [{ id, key: "token", displayName: "Token" }],
+  });
+  assert.equal(usage.otherProjects[0]?.agentCount, 2);
+  assert.throws(() =>
+    v.parse(RemoveMcpServerResultSchema, {
+      revokedToolsetIds: ["not-a-uuid"],
+      revokedCredentialPolicyIds: [],
+      revokedCredentialIds: [],
+    }),
   );
 });
 

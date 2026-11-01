@@ -77,7 +77,7 @@ import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import type { PostgresApiStore } from "./store.js";
 import type { RuntimeCommandPort } from "./runtime-commands.js";
 import { errorEnvelope, HttpApiError } from "./errors.js";
-import { McpAdminService } from "./mcp.js";
+import { McpAdminService, lockMcpBindings } from "./mcp.js";
 import { registerConfigurationBackupRoutes } from "./configuration-backup.js";
 import {
   decodeListCursor,
@@ -3079,6 +3079,67 @@ function registerMcpRoutes(
       });
       return c.json(response.body, response.status as 201);
     });
+  });
+
+  app.get("/v1/projects/:projectId/mcp-servers/:serverId/usage", async (c) => {
+    const actor = assertProject(c);
+    const service = requiredService();
+    return dependencies.store.transaction(actor, "mcp:read", async (tx) =>
+      c.json(await service.serverUsage(tx, actor, c.req.param("serverId"))),
+    );
+  });
+
+  // Retires a server instead of deleting it: versions are immutable and
+  // sessions, call attempts, and audit history keep referring to them.
+  app.delete("/v1/projects/:projectId/mcp-servers/:serverId", async (c) => {
+    const actor = assertProject(c);
+    const serverId = c.req.param("serverId");
+    const keepCredentials = c.req.query("keepCredentials") === "true";
+    const key = idempotencyKey(c.req.raw);
+    const service = requiredService();
+    return dependencies.store.transaction(
+      actor,
+      keepCredentials ? "mcp:write" : ["mcp:write", "credential:revoke"],
+      async (tx) => {
+        const response = await dependencies.store.idempotent(tx, actor, {
+          scope: `DELETE:/mcp-servers/${serverId}`,
+          method: "DELETE",
+          key,
+          hash: requestHash({ serverId, keepCredentials }),
+          status: 200,
+          execute: async () => {
+            const removed = await service.removeServer(tx, actor, serverId, {
+              keepCredentials,
+            });
+            await dependencies.store.appendAudit(tx, actor, {
+              action: "mcp.server_revoked",
+              resourceType: "mcp_server",
+              resourceId: serverId,
+              detail: {
+                toolsetIds: removed.revokedToolsetIds,
+                credentialPolicyIds: removed.revokedCredentialPolicyIds,
+                credentialIds: removed.revokedCredentialIds,
+              },
+            });
+            for (const credentialId of removed.revokedCredentialIds) {
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "mcp.credential_revoked",
+                resourceType: "mcp_credential",
+                resourceId: credentialId,
+                detail: { reason: "mcp_server_removed", serverId },
+              });
+              await dependencies.store.appendEvent(tx, actor, {
+                aggregateType: "mcp_credential",
+                aggregateId: credentialId,
+                kind: "mcp.credential_revoked",
+              });
+            }
+            return removed;
+          },
+        });
+        return c.json(response.body);
+      },
+    );
   });
 
   app.post(
@@ -6701,6 +6762,8 @@ function registerAgentRoutes(
                 description ?? null,
               ],
             );
+            if (config.mcpBindings.length > 0)
+              await lockMcpBindings(tx, actor.organizationId);
             await tx.query(
               "SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7)",
               [
@@ -6916,6 +6979,8 @@ function registerAgentRoutes(
           hash: requestHash(body),
           status: 201,
           execute: async () => {
+            if (config.mcpBindings.length > 0)
+              await lockMcpBindings(tx, actor.organizationId);
             const result = await tx.query(
               `SELECT (published).*
              FROM (SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7) AS published) q`,

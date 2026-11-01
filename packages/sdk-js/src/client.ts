@@ -96,6 +96,8 @@ import type {
   McpToolsetList,
   CreateMcpServerInput,
   DiscoverMcpServerInput,
+  McpServerUsage,
+  RemoveMcpServerResult,
   DiscoverMcpAuthorizationInput,
   McpAuthorizationDiscovery,
   McpCredentialTestResult,
@@ -1012,6 +1014,40 @@ export class OaoClient {
       "POST",
       input,
       options,
+    );
+  }
+
+  /**
+   * What still uses an MCP server and what removing it would revoke. A
+   * server cannot be removed while a live agent's current version binds it.
+   */
+  getMcpServerUsage(
+    projectId: string,
+    serverId: string,
+    options?: RequestOptions,
+  ): Promise<McpServerUsage> {
+    return this.#request(
+      this.routes.mcpServerUsage(projectId, serverId),
+      options,
+    );
+  }
+
+  /**
+   * Retires an MCP server: revokes its versions and this project's toolsets
+   * for it, plus the policies and credentials only it used unless
+   * `keepCredentials` is set. Refused with 409 while an agent uses it.
+   */
+  removeMcpServer(
+    projectId: string,
+    serverId: string,
+    options: WriteOptions & { readonly keepCredentials?: boolean },
+  ): Promise<RemoveMcpServerResult> {
+    const { keepCredentials, ...write } = options;
+    return this.#write(
+      `${this.routes.mcpServer(projectId, serverId)}${keepCredentials ? "?keepCredentials=true" : ""}`,
+      "DELETE",
+      undefined,
+      write,
     );
   }
 

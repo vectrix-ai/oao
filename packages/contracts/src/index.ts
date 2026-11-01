@@ -1977,6 +1977,45 @@ export const DiscoverMcpServerInputSchema = v.strictObject({
   credentialPolicyVersionId: v.optional(IdSchema),
 });
 
+const McpResourceSummarySchema = v.object({
+  id: IdSchema,
+  key: v.string(),
+  displayName: v.string(),
+});
+
+/**
+ * What still uses an MCP server, and what removing it would revoke. A server
+ * cannot be removed while any live agent's current version binds its tools.
+ */
+export const McpServerUsageSchema = v.object({
+  /** Live agents in this project whose current version binds the server. */
+  agents: v.array(
+    v.object({ id: IdSchema, key: v.string(), name: v.string() }),
+  ),
+  /** Other projects of the organization with such agents, by count only. */
+  otherProjects: v.array(
+    v.object({
+      id: IdSchema,
+      slug: v.string(),
+      name: v.string(),
+      agentCount: v.number(),
+    }),
+  ),
+  /** This project's active toolsets for the server. */
+  toolsets: v.array(McpResourceSummarySchema),
+  /** Active credential policies no other active server uses. */
+  credentialPolicies: v.array(McpResourceSummarySchema),
+  /** Active credentials used only by those policies. */
+  credentials: v.array(McpResourceSummarySchema),
+});
+
+export const RemoveMcpServerResultSchema = v.object({
+  server: McpServerSchema,
+  revokedToolsetIds: v.array(IdSchema),
+  revokedCredentialPolicyIds: v.array(IdSchema),
+  revokedCredentialIds: v.array(IdSchema),
+});
+
 const McpHttpsOriginSchema = v.pipe(
   v.string(),
   v.maxLength(512),
@@ -2350,6 +2389,8 @@ export const McpToolsetSchema = v.object({
   displayName: v.pipe(v.string(), v.minLength(1), v.maxLength(200)),
   latestVersionId: IdSchema,
   version: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  /** The MCP server the toolset's version belongs to. */
+  serverId: IdSchema,
   serverVersionId: IdSchema,
   status: McpLifecycleStatusSchema,
   tools: v.array(McpToolsetToolSchema),
@@ -2908,6 +2949,10 @@ export type CreateMcpServerInput = v.InferOutput<
 >;
 export type DiscoverMcpServerInput = v.InferOutput<
   typeof DiscoverMcpServerInputSchema
+>;
+export type McpServerUsage = v.InferOutput<typeof McpServerUsageSchema>;
+export type RemoveMcpServerResult = v.InferOutput<
+  typeof RemoveMcpServerResultSchema
 >;
 export type McpCredential = v.InferOutput<typeof McpCredentialSchema>;
 export type CreateMcpCredentialInput = v.InferOutput<
@@ -3566,9 +3611,25 @@ export function checkConfigurationBackupReferences(
   uniqueKeys(backup.storageProviders, "Storage provider");
   if (backup.storageProviders.filter((provider) => provider.default).length > 1)
     problems.push("More than one storage provider is the default");
-  uniqueKeys(backup.mcpServers, "MCP server");
-  uniqueKeys(backup.mcpCredentials, "MCP credential");
-  uniqueKeys(backup.mcpCredentialPolicies, "MCP credential policy");
+  // A removed MCP resource frees its key, like an archived agent.
+  const removed = <
+    T extends { readonly versions: readonly { readonly status: string }[] },
+  >(
+    entries: readonly (T & { readonly key: string })[],
+  ) =>
+    entries.map((entry) => ({
+      key: entry.key,
+      archived: entry.versions.at(-1)?.status === "revoked",
+    }));
+  uniqueKeys(removed(backup.mcpServers), "MCP server");
+  uniqueKeys(
+    backup.mcpCredentials.map((credential) => ({
+      key: credential.key,
+      archived: credential.status === "revoked",
+    })),
+    "MCP credential",
+  );
+  uniqueKeys(removed(backup.mcpCredentialPolicies), "MCP credential policy");
 
   const serverVersions = new Map<string, readonly string[]>();
   for (const server of backup.mcpServers) {
@@ -3640,7 +3701,7 @@ export function checkConfigurationBackupReferences(
         );
     }
     uniqueKeys(project.skills, `${where} Skill`);
-    uniqueKeys(project.mcpToolsets, `${where} MCP toolset`);
+    uniqueKeys(removed(project.mcpToolsets), `${where} MCP toolset`);
     uniqueKeys(project.agents, `${where} agent`);
     const skillVersions = new Set<string>();
     for (const skill of project.skills) {

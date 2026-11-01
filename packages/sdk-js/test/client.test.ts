@@ -33,6 +33,10 @@ test("route builders scope resources to a project and allow a custom prefix", ()
     "/platform/v2/projects/project%2Fone/mcp-servers/server%20one/discover",
   );
   assert.equal(
+    routes.mcpServerUsage("project/one", "server one"),
+    "/platform/v2/projects/project%2Fone/mcp-servers/server%20one/usage",
+  );
+  assert.equal(
     routes.mcpAuthorizationDiscovery("project/one"),
     "/platform/v2/projects/project%2Fone/mcp-authorization-discovery",
   );
@@ -358,6 +362,39 @@ test("client discovers MCP authorization and tests OAuth credentials without ide
   );
   assert.equal(requests[0]?.headers.get("idempotency-key"), null);
   assert.equal(requests[1]?.headers.get("idempotency-key"), null);
+});
+
+test("client removes an MCP server and reads what still uses it", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({});
+    },
+  });
+  await client.getMcpServerUsage("project-1", "server-1");
+  await client.removeMcpServer("project-1", "server-1", {
+    idempotencyKey: "remove-1",
+  });
+  await client.removeMcpServer("project-1", "server-1", {
+    idempotencyKey: "remove-2",
+    keepCredentials: true,
+  });
+  assert.equal(
+    requests[0]?.url.endsWith("/projects/project-1/mcp-servers/server-1/usage"),
+    true,
+  );
+  assert.equal(requests[1]?.method, "DELETE");
+  assert.equal(
+    requests[1]?.url.endsWith("/projects/project-1/mcp-servers/server-1"),
+    true,
+  );
+  assert.equal(requests[1]?.headers.get("idempotency-key"), "remove-1");
+  assert.equal(
+    requests[2]?.url.endsWith("/mcp-servers/server-1?keepCredentials=true"),
+    true,
+  );
 });
 
 test("client follows up with and cancels a persistent child delegation", async () => {

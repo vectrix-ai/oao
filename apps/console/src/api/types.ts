@@ -18,6 +18,8 @@ import type {
   ManagedHarnessOperation,
   CreateMcpServerInput,
   DiscoverMcpServerInput,
+  McpServerUsage,
+  RemoveMcpServerResult,
   DiscoverMcpAuthorizationInput,
   McpAuthorizationDiscovery,
   McpCredentialTestResult,
@@ -51,6 +53,8 @@ export type {
   ManagedHarnessOperation,
   CreateMcpServerInput,
   DiscoverMcpServerInput,
+  McpServerUsage,
+  RemoveMcpServerResult,
   DiscoverMcpAuthorizationInput,
   McpAuthorizationDiscovery,
   McpCredentialTestResult,
@@ -739,6 +743,13 @@ export interface ConsoleApi {
     serverId: string,
     input: DiscoverMcpServerInput,
   ): Promise<McpServer>;
+  /** What still uses a server and what removing it would revoke. */
+  getMcpServerUsage(serverId: string): Promise<McpServerUsage>;
+  /** Retires a server; refused while a live agent still uses it. */
+  removeMcpServer(
+    serverId: string,
+    options?: { readonly keepCredentials?: boolean },
+  ): Promise<RemoveMcpServerResult>;
   listMcpCredentials(): Promise<McpCredentialList>;
   createMcpCredential(input: CreateMcpCredentialInput): Promise<McpCredential>;
   rotateMcpCredential(

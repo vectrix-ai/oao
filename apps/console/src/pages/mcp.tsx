@@ -41,21 +41,43 @@ import {
   useToast,
 } from "../components/ui";
 
-type CreateDialog = "credential" | "server" | "policy" | "toolset";
+/** A create dialog opened from one connection's details. */
+type CreateDialog = {
+  readonly kind: "policy" | "toolset";
+  readonly server: McpServer;
+};
+
+/**
+ * True when a policy covers a server endpoint, as the database matches them:
+ * the same origin and a path that starts with the policy's prefix.
+ */
+function policyCoversServer(
+  policy: McpCredentialPolicy,
+  server: McpServer,
+): boolean {
+  try {
+    const endpoint = new URL(server.endpointUrl);
+    return (
+      new URL(policy.exactOrigin).origin === endpoint.origin &&
+      endpoint.pathname.startsWith(policy.pathPrefix)
+    );
+  } catch {
+    return false;
+  }
+}
 
 export function McpPage() {
   const api = useApi();
   const queryClient = useQueryClient();
   const notify = useToast();
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [managingServerId, setManagingServerId] = useState<string | null>(null);
   const [dialog, setDialog] = useState<CreateDialog | null>(null);
   const [rotatingCredential, setRotatingCredential] =
     useState<McpCredential | null>(null);
   const [revokingCredential, setRevokingCredential] =
     useState<McpCredential | null>(null);
-  const [discoveryPolicy, setDiscoveryPolicy] = useState<
-    Record<string, string>
-  >({});
+  const [removingServer, setRemovingServer] = useState<McpServer | null>(null);
   const servers = useQuery({
     queryKey: ["mcp-servers"],
     queryFn: () => api.listMcpServers(),
@@ -85,18 +107,10 @@ export function McpPage() {
     ]);
   };
   const create = useMutation({
-    mutationFn: async (input: McpCreateInput) => {
-      switch (input.kind) {
-        case "credential":
-          return api.createMcpCredential(input.value);
-        case "server":
-          return api.createMcpServer(input.value);
-        case "policy":
-          return api.createMcpCredentialPolicy(input.value);
-        case "toolset":
-          return api.createMcpToolset(input.value);
-      }
-    },
+    mutationFn: async (input: McpCreateInput) =>
+      input.kind === "policy"
+        ? api.createMcpCredentialPolicy(input.value)
+        : api.createMcpToolset(input.value),
     onSuccess: async () => {
       await refresh();
       setDialog(null);
@@ -159,6 +173,18 @@ export function McpPage() {
   const encryptionConfigured =
     servers.data?.credentialEncryptionConfigured === true &&
     credentials.data?.credentialEncryptionConfigured === true;
+  const liveServers = (servers.data?.data ?? []).filter(
+    (server) => server.status !== "revoked",
+  );
+  const managingServer = liveServers.find(
+    (server) => server.id === managingServerId,
+  );
+  // One dialog at a time: the details reopen when a nested one closes.
+  const nestedOpen =
+    dialog !== null ||
+    rotatingCredential !== null ||
+    revokingCredential !== null ||
+    removingServer !== null;
 
   return (
     <Page>
@@ -199,317 +225,69 @@ export function McpPage() {
             </Alert>
           ) : null}
           <ConnectionsPanel
-            servers={servers.data?.data ?? []}
+            servers={liveServers}
             toolsets={toolsets.data?.data ?? []}
             disabled={!encryptionConfigured}
             onAdd={() => setWizardOpen(true)}
+            onManage={(server) => setManagingServerId(server.id)}
           />
-          <Panel
-            title="Advanced resources"
-            description="Inspect or manage the immutable credentials, policies, server versions, and toolsets created by the setup wizard."
-            collapsible
-            defaultCollapsed
-          >
-            <div className="stack">
-              <ResourcePanel
-                title="Credentials"
-                description="Encrypted bearer tokens or API-key headers, each pinned to the one destination its secret may reach. Values are write-only."
-                action="Add credential"
-                disabled={!encryptionConfigured}
-                onAction={() => setDialog("credential")}
-              >
-                {(credentials.data?.data.length ?? 0) === 0 ? (
-                  <EmptyState
-                    icon="⚿"
-                    title="No MCP credentials"
-                    description="Add a project-scoped credential to continue."
-                  />
-                ) : (
-                  <TableCard
-                    label="MCP credentials table"
-                    caption="Redacted MCP credentials"
-                  >
-                    <thead>
-                      <tr>
-                        <th>Name</th>
-                        <th>Kind</th>
-                        <th>Destination</th>
-                        <th>Fingerprint</th>
-                        <th>Status</th>
-                        <th>Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {credentials.data?.data.map((item) => (
-                        <tr key={item.id}>
-                          <td>
-                            <strong>{item.displayName}</strong>
-                            <br />
-                            <code>{item.key}</code>
-                          </td>
-                          <td>{item.kind.replaceAll("_", " ")}</td>
-                          <td>
-                            {item.destination ? (
-                              <code>
-                                {item.destination.origin}
-                                {item.destination.pathPrefix}
-                              </code>
-                            ) : (
-                              <StatusChip value="unpinned" />
-                            )}
-                          </td>
-                          <td>
-                            <span className="key-mask">
-                              ••••{item.credentialFingerprint.slice(-6)}
-                            </span>{" "}
-                            · v{item.credentialVersion}
-                          </td>
-                          <td>
-                            <StatusChip value={item.status} />
-                          </td>
-                          <td>
-                            <span className="row">
-                              {item.oauth ? (
-                                <Button
-                                  size="sm"
-                                  icon={<Check size={13} />}
-                                  aria-label={`Test ${item.displayName}`}
-                                  disabled={
-                                    item.status !== "active" || test.isPending
-                                  }
-                                  onClick={() => test.mutate(item.id)}
-                                >
-                                  Test
-                                </Button>
-                              ) : null}
-                              <Button
-                                size="sm"
-                                icon={<RefreshCw size={13} />}
-                                disabled={item.status !== "active"}
-                                onClick={() => setRotatingCredential(item)}
-                              >
-                                Rotate
-                              </Button>
-                              <Button
-                                size="sm"
-                                icon={<Trash2 size={13} />}
-                                disabled={item.status === "revoked"}
-                                onClick={() => setRevokingCredential(item)}
-                              >
-                                Revoke
-                              </Button>
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </TableCard>
-                )}
-              </ResourcePanel>
-              <ResourcePanel
-                title="Credential policies"
-                description="Use one credential at an exact HTTPS origin and path prefix inside the credential's pinned destination."
-                action="Add policy"
-                disabled={(credentials.data?.data.length ?? 0) === 0}
-                onAction={() => setDialog("policy")}
-              >
-                {(policies.data?.data.length ?? 0) === 0 ? (
-                  <EmptyState
-                    icon="⌁"
-                    title="No credential policies"
-                    description="Create an exact-origin policy for a credential."
-                  />
-                ) : (
-                  <TableCard
-                    label="MCP credential policies table"
-                    caption="Exact-origin credential policies"
-                  >
-                    <thead>
-                      <tr>
-                        <th>Name</th>
-                        <th>Destination</th>
-                        <th>Limits</th>
-                        <th>Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {policies.data?.data.map((item) => (
-                        <tr key={item.id}>
-                          <td>
-                            <strong>{item.displayName}</strong>
-                            <br />
-                            <code>{item.key}</code>
-                          </td>
-                          <td>
-                            <code>
-                              {item.exactOrigin}
-                              {item.pathPrefix}
-                            </code>
-                          </td>
-                          <td>
-                            {item.timeoutMs / 1000}s ·{" "}
-                            {Math.round(item.maximumResponseBytes / 1024)} KiB
-                            {item.forwardCallContext ? (
-                              <>
-                                <br />
-                                <small>Forwards call context</small>
-                              </>
-                            ) : null}
-                          </td>
-                          <td>
-                            <StatusChip value={item.status} />
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </TableCard>
-                )}
-              </ResourcePanel>
-              <ResourcePanel
-                title="Remote servers"
-                description="HTTPS Streamable HTTP or legacy SSE endpoints; redirects and private-network destinations are denied."
-                action="Add server"
-                disabled={false}
-                onAction={() => setDialog("server")}
-              >
-                {(servers.data?.data.length ?? 0) === 0 ? (
-                  <EmptyState
-                    icon="▣"
-                    title="No MCP servers"
-                    description="Register a remote MCP endpoint."
-                  />
-                ) : (
-                  <TableCard
-                    label="MCP servers table"
-                    caption="Versioned remote MCP servers"
-                  >
-                    <thead>
-                      <tr>
-                        <th>Server</th>
-                        <th>Endpoint</th>
-                        <th>Tools</th>
-                        <th>Discover</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {servers.data?.data.map((server) => (
-                        <tr key={server.id}>
-                          <td>
-                            <strong>{server.displayName}</strong>
-                            <br />
-                            <StatusChip value={server.status} />
-                          </td>
-                          <td>
-                            <code>{server.endpointUrl}</code>
-                            <br />
-                            <small>
-                              {server.transport.replaceAll("_", " ")}
-                            </small>
-                          </td>
-                          <td>{server.tools.length}</td>
-                          <td>
-                            <span className="row">
-                              <Select
-                                aria-label={`Credential policy for ${server.displayName}`}
-                                value={discoveryPolicy[server.id] ?? ""}
-                                onChange={(event) =>
-                                  setDiscoveryPolicy((current) => ({
-                                    ...current,
-                                    [server.id]: event.target.value,
-                                  }))
-                                }
-                              >
-                                <option value="">Select policy</option>
-                                {policies.data?.data.map((policy) => (
-                                  <option
-                                    key={policy.latestVersionId}
-                                    value={policy.latestVersionId}
-                                  >
-                                    {policy.displayName}
-                                  </option>
-                                ))}
-                              </Select>
-                              <Button
-                                size="sm"
-                                icon={<RefreshCw size={13} />}
-                                disabled={
-                                  !discoveryPolicy[server.id] ||
-                                  discover.isPending
-                                }
-                                onClick={() =>
-                                  discover.mutate({
-                                    serverId: server.id,
-                                    policyVersionId:
-                                      discoveryPolicy[server.id]!,
-                                  })
-                                }
-                              >
-                                Discover
-                              </Button>
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </TableCard>
-                )}
-              </ResourcePanel>
-              <ResourcePanel
-                title="Toolsets"
-                description="Expose only selected discovered tools. Approval defaults to always."
-                action="Create toolset"
-                disabled={
-                  !servers.data?.data.some((server) => server.tools.length > 0)
-                }
-                onAction={() => setDialog("toolset")}
-              >
-                {(toolsets.data?.data.length ?? 0) === 0 ? (
-                  <EmptyState
-                    icon="⌘"
-                    title="No MCP toolsets"
-                    description="Discover a server, then select the tools an agent may use."
-                  />
-                ) : (
-                  <TableCard
-                    label="MCP toolsets table"
-                    caption="Restricted immutable MCP toolsets"
-                  >
-                    <thead>
-                      <tr>
-                        <th>Name</th>
-                        <th>Tools</th>
-                        <th>Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {toolsets.data?.data.map((item) => (
-                        <tr key={item.id}>
-                          <td>
-                            <strong>{item.displayName}</strong>
-                            <br />
-                            <code>{item.key}</code>
-                          </td>
-                          <td>
-                            {item.tools
-                              .map((tool) => tool.remoteToolName)
-                              .join(", ")}
-                          </td>
-                          <td>
-                            <StatusChip value={item.status} />
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </TableCard>
-                )}
-              </ResourcePanel>
-            </div>
-          </Panel>
+          <UnattachedCredentialsPanel
+            credentials={(credentials.data?.data ?? []).filter(
+              (credential) =>
+                !(policies.data?.data ?? []).some(
+                  (policy) =>
+                    policy.credentialId === credential.id &&
+                    liveServers.some((server) =>
+                      policyCoversServer(policy, server),
+                    ),
+                ),
+            )}
+            onRevoke={setRevokingCredential}
+          />
         </div>
+      ) : null}
+      {managingServer && !nestedOpen ? (
+        <ConnectionDetailsDialog
+          server={managingServer}
+          policies={(policies.data?.data ?? []).filter((policy) =>
+            policyCoversServer(policy, managingServer),
+          )}
+          credentials={credentials.data?.data ?? []}
+          toolsets={(toolsets.data?.data ?? []).filter(
+            (toolset) => toolset.serverId === managingServer.id,
+          )}
+          discovering={discover.isPending}
+          discoverError={discover.error}
+          testing={test.isPending}
+          onClose={() => {
+            discover.reset();
+            setManagingServerId(null);
+          }}
+          onDiscover={(policyVersionId) =>
+            discover.mutate({ serverId: managingServer.id, policyVersionId })
+          }
+          onTest={(credential) => test.mutate(credential.id)}
+          onRotate={setRotatingCredential}
+          onRevoke={setRevokingCredential}
+          onCreate={(kind) => setDialog({ kind, server: managingServer })}
+          onRemove={() => setRemovingServer(managingServer)}
+        />
       ) : null}
       {wizardOpen ? (
         <McpSetupDialog
           agents={agents.data?.data ?? []}
+          takenKeys={{
+            servers: new Set(liveServers.map((item) => item.key)),
+            credentials: new Set(
+              (credentials.data?.data ?? []).map((item) => item.key),
+            ),
+            policies: new Set(
+              (policies.data?.data ?? []).map((item) => item.key),
+            ),
+            toolsets: new Set(
+              (toolsets.data?.data ?? []).map((item) => item.key),
+            ),
+          }}
           encryptionConfigured={encryptionConfigured}
           onClose={() => setWizardOpen(false)}
           onComplete={async () => {
@@ -522,9 +300,9 @@ export function McpPage() {
       ) : null}
       {dialog ? (
         <McpCreateDialog
-          kind={dialog}
+          kind={dialog.kind}
+          server={dialog.server}
           credentials={credentials.data?.data ?? []}
-          servers={servers.data?.data ?? []}
           pending={create.isPending}
           error={create.error}
           onClose={() => {
@@ -532,6 +310,18 @@ export function McpPage() {
             setDialog(null);
           }}
           onSubmit={(input) => create.mutate(input)}
+        />
+      ) : null}
+      {removingServer ? (
+        <RemoveConnectionDialog
+          server={removingServer}
+          onClose={() => setRemovingServer(null)}
+          onRemoved={async () => {
+            await refresh();
+            setRemovingServer(null);
+            setManagingServerId(null);
+            notify(`${removingServer.displayName} was removed.`);
+          }}
         />
       ) : null}
       {rotatingCredential ? (
@@ -551,7 +341,7 @@ export function McpPage() {
       {revokingCredential ? (
         <Dialog
           title={`Revoke ${revokingCredential.displayName}`}
-          description="Revocation immediately blocks discovery and runtime calls that use this credential. It cannot be undone."
+          description="Revocation immediately blocks discovery and runtime calls that use this credential, and removes it from the list. It cannot be undone."
           onClose={() => {
             revoke.reset();
             setRevokingCredential(null);
@@ -585,16 +375,368 @@ export function McpPage() {
   );
 }
 
+/**
+ * Credentials no connection uses, for example ones kept when their
+ * connection was removed. Shown only when there are any.
+ */
+function UnattachedCredentialsPanel({
+  credentials,
+  onRevoke,
+}: {
+  readonly credentials: readonly McpCredential[];
+  readonly onRevoke: (credential: McpCredential) => void;
+}) {
+  if (credentials.length === 0) return null;
+  return (
+    <Panel
+      title="Credentials not used by any connection"
+      description="Kept when a connection was removed, or never connected. Revoke the ones you no longer need."
+    >
+      <TableCard
+        label="Unattached MCP credentials table"
+        caption="Credentials not used by any connection"
+      >
+        <thead>
+          <tr>
+            <th>Credential</th>
+            <th>Destination</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {credentials.map((credential) => (
+            <tr key={credential.id}>
+              <td>
+                <strong>{credential.displayName}</strong>
+                <br />
+                <small>
+                  {credential.kind.replaceAll("_", " ")} ·{" "}
+                  <span className="key-mask">
+                    ••••{credential.credentialFingerprint.slice(-6)}
+                  </span>
+                </small>
+              </td>
+              <td>
+                {credential.destination ? (
+                  <code>
+                    {credential.destination.origin}
+                    {credential.destination.pathPrefix}
+                  </code>
+                ) : (
+                  <StatusChip value="unpinned" />
+                )}
+              </td>
+              <td>
+                <Button
+                  size="sm"
+                  icon={<Trash2 size={13} />}
+                  aria-label={`Revoke ${credential.displayName}`}
+                  onClick={() => onRevoke(credential)}
+                >
+                  Revoke
+                </Button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </TableCard>
+    </Panel>
+  );
+}
+
+/**
+ * Everything one connection is made of: its tools, the policies and
+ * credentials that authenticate to it, and its toolsets.
+ */
+function ConnectionDetailsDialog({
+  server,
+  policies,
+  credentials,
+  toolsets,
+  discovering,
+  discoverError,
+  testing,
+  onClose,
+  onDiscover,
+  onTest,
+  onRotate,
+  onRevoke,
+  onCreate,
+  onRemove,
+}: {
+  readonly server: McpServer;
+  readonly policies: readonly McpCredentialPolicy[];
+  readonly credentials: readonly McpCredential[];
+  readonly toolsets: readonly McpToolset[];
+  readonly discovering: boolean;
+  readonly discoverError: Error | null;
+  readonly testing: boolean;
+  readonly onClose: () => void;
+  readonly onDiscover: (policyVersionId: string) => void;
+  readonly onTest: (credential: McpCredential) => void;
+  readonly onRotate: (credential: McpCredential) => void;
+  readonly onRevoke: (credential: McpCredential) => void;
+  readonly onCreate: (kind: CreateDialog["kind"]) => void;
+  readonly onRemove: () => void;
+}) {
+  const [policyVersionId, setPolicyVersionId] = useState(
+    policies[0]?.latestVersionId ?? "",
+  );
+  return (
+    <Dialog
+      title={server.displayName}
+      description="This connection's tools, authentication, and toolsets."
+      wide
+      onClose={onClose}
+      footer={
+        <>
+          <Button
+            variant="danger"
+            icon={<Trash2 size={14} />}
+            onClick={onRemove}
+          >
+            Remove
+          </Button>
+          <Button onClick={onClose}>Close</Button>
+        </>
+      }
+    >
+      <div className="stack">
+        <dl className="wizard-review">
+          <div>
+            <dt>Endpoint</dt>
+            <dd>
+              <code>{server.endpointUrl}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>Transport</dt>
+            <dd>{server.transport.replaceAll("_", " ")}</dd>
+          </div>
+          <div>
+            <dt>Discovered tools</dt>
+            <dd>
+              {server.tools.length > 0
+                ? server.tools.map((tool) => tool.name).join(", ")
+                : "None yet"}
+            </dd>
+          </div>
+          <div>
+            <dt>Last discovered</dt>
+            <dd>
+              {server.lastDiscoveredAt
+                ? new Date(server.lastDiscoveredAt).toLocaleString()
+                : "Never"}
+            </dd>
+          </div>
+        </dl>
+        <span className="row">
+          <Select
+            aria-label="Credential policy for discovery"
+            value={policyVersionId}
+            onChange={(event) => setPolicyVersionId(event.currentTarget.value)}
+          >
+            <option value="">Select policy</option>
+            {policies.map((policy) => (
+              <option
+                key={policy.latestVersionId}
+                value={policy.latestVersionId}
+              >
+                {policy.displayName}
+              </option>
+            ))}
+          </Select>
+          <Button
+            size="sm"
+            icon={<RefreshCw size={13} />}
+            loading={discovering}
+            disabled={!policyVersionId}
+            onClick={() => onDiscover(policyVersionId)}
+          >
+            Discover tools
+          </Button>
+        </span>
+        {discoverError ? <FormError>{discoverError.message}</FormError> : null}
+
+        <span className="row">
+          <h3>Authentication</h3>
+          <Button
+            size="sm"
+            icon={<Plus size={13} />}
+            disabled={credentials.length === 0}
+            onClick={() => onCreate("policy")}
+          >
+            Add policy
+          </Button>
+        </span>
+        {policies.length === 0 ? (
+          <small>No credential policy covers this endpoint.</small>
+        ) : (
+          <TableCard
+            label="Connection authentication table"
+            caption="Policies and credentials for this connection"
+          >
+            <thead>
+              <tr>
+                <th>Policy</th>
+                <th>Credential</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {policies.map((policy) => {
+                const credential = credentials.find(
+                  (item) => item.id === policy.credentialId,
+                );
+                return (
+                  <tr key={policy.id}>
+                    <td>
+                      <strong>{policy.displayName}</strong>
+                      <br />
+                      <code>
+                        {policy.exactOrigin}
+                        {policy.pathPrefix}
+                      </code>
+                      <br />
+                      <small>
+                        {policy.timeoutMs / 1000}s ·{" "}
+                        {Math.round(policy.maximumResponseBytes / 1024)} KiB
+                        {policy.forwardCallContext
+                          ? " · forwards call context"
+                          : ""}
+                      </small>
+                    </td>
+                    <td>
+                      {credential ? (
+                        <>
+                          <strong>{credential.displayName}</strong>
+                          <br />
+                          <small>
+                            {credential.kind.replaceAll("_", " ")} ·{" "}
+                            <span className="key-mask">
+                              ••••{credential.credentialFingerprint.slice(-6)}
+                            </span>{" "}
+                            · v{credential.credentialVersion}
+                          </small>
+                          {credential.destination ? null : (
+                            <>
+                              <br />
+                              <StatusChip value="unpinned" />
+                            </>
+                          )}
+                        </>
+                      ) : (
+                        <small>Credential revoked</small>
+                      )}
+                    </td>
+                    <td>
+                      {credential ? (
+                        <span className="row">
+                          {credential.oauth ? (
+                            <Button
+                              size="sm"
+                              icon={<Check size={13} />}
+                              aria-label={`Test ${credential.displayName}`}
+                              disabled={testing}
+                              onClick={() => onTest(credential)}
+                            >
+                              Test
+                            </Button>
+                          ) : null}
+                          <Button
+                            size="sm"
+                            icon={<RefreshCw size={13} />}
+                            aria-label={`Rotate ${credential.displayName}`}
+                            onClick={() => onRotate(credential)}
+                          >
+                            Rotate
+                          </Button>
+                          <Button
+                            size="sm"
+                            icon={<Trash2 size={13} />}
+                            aria-label={`Revoke ${credential.displayName}`}
+                            onClick={() => onRevoke(credential)}
+                          >
+                            Revoke
+                          </Button>
+                        </span>
+                      ) : null}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </TableCard>
+        )}
+
+        <span className="row">
+          <h3>Toolsets</h3>
+          <Button
+            size="sm"
+            icon={<Plus size={13} />}
+            disabled={server.tools.length === 0}
+            onClick={() => onCreate("toolset")}
+          >
+            Create toolset
+          </Button>
+        </span>
+        {toolsets.length === 0 ? (
+          <small>No toolset exposes this connection&apos;s tools yet.</small>
+        ) : (
+          <TableCard
+            label="Connection toolsets table"
+            caption="Restricted toolsets for this connection"
+          >
+            <thead>
+              <tr>
+                <th>Toolset</th>
+                <th>Tools</th>
+              </tr>
+            </thead>
+            <tbody>
+              {toolsets.map((toolset) => (
+                <tr key={toolset.id}>
+                  <td>
+                    <strong>{toolset.displayName}</strong>
+                    <br />
+                    <code>{toolset.key}</code>
+                    {toolset.serverVersionId !== server.latestVersionId ? (
+                      <>
+                        <br />
+                        <small>Pinned to an earlier server version</small>
+                      </>
+                    ) : null}
+                  </td>
+                  <td>
+                    {toolset.tools
+                      .map(
+                        (tool) =>
+                          `${tool.remoteToolName}${tool.approval === "never" ? "" : " (approval)"}`,
+                      )
+                      .join(", ")}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </TableCard>
+        )}
+      </div>
+    </Dialog>
+  );
+}
+
 function ConnectionsPanel({
   servers,
   toolsets,
   disabled,
   onAdd,
+  onManage,
 }: {
   readonly servers: readonly McpServer[];
   readonly toolsets: readonly McpToolset[];
   readonly disabled: boolean;
   readonly onAdd: () => void;
+  readonly onManage: (server: McpServer) => void;
 }) {
   return (
     <Panel
@@ -627,7 +769,7 @@ function ConnectionsPanel({
         <div className="cards-grid">
           {servers.map((server) => {
             const connectionToolsets = toolsets.filter(
-              (toolset) => toolset.serverVersionId === server.latestVersionId,
+              (toolset) => toolset.serverId === server.id,
             );
             return (
               <article
@@ -639,6 +781,13 @@ function ConnectionsPanel({
                   <StatusChip
                     value={server.tools.length > 0 ? "ready" : server.status}
                   />
+                  <Button
+                    size="sm"
+                    aria-label={`Manage ${server.displayName}`}
+                    onClick={() => onManage(server)}
+                  >
+                    Manage
+                  </Button>
                 </header>
                 <code>{server.endpointUrl}</code>
                 <dl>
@@ -703,13 +852,33 @@ function endpointPolicy(
   }
 }
 
+/**
+ * Keys live resources already use. Removed ones free their keys, but a kept
+ * credential or policy still holds its own.
+ */
+interface TakenMcpKeys {
+  readonly servers: ReadonlySet<string>;
+  readonly credentials: ReadonlySet<string>;
+  readonly policies: ReadonlySet<string>;
+  readonly toolsets: ReadonlySet<string>;
+}
+
+/** The first of `base`, `base-2`, `base-3`, … that no live resource uses. */
+function freeKey(base: string, taken: ReadonlySet<string>): string {
+  if (!taken.has(base)) return base;
+  for (let suffix = 2; ; suffix += 1)
+    if (!taken.has(`${base}-${suffix}`)) return `${base}-${suffix}`;
+}
+
 function McpSetupDialog({
   agents,
+  takenKeys,
   encryptionConfigured,
   onClose,
   onComplete,
 }: {
   readonly agents: readonly AgentSummary[];
+  readonly takenKeys: TakenMcpKeys;
   readonly encryptionConfigured: boolean;
   readonly onClose: () => void;
   readonly onComplete: () => void | Promise<void>;
@@ -764,8 +933,12 @@ function McpSetupDialog({
   const derivedPolicy = endpointPolicy(endpointUrl, transport);
   const validKey =
     key.length <= 90 && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(key);
+  const keyTaken = resources.server === undefined && takenKeys.servers.has(key);
   const serverReady =
-    displayName.trim().length > 0 && validKey && derivedPolicy !== null;
+    displayName.trim().length > 0 &&
+    validKey &&
+    !keyTaken &&
+    derivedPolicy !== null;
   const oauthSelected = credentialKind === "oauth_client_credentials";
   const authorizationServer = authorization?.authorizationServers.find(
     (entry) => entry.issuer === issuer && entry.problem === null,
@@ -824,7 +997,7 @@ function McpSetupDialog({
       }
       if (!current.credential) {
         const base = {
-          key: `${key}-credential`,
+          key: freeKey(`${key}-credential`, takenKeys.credentials),
           displayName: `${displayName.trim()} credential`,
           secret,
         };
@@ -865,7 +1038,7 @@ function McpSetupDialog({
       }
       if (!current.policy) {
         const policy = await api.createMcpCredentialPolicy({
-          key: `${key}-policy`,
+          key: freeKey(`${key}-policy`, takenKeys.policies),
           displayName: `${displayName.trim()} egress policy`,
           credentialId: current.credential!.id,
           exactOrigin,
@@ -899,7 +1072,7 @@ function McpSetupDialog({
       const policy = current.policy;
       if (!current.toolset) {
         const toolset = await api.createMcpToolset({
-          key: `${key}-tools`,
+          key: freeKey(`${key}-tools`, takenKeys.toolsets),
           displayName: `${displayName.trim()} tools`,
           serverVersionId: current.server.latestVersionId,
           tools: selectedTools.map((remoteToolName) => ({
@@ -1078,7 +1251,9 @@ function McpSetupDialog({
           <Field
             label="Connection key"
             {...(!key || validKey
-              ? {}
+              ? keyTaken
+                ? { error: "Another connection already uses this key." }
+                : {}
               : { error: "Use a lowercase, hyphen-separated key." })}
           >
             <Input
@@ -1668,6 +1843,139 @@ function CallContextToggle({
   );
 }
 
+/**
+ * Confirms removing a connection. Removal is refused while a live agent
+ * uses it, so the dialog lists those agents instead of a Remove button.
+ */
+function RemoveConnectionDialog({
+  server,
+  onClose,
+  onRemoved,
+}: {
+  readonly server: McpServer;
+  readonly onClose: () => void;
+  readonly onRemoved: () => void | Promise<void>;
+}) {
+  const api = useApi();
+  const [revokeCredentials, setRevokeCredentials] = useState(true);
+  const usage = useQuery({
+    queryKey: ["mcp-server-usage", server.id],
+    queryFn: () => api.getMcpServerUsage(server.id),
+  });
+  const remove = useMutation({
+    mutationFn: () =>
+      api.removeMcpServer(server.id, { keepCredentials: !revokeCredentials }),
+    onSuccess: onRemoved,
+  });
+  const data = usage.data;
+  const inUse =
+    data !== undefined &&
+    (data.agents.length > 0 || data.otherProjects.length > 0);
+  const related = data ? [...data.credentialPolicies, ...data.credentials] : [];
+  return (
+    <Dialog
+      title={`Remove ${server.displayName}`}
+      description="Removing a connection revokes it and takes it off this page. Past sessions and the audit trail keep their history, but no agent can call its tools again, and its key can be used again."
+      onClose={onClose}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (data && !inUse) remove.mutate();
+      }}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={remove.isPending}>
+            {inUse ? "Close" : "Cancel"}
+          </Button>
+          {inUse ? null : (
+            <Button
+              type="submit"
+              variant="danger"
+              icon={<Trash2 size={14} />}
+              loading={remove.isPending}
+              disabled={!data}
+            >
+              Remove connection
+            </Button>
+          )}
+        </>
+      }
+    >
+      {usage.isPending ? (
+        <LoadingState label="Checking what uses this connection" rows={2} />
+      ) : null}
+      {usage.error ? <FormError>{usage.error.message}</FormError> : null}
+      {data && inUse ? (
+        <Alert tone="warning" role="alert" title="Still in use">
+          {data.agents.length > 0 ? (
+            <>
+              These agents still use this connection:{" "}
+              <strong>
+                {data.agents.map((agent) => agent.name).join(", ")}
+              </strong>
+              .{" "}
+            </>
+          ) : null}
+          {data.otherProjects.length > 0 ? (
+            <>
+              Agents in other projects use it too:{" "}
+              {data.otherProjects
+                .map(
+                  (project) =>
+                    `${project.name} (${project.agentCount} ${project.agentCount === 1 ? "agent" : "agents"})`,
+                )
+                .join(", ")}
+              .{" "}
+            </>
+          ) : null}
+          Publish agent versions without it, or delete those agents, before
+          removing the connection.
+        </Alert>
+      ) : null}
+      {data && !inUse ? (
+        <div className="stack">
+          <dl className="wizard-review">
+            <div>
+              <dt>Server</dt>
+              <dd>
+                <code>{server.endpointUrl}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Toolsets revoked</dt>
+              <dd>
+                {data.toolsets.length > 0
+                  ? data.toolsets
+                      .map((toolset) => toolset.displayName)
+                      .join(", ")
+                  : "None"}
+              </dd>
+            </div>
+          </dl>
+          {related.length > 0 ? (
+            <CheckboxRow
+              label="Also revoke its credential and policy"
+              description={`Nothing else uses ${related.map((item) => item.displayName).join(", ")}. Revoked credentials cannot be restored; you would enter the secret again.`}
+              checked={revokeCredentials}
+              onChange={(event) =>
+                setRevokeCredentials(event.currentTarget.checked)
+              }
+            />
+          ) : (
+            <small>
+              Its credential is shared with another connection and stays active.
+            </small>
+          )}
+          <small>
+            Existing sessions that were started with this connection keep
+            running, but their calls to its tools fail.
+          </small>
+        </div>
+      ) : null}
+      {remove.error ? <FormError>{remove.error.message}</FormError> : null}
+    </Dialog>
+  );
+}
+
 function RotateCredentialDialog({
   credential,
   pending,
@@ -1766,146 +2074,52 @@ function RotateCredentialDialog({
   );
 }
 
-function ResourcePanel({
-  title,
-  description,
-  action,
-  disabled,
-  onAction,
-  children,
-}: {
-  readonly title: string;
-  readonly description: string;
-  readonly action: string;
-  readonly disabled: boolean;
-  readonly onAction: () => void;
-  readonly children: React.ReactNode;
-}) {
-  return (
-    <Panel
-      title={title}
-      description={description}
-      actions={
-        <Button
-          variant="primary"
-          size="sm"
-          icon={<Plus size={14} />}
-          disabled={disabled}
-          onClick={onAction}
-        >
-          {action}
-        </Button>
-      }
-    >
-      {children}
-    </Panel>
-  );
-}
-
 type McpCreateInput =
-  | { readonly kind: "credential"; readonly value: CreateMcpCredentialInput }
-  | { readonly kind: "server"; readonly value: CreateMcpServerInput }
   | { readonly kind: "policy"; readonly value: CreateMcpCredentialPolicyInput }
   | { readonly kind: "toolset"; readonly value: CreateMcpToolsetInput };
 
+/** Adds a policy or a toolset to one connection. */
 function McpCreateDialog({
   kind,
+  server,
   credentials,
-  servers,
   pending,
   error,
   onClose,
   onSubmit,
 }: {
-  readonly kind: CreateDialog;
+  readonly kind: CreateDialog["kind"];
+  readonly server: McpServer;
   readonly credentials: readonly McpCredential[];
-  readonly servers: readonly McpServer[];
   readonly pending: boolean;
   readonly error: Error | null;
   readonly onClose: () => void;
   readonly onSubmit: (input: McpCreateInput) => void;
 }) {
+  const derived = endpointPolicy(server.endpointUrl, server.transport);
   const [key, setKey] = useState("");
   const [displayName, setDisplayName] = useState("");
-  const [secret, setSecret] = useState("");
-  const [credentialKind, setCredentialKind] = useState<
-    "static_bearer" | "api_key_header"
-  >("static_bearer");
-  const [headerName, setHeaderName] = useState("X-API-Key");
-  const [endpointUrl, setEndpointUrl] = useState("");
-  const [transport, setTransport] =
-    useState<CreateMcpServerInput["transport"]>("streamable_http");
   const [credentialId, setCredentialId] = useState(credentials[0]?.id ?? "");
-  const [policyForwardCallContext, setPolicyForwardCallContext] =
-    useState(false);
-  const initialDestination =
-    kind === "policy" ? credentials[0]?.destination : undefined;
-  const [exactOrigin, setExactOrigin] = useState(
-    initialDestination?.origin ?? "",
-  );
-  const [pathPrefix, setPathPrefix] = useState(
-    initialDestination?.pathPrefix ?? "/",
-  );
-  const eligibleServers = servers.filter((server) => server.tools.length > 0);
-  const [serverVersionId, setServerVersionId] = useState(
-    eligibleServers[0]?.latestVersionId ?? "",
-  );
-  const selectedServer = eligibleServers.find(
-    (server) => server.latestVersionId === serverVersionId,
-  );
+  const [forwardCallContext, setForwardCallContext] = useState(false);
+  const [exactOrigin, setExactOrigin] = useState(derived?.exactOrigin ?? "");
+  const [pathPrefix, setPathPrefix] = useState(derived?.pathPrefix ?? "/");
   const [selectedTools, setSelectedTools] = useState<readonly string[]>([]);
   const [toolApproval, setToolApproval] =
     useState<CreateMcpToolsetInput["tools"][number]["approval"]>("always");
-  const title = {
-    credential: "Add MCP credential",
-    server: "Add MCP server",
-    policy: "Add credential policy",
-    toolset: "Create MCP toolset",
-  }[kind];
+  const title =
+    kind === "policy" ? "Add credential policy" : "Create MCP toolset";
   const validKey = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/u.test(key);
   const invalid =
     !validKey ||
     !displayName.trim() ||
-    (kind === "credential" &&
-      (secret.length < 8 ||
-        !exactOrigin.startsWith("https://") ||
-        !pathPrefix.startsWith("/"))) ||
-    (kind === "server" && !endpointUrl.startsWith("https://")) ||
     (kind === "policy" &&
       (!credentialId ||
         !exactOrigin.startsWith("https://") ||
         !pathPrefix.startsWith("/"))) ||
-    (kind === "toolset" && (!serverVersionId || selectedTools.length === 0));
+    (kind === "toolset" && selectedTools.length === 0);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (invalid) return;
-    if (kind === "credential")
-      onSubmit({
-        kind,
-        value:
-          credentialKind === "api_key_header"
-            ? {
-                key,
-                displayName: displayName.trim(),
-                kind: credentialKind,
-                headerName,
-                destination: { origin: exactOrigin, pathPrefix },
-                secret,
-              }
-            : {
-                key,
-                displayName: displayName.trim(),
-                kind: credentialKind,
-                headerName: null,
-                destination: { origin: exactOrigin, pathPrefix },
-                secret,
-              },
-      });
-    if (kind === "server")
-      onSubmit({
-        kind,
-        value: { key, displayName: displayName.trim(), endpointUrl, transport },
-      });
     if (kind === "policy")
       onSubmit({
         kind,
@@ -1917,16 +2131,16 @@ function McpCreateDialog({
           pathPrefix,
           timeoutMs: 30_000,
           maximumResponseBytes: 1_048_576,
-          forwardCallContext: policyForwardCallContext,
+          forwardCallContext,
         },
       });
-    if (kind === "toolset")
+    else
       onSubmit({
         kind,
         value: {
           key,
           displayName: displayName.trim(),
-          serverVersionId,
+          serverVersionId: server.latestVersionId,
           tools: selectedTools.map((remoteToolName) => ({
             remoteToolName,
             approval: toolApproval,
@@ -1937,7 +2151,7 @@ function McpCreateDialog({
   return (
     <Dialog
       title={title}
-      description="Published MCP resources are immutable. Create a new version when policy or tool access changes."
+      description={`For ${server.displayName}. Published MCP resources are immutable; create a new one when policy or tool access changes.`}
       wide
       onClose={onClose}
       onSubmit={submit}
@@ -1967,103 +2181,12 @@ function McpCreateDialog({
             onChange={(event) => setDisplayName(event.target.value)}
           />
         </Field>
-        {kind === "credential" ? (
-          <>
-            <Field label="Credential type">
-              <Select
-                value={credentialKind}
-                onChange={(event) =>
-                  setCredentialKind(
-                    event.target.value as "static_bearer" | "api_key_header",
-                  )
-                }
-              >
-                <option value="static_bearer">Static bearer</option>
-                <option value="api_key_header">API key header</option>
-              </Select>
-            </Field>
-            <small>
-              Use <strong>Add MCP server</strong> for OAuth client credentials:
-              it discovers and confirms the authorization server first.
-            </small>
-            {credentialKind === "api_key_header" ? (
-              <Field label="Header name">
-                <Input
-                  value={headerName}
-                  onChange={(event) => setHeaderName(event.target.value)}
-                />
-              </Field>
-            ) : null}
-            <Field
-              label="Destination HTTPS origin"
-              hint="The secret is only ever sent to this origin."
-            >
-              <Input
-                type="url"
-                placeholder="https://mcp.example.com"
-                value={exactOrigin}
-                onChange={(event) => setExactOrigin(event.target.value)}
-              />
-            </Field>
-            <Field
-              label="Destination path prefix"
-              hint="Policies for this credential must stay under this path."
-            >
-              <Input
-                value={pathPrefix}
-                onChange={(event) => setPathPrefix(event.target.value)}
-              />
-            </Field>
-            <Field label="Secret" hint="Write-only. It will never be returned.">
-              <Input
-                type="password"
-                autoComplete="new-password"
-                value={secret}
-                onChange={(event) => setSecret(event.target.value)}
-              />
-            </Field>
-          </>
-        ) : null}
-        {kind === "server" ? (
-          <>
-            <Field label="HTTPS endpoint">
-              <Input
-                type="url"
-                placeholder="https://mcp.example.com/mcp"
-                value={endpointUrl}
-                onChange={(event) => setEndpointUrl(event.target.value)}
-              />
-            </Field>
-            <Field label="Transport">
-              <Select
-                value={transport}
-                onChange={(event) =>
-                  setTransport(
-                    event.target.value as CreateMcpServerInput["transport"],
-                  )
-                }
-              >
-                <option value="streamable_http">Streamable HTTP</option>
-                <option value="legacy_sse">Legacy SSE</option>
-              </Select>
-            </Field>
-          </>
-        ) : null}
         {kind === "policy" ? (
           <>
             <Field label="Credential">
               <Select
                 value={credentialId}
-                onChange={(event) => {
-                  setCredentialId(event.target.value);
-                  const destination = credentials.find(
-                    (item) => item.id === event.target.value,
-                  )?.destination;
-                  if (destination) {
-                    setExactOrigin(destination.origin);
-                    setPathPrefix(destination.pathPrefix);
-                  }
-                }}
+                onChange={(event) => setCredentialId(event.target.value)}
               >
                 {credentials.map((item) => (
                   <option key={item.id} value={item.id}>
@@ -2072,7 +2195,10 @@ function McpCreateDialog({
                 ))}
               </Select>
             </Field>
-            <Field label="Exact HTTPS origin">
+            <Field
+              label="Exact HTTPS origin"
+              hint="Must lie inside the credential's pinned destination."
+            >
               <Input
                 type="url"
                 placeholder="https://mcp.example.com"
@@ -2087,32 +2213,13 @@ function McpCreateDialog({
               />
             </Field>
             <CallContextToggle
-              checked={policyForwardCallContext}
+              checked={forwardCallContext}
               disabled={false}
-              onChange={setPolicyForwardCallContext}
+              onChange={setForwardCallContext}
             />
           </>
-        ) : null}
-        {kind === "toolset" ? (
+        ) : (
           <>
-            <Field label="Discovered server">
-              <Select
-                value={serverVersionId}
-                onChange={(event) => {
-                  setServerVersionId(event.target.value);
-                  setSelectedTools([]);
-                }}
-              >
-                {eligibleServers.map((server) => (
-                  <option
-                    key={server.latestVersionId}
-                    value={server.latestVersionId}
-                  >
-                    {server.displayName}
-                  </option>
-                ))}
-              </Select>
-            </Field>
             <Field
               label="Approval policy"
               hint="Applied to every tool selected for this immutable toolset version."
@@ -2131,7 +2238,7 @@ function McpCreateDialog({
               </Select>
             </Field>
             <div className="field-row">
-              {selectedServer?.tools.map((tool) => (
+              {server.tools.map((tool) => (
                 <CheckboxRow
                   key={tool.name}
                   label={tool.title ?? tool.name}
@@ -2148,7 +2255,7 @@ function McpCreateDialog({
               ))}
             </div>
           </>
-        ) : null}
+        )}
         {error ? <FormError>{error.message}</FormError> : null}
       </div>
     </Dialog>

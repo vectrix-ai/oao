@@ -11,7 +11,9 @@ import {
   type McpCredentialPolicy,
   type McpOAuthClientCredentialsConfig,
   type McpServer,
+  type McpServerUsage,
   type McpToolset,
+  type RemoveMcpServerResult,
   type RotateMcpCredentialInput,
 } from "@oao/contracts";
 import type { Principal } from "@oao/domain";
@@ -113,6 +115,7 @@ interface ToolsetRow {
   latest_version_id: string;
   version: number;
   server_version_id: string;
+  server_id: string;
   status: "active" | "deprecated" | "revoked";
   tools: unknown;
   created_by_principal_id: string;
@@ -152,6 +155,21 @@ function canonicalJson(value: unknown): string {
 
 function digest(value: unknown): Buffer {
   return createHash("sha256").update(canonicalJson(value)).digest();
+}
+
+/**
+ * Serializes agent publications that bind MCP tools with MCP server removal
+ * in one organization. Publication checks a server's status without locking
+ * it, so without this a removal and a publication could each pass their
+ * check and leave a new agent version bound to a revoked server.
+ */
+export async function lockMcpBindings(
+  tx: PgClient,
+  organizationId: string,
+): Promise<void> {
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+    `oao:mcp-bindings:${organizationId}`,
+  ]);
 }
 
 function timestamp(value: Date): string {
@@ -356,6 +374,7 @@ function toolset(row: ToolsetRow): McpToolset {
     displayName: row.display_name,
     latestVersionId: row.latest_version_id,
     version: row.version,
+    serverId: row.server_id,
     serverVersionId: row.server_version_id,
     status: row.status,
     tools: row.tools as McpToolset["tools"],
@@ -430,7 +449,8 @@ const POLICY_SELECT = `
 const TOOLSET_SELECT = `
   SELECT resource.id,resource.organization_id,resource.project_id,
          resource.toolset_key,resource.display_name,resource.latest_version_id,
-         version.version,version.server_version_id,lifecycle.status,
+         version.version,version.server_version_id,server.server_id,
+         lifecycle.status,
          COALESCE((
            SELECT jsonb_agg(jsonb_build_object(
              'remoteToolName',selection.remote_tool_name,
@@ -457,7 +477,10 @@ const TOOLSET_SELECT = `
     JOIN oao.mcp_toolset_version_lifecycle lifecycle
       ON lifecycle.organization_id=version.organization_id
      AND lifecycle.project_id=version.project_id
-     AND lifecycle.toolset_version_id=version.id`;
+     AND lifecycle.toolset_version_id=version.id
+    JOIN oao.mcp_server_versions server
+      ON server.organization_id=version.organization_id
+     AND server.id=version.server_version_id`;
 
 export class McpAdminService {
   constructor(
@@ -471,7 +494,7 @@ export class McpAdminService {
   ): Promise<readonly McpServer[]> {
     const result = await tx.query<ServerRow>(
       `${SERVER_SELECT}
-       WHERE resource.organization_id=$1
+       WHERE resource.organization_id=$1 AND resource.revoked_at IS NULL
        ORDER BY resource.created_at DESC,resource.id DESC`,
       [actor.organizationId],
     );
@@ -526,13 +549,338 @@ export class McpAdminService {
     return server(result.rows[0]!);
   }
 
+  /**
+   * What still uses a server, and what removing it would revoke. Agents are
+   * counted in every project of the organization, because servers are
+   * shared; other projects are reported by count only.
+   */
+  async serverUsage(
+    tx: PgClient,
+    actor: Principal,
+    serverId: string,
+  ): Promise<McpServerUsage> {
+    const exists = await tx.query(
+      `SELECT 1 FROM oao.mcp_servers resource
+         JOIN oao.mcp_server_version_lifecycle lifecycle
+           ON lifecycle.organization_id=resource.organization_id
+          AND lifecycle.server_version_id=resource.latest_version_id
+          AND lifecycle.status<>'revoked'
+        WHERE resource.organization_id=$1 AND resource.id=$2
+          AND resource.revoked_at IS NULL`,
+      [actor.organizationId, serverId],
+    );
+    if (!exists.rowCount)
+      throw new HttpApiError("not_found", "Active MCP server not found");
+    const agents = await this.liveAgentsUsing(
+      tx,
+      actor.organizationId,
+      actor.projectId,
+      serverId,
+    );
+    const projects = await tx.query<{ id: string; slug: string; name: string }>(
+      `SELECT id,slug,name FROM oao.projects
+        WHERE organization_id=$1 AND id<>$2
+        ORDER BY created_at,id`,
+      [actor.organizationId, actor.projectId],
+    );
+    const otherProjects: McpServerUsage["otherProjects"][number][] = [];
+    try {
+      for (const project of projects.rows) {
+        // Project-scoped rows are read under each project's tenant context.
+        await tx.query("SELECT oao.set_tenant_context($1,$2)", [
+          actor.organizationId,
+          project.id,
+        ]);
+        const used = await this.liveAgentsUsing(
+          tx,
+          actor.organizationId,
+          project.id,
+          serverId,
+        );
+        if (used.length > 0)
+          otherProjects.push({ ...project, agentCount: used.length });
+      }
+    } finally {
+      await tx.query("SELECT oao.set_tenant_context($1,$2)", [
+        actor.organizationId,
+        actor.projectId,
+      ]);
+    }
+    const toolsets = await tx.query<{
+      id: string;
+      key: string;
+      display_name: string;
+    }>(
+      `SELECT DISTINCT resource.id,resource.toolset_key AS key,resource.display_name
+         FROM oao.mcp_toolsets resource
+         JOIN oao.mcp_toolset_versions version
+           ON version.organization_id=resource.organization_id
+          AND version.project_id=resource.project_id
+          AND version.toolset_id=resource.id
+         JOIN oao.mcp_toolset_version_lifecycle lifecycle
+           ON lifecycle.organization_id=version.organization_id
+          AND lifecycle.project_id=version.project_id
+          AND lifecycle.toolset_version_id=version.id
+          AND lifecycle.status<>'revoked'
+         JOIN oao.mcp_server_versions server
+           ON server.organization_id=version.organization_id
+          AND server.id=version.server_version_id
+        WHERE resource.organization_id=$1 AND resource.project_id=$2
+          AND server.server_id=$3
+        ORDER BY resource.toolset_key`,
+      [actor.organizationId, actor.projectId, serverId],
+    );
+    // A policy is this server's alone when it covers one of the server's
+    // endpoints and no other live server's endpoint.
+    const policies = await tx.query<{
+      id: string;
+      key: string;
+      display_name: string;
+    }>(
+      `WITH live_policy_versions AS (
+         SELECT version.*
+           FROM oao.mcp_credential_policy_versions version
+           JOIN oao.mcp_credential_policy_version_lifecycle lifecycle
+             ON lifecycle.organization_id=version.organization_id
+            AND lifecycle.policy_version_id=version.id
+            AND lifecycle.status<>'revoked'
+          WHERE version.organization_id=$1
+       ),
+       other_endpoints AS (
+         SELECT server.endpoint_url
+           FROM oao.mcp_server_versions server
+           JOIN oao.mcp_server_version_lifecycle lifecycle
+             ON lifecycle.organization_id=server.organization_id
+            AND lifecycle.server_version_id=server.id
+            AND lifecycle.status<>'revoked'
+          WHERE server.organization_id=$1 AND server.server_id<>$2
+       )
+       SELECT resource.id,resource.policy_key AS key,resource.display_name
+         FROM oao.mcp_credential_policies resource
+        WHERE resource.organization_id=$1
+          AND EXISTS (
+            SELECT 1 FROM live_policy_versions version
+              JOIN oao.mcp_server_versions mine
+                ON mine.organization_id=version.organization_id
+               AND mine.server_id=$2
+             WHERE version.policy_id=resource.id
+               AND oao.mcp_endpoint_matches_policy(
+                 mine.endpoint_url,version.exact_origin,version.path_prefix
+               )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM live_policy_versions version
+              JOIN other_endpoints other ON oao.mcp_endpoint_matches_policy(
+                other.endpoint_url,version.exact_origin,version.path_prefix
+              )
+             WHERE version.policy_id=resource.id
+          )
+        ORDER BY resource.policy_key`,
+      [actor.organizationId, serverId],
+    );
+    const policyIds = policies.rows.map((row) => row.id);
+    // A credential goes with them only when no other live policy uses it.
+    const credentials = await tx.query<{
+      id: string;
+      key: string;
+      display_name: string;
+    }>(
+      `SELECT DISTINCT credential.id,credential.credential_key AS key,
+              credential.display_name
+         FROM oao.mcp_credentials credential
+         JOIN oao.mcp_credential_version_lifecycle lifecycle
+           ON lifecycle.organization_id=credential.organization_id
+          AND lifecycle.credential_version_id=credential.active_version_id
+          AND lifecycle.status='active'
+         JOIN oao.mcp_credential_policy_versions policy
+           ON policy.organization_id=credential.organization_id
+          AND policy.credential_id=credential.id
+          AND policy.policy_id=ANY($2::uuid[])
+        WHERE credential.organization_id=$1
+          AND NOT EXISTS (
+            SELECT 1 FROM oao.mcp_credential_policy_versions other
+              JOIN oao.mcp_credential_policy_version_lifecycle other_lifecycle
+                ON other_lifecycle.organization_id=other.organization_id
+               AND other_lifecycle.policy_version_id=other.id
+               AND other_lifecycle.status<>'revoked'
+             WHERE other.organization_id=credential.organization_id
+               AND other.credential_id=credential.id
+               AND NOT (other.policy_id=ANY($2::uuid[]))
+          )
+        ORDER BY credential.credential_key`,
+      [actor.organizationId, policyIds],
+    );
+    const summary = (row: {
+      id: string;
+      key: string;
+      display_name: string;
+    }) => ({
+      id: row.id,
+      key: row.key,
+      displayName: row.display_name,
+    });
+    return {
+      agents,
+      otherProjects,
+      toolsets: toolsets.rows.map(summary),
+      credentialPolicies: policies.rows.map(summary),
+      credentials: credentials.rows.map(summary),
+    };
+  }
+
+  /** Live agents of one project whose current version binds the server. */
+  private async liveAgentsUsing(
+    tx: PgClient,
+    organizationId: string,
+    projectId: string,
+    serverId: string,
+  ): Promise<McpServerUsage["agents"]> {
+    const result = await tx.query<{ id: string; key: string; name: string }>(
+      `SELECT DISTINCT agent.id,agent.agent_key AS key,agent.name
+         FROM oao.agent_definitions agent
+         JOIN oao.agent_version_mcp_bindings binding
+           ON binding.organization_id=agent.organization_id
+          AND binding.project_id=agent.project_id
+          AND binding.agent_version_id=agent.latest_version_id
+         JOIN oao.mcp_toolset_versions toolset
+           ON toolset.organization_id=binding.organization_id
+          AND toolset.project_id=binding.project_id
+          AND toolset.id=binding.toolset_version_id
+         JOIN oao.mcp_server_versions server
+           ON server.organization_id=toolset.organization_id
+          AND server.id=toolset.server_version_id
+        WHERE agent.organization_id=$1 AND agent.project_id=$2
+          AND agent.archived_at IS NULL
+          AND server.server_id=$3
+        ORDER BY agent.agent_key`,
+      [organizationId, projectId, serverId],
+    );
+    return result.rows;
+  }
+
+  /**
+   * Retires a server: revokes every server version and this project's
+   * toolsets for it, and unless told to keep them, the policies and
+   * credentials only it used. Versions are immutable and history refers to
+   * them, so nothing is deleted. Refused while a live agent uses the server.
+   */
+  async removeServer(
+    tx: PgClient,
+    actor: Principal,
+    serverId: string,
+    options: { readonly keepCredentials: boolean },
+  ): Promise<RemoveMcpServerResult> {
+    await lockMcpBindings(tx, actor.organizationId);
+    // Discovery saves under the same row lock, so it cannot publish a new
+    // active version of a server this removal has revoked.
+    await tx.query(
+      `SELECT 1 FROM oao.mcp_servers
+        WHERE organization_id=$1 AND id=$2 FOR UPDATE`,
+      [actor.organizationId, serverId],
+    );
+    const usage = await this.serverUsage(tx, actor, serverId);
+    const agentCount =
+      usage.agents.length +
+      usage.otherProjects.reduce(
+        (total, project) => total + project.agentCount,
+        0,
+      );
+    if (agentCount > 0)
+      throw new HttpApiError(
+        "conflict",
+        `${agentCount} ${agentCount === 1 ? "agent still uses" : "agents still use"} this MCP server${
+          usage.agents.length > 0
+            ? ` (${usage.agents.map((agent) => agent.name).join(", ")})`
+            : ""
+        }${
+          usage.otherProjects.length > 0
+            ? `${usage.agents.length > 0 ? " and agents in" : " in"} ${usage.otherProjects.map((project) => project.slug).join(", ")}`
+            : ""
+        }. Publish agent versions without it, or archive those agents, first.`,
+      );
+    await tx.query(
+      `UPDATE oao.mcp_server_version_lifecycle lifecycle
+          SET status='revoked',updated_by_principal_id=$3
+         FROM oao.mcp_server_versions version
+        WHERE version.organization_id=$1 AND version.server_id=$2
+          AND lifecycle.organization_id=version.organization_id
+          AND lifecycle.server_version_id=version.id
+          AND lifecycle.status<>'revoked'`,
+      [actor.organizationId, serverId, actor.id],
+    );
+    await tx.query(
+      `UPDATE oao.mcp_toolset_version_lifecycle lifecycle
+          SET status='revoked',updated_by_principal_id=$4
+         FROM oao.mcp_toolset_versions version
+         JOIN oao.mcp_server_versions server
+           ON server.organization_id=version.organization_id
+          AND server.id=version.server_version_id
+        WHERE version.organization_id=$1 AND version.project_id=$2
+          AND server.server_id=$3
+          AND lifecycle.organization_id=version.organization_id
+          AND lifecycle.project_id=version.project_id
+          AND lifecycle.toolset_version_id=version.id
+          AND lifecycle.status<>'revoked'`,
+      [actor.organizationId, actor.projectId, serverId, actor.id],
+    );
+    const policies = options.keepCredentials ? [] : usage.credentialPolicies;
+    const credentials = options.keepCredentials ? [] : usage.credentials;
+    if (policies.length > 0)
+      await tx.query(
+        `UPDATE oao.mcp_credential_policy_version_lifecycle lifecycle
+            SET status='revoked',updated_by_principal_id=$3
+           FROM oao.mcp_credential_policy_versions version
+          WHERE version.organization_id=$1
+            AND version.policy_id=ANY($2::uuid[])
+            AND lifecycle.organization_id=version.organization_id
+            AND lifecycle.policy_version_id=version.id
+            AND lifecycle.status<>'revoked'`,
+        [actor.organizationId, policies.map((policy) => policy.id), actor.id],
+      );
+    for (const credential of credentials)
+      await this.revokeCredential(tx, actor, credential.id);
+    // Removed rows leave every list and free their keys; their versions
+    // stay, because history refers to them.
+    await tx.query(
+      `UPDATE oao.mcp_servers SET revoked_at=clock_timestamp()
+        WHERE organization_id=$1 AND id=$2`,
+      [actor.organizationId, serverId],
+    );
+    await tx.query(
+      `UPDATE oao.mcp_toolsets SET revoked_at=clock_timestamp()
+        WHERE organization_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])`,
+      [
+        actor.organizationId,
+        actor.projectId,
+        usage.toolsets.map((toolset) => toolset.id),
+      ],
+    );
+    if (policies.length > 0)
+      await tx.query(
+        `UPDATE oao.mcp_credential_policies SET revoked_at=clock_timestamp()
+          WHERE organization_id=$1 AND id=ANY($2::uuid[])`,
+        [actor.organizationId, policies.map((policy) => policy.id)],
+      );
+    const result = await tx.query<ServerRow>(
+      `${SERVER_SELECT}
+       WHERE resource.organization_id=$1 AND resource.id=$2`,
+      [actor.organizationId, serverId],
+    );
+    return {
+      server: server(result.rows[0]!),
+      revokedToolsetIds: usage.toolsets.map((toolset) => toolset.id),
+      revokedCredentialPolicyIds: policies.map((policy) => policy.id),
+      revokedCredentialIds: credentials.map((credential) => credential.id),
+    };
+  }
+
   async listCredentials(
     tx: PgClient,
     actor: Principal,
   ): Promise<readonly McpCredential[]> {
     const result = await tx.query<CredentialRow>(
       `${CREDENTIAL_SELECT}
-       WHERE resource.organization_id=$1
+       WHERE resource.organization_id=$1 AND resource.revoked_at IS NULL
        ORDER BY resource.created_at DESC,resource.id DESC`,
       [actor.organizationId],
     );
@@ -958,6 +1306,12 @@ export class McpAdminService {
     );
     if (!result.rowCount)
       throw new HttpApiError("not_found", "Active MCP credential not found");
+    // A revoked credential leaves every list and frees its key.
+    await tx.query(
+      `UPDATE oao.mcp_credentials SET revoked_at=clock_timestamp()
+        WHERE organization_id=$1 AND id=$2`,
+      [actor.organizationId, credentialId],
+    );
     const revoked = await tx.query<CredentialRow>(
       `${CREDENTIAL_SELECT}
        WHERE resource.organization_id=$1 AND resource.id=$2`,
@@ -972,7 +1326,7 @@ export class McpAdminService {
   ): Promise<readonly McpCredentialPolicy[]> {
     const result = await tx.query<PolicyRow>(
       `${POLICY_SELECT}
-       WHERE resource.organization_id=$1
+       WHERE resource.organization_id=$1 AND resource.revoked_at IS NULL
        ORDER BY resource.created_at DESC,resource.id DESC`,
       [actor.organizationId],
     );
@@ -984,6 +1338,9 @@ export class McpAdminService {
     actor: Principal,
     input: CreateMcpCredentialPolicyInput,
   ): Promise<McpCredentialPolicy> {
+    // Removal decides which credentials nothing else uses; a policy created
+    // meanwhile must not lose its credential to it.
+    await lockMcpBindings(tx, actor.organizationId);
     // The policy must lie inside the destination pinned on the credential's
     // active version, so a policy can never redirect an existing secret.
     const active = await tx.query<{
@@ -1238,6 +1595,26 @@ export class McpAdminService {
     serverVersionId: string,
     tools: readonly RemoteMcpDiscoveredTool[],
   ): Promise<McpServer> {
+    // A server removed while its discovery was in flight stays removed.
+    const live = await tx.query(
+      `SELECT 1 FROM oao.mcp_servers resource
+         JOIN oao.mcp_server_versions version
+           ON version.organization_id=resource.organization_id
+          AND version.server_id=resource.id
+          AND version.id=$2
+         JOIN oao.mcp_server_version_lifecycle lifecycle
+           ON lifecycle.organization_id=version.organization_id
+          AND lifecycle.server_version_id=version.id
+          AND lifecycle.status<>'revoked'
+        WHERE resource.organization_id=$1
+        FOR UPDATE OF resource`,
+      [actor.organizationId, serverVersionId],
+    );
+    if (!live.rowCount)
+      throw new HttpApiError(
+        "conflict",
+        "MCP server was removed during discovery",
+      );
     const existing = await tx.query<{
       remote_tool_name: string;
       title: string | null;
@@ -1378,6 +1755,7 @@ export class McpAdminService {
     const result = await tx.query<ToolsetRow>(
       `${TOOLSET_SELECT}
        WHERE resource.organization_id=$1 AND resource.project_id=$2
+         AND resource.revoked_at IS NULL
        ORDER BY resource.created_at DESC,resource.id DESC`,
       [actor.organizationId, actor.projectId],
     );
