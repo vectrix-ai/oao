@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import {
   McpRemoteClient,
+  allowPrivateMcpNetwork,
   createBrokeredMcpFetch,
   isPathWithin,
   isPublicNetworkAddress,
@@ -145,6 +146,30 @@ test("blocks private and special-purpose network addresses", () => {
     assert.equal(isPublicNetworkAddress(address), false, address);
   assert.equal(isPublicNetworkAddress("1.1.1.1"), true);
   assert.equal(isPublicNetworkAddress("2606:4700:4700::1111"), true);
+});
+
+test("the private-network escape hatch is development only", () => {
+  assert.equal(allowPrivateMcpNetwork({}), false);
+  assert.equal(
+    allowPrivateMcpNetwork({ OAO_MCP_ALLOW_PRIVATE_NETWORK: "false" }),
+    false,
+  );
+  assert.equal(
+    allowPrivateMcpNetwork({
+      OAO_MCP_ALLOW_PRIVATE_NETWORK: "true",
+      NODE_ENV: "development",
+    }),
+    true,
+  );
+  assert.throws(() =>
+    allowPrivateMcpNetwork({
+      OAO_MCP_ALLOW_PRIVATE_NETWORK: "true",
+      NODE_ENV: "production",
+    }),
+  );
+  assert.throws(() =>
+    allowPrivateMcpNetwork({ OAO_MCP_ALLOW_PRIVATE_NETWORK: "yes" }),
+  );
 });
 
 test("rejects sensitive or malformed secret header names", () => {

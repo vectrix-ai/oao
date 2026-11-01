@@ -25,7 +25,11 @@ import {
   type McpOAuthClientCredentialsMaterial,
 } from "./oauth.js";
 
-export { isPublicNetworkAddress, type McpEgressOptions } from "./egress.js";
+export {
+  allowPrivateMcpNetwork,
+  isPublicNetworkAddress,
+  type McpEgressOptions,
+} from "./egress.js";
 export {
   McpRemoteError,
   McpTokenBroker,

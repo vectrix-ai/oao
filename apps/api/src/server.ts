@@ -13,7 +13,7 @@ import {
   listOpenRouterModelCatalog,
   listXAIModelCatalog,
 } from "@oao/models-openrouter";
-import { McpRemoteClient } from "@oao/mcp-remote";
+import { McpRemoteClient, allowPrivateMcpNetwork } from "@oao/mcp-remote";
 import { allowPrivateWebhookNetwork } from "@oao/event-webhooks";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { listDaytonaSnapshots } from "@oao/sandbox-daytona";
@@ -42,6 +42,7 @@ const notifier = new PostgresWakeNotifier(pool, {
     );
   },
 });
+const allowPrivateMcp = allowPrivateMcpNetwork(process.env);
 const credentialCipher = process.env.OAO_CREDENTIAL_ENCRYPTION_KEY
   ? ProviderCredentialCipher.fromBase64(
       process.env.OAO_CREDENTIAL_ENCRYPTION_KEY,
@@ -68,7 +69,13 @@ const app = createApiApp({
   eventWebhooks: {
     allowPrivateNetwork: allowPrivateWebhookNetwork(process.env),
   },
-  ...(credentialCipher ? { mcpRemote: new McpRemoteClient() } : {}),
+  ...(credentialCipher
+    ? {
+        mcpRemote: new McpRemoteClient({
+          allowPrivateNetwork: allowPrivateMcp,
+        }),
+      }
+    : {}),
   modelCatalog: {
     deploymentPresets: [],
     listCatalog: (input) => {

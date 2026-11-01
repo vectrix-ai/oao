@@ -35,7 +35,11 @@ import {
   withModelCallTimeout,
   type FauxResponseStep,
 } from "@oao/models-openrouter";
-import { McpRemoteClient, type McpRemotePort } from "@oao/mcp-remote";
+import {
+  McpRemoteClient,
+  allowPrivateMcpNetwork,
+  type McpRemotePort,
+} from "@oao/mcp-remote";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { PostgresWakeQueue, WakeWorker } from "@oao/queue-postgres";
 import {
@@ -143,6 +147,7 @@ export async function startRuntimeWorker(input: {
     deployment: deploymentPresets,
     registerProvider: (provider) => registerRuntimeModelProvider(provider),
   });
+  const allowPrivateMcp = allowPrivateMcpNetwork(env);
   const credentialCipher = env.OAO_CREDENTIAL_ENCRYPTION_KEY
     ? ProviderCredentialCipher.fromBase64(env.OAO_CREDENTIAL_ENCRYPTION_KEY)
     : undefined;
@@ -168,7 +173,9 @@ export async function startRuntimeWorker(input: {
     ? createPostgresMcpToolExecutor({
         pool,
         credentialCipher,
-        remote: input.mcpRemote ?? new McpRemoteClient(),
+        remote:
+          input.mcpRemote ??
+          new McpRemoteClient({ allowPrivateNetwork: allowPrivateMcp }),
       })
     : undefined;
   const flue = await startManagedFlueRuntime({

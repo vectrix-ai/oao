@@ -12,7 +12,10 @@ export class McpEgressRefusal extends Error {
 }
 
 export interface McpEgressOptions {
-  /** Test-only escape hatch. Production callers must leave this disabled. */
+  /**
+   * Test and local-development escape hatch; see `allowPrivateMcpNetwork`.
+   * Production callers must leave this disabled.
+   */
   readonly allowPrivateNetwork?: boolean;
   readonly resolve?: (
     hostname: string,
@@ -69,6 +72,24 @@ export function isPublicNetworkAddress(address: string): boolean {
   if (family === 4) return !isBlockedIpv4(address);
   if (family === 6) return !isBlockedIpv6(address);
   return false;
+}
+
+/**
+ * Reads `OAO_MCP_ALLOW_PRIVATE_NETWORK`. The escape hatch exists for MCP
+ * servers on a developer's machine or private network, such as a tailnet, so
+ * it is refused outside `NODE_ENV=development` instead of silently weakening
+ * egress checks.
+ */
+export function allowPrivateMcpNetwork(env: NodeJS.ProcessEnv): boolean {
+  const value = env.OAO_MCP_ALLOW_PRIVATE_NETWORK;
+  if (value === undefined || value === "" || value === "false") return false;
+  if (value !== "true")
+    throw new Error("OAO_MCP_ALLOW_PRIVATE_NETWORK must be true or false");
+  if ((env.NODE_ENV ?? "development") !== "development")
+    throw new Error(
+      "OAO_MCP_ALLOW_PRIVATE_NETWORK is only allowed with NODE_ENV=development",
+    );
+  return true;
 }
 
 export async function requestBody(

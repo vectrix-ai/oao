@@ -476,6 +476,15 @@ while retaining TLS server-name verification. This limits SSRF and DNS
 rebinding. It strips caller-supplied authorization, cookie, proxy
 authorization, and `x-oao-*` headers before injecting the configured secret.
 
+<Tip>
+  To develop against an MCP server on your machine or tailnet, run the API and
+  runtime worker with `NODE_ENV=development` and
+  `OAO_MCP_ALLOW_PRIVATE_NETWORK=true`; see [Local
+  development](/getting-started/local-development#mcp-servers-on-your-machine-or-tailnet).
+  OAO refuses this setting outside development, and endpoints must still be
+  HTTPS.
+</Tip>
+
 Credential-bearing requests must retain the exact scheme, host, and port and
 remain under the policy path prefix and inside the credential's pinned
 destination. Redirects are not followed. Requests and
