@@ -122,6 +122,54 @@ the agent's answer. When the run is still going, the result has
 approval does not settle until someone decides it, for example with
 `decide_approval`.
 
+## Let OAO agents use these tools
+
+An agent inside OAO can use the same tools, for example to check what other
+agents did and ask them about it. Grant them in the agent version under
+**Agents → OAO tools** in the console, or with `oaoTools` in the config:
+
+```json
+{
+  "oaoTools": {
+    "scopes": ["agent:read", "session:read", "run:read", "run:create"],
+    "approval": "always"
+  }
+}
+```
+
+The model sees each tool with an `oao__` prefix, such as
+`oao__list_sessions` and `oao__send_message`.
+
+- **Identity.** A run acts as the person or API key that started it. Its
+  rights are the scopes in `oaoTools` that this principal still holds when
+  the tool runs; removing a member or revoking the key takes them away at
+  once. Like a [project key](/reference/authentication#project-keys), a run
+  stays in its project and is never offered the tools that change
+  organization-shared connections. The audit trail records the acting run as
+  `viaRunId`.
+- **Grant.** `scopes` are any of `agent:read`, `agent:write`, `skill:read`,
+  `skill:write`, `skill:bind`, `mcp:read`, `mcp:write`, `mcp:discover`,
+  `mcp:bind`, `credential:read_metadata`, `session:read`, `session:write`,
+  `run:create`, `run:read`, `run:cancel`, `delegation:read`,
+  `delegation:message`, and `audit:read`. The publisher must hold each one.
+  `approval:resolve` and `project:admin` cannot be granted, so an agent never
+  approves its own or another agent's tool calls.
+- **Approval.** Read-only tools run at once. `approval` (default `always`)
+  decides whether tools that change OAO wait for a person to approve each
+  call.
+- **No chains.** A run an agent started, by sending a message or starting a
+  session, can read but cannot start or message further runs. This rules out
+  agents asking each other in a loop.
+- **Credentials.** The runtime worker mints a token for each call, valid only
+  for that call and while the run is unsettled, and keeps only its SHA-256.
+  Writes use the tool call as their `Idempotency-Key`, so a replayed call
+  repeats nothing.
+
+The runtime worker reaches the API through `OAO_API_URL`, for example
+`http://127.0.0.1:3000`. `pnpm dev:local` sets it; in a deployment, set it on
+the worker to an address of the API the worker can reach. Without it, OAO tool
+calls fail with an error that names the variable.
+
 ## Retries and results
 
 Every write sends an `Idempotency-Key`. Pass `idempotencyKey` to retry a call

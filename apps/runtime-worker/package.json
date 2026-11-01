@@ -28,6 +28,7 @@
     "hono": "4.13.13"
   },
   "devDependencies": {
+    "@oao/mcp-server": "workspace:*",
     "@oao/testkit": "workspace:*"
   }
 }

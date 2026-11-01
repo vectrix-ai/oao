@@ -45,6 +45,7 @@ import type { Flue } from "@flue/runtime/node";
 import {
   MAX_AGENT_MODEL_TURNS,
   ManagedAgentInstanceDataSchema,
+  OAO_AGENT_TOOL_PREFIX,
   parseManagedAgentSnapshotForPublication,
   ManagedRunDeliverySchema,
   ManagedRunInputV1Schema,
@@ -53,6 +54,7 @@ import {
   TOOL_RETRY_POLICY,
   ToolResultFailureCodeSchema,
   type ManagedAgentSnapshot,
+  type ManagedAgentOaoTools,
   type ManagedHarnessOperation,
   type ManagedMcpToolSnapshot,
   type ManagedSkillBindingSnapshot,
@@ -77,6 +79,7 @@ import {
   type McpRemotePort,
   type McpToolResult,
 } from "@oao/mcp-remote";
+import { availableOaoTools } from "@oao/mcp-server";
 import type {
   OrganizationId,
   ProjectArtifactStoreResolverPort,
@@ -121,6 +124,18 @@ export const FLUE_PACKAGE_VERSIONS = Object.freeze({
   opentelemetry: "2.3.0",
   piAi: "1.4.0",
 });
+
+import {
+  oaoToolLedgerArguments,
+  type OaoToolExecutionPort,
+} from "./oao-tools.js";
+
+export {
+  createOaoToolExecutor,
+  OAO_TOOL_RESULT_CHARACTERS,
+  type OaoToolExecutionPort,
+  type OaoToolResult,
+} from "./oao-tools.js";
 
 export type PlatformToolHandler = (
   arguments_: Readonly<Record<string, PublicValue>>,
@@ -260,6 +275,7 @@ interface ManagedAgentRuntimeConfig {
   readonly skills?: SkillDefinitionResolverPort;
   readonly delegations?: AgentDelegationPort;
   readonly mcp?: McpToolExecutionPort;
+  readonly oaoTools?: OaoToolExecutionPort;
   readonly runFileStorage?: ProjectArtifactStoreResolverPort;
   readonly sandboxFactory?: (
     initial: ManagedAgentInstanceData,
@@ -1108,7 +1124,19 @@ function managedSystemPrompt(snapshot: ManagedAgentSnapshot): string {
     (snapshot.harnessOperations?.length ?? 0) === 0
       ? ""
       : "\n\nFocused Harness Operations are available as tools. Call them with a detailed task when their descriptions match the work. Each call runs a temporary scratch agentic loop with this Agent's model, instructions, tools, full Skill catalog, and live sandbox, then returns a validated structured result. Calls may be sequential or submitted in one model tool batch. Harness Operations cannot call another Harness Operation.";
-  return `${snapshot.systemPrompt}${retryInstructions}${delegationInstructions}${harnessOperationInstructions}`;
+  const oaoInstructions = snapshot.oaoTools
+    ? `\n\nThe ${OAO_AGENT_TOOL_PREFIX} tools read and manage this OAO project on behalf of the person or key that started this run. To ask another agent about its work, find its session with ${OAO_AGENT_TOOL_PREFIX}list_sessions, read it with ${OAO_AGENT_TOOL_PREFIX}get_session, and ask with ${OAO_AGENT_TOOL_PREFIX}send_message. Never send a message to your own session.`
+    : "";
+  return `${snapshot.systemPrompt}${retryInstructions}${delegationInstructions}${harnessOperationInstructions}${oaoInstructions}`;
+}
+
+/**
+ * The OAO tools an agent's grant offers. A run token is always restricted
+ * to its project, so tools that change organization-shared resources are
+ * left out.
+ */
+function oaoAgentTools(grant: ManagedAgentOaoTools) {
+  return availableOaoTools(new Set(grant.scopes), { projectRestricted: true });
 }
 
 function mcpToolName(namespace: string, remoteToolName: string): string {
@@ -1673,6 +1701,60 @@ export function ManagedAgent(): string {
                   obligation.safeArguments,
                   executeSignal,
                 ),
+              signal,
+            ),
+          ),
+        );
+        return { output: outcome };
+      },
+    });
+
+  const oaoGrant = initial.snapshot.oaoTools;
+  for (const tool of oaoGrant ? oaoAgentTools(oaoGrant) : [])
+    useTool({
+      name: `${OAO_AGENT_TOOL_PREFIX}${tool.name}`,
+      description: tool.description,
+      input: tool.input,
+      output: mcpOutput,
+      durable: true,
+      async run({ data, signal, step, toolCallId }) {
+        const arguments_ = data as Readonly<Record<string, unknown>>;
+        const obligation: ToolObligationInput = {
+          organizationId: initial.organizationId as OrganizationId,
+          projectId: initial.projectId as ProjectId,
+          runId: delivery.runId as RunId,
+          flueToolCallId: toolCallId,
+          toolName: `${OAO_AGENT_TOOL_PREFIX}${tool.name}`,
+          safeArguments: safeArguments(oaoToolLedgerArguments(arguments_)),
+          // Reading never waits for a person; changing OAO follows the grant.
+          approval: tool.readOnly ? "never" : oaoGrant!.approval,
+        };
+        const retryBlocked = await config.broker.retryAdmission(obligation);
+        if (retryBlocked) return { output: retryBlocked };
+        const outcome = await step.do("execute-oao-obligation", () =>
+          withPendingAssistantText(config.broker, obligation, signal, (gated) =>
+            config.broker.executePlatform(
+              gated,
+              async (executeSignal) => {
+                if (!config.oaoTools)
+                  throw new Error(
+                    "OAO tools are not configured on this runtime worker",
+                  );
+                return {
+                  ...(await config.oaoTools.execute(
+                    {
+                      organizationId: initial.organizationId as OrganizationId,
+                      projectId: initial.projectId as ProjectId,
+                      runId: delivery.runId as RunId,
+                      flueToolCallId: toolCallId,
+                    },
+                    tool,
+                    oaoGrant!,
+                    arguments_,
+                    executeSignal,
+                  )),
+                };
+              },
               signal,
             ),
           ),
@@ -3777,6 +3859,11 @@ export class ManagedRuntimeOrchestrator {
         ...(publication.delegates.length
           ? ["delegate_agent", "message_agent"]
           : []),
+        ...(publication.oaoTools
+          ? oaoAgentTools(publication.oaoTools).map(
+              (tool) => `${OAO_AGENT_TOOL_PREFIX}${tool.name}`,
+            )
+          : []),
       ];
       if (new Set(visibleToolNames).size !== visibleToolNames.length)
         throw new Error("MCP tool namespace collides with another agent tool");
@@ -3788,6 +3875,7 @@ export class ManagedRuntimeOrchestrator {
         harnessOperations,
         mcpTools,
         delegates: publication.delegates,
+        ...(publication.oaoTools ? { oaoTools: publication.oaoTools } : {}),
         sandbox: publication.sandbox,
         limits: publication.limits,
       };
@@ -5763,6 +5851,7 @@ export async function startManagedFlueRuntime(input: {
   readonly skills?: SkillDefinitionResolverPort;
   readonly delegations?: AgentDelegationPort;
   readonly mcp?: McpToolExecutionPort;
+  readonly oaoTools?: OaoToolExecutionPort;
   readonly runFileStorage?: ProjectArtifactStoreResolverPort;
   readonly platformTools?: ReadonlyMap<string, PlatformToolHandler>;
   readonly sandboxFactory?: (
@@ -5778,6 +5867,7 @@ export async function startManagedFlueRuntime(input: {
     ...(input.skills ? { skills: input.skills } : {}),
     ...(input.delegations ? { delegations: input.delegations } : {}),
     ...(input.mcp ? { mcp: input.mcp } : {}),
+    ...(input.oaoTools ? { oaoTools: input.oaoTools } : {}),
     ...(input.runFileStorage ? { runFileStorage: input.runFileStorage } : {}),
     ...(input.sandboxFactory ? { sandboxFactory: input.sandboxFactory } : {}),
   });
@@ -5808,6 +5898,8 @@ export const runtimeTesting = {
   compileToolInputSchema,
   managedSystemPrompt,
   mcpToolName,
+  oaoAgentTools,
+  oaoToolLedgerArguments,
   loadManagedRunFiles,
   deliveryContext,
   recoveredAdmissionRequest,

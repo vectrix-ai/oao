@@ -3761,6 +3761,41 @@ describe("management console", () => {
     });
   });
 
+  it("grants an agent OAO tools with chosen scopes and approval", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", api);
+    await user.click(await screen.findByRole("button", { name: "OAO tools" }));
+    expect(
+      screen.getByText("The agent cannot read or manage OAO itself."),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("checkbox", { name: /^Let this agent use OAO tools/u }),
+    );
+    // Approving tool calls and project administration are never offered.
+    expect(
+      screen.queryByRole("checkbox", { name: /^approval:resolve/u }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: /^project:admin/u }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: /^run:create/u }),
+    ).toBeChecked();
+    await user.click(screen.getByRole("checkbox", { name: /^run:create/u }));
+    await user.click(screen.getByRole("checkbox", { name: /^audit:read/u }));
+    await user.selectOptions(screen.getByLabelText("Changes to OAO"), "never");
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 4")).toBeInTheDocument();
+    const updated = await api.getAgent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    expect(updated.versions[0]?.config.oaoTools).toEqual({
+      scopes: ["agent:read", "session:read", "run:read", "audit:read"],
+      approval: "never",
+    });
+  });
+
   it("adds, edits, and removes one tool through the modal editor", async () => {
     const user = userEvent.setup();
     renderConsole(

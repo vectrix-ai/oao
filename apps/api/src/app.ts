@@ -1844,7 +1844,12 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
   ) => {
     const authorization = c.req.header("authorization");
     let authenticated: Principal | undefined;
-    if (authorization?.startsWith("Bearer oao_")) {
+    if (authorization?.startsWith("Bearer oao_run_")) {
+      // An agent's OAO tool acts in its run's project, whatever the path.
+      authenticated = await dependencies.store.authenticateRunToken(
+        authorization.slice("Bearer ".length),
+      );
+    } else if (authorization?.startsWith("Bearer oao_")) {
       // Organization API keys act inside the project addressed by the URL,
       // falling back to the organization's earliest project. DELETE of a
       // project itself must not bind the key to its own target.
@@ -1877,7 +1882,8 @@ export function createApiApp(dependencies: ApiDependencies): Hono<{
     request: Request,
     authenticated: Principal,
   ): Promise<Principal> => {
-    if (authenticated.kind !== "human") return authenticated;
+    if (authenticated.kind !== "human" || authenticated.projectRestricted)
+      return authenticated;
     const requested = readCookie(request, "oao_active_project");
     if (
       !requested ||
@@ -6818,6 +6824,8 @@ function registerAgentRoutes(
         "agent:write",
         ...(config.skillVersionIds.length ? (["skill:bind"] as const) : []),
         ...(config.mcpBindings.length ? (["mcp:bind"] as const) : []),
+        // An agent's OAO tools may hold only scopes its publisher holds.
+        ...(config.oaoTools?.scopes ?? []),
       ],
       async (tx) => {
         await assertModelPresetApproved(
@@ -7036,6 +7044,8 @@ function registerAgentRoutes(
         "agent:write",
         ...(config.skillVersionIds.length ? (["skill:bind"] as const) : []),
         ...(config.mcpBindings.length ? (["mcp:bind"] as const) : []),
+        // An agent's OAO tools may hold only scopes its publisher holds.
+        ...(config.oaoTools?.scopes ?? []),
       ],
       async (tx) => {
         await assertModelPresetApproved(
@@ -7368,8 +7378,8 @@ function registerRunRoutes(
                  VALUES ($1,$2,$5,$3,$6) RETURNING *
                ), run AS (
                  INSERT INTO oao.runs
-                   (organization_id,project_id,id,thread_id,session_id,agent_version_id,created_by_principal_id,idempotency_key,input_public)
-                 VALUES ($1,$2,$7,$3,$5,$6,$8,$9,$10) RETURNING *
+                   (organization_id,project_id,id,thread_id,session_id,agent_version_id,created_by_principal_id,idempotency_key,input_public,requested_by_run_id)
+                 VALUES ($1,$2,$7,$3,$5,$6,$8,$9,$10,$13) RETURNING *
                ), message AS (
                  INSERT INTO oao.messages
                    (organization_id,project_id,id,thread_id,run_id,role,redacted_content)
@@ -7394,6 +7404,7 @@ function registerRunRoutes(
                   },
                   messageId,
                   initialMessage,
+                  actor.actingRunId ?? null,
                 ],
               );
               const session = publicValue(result.rows[0]?.session) as Readonly<
@@ -7894,8 +7905,8 @@ function registerRunRoutes(
               await tx.query(
                 `INSERT INTO oao.runs (
                    organization_id,project_id,id,thread_id,session_id,agent_version_id,
-                   created_by_principal_id,idempotency_key,input_public
-                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+                   created_by_principal_id,idempotency_key,input_public,requested_by_run_id
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
                 [
                   actor.organizationId,
                   actor.projectId,
@@ -7906,6 +7917,7 @@ function registerRunRoutes(
                   actor.id,
                   idem,
                   { message },
+                  actor.actingRunId ?? null,
                 ],
               );
               await tx.query(
@@ -8256,8 +8268,8 @@ function registerRunRoutes(
               const result = await tx.query(
                 `WITH run AS (
                INSERT INTO oao.runs
-                 (organization_id,project_id,id,thread_id,session_id,agent_version_id,created_by_principal_id,idempotency_key,input_public)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
+                 (organization_id,project_id,id,thread_id,session_id,agent_version_id,created_by_principal_id,idempotency_key,input_public,requested_by_run_id)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$12) RETURNING *
              ), message AS (
                INSERT INTO oao.messages
                  (organization_id,project_id,id,thread_id,run_id,role,redacted_content)
@@ -8283,6 +8295,7 @@ function registerRunRoutes(
                   },
                   messageId,
                   redactedInput,
+                  actor.actingRunId ?? null,
                 ],
               );
               await dependencies.store.appendEvent(tx, actor, {

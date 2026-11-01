@@ -1,4 +1,5 @@
 import type {
+  ManagedAgentOaoTools,
   ModelCatalogEntry,
   ModelGenerationSettings,
   ModelPreset,
@@ -265,6 +266,8 @@ export interface AgentVersionConfig {
     readonly agentVersionId: string;
     readonly maxParallel: number;
   }[];
+  /** Lets the agent use the OAO MCP tools in its runs. */
+  readonly oaoTools?: ManagedAgentOaoTools;
   readonly sandbox: {
     readonly enabled: boolean;
     readonly provider: string;

@@ -10,18 +10,20 @@ agent-version editor and the publication API.
 
 ## Where an agent's tools come from
 
-| Source           | Configured in                           | Executed by                                                             |
-| ---------------- | --------------------------------------- | ----------------------------------------------------------------------- |
-| Caller tools     | `config.tools` with `owner: "caller"`   | Your application, through durable claim/result work items               |
-| Platform tools   | `config.tools` with `owner: "platform"` | A handler registered in the runtime worker                              |
-| Sandbox tools    | `config.sandbox.capabilities`           | The Daytona sandbox (`read`, `write`, `bash`, browser tools, and so on) |
-| MCP tools        | `config.mcpBindings`                    | A remote HTTPS MCP server through an immutable restricted toolset       |
-| Delegation tools | `config.delegates`                      | The platform; `delegate_agent` and `message_agent` are added for you    |
+| Source           | Configured in                           | Executed by                                                                                                                  |
+| ---------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Caller tools     | `config.tools` with `owner: "caller"`   | Your application, through durable claim/result work items                                                                    |
+| Platform tools   | `config.tools` with `owner: "platform"` | A handler registered in the runtime worker                                                                                   |
+| Sandbox tools    | `config.sandbox.capabilities`           | The Daytona sandbox (`read`, `write`, `bash`, browser tools, and so on)                                                      |
+| MCP tools        | `config.mcpBindings`                    | A remote HTTPS MCP server through an immutable restricted toolset                                                            |
+| Delegation tools | `config.delegates`                      | The platform; `delegate_agent` and `message_agent` are added for you                                                         |
+| OAO tools        | `config.oaoTools`                       | The OAO API, as the run's creator; see [Manage OAO through MCP](/integrations/oao-mcp-server#let-oao-agents-use-these-tools) |
 
 `delegate_agent` and `message_agent` are reserved platform tool names: they are
 published automatically when a version has delegates and are rejected inside
-`config.tools`. A version may declare at most 64 tools with unique names and at
-most 16 MCP bindings.
+`config.tools`. Names starting with `oao__` are reserved for OAO tools. A
+version may declare at most 64 tools with unique names and at most 16 MCP
+bindings.
 
 ## Add tools in the console
 

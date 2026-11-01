@@ -114,6 +114,12 @@ OTel SDK -> optional Collector -> configured OTLP backend
     numbers and lifecycle states, revalidates agent and Skill versions, and
     encrypts the credentials the operator supplies for the target
     organization. It only fills new or empty projects.
+19. An agent's OAO tools reach the API only through a run token minted per
+    call by the runtime worker. PostgreSQL stores its SHA-256, never the
+    token. The API resolves it to the run's creator, restricted to the run's
+    project and to the agent version's granted scopes that the creator still
+    holds, and only while the run is unsettled. A run an agent started reads
+    only; it cannot start or message further runs.
 
 ## Public run states
 

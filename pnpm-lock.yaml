@@ -222,6 +222,9 @@ importers:
         specifier: 4.13.13
         version: 4.13.13
     devDependencies:
+      '@oao/mcp-server':
+        specifier: workspace:*
+        version: link:../../packages/mcp-server
       '@oao/testkit':
         specifier: workspace:*
         version: link:../../packages/testkit
@@ -412,6 +415,9 @@ importers:
       '@oao/mcp-remote':
         specifier: workspace:*
         version: link:../mcp-remote
+      '@oao/mcp-server':
+        specifier: workspace:*
+        version: link:../mcp-server
       '@oao/model-images':
         specifier: workspace:*
         version: link:../model-images
@@ -424,6 +430,9 @@ importers:
       '@oao/queue-postgres':
         specifier: workspace:*
         version: link:../queue-postgres
+      '@oao/sdk-js':
+        specifier: workspace:*
+        version: link:../sdk-js
       '@oao/tool-broker':
         specifier: workspace:*
         version: link:../tool-broker

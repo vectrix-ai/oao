@@ -4,7 +4,7 @@ import {
 } from "@modelcontextprotocol/client";
 import { AUTHORIZATION_SCOPE_CATALOG } from "@oao/contracts";
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
 import { DevelopmentAuthAdapter } from "@oao/auth-core";
@@ -4287,6 +4287,210 @@ test(
             headers: { "idempotency-key": "mcp-client-key-revoke-1" },
           });
         }
+      },
+    );
+
+    await t.test(
+      "an agent's run token acts as the run's creator, narrowed, while the run is unsettled",
+      async () => {
+        const agentConfig = (oaoTools: unknown) => ({
+          systemPrompt: "Coordinate other agents.",
+          modelPreset: baseModelPresetKey,
+          tools: [],
+          sandbox: disabledSandbox,
+          limits: { maxTurns: 32, timeoutMs: 60_000 },
+          oaoTools,
+        });
+        // Agents can never be granted approvals or project administration.
+        const forbidden = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "oao-tools-forbidden",
+              name: "Forbidden grant",
+              config: agentConfig({ scopes: ["approval:resolve"] }),
+            },
+            "oao-tools-agent-forbidden-1",
+          ),
+        );
+        assert.equal(forbidden.status, 400);
+
+        // A publisher may grant only scopes it holds.
+        const publisherKey = (await (
+          await app.request(
+            `${projectPath}/api-keys`,
+            jsonRequest(
+              { name: "Publisher", scopes: ["agent:write"] },
+              "oao-tools-publisher-key-1",
+            ),
+          )
+        ).json()) as { id: string; secret: string };
+        const escalated = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "oao-tools-escalated",
+              name: "Escalated grant",
+              config: agentConfig({ scopes: ["session:read"] }),
+            },
+            "oao-tools-agent-escalated-1",
+            { authorization: `Bearer ${publisherKey.secret}` },
+          ),
+        );
+        assert.equal(escalated.status, 403);
+
+        const grant = [
+          "agent:read",
+          "session:read",
+          "session:write",
+          "run:create",
+          "run:read",
+        ];
+        const created = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "oao-tools-coordinator",
+              name: "OAO tools coordinator",
+              config: agentConfig({ scopes: grant, approval: "never" }),
+            },
+            "oao-tools-agent-1",
+          ),
+        );
+        assert.equal(created.status, 201);
+        const agent = (await created.json()) as {
+          id: string;
+          latestVersion?: { config: { oaoTools?: unknown } };
+        };
+        const version = (await (
+          await app.request(`${projectPath}/agents/${agent.id}/versions`)
+        ).json()) as { data: { config: { oaoTools?: unknown } }[] };
+        assert.deepEqual(version.data[0]?.config.oaoTools, {
+          scopes: grant,
+          approval: "never",
+        });
+
+        const startSession = async (key: string, headers = {}) => {
+          const response = await app.request(
+            `${projectPath}/sessions`,
+            jsonRequest(
+              { agentId: agent.id, initialMessage: "Check the other agents." },
+              key,
+              headers,
+            ),
+          );
+          assert.equal(response.status, 201, await response.clone().text());
+          return (await response.json()) as {
+            id: string;
+            latestRunId: string;
+          };
+        };
+        const issueToken = async (runId: string) => {
+          const token = `oao_run_${randomBytes(32).toString("base64url")}`;
+          await pool.query(
+            `INSERT INTO oao.run_access_tokens
+               (organization_id,project_id,id,run_id,token_hash,scopes,expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp() + interval '10 minutes')`,
+            [
+              integrationPrincipal.organizationId,
+              integrationPrincipal.projectId,
+              randomUUID(),
+              runId,
+              createHash("sha256").update(token).digest(),
+              grant,
+            ],
+          );
+          return { authorization: `Bearer ${token}` };
+        };
+
+        const session = await startSession("oao-tools-session-1");
+        const asRun = await issueToken(session.latestRunId);
+        const context = (await (
+          await app.request("/v1/context", { headers: asRun })
+        ).json()) as {
+          principal: {
+            id: string;
+            scopes: string[];
+            projectRestricted?: boolean;
+          };
+        };
+        assert.equal(context.principal.id, integrationPrincipal.id);
+        assert.equal(context.principal.projectRestricted, true);
+        assert.deepEqual(
+          [...context.principal.scopes].sort(),
+          [...grant].sort(),
+        );
+        assert.equal(
+          (
+            await app.request(`${projectPath}/agents?limit=1`, {
+              headers: asRun,
+            })
+          ).status,
+          200,
+        );
+        // Scopes outside the grant stay out of reach.
+        assert.equal(
+          (
+            await app.request(`${projectPath}/audit?limit=1`, {
+              headers: asRun,
+            })
+          ).status,
+          403,
+        );
+
+        // A session the agent starts records the asking run and its creator.
+        const asked = await startSession("oao-tools-session-2", asRun);
+        const askedRun = await pool.query<{
+          created_by_principal_id: string;
+          requested_by_run_id: string | null;
+        }>(
+          "SELECT created_by_principal_id,requested_by_run_id FROM oao.runs WHERE id=$1",
+          [asked.latestRunId],
+        );
+        assert.equal(
+          askedRun.rows[0]?.created_by_principal_id,
+          integrationPrincipal.id,
+        );
+        assert.equal(
+          askedRun.rows[0]?.requested_by_run_id,
+          session.latestRunId,
+        );
+        const audit = await pool.query<{ detail: { viaRunId?: string } }>(
+          `SELECT safe_detail AS detail FROM oao.audit_entries
+            WHERE organization_id=$1 AND project_id=$2 AND action='session.created'
+              AND resource_id=$3`,
+          [
+            integrationPrincipal.organizationId,
+            integrationPrincipal.projectId,
+            asked.id,
+          ],
+        );
+        assert.equal(audit.rows[0]?.detail.viaRunId, session.latestRunId);
+
+        // That run reads only: it cannot ask further agents.
+        const asAskedRun = await issueToken(asked.latestRunId);
+        const askedContext = (await (
+          await app.request("/v1/context", { headers: asAskedRun })
+        ).json()) as { principal: { scopes: string[] } };
+        assert.deepEqual([...askedContext.principal.scopes].sort(), [
+          "agent:read",
+          "run:read",
+          "session:read",
+        ]);
+
+        // A settled run's token stops working.
+        await pool.query(
+          "UPDATE oao.runs SET state='cancelled',settled_at=clock_timestamp() WHERE id=$1",
+          [session.latestRunId],
+        );
+        assert.equal(
+          (await app.request("/v1/context", { headers: asRun })).status,
+          401,
+        );
+        await app.request(`${projectPath}/api-keys/${publisherKey.id}`, {
+          method: "DELETE",
+          headers: { "idempotency-key": "oao-tools-publisher-revoke-1" },
+        });
       },
     );
 

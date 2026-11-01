@@ -11,6 +11,11 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
+import {
+  AUTHORIZATION_SCOPE_CATALOG,
+  OAO_AGENT_TOOL_SCOPES,
+  type OaoAgentToolScope,
+} from "@oao/contracts";
 import { useApi } from "../api/context";
 import { listAllPages } from "../api/paginate";
 import type {
@@ -62,6 +67,25 @@ import {
 } from "../components/ui";
 
 const agentStatuses = ["", "published", "draft", "archived"];
+const OAO_TOOL_SCOPE_DESCRIPTIONS = new Map<string, string>(
+  AUTHORIZATION_SCOPE_CATALOG,
+);
+/** A sensible first grant: read the project and ask other agents. */
+const DEFAULT_OAO_TOOL_SCOPES: readonly OaoAgentToolScope[] = [
+  "agent:read",
+  "session:read",
+  "run:read",
+  "run:create",
+];
+
+/** The config without its OAO tool grant, which the editor sets itself. */
+function withoutOaoTools(config: AgentVersionConfig): AgentVersionConfig {
+  const copy: { -readonly [Key in keyof AgentVersionConfig]?: unknown } = {
+    ...config,
+  };
+  delete copy.oaoTools;
+  return copy as AgentVersionConfig;
+}
 type SandboxCapability = AgentVersionConfig["sandbox"]["capabilities"][number];
 
 function parseToolsJson(value: string): {
@@ -1149,6 +1173,7 @@ function AgentEditor({
   const [mcpBindings, setMcpBindings] = useState(baseConfig.mcpBindings ?? []);
   const [delegates, setDelegates] = useState(baseConfig.delegates ?? []);
   const [delegatePicker, setDelegatePicker] = useState(false);
+  const [oaoTools, setOaoTools] = useState(baseConfig.oaoTools);
   const [tools, setTools] = useState<readonly ToolDefinition[]>(
     baseConfig.tools,
   );
@@ -1188,11 +1213,12 @@ function AgentEditor({
     setSkillVersionIds(next.config.skillVersionIds ?? []);
     setMcpBindings(next.config.mcpBindings ?? []);
     setDelegates(next.config.delegates ?? []);
+    setOaoTools(next.config.oaoTools);
     setTools(next.config.tools);
     setHarnessOperations(next.config.harnessOperations ?? []);
   };
   const config: AgentVersionConfig = {
-    ...baseConfig,
+    ...withoutOaoTools(baseConfig),
     systemPrompt: instructions,
     modelPreset,
     tools,
@@ -1200,6 +1226,7 @@ function AgentEditor({
     skillVersionIds,
     mcpBindings,
     delegates,
+    ...(oaoTools ? { oaoTools } : {}),
     sandbox: {
       enabled: sandboxEnabled,
       provider: sandboxProvider,
@@ -1877,6 +1904,101 @@ function AgentEditor({
               )}
             </div>
           )}
+        </Panel>
+        <Panel
+          title="OAO tools"
+          collapsible
+          defaultCollapsed
+          description={
+            oaoTools
+              ? `The agent can use OAO tools with ${oaoTools.scopes.length} ${oaoTools.scopes.length === 1 ? "scope" : "scopes"}${
+                  oaoTools.approval === "always"
+                    ? "; changes wait for approval"
+                    : ""
+                }.`
+              : "The agent cannot read or manage OAO itself."
+          }
+        >
+          <div className="stack">
+            <CheckboxRow
+              label="Let this agent use OAO tools"
+              description="It can read other agents' sessions and runs and ask them questions, acting as the person or key that started its run and limited to the scopes below. Reading never waits for approval."
+              checked={oaoTools !== undefined}
+              disabled={!isLatest}
+              onChange={(event) => {
+                const enabled = event.currentTarget.checked;
+                setOaoTools(
+                  enabled
+                    ? {
+                        scopes: [...DEFAULT_OAO_TOOL_SCOPES],
+                        approval: "always",
+                      }
+                    : undefined,
+                );
+              }}
+            />
+            {oaoTools ? (
+              <>
+                <Field label="Changes to OAO">
+                  <Select
+                    value={oaoTools.approval}
+                    disabled={!isLatest}
+                    onChange={(event) => {
+                      const approval =
+                        event.currentTarget.value === "never"
+                          ? "never"
+                          : "always";
+                      setOaoTools((current) =>
+                        current ? { ...current, approval } : current,
+                      );
+                    }}
+                  >
+                    <option value="always">Wait for a person to approve</option>
+                    <option value="never">Run without approval</option>
+                  </Select>
+                </Field>
+                <fieldset className="scope-picker">
+                  <legend>OAO tool scopes</legend>
+                  <span className="hint">
+                    The agent may use only scopes you hold. Approving tool calls
+                    and project administration are never available to an agent.
+                  </span>
+                  <div className="scope-picker-grid">
+                    {OAO_AGENT_TOOL_SCOPES.map((scope) => (
+                      <CheckboxRow
+                        key={scope}
+                        label={scope}
+                        description={
+                          OAO_TOOL_SCOPE_DESCRIPTIONS.get(scope) ?? ""
+                        }
+                        checked={oaoTools.scopes.includes(scope)}
+                        disabled={
+                          !isLatest ||
+                          (oaoTools.scopes.length === 1 &&
+                            oaoTools.scopes.includes(scope))
+                        }
+                        onChange={(event) => {
+                          const checked = event.currentTarget.checked;
+                          setOaoTools((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  scopes: checked
+                                    ? [...current.scopes, scope]
+                                    : current.scopes.filter(
+                                        (item) => item !== scope,
+                                      ),
+                                }
+                              : current,
+                          );
+                        }}
+                      />
+                    ))}
+                  </div>
+                </fieldset>
+              </>
+            ) : null}
+          </div>
         </Panel>
         {delegatePicker ? (
           <DelegatePickerDialog

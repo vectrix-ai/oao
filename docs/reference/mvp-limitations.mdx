@@ -114,7 +114,9 @@ and should shape integrations:
   cannot connect. The server is stateless: it sends no notifications, offers
   no resources or prompts, and waits at most 600 seconds for a run inside one
   call. It never takes a plaintext secret, so credentials and API keys are
-  managed outside it.
+  managed outside it. Agents using OAO tools cannot be granted
+  `approval:resolve` or `project:admin`, and a run another agent started can
+  only read, so agents cannot ask each other in chains.
 - **Remote MCP is HTTPS with static or client-credentials authentication.**
   OAO supports Streamable HTTP and legacy SSE with static bearer or safe API-key
   headers and OAuth client credentials with a client secret

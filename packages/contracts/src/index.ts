@@ -1427,6 +1427,54 @@ export const ManagedAgentDelegateSchema = v.strictObject({
   ),
 });
 
+/**
+ * Scopes an agent version may grant its built-in OAO tools. Deciding
+ * approvals and project administration stay with people and API keys, so an
+ * agent can never approve its own or another agent's tool calls.
+ */
+export const OAO_AGENT_TOOL_SCOPES = [
+  "agent:read",
+  "agent:write",
+  "skill:read",
+  "skill:write",
+  "skill:bind",
+  "mcp:read",
+  "mcp:write",
+  "mcp:discover",
+  "mcp:bind",
+  "credential:read_metadata",
+  "session:read",
+  "session:write",
+  "run:create",
+  "run:read",
+  "run:cancel",
+  "delegation:read",
+  "delegation:message",
+  "audit:read",
+] as const;
+export type OaoAgentToolScope = (typeof OAO_AGENT_TOOL_SCOPES)[number];
+
+/** Model-visible names of built-in OAO tools start with this prefix. */
+export const OAO_AGENT_TOOL_PREFIX = "oao__";
+
+/**
+ * Lets an agent use the OAO MCP tools inside its runs. A run acts as the
+ * person or key that started it, narrowed to these scopes. Read-only tools
+ * never ask for approval; `approval` applies to the tools that change OAO.
+ */
+export const ManagedAgentOaoToolsSchema = v.strictObject({
+  scopes: v.pipe(
+    v.array(v.picklist(OAO_AGENT_TOOL_SCOPES)),
+    v.minLength(1),
+    v.maxLength(OAO_AGENT_TOOL_SCOPES.length),
+    v.check(
+      (scopes) => new Set(scopes).size === scopes.length,
+      "OAO tool scopes must be unique",
+    ),
+  ),
+  approval: v.optional(v.picklist(["never", "always"]), "always"),
+});
+
 const ManagedAgentDelegatesSchema = v.pipe(
   v.array(ManagedAgentDelegateSchema),
   v.maxLength(32),
@@ -1479,6 +1527,7 @@ export const ManagedAgentPublicationConfigSchema = v.pipe(
       [],
     ),
     delegates: v.optional(ManagedAgentDelegatesSchema, []),
+    oaoTools: v.optional(ManagedAgentOaoToolsSchema),
     sandbox: v.strictObject({
       enabled: v.boolean(),
       provider: ProjectSandboxProviderKeySchema,
@@ -1509,8 +1558,11 @@ export const ManagedAgentPublicationConfigSchema = v.pipe(
       ...config.tools.map((tool) => tool.name),
       ...config.harnessOperations.map((operation) => operation.key),
     ];
-    return new Set(names).size === names.length;
-  }, "Agent tools and Harness Operations must not collide with another mounted tool name"),
+    return (
+      new Set(names).size === names.length &&
+      names.every((name) => !name.startsWith(OAO_AGENT_TOOL_PREFIX))
+    );
+  }, `Agent tools and Harness Operations must not collide with another mounted tool name or start with ${OAO_AGENT_TOOL_PREFIX}`),
 );
 
 export function parseManagedAgentSnapshotForPublication(
@@ -1529,6 +1581,7 @@ export const ManagedAgentSnapshotSchema = v.strictObject({
   skills: v.optional(v.array(ManagedSkillBindingSnapshotSchema), []),
   mcpTools: v.optional(v.array(ManagedMcpToolSnapshotSchema), []),
   delegates: v.optional(ManagedAgentDelegatesSchema, []),
+  oaoTools: v.optional(ManagedAgentOaoToolsSchema),
   sandbox: v.strictObject({
     enabled: v.boolean(),
     provider: v.optional(LegacySandboxProviderKeySchema, "local-fake"),
@@ -1719,6 +1772,9 @@ export type ManagedHarnessOperation = v.InferOutput<
   typeof ManagedHarnessOperationSchema
 >;
 export type ManagedMcpBinding = v.InferOutput<typeof ManagedMcpBindingSchema>;
+export type ManagedAgentOaoTools = v.InferOutput<
+  typeof ManagedAgentOaoToolsSchema
+>;
 export type ManagedMcpToolSnapshot = v.InferOutput<
   typeof ManagedMcpToolSnapshotSchema
 >;

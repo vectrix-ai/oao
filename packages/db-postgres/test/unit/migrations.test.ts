@@ -931,3 +931,37 @@ test("a project API key authenticates only in its project and is revoked with it
     /GRANT EXECUTE ON FUNCTION oao\.authenticate_api_key\(text, bytea, uuid, timestamptz\) TO oao_app;/u,
   );
 });
+
+test("run tokens act as the run's creator, narrowed, and only while the run is unsettled", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0059_agent_oao_tools.sql", import.meta.url),
+    "utf8",
+  );
+  // Only a hash is stored, and tokens go with their run in a project purge.
+  assert.match(sql, /token_hash bytea NOT NULL UNIQUE/u);
+  assert.doesNotMatch(sql, /token text/u);
+  assert.match(
+    sql,
+    /REFERENCES oao\.runs\(organization_id, project_id, id\) ON DELETE CASCADE/u,
+  );
+  assert.match(sql, /run\.settled_at IS NULL/u);
+  assert.match(sql, /scope = ANY\(creator\.scopes\)/u);
+  assert.match(
+    sql,
+    /creator\.kind <> 'human' OR member\.principal_id IS NOT NULL/u,
+  );
+  assert.match(sql, /api_key\.revoked_at IS NULL/u);
+  // A run another agent started reads only.
+  assert.match(
+    sql,
+    /requested_by_run_id IS NULL[\s\S]*?ARRAY\['run:create','session:write','delegation:message'\]/u,
+  );
+  // Agents can never be granted approvals or project administration.
+  const grantable =
+    /scope #>> '\{\}' NOT IN \(([\s\S]*?)\)/u.exec(sql)?.[1] ?? "";
+  assert.doesNotMatch(grantable, /approval:resolve|project:admin|\*/u);
+  assert.match(
+    sql,
+    /SET ROLE oao_auth;[\s\S]*CREATE FUNCTION oao\.authenticate_run_token/u,
+  );
+});

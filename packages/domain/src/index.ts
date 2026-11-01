@@ -43,6 +43,11 @@ export interface Principal extends TenantIdentity {
    * resources the whole organization shares.
    */
   readonly projectRestricted?: boolean;
+  /**
+   * Set when an agent's OAO tool acts through a run token: the principal is
+   * the run's creator and this is the run acting for it.
+   */
+  readonly actingRunId?: string;
 }
 
 export const AUTHORIZATION_ACTIONS = [

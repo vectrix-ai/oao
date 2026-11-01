@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import type {
   AuthorizationAction,
   AuthorizationScope,
@@ -82,6 +82,38 @@ export class PostgresApiStore {
       subject: row.subject,
       scopes: new Set(row.scopes as AuthorizationScope[]),
       ...(row.project_restricted ? { projectRestricted: true } : {}),
+    };
+  }
+
+  /**
+   * Resolves a run token minted by the runtime worker for an agent's OAO
+   * tool. The principal is the run's creator, limited to the run's project
+   * and to the scopes both the agent version and the creator hold now.
+   */
+  async authenticateRunToken(token: string): Promise<Principal | undefined> {
+    if (!/^oao_run_[A-Za-z0-9_-]{43}$/u.test(token)) return undefined;
+    const result = await this.pool.query<{
+      organization_id: string;
+      project_id: string;
+      principal_id: string;
+      principal_kind: Principal["kind"];
+      subject: string;
+      scopes: string[];
+      run_id: string;
+    }>("SELECT * FROM oao.authenticate_run_token($1,clock_timestamp())", [
+      createHash("sha256").update(token).digest(),
+    ]);
+    const row = result.rows[0];
+    if (!row) return undefined;
+    return {
+      id: brandedId<PrincipalId>(row.principal_id),
+      organizationId: row.organization_id as Principal["organizationId"],
+      projectId: row.project_id as Principal["projectId"],
+      kind: row.principal_kind,
+      subject: row.subject,
+      scopes: new Set(row.scopes as AuthorizationScope[]),
+      projectRestricted: true,
+      actingRunId: row.run_id,
     };
   }
 
@@ -194,7 +226,11 @@ export class PostgresApiStore {
       readonly detail?: Readonly<Record<string, PublicValue>>;
     },
   ): Promise<void> {
-    const detail = input.detail ?? {};
+    // An agent acting through a run token is recorded beside the principal
+    // it acts for.
+    const detail = principal.actingRunId
+      ? { ...input.detail, viaRunId: principal.actingRunId }
+      : (input.detail ?? {});
     assertPublicPayload(detail);
     await transaction.query(
       "SELECT oao.append_audit_entry($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp())",
