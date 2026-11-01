@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.11.0](https://github.com/vectrix-ai/oao/compare/v0.10.0...v0.11.0) (2026-11-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* creating an MCP credential now requires the destination (origin and path prefix) its secret may reach, and a credential policy must lie inside it. Migration 0054 pins existing credentials; a credential it could not pin accepts no new policy until it is rotated with a destination.
+
+### Features
+
+* OAuth client credentials for remote MCP and OAO's own MCP server ([#52](https://github.com/vectrix-ai/oao/issues/52)) ([67d46c1](https://github.com/vectrix-ai/oao/commit/67d46c1e415a2471deb1c8a963d9d28e6db52714))
+
 ## [0.10.0](https://github.com/vectrix-ai/oao/compare/v0.9.1...v0.10.0) (2026-10-30)
 
 
