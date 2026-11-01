@@ -1548,25 +1548,27 @@ function McpSetupDialog({
                   label={tool.title ?? tool.name}
                   description={tool.description}
                   checked={selectedTools.includes(tool.name)}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const checked = event.currentTarget.checked;
                     setSelectedTools((current) =>
-                      event.currentTarget.checked
+                      checked
                         ? [...current, tool.name]
                         : current.filter((name) => name !== tool.name),
-                    )
-                  }
+                    );
+                  }}
                 />
                 {selectedTools.includes(tool.name) ? (
                   <Field label={`Approval for ${tool.name}`}>
                     <Select
                       value={approvals[tool.name] ?? "always"}
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        const approval = event.currentTarget.value as
+                          "never" | "always";
                         setApprovals((current) => ({
                           ...current,
-                          [tool.name]: event.currentTarget.value as
-                            "never" | "always",
-                        }))
-                      }
+                          [tool.name]: approval,
+                        }));
+                      }}
                     >
                       <option value="always">Always require approval</option>
                       <option value="never">Run without approval</option>

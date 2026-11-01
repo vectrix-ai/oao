@@ -1240,8 +1240,23 @@ describe("management console", () => {
       dialog.getAllByText("https://mcp.example.test/rpc").length,
     ).toBeGreaterThan(0);
     await user.click(dialog.getByRole("button", { name: "Test and discover" }));
-    await user.click(
-      await dialog.findByRole("checkbox", { name: /Look up trace/u }),
+    const lookupTrace = await dialog.findByRole("checkbox", {
+      name: /Look up trace/u,
+    });
+    // Toggling a tool more than once and changing its approval keeps the
+    // wizard open.
+    await user.click(lookupTrace);
+    await user.click(lookupTrace);
+    expect(lookupTrace).not.toBeChecked();
+    await user.click(lookupTrace);
+    expect(lookupTrace).toBeChecked();
+    await user.selectOptions(
+      dialog.getByLabelText("Approval for lookup_trace"),
+      "never",
+    );
+    await user.selectOptions(
+      dialog.getByLabelText("Approval for lookup_trace"),
+      "always",
     );
     await user.click(dialog.getByRole("button", { name: "Next" }));
     await user.selectOptions(
