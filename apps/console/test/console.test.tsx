@@ -4647,6 +4647,53 @@ describe("management console", () => {
     expect(config?.skillVersionIds).toEqual([]);
   });
 
+  it("edits and removes one delegate row when two share a target", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const coordinatorId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const base = (await api.getAgent(coordinatorId)).versions[0]!.config;
+    await api.publishAgentVersion(coordinatorId, {
+      ...base,
+      delegates: [
+        {
+          key: "pinned-analyst",
+          description: "Analyses with one exact version.",
+          agentVersionId: "bbbbbbb5-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          maxParallel: 1,
+        },
+        {
+          key: "latest-analyst",
+          description: "Analyses with the latest version.",
+          agentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          maxParallel: 1,
+        },
+      ],
+    });
+    renderConsole(`/agents/${coordinatorId}`, api);
+    await openSection(user, "Delegates");
+    const linked = await screen.findByRole("list", {
+      name: "Linked delegates",
+    });
+    const selectors = within(linked).getAllByRole("combobox", {
+      name: "Version of delegate Document analyst",
+    });
+    // Pinning the followed row gives both rows the same target.
+    await user.selectOptions(selectors[1]!, "pinned");
+    expect(
+      screen.getByText(/Document analyst is linked twice the same way/u),
+    ).toBeInTheDocument();
+    await user.click(
+      within(linked).getAllByRole("button", {
+        name: "Remove delegate Document analyst",
+      })[1]!,
+    );
+    const rows = within(
+      screen.getByRole("list", { name: "Linked delegates" }),
+    ).getAllByRole("listitem");
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]!).getByText("pinned-analyst")).toBeInTheDocument();
+  });
+
   it("refuses followed links the demo API cannot resolve", async () => {
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     const coordinator = await api.getAgent(

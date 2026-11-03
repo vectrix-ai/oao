@@ -2069,7 +2069,7 @@ function AgentEditor({
                     each session starts, fixed for that session.
                   </p>
                   <ul className="delegate-list" aria-label="Linked delegates">
-                    {delegates.map((delegate) => {
+                    {delegates.map((delegate, index) => {
                       const followed = delegate.agentId !== undefined;
                       const candidate = delegateCandidate(
                         delegate,
@@ -2109,7 +2109,9 @@ function AgentEditor({
                         : mismatch
                           ? `Incompatible — ${mismatch}.`
                           : undefined;
-                      const target = delegateTarget(delegate);
+                      // Rows are edited by position: two rows may briefly
+                      // share a target, which validation then refuses.
+                      const target = `${index}:${delegateTarget(delegate)}`;
                       return (
                         <li className="delegate-row" key={target}>
                           <div className="delegate-row-main">
@@ -2181,10 +2183,8 @@ function AgentEditor({
                                         maxParallel: delegate.maxParallel,
                                       };
                                   setDelegates((current) =>
-                                    current.map((item) =>
-                                      delegateTarget(item) === target
-                                        ? next
-                                        : item,
+                                    current.map((item, position) =>
+                                      position === index ? next : item,
                                     ),
                                   );
                                 }}
@@ -2208,7 +2208,7 @@ function AgentEditor({
                               onClick={() =>
                                 setDelegates((current) =>
                                   current.filter(
-                                    (item) => delegateTarget(item) !== target,
+                                    (_, position) => position !== index,
                                   ),
                                 )
                               }
