@@ -85,12 +85,13 @@ function config(input: AgentConfigInput = {}) {
 function write(
   body: Readonly<Record<string, unknown>>,
   method: "POST" | "PATCH" | "DELETE" = "POST",
+  idempotencyKey: string = randomUUID(),
 ): RequestInit {
   return {
     method,
     headers: {
       "content-type": "application/json",
-      "idempotency-key": randomUUID(),
+      "idempotency-key": idempotencyKey,
     },
     body: JSON.stringify(body),
   };
@@ -566,6 +567,34 @@ test(
           ],
         );
         assert.equal(shape.rows[0]?.valid, false);
+      },
+    );
+
+    await t.test(
+      "a retried publication replays even after its followed Skill changed",
+      async () => {
+        const skill = await createSkill("replayed-skill");
+        const coordinator = await createAgent("replayed-coordinator");
+        const request = () =>
+          app.request(
+            `${projectPath}/agents/${coordinator.id}/versions`,
+            write(
+              { config: config({ skillIds: [skill.id] }) },
+              "POST",
+              "replayed-publication",
+            ),
+          );
+        const first = await request();
+        assert.equal(first.status, 201, await first.clone().text());
+        const disabled = await app.request(
+          `${projectPath}/skills/${skill.id}`,
+          write({ enabled: false }, "PATCH"),
+        );
+        assert.equal(disabled.status, 200, await disabled.clone().text());
+        const replay = await request();
+        assert.equal(replay.status, 201, await replay.clone().text());
+        assert.equal(replay.headers.get("idempotency-replayed"), "true");
+        assert.deepEqual(await replay.json(), await first.json());
       },
     );
 

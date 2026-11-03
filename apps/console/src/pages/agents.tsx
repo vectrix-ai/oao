@@ -8,7 +8,12 @@ import {
   Trash2,
   Wrench,
 } from "lucide-react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useEffect, useId, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../api/context";
@@ -1129,6 +1134,7 @@ export function AgentDetailPage() {
       sandboxProviders={sandboxProviders.data?.data ?? []}
       sandboxProvidersError={sandboxProviders.error}
       skills={skills.data?.data ?? []}
+      skillsLoaded={skills.isSuccess}
       mcpToolsets={mcpToolsets.data?.data ?? []}
       mcpPolicies={mcpPolicies.data?.data ?? []}
       availableAgents={(agents.data ?? []).filter(
@@ -1151,6 +1157,7 @@ function AgentEditor({
   sandboxProviders,
   sandboxProvidersError,
   skills,
+  skillsLoaded,
   mcpToolsets,
   mcpPolicies,
   availableAgents,
@@ -1167,6 +1174,7 @@ function AgentEditor({
   readonly sandboxProviders: readonly ProjectSandboxProvider[];
   readonly sandboxProvidersError: Error | null;
   readonly skills: readonly SkillSummary[];
+  readonly skillsLoaded: boolean;
   readonly mcpToolsets: readonly McpToolset[];
   readonly mcpPolicies: readonly McpCredentialPolicy[];
   readonly availableAgents: readonly AgentSummary[];
@@ -1201,6 +1209,41 @@ function AgentEditor({
   const [skillIds, setSkillIds] = useState(baseConfig.skillIds ?? []);
   const [mcpBindings, setMcpBindings] = useState(baseConfig.mcpBindings ?? []);
   const [delegates, setDelegates] = useState(baseConfig.delegates ?? []);
+  // An older pin is shown under the agent its key matches. Following that
+  // agent instead needs the pinned version confirmed as the agent's own, so a
+  // key another agent reused cannot redirect the delegate.
+  const olderPinAgentIds = [
+    ...new Set(
+      delegates.flatMap((delegate) => {
+        if (delegate.agentId !== undefined) return [];
+        if (
+          availableAgents.some(
+            (item) => item.latestVersionId === delegate.agentVersionId,
+          )
+        )
+          return [];
+        const candidate = availableAgents.find(
+          (item) => item.key === delegate.key,
+        );
+        return candidate ? [candidate.id] : [];
+      }),
+    ),
+  ];
+  const olderPinAgents = useQueries({
+    queries: olderPinAgentIds.map((id) => ({
+      queryKey: ["agent", id],
+      queryFn: () => api.getAgent(id),
+    })),
+  });
+  const versionOwners = new Map(
+    olderPinAgents.flatMap((result) =>
+      result.data
+        ? result.data.versions.map(
+            (version) => [version.id, result.data.id] as const,
+          )
+        : [],
+    ),
+  );
   const [delegatePicker, setDelegatePicker] = useState(false);
   const [oaoTools, setOaoTools] = useState(baseConfig.oaoTools);
   const [tools, setTools] = useState<readonly ToolDefinition[]>(
@@ -1406,6 +1449,26 @@ function AgentEditor({
   for (const delegate of duplicateDelegates)
     validation.push(
       `${delegateCandidate(delegate, availableAgents)?.name ?? delegate.key} is linked twice the same way. Remove one link, or pin one and let the other follow the latest version.`,
+    );
+  // A removed Skill leaves every list, but a binding to it stays in this
+  // version's config; show it so it can be removed before publishing.
+  const listedSkillIds = new Set(skills.map((skill) => skill.id));
+  const listedSkillVersionIds = new Set(
+    skills.flatMap((skill) => skill.versionIds),
+  );
+  const unavailableSkillBindings = skillsLoaded
+    ? [
+        ...skillIds
+          .filter((id) => !listedSkillIds.has(id))
+          .map((id) => ({ followed: true, id })),
+        ...skillVersionIds
+          .filter((id) => !listedSkillVersionIds.has(id))
+          .map((id) => ({ followed: false, id })),
+      ]
+    : [];
+  for (const binding of unavailableSkillBindings)
+    validation.push(
+      `A ${binding.followed ? "followed Skill" : "pinned Skill version"} is no longer available (${binding.id}). Remove it from the Skills section before publishing.`,
     );
   const followedSkillCount = skillIds.length;
   const boundSkillCount = skillVersionIds.length + followedSkillCount;
@@ -1666,6 +1729,49 @@ function AgentEditor({
           }
           actions={<Link to="/skills">Manage Skills</Link>}
         >
+          {unavailableSkillBindings.length > 0 ? (
+            <ul
+              className="delegate-list"
+              aria-label="Unavailable Skill bindings"
+            >
+              {unavailableSkillBindings.map((binding) => (
+                <li
+                  className="delegate-row"
+                  key={`${binding.followed ? "skill" : "version"}:${binding.id}`}
+                >
+                  <div className="delegate-row-main">
+                    <strong>
+                      {binding.followed
+                        ? "Followed Skill unavailable"
+                        : "Pinned Skill version unavailable"}
+                    </strong>
+                    <span className="delegate-row-sub delegate-row-sub--warn">
+                      This Skill is no longer in the project, so a new version
+                      cannot bind it. <span className="mono">{binding.id}</span>
+                    </span>
+                  </div>
+                  <div className="delegate-row-actions">
+                    <IconButton
+                      label={`Remove unavailable Skill binding ${binding.id}`}
+                      title="Remove binding"
+                      disabled={!isLatest}
+                      onClick={() =>
+                        binding.followed
+                          ? setSkillIds((current) =>
+                              current.filter((id) => id !== binding.id),
+                            )
+                          : setSkillVersionIds((current) =>
+                              current.filter((id) => id !== binding.id),
+                            )
+                      }
+                    >
+                      <Trash2 size={14} aria-hidden="true" />
+                    </IconButton>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : null}
           {skills.length === 0 ? (
             <EmptyState
               icon="◇"
@@ -1962,6 +2068,12 @@ function AgentEditor({
                       const pinnedLatest =
                         !followed &&
                         candidate?.latestVersionId === delegate.agentVersionId;
+                      const followable =
+                        followed ||
+                        pinnedLatest ||
+                        (candidate !== undefined &&
+                          versionOwners.get(delegate.agentVersionId ?? "") ===
+                            candidate.id);
                       const published =
                         candidate?.status === "published" &&
                         candidate.version != null &&
@@ -2073,7 +2185,9 @@ function AgentEditor({
                                       ? `Pinned v${candidate.version}`
                                       : "Pinned"}
                                 </option>
-                                <option value="latest">Latest version</option>
+                                <option value="latest" disabled={!followable}>
+                                  Latest version
+                                </option>
                               </Select>
                             </Field>
                             <IconButton

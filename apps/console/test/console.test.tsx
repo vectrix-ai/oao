@@ -4458,6 +4458,114 @@ describe("management console", () => {
     ]);
   });
 
+  it("lets a removed followed Skill be dropped before publishing", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const coordinatorId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const base = (await api.getAgent(coordinatorId)).versions[0]!.config;
+    await api.publishAgentVersion(coordinatorId, {
+      ...base,
+      skillVersionIds: [],
+      skillIds: ["44444444-4444-4444-8444-444444444444"],
+    });
+    await api.deleteSkill("44444444-4444-4444-8444-444444444444");
+    renderConsole(`/agents/${coordinatorId}`, api);
+
+    await openSection(user, "Skills");
+    const unavailable = await screen.findByRole("list", {
+      name: "Unavailable Skill bindings",
+    });
+    expect(
+      within(unavailable).getByText("Followed Skill unavailable"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/A followed Skill is no longer available/u),
+    ).toBeInTheDocument();
+    await user.click(
+      within(unavailable).getByRole("button", {
+        name: "Remove unavailable Skill binding 44444444-4444-4444-8444-444444444444",
+      }),
+    );
+    expect(
+      screen.queryByRole("list", { name: "Unavailable Skill bindings" }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 5")).toBeInTheDocument();
+    const config = (await api.getAgent(coordinatorId)).versions[0]?.config;
+    expect(config?.skillIds).toBeUndefined();
+  });
+
+  it("follows an older pinned delegate only when its agent owns that version", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const coordinatorId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const analystId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const analyst = await api.getAgent(analystId);
+    const analystV5 = analyst.versions[0]!;
+    // The analyst moves on to v6, so the coordinator's pin is an older one.
+    await api.publishAgentVersion(analystId, {
+      ...analystV5.config,
+      systemPrompt: `${analystV5.config.systemPrompt} Version 6.`,
+    });
+    const base = (await api.getAgent(coordinatorId)).versions[0]!.config;
+    await api.publishAgentVersion(coordinatorId, {
+      ...base,
+      delegates: [
+        {
+          key: "document-analyst",
+          description: "Extracts structured facts from uploaded documents.",
+          agentVersionId: analystV5.id,
+          maxParallel: 1,
+        },
+      ],
+    });
+    renderConsole(`/agents/${coordinatorId}`, api);
+    await openSection(user, "Delegates");
+    const own = await screen.findByRole("combobox", {
+      name: "Version of delegate Document analyst",
+    });
+    await waitFor(() =>
+      expect(
+        within(own).getByRole("option", { name: "Latest version" }),
+      ).toBeEnabled(),
+    );
+    await user.selectOptions(own, "latest");
+    expect(own).toHaveValue("latest");
+  });
+
+  it("does not let a reused delegate key redirect an older pin", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const coordinatorId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const base = (await api.getAgent(coordinatorId)).versions[0]!.config;
+    // The pinned version belonged to an agent that is gone; the analyst
+    // now carries the same key.
+    await api.publishAgentVersion(coordinatorId, {
+      ...base,
+      delegates: [
+        {
+          key: "document-analyst",
+          description: "Extracts structured facts from uploaded documents.",
+          agentVersionId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          maxParallel: 1,
+        },
+      ],
+    });
+    renderConsole(`/agents/${coordinatorId}`, api);
+    await openSection(user, "Delegates");
+    const pin = await screen.findByRole("combobox", {
+      name: "Version of delegate Document analyst",
+    });
+    await waitFor(() =>
+      expect(
+        within(pin).getByRole("option", { name: "Latest version" }),
+      ).toBeDisabled(),
+    );
+    expect(pin).toHaveValue("pinned");
+  });
+
   it("refuses followed links the demo API cannot resolve", async () => {
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     const coordinator = await api.getAgent(

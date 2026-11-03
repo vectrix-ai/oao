@@ -7013,14 +7013,16 @@ function registerAgentRoutes(
           dependencies.sandboxSnapshotCatalog,
         );
         await assertAgentToolNamespaceAvailable(tx, actor, config);
-        await assertAgentDelegatesCompatible(tx, actor, undefined, config);
-        await assertFollowedSkillsAvailable(tx, actor, config);
         const response = await dependencies.store.idempotent(tx, actor, {
           scope: "POST:/agents",
           key: idem,
           hash: requestHash(body),
           status: 201,
           execute: async () => {
+            // Checked only for a new request: a retry replays its saved
+            // result even if a delegate or Skill changed since.
+            await assertAgentDelegatesCompatible(tx, actor, undefined, config);
+            await assertFollowedSkillsAvailable(tx, actor, config);
             const agentId = randomUUID();
             const versionId = randomUUID();
             await tx.query(
@@ -7236,13 +7238,6 @@ function registerAgentRoutes(
           dependencies.sandboxSnapshotCatalog,
         );
         await assertAgentToolNamespaceAvailable(tx, actor, config);
-        await assertAgentDelegatesCompatible(
-          tx,
-          actor,
-          c.req.param("agentId"),
-          config,
-        );
-        await assertFollowedSkillsAvailable(tx, actor, config);
         // Locked: a concurrent delete waits here and, once this publish
         // commits, archives the definition together with the new version.
         const live = await tx.query(
@@ -7259,6 +7254,15 @@ function registerAgentRoutes(
           hash: requestHash(body),
           status: 201,
           execute: async () => {
+            // Checked only for a new request: a retry replays its saved
+            // result even if a delegate or Skill changed since.
+            await assertAgentDelegatesCompatible(
+              tx,
+              actor,
+              c.req.param("agentId"),
+              config,
+            );
+            await assertFollowedSkillsAvailable(tx, actor, config);
             if (config.mcpBindings.length > 0)
               await lockMcpBindings(tx, actor.organizationId);
             const result = await tx.query(
