@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/vectrix-ai/oao/compare/v0.11.0...v0.12.0) (2026-11-03)
+
+
+### Features
+
+* let delegates and Skills follow the latest published version (VEC-2358) ([#54](https://github.com/vectrix-ai/oao/issues/54)) ([aad2ef2](https://github.com/vectrix-ai/oao/commit/aad2ef240c215f98773f555655d2f9f44ba2b8fb))
+
 ## [0.11.0](https://github.com/vectrix-ai/oao/compare/v0.10.0...v0.11.0) (2026-11-01)
 
 
