@@ -4694,6 +4694,91 @@ describe("management console", () => {
     expect(within(rows[0]!).getByText("pinned-analyst")).toBeInTheDocument();
   });
 
+  it("follows an older pin with a custom key once its owner is found", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const coordinatorId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const analystId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const analystV5 = (await api.getAgent(analystId)).versions[0]!;
+    await api.publishAgentVersion(analystId, {
+      ...analystV5.config,
+      systemPrompt: `${analystV5.config.systemPrompt} Version 6.`,
+    });
+    const base = (await api.getAgent(coordinatorId)).versions[0]!.config;
+    await api.publishAgentVersion(coordinatorId, {
+      ...base,
+      delegates: [
+        {
+          // A key of its own, matching no agent's key.
+          key: "extract",
+          description: "Extracts structured facts from uploaded documents.",
+          agentVersionId: analystV5.id,
+          maxParallel: 1,
+        },
+      ],
+    });
+    renderConsole(`/agents/${coordinatorId}`, api);
+    await openSection(user, "Delegates");
+    const pin = await screen.findByRole("combobox", {
+      name: "Version of delegate Document analyst",
+    });
+    await waitFor(() =>
+      expect(
+        within(pin).getByRole("option", { name: "Latest version" }),
+      ).toBeEnabled(),
+    );
+    await user.selectOptions(pin, "latest");
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 5")).toBeInTheDocument();
+    expect(
+      (await api.getAgent(coordinatorId)).versions[0]?.config.delegates,
+    ).toEqual([
+      {
+        key: "extract",
+        description: "Extracts structured facts from uploaded documents.",
+        agentId: analystId,
+        maxParallel: 1,
+      },
+    ]);
+  });
+
+  it("keeps a pinned delegate usable after its agent is deleted", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const coordinatorId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const analystId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const analystV5 = (await api.getAgent(analystId)).versions[0]!;
+    const base = (await api.getAgent(coordinatorId)).versions[0]!.config;
+    await api.publishAgentVersion(coordinatorId, {
+      ...base,
+      delegates: [
+        {
+          key: "document-analyst",
+          description: "Extracts structured facts from uploaded documents.",
+          agentVersionId: analystV5.id,
+          maxParallel: 1,
+        },
+      ],
+    });
+    await api.deleteAgent(analystId);
+    const session = await api.createSession({
+      agentId: coordinatorId,
+      title: "Pinned after delete",
+      initialMessage: "Check the shipment.",
+    });
+    const detail = await api.getSession(session.id);
+    expect(detail.resolvedVersions?.agentVersions[0]?.delegates).toEqual([
+      {
+        key: "document-analyst",
+        agentId: analystId,
+        agentVersionId: analystV5.id,
+        version: 5,
+        followsLatest: false,
+      },
+    ]);
+  });
+
   it("refuses followed links the demo API cannot resolve", async () => {
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     const coordinator = await api.getAgent(

@@ -550,6 +550,26 @@ test(
           ]),
           /followed Skill is missing, unavailable/u,
         );
+        for (const [agentId, label] of [
+          [removed.id, "removed"],
+          [unpublishedId, "unpublished"],
+        ] as const)
+          await assert.rejects(
+            pool.query(
+              "SELECT oao.publish_agent_version($1,$2,$3,$4,$5,$6,$7)",
+              [
+                principal.organizationId,
+                principal.projectId,
+                coordinator.id,
+                randomUUID(),
+                config({ delegates: [{ key: "gone", agentId }] }),
+                Buffer.alloc(32, label === "removed" ? 4 : 5),
+                principal.id,
+              ],
+            ),
+            /followed delegate agent is missing, removed, or has no published version/u,
+            label,
+          );
         const shape = await pool.query<{ valid: boolean }>(
           "SELECT oao.is_valid_agent_publication_config_with_mcp($1) AS valid",
           [

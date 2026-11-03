@@ -245,19 +245,27 @@ function delegateTarget(delegate: AgentDelegate): string {
 
 /**
  * The roster entry a delegate links to. A followed delegate names its agent;
- * a pinned one is matched by version, and an older pin falls back to the
- * delegate key, which defaults to the child agent's key.
+ * a pinned one is matched by version: the agent's latest, or an older one
+ * whose owner is known. An older pin whose owner is not known yet falls back
+ * to the delegate key, which defaults to the child agent's key; that match
+ * is for display only and never lets the delegate follow the agent.
  */
 function delegateCandidate(
   delegate: AgentDelegate,
   candidates: readonly AgentSummary[],
+  versionOwners: ReadonlyMap<string, string> = new Map(),
 ): AgentSummary | undefined {
   if (delegate.agentId !== undefined)
     return candidates.find((item) => item.id === delegate.agentId);
+  const owner = versionOwners.get(delegate.agentVersionId);
   return (
     candidates.find(
       (item) => item.latestVersionId === delegate.agentVersionId,
-    ) ?? candidates.find((item) => item.key === delegate.key)
+    ) ??
+    (owner === undefined
+      ? undefined
+      : candidates.find((item) => item.id === owner)) ??
+    candidates.find((item) => item.key === delegate.key)
   );
 }
 
@@ -1211,26 +1219,19 @@ function AgentEditor({
   const [skillIds, setSkillIds] = useState(baseConfig.skillIds ?? []);
   const [mcpBindings, setMcpBindings] = useState(baseConfig.mcpBindings ?? []);
   const [delegates, setDelegates] = useState(baseConfig.delegates ?? []);
-  // An older pin is shown under the agent its key matches. Following that
-  // agent instead needs the pinned version confirmed as the agent's own, so a
-  // key another agent reused cannot redirect the delegate.
-  const olderPinAgentIds = [
-    ...new Set(
-      delegates.flatMap((delegate) => {
-        if (delegate.agentId !== undefined) return [];
-        if (
-          availableAgents.some(
-            (item) => item.latestVersionId === delegate.agentVersionId,
-          )
-        )
-          return [];
-        const candidate = availableAgents.find(
-          (item) => item.key === delegate.key,
-        );
-        return candidate ? [candidate.id] : [];
-      }),
-    ),
-  ];
+  // An older pin's owner is found by its version, among every agent's
+  // versions: the delegate key may be custom, or reused by another agent.
+  // Following an agent needs that owner confirmed.
+  const hasOlderPins = delegates.some(
+    (delegate) =>
+      delegate.agentId === undefined &&
+      !availableAgents.some(
+        (item) => item.latestVersionId === delegate.agentVersionId,
+      ),
+  );
+  const olderPinAgentIds = hasOlderPins
+    ? availableAgents.map((item) => item.id)
+    : [];
   const olderPinAgents = useQueries({
     queries: olderPinAgentIds.map((id) => ({
       queryKey: ["agent", id],
@@ -1450,7 +1451,7 @@ function AgentEditor({
   );
   for (const delegate of duplicateDelegates)
     validation.push(
-      `${delegateCandidate(delegate, availableAgents)?.name ?? delegate.key} is linked twice the same way. Remove one link, or pin one and let the other follow the latest version.`,
+      `${delegateCandidate(delegate, availableAgents, versionOwners)?.name ?? delegate.key} is linked twice the same way. Remove one link, or pin one and let the other follow the latest version.`,
     );
   // A removed Skill leaves every list, but a binding to it stays in this
   // version's config; show it so it can be removed before publishing.
@@ -2074,6 +2075,7 @@ function AgentEditor({
                       const candidate = delegateCandidate(
                         delegate,
                         availableAgents,
+                        versionOwners,
                       );
                       const name = candidate?.name ?? delegate.key;
                       const pinnedLatest =

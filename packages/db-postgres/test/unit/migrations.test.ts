@@ -1007,6 +1007,11 @@ test("followed delegates and Skills keep pinned links and freeze per session", a
     /latest\.id=skill\.latest_version_id[\s\S]*?lifecycle\.status='active'[\s\S]*?skill\.disabled_at IS NULL[\s\S]*?skill\.archived_at IS NULL/u,
   );
   assert.match(sql, /a Skill is either pinned or followed, not both/u);
+  // A followed agent must be live and published to be linked.
+  assert.match(
+    sql,
+    /followed\.archived_at IS NOT NULL\s+OR followed\.latest_version_id IS NULL/u,
+  );
   // The per-session record is append-only, tenant-scoped, and goes with
   // its session in a project purge.
   assert.match(sql, /CREATE TABLE oao\.session_version_resolutions/u);

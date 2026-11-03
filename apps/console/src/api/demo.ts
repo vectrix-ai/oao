@@ -1313,6 +1313,11 @@ export interface DemoApiOptions {
 
 export class DemoConsoleApi implements ConsoleApi {
   #agents = structuredClone(agentsSeed);
+  /**
+   * Deleted agents leave every list, but their immutable versions stay
+   * pinnable, as the API archives the definition and keeps its versions.
+   */
+  #deletedAgents: AgentDetail[] = [];
   #skills = structuredClone(skillsSeed);
   #mcpServers: McpServer[] = [];
   #mcpCredentials: McpCredential[] = [];
@@ -1498,7 +1503,7 @@ export class DemoConsoleApi implements ConsoleApi {
     this.#guard();
     const index = this.#agents.findIndex((agent) => agent.id === id);
     if (index === -1) throw new Error("Agent not found");
-    this.#agents.splice(index, 1);
+    this.#deletedAgents.push(...this.#agents.splice(index, 1));
   }
 
   async publishAgentVersion(id: string, config: AgentVersionConfig) {
@@ -1557,7 +1562,8 @@ export class DemoConsoleApi implements ConsoleApi {
       const version = agent ? demoPublishedVersion(agent) : undefined;
       return agent && version ? { agent, version } : undefined;
     }
-    for (const agent of this.#agents) {
+    // A pinned version stays usable after its agent is deleted.
+    for (const agent of [...this.#agents, ...this.#deletedAgents]) {
       const version = agent.versions.find(
         (item) => item.id === delegate.agentVersionId,
       );

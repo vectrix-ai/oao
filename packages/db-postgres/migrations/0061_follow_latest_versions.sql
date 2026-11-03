@@ -210,10 +210,13 @@ $$;
 -- 3. Publication checks followed Skills against their latest version.
 --------------------------------------------------------------------------------
 
--- Matches migration 0037, plus followed Skills: each must be enabled, not
+-- Matches migration 0037, plus followed links. A followed agent must not be
+-- removed and must have a published version (the delegate trigger then
+-- checks that version's sandbox). A followed Skill must be enabled, not
 -- removed, and have an active latest version; a Skill is pinned or followed,
 -- not both; and names stay unique across pinned versions and the latest
--- versions of followed Skills.
+-- versions of followed Skills. Configuration restore inserts versions
+-- directly and keeps removed agents' and Skills' links as they were.
 CREATE OR REPLACE FUNCTION oao.publish_agent_version(
   p_organization_id uuid,
   p_project_id uuid,
@@ -288,6 +291,17 @@ BEGIN
       AND skill.disabled_at IS NULL
       AND skill.archived_at IS NULL
   ) THEN RAISE EXCEPTION 'agent skill version is missing or unavailable' USING ERRCODE='22023'; END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(COALESCE(p_config->'delegates','[]'::jsonb)) delegate
+    LEFT JOIN oao.agent_definitions followed
+      ON followed.organization_id=p_organization_id AND followed.project_id=p_project_id
+     AND followed.id=(delegate->>'agentId')::uuid
+    WHERE delegate ? 'agentId'
+      AND (followed.id IS NULL OR followed.archived_at IS NOT NULL
+           OR followed.latest_version_id IS NULL)
+  ) THEN RAISE EXCEPTION 'followed delegate agent is missing, removed, or has no published version' USING ERRCODE='22023'; END IF;
 
   SELECT jsonb_array_length(COALESCE(p_config->'skillIds','[]'::jsonb))
     INTO requested_followed_skill_count;
