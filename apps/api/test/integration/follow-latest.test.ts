@@ -286,6 +286,23 @@ test(
         );
         const detail = await sessionDetail(session.id);
         assert.deepEqual(detail.resolvedVersions, session.resolvedVersions);
+        // A version ID in another spelling resolves to the stored one.
+        const byVersion = await app.request(
+          `${projectPath}/sessions`,
+          write({
+            agentVersionId: coordinator.versionId.toUpperCase(),
+            initialMessage: "Start.",
+          }),
+        );
+        assert.equal(byVersion.status, 201, await byVersion.clone().text());
+        assert.equal(
+          (
+            (await byVersion.json()) as {
+              resolvedVersions: SessionVersionResolution;
+            }
+          ).resolvedVersions.rootAgentVersionId,
+          coordinator.versionId,
+        );
         assert.deepEqual(
           detail.skills.map((bound) => bound.skillVersionId),
           [skill.versionId],

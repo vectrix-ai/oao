@@ -7536,8 +7536,8 @@ function registerRunRoutes(
                   "conflict",
                   "Agent does not have a published version",
                 );
-              const owner = await tx.query(
-                `SELECT 1 FROM oao.agent_versions v
+              const owner = await tx.query<{ id: string }>(
+                `SELECT v.id FROM oao.agent_versions v
                  JOIN oao.agent_definitions d ON d.organization_id=v.organization_id
                    AND d.project_id=v.project_id AND d.id=v.agent_definition_id
                  WHERE v.organization_id=$1 AND v.project_id=$2 AND v.id=$3
@@ -7545,8 +7545,11 @@ function registerRunRoutes(
                  FOR SHARE OF d`,
                 [actor.organizationId, actor.projectId, agentVersionId],
               );
-              if (!owner.rowCount)
+              if (!owner.rows[0])
                 throw new HttpApiError("not_found", "Agent version not found");
+              // The stored, lowercase form, so the version resolution and
+              // its lookups compare one spelling of the ID.
+              agentVersionId = owner.rows[0].id;
               await assertAgentCanInspectRunFiles(
                 tx,
                 actor,
