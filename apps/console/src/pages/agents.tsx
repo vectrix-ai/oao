@@ -20,6 +20,7 @@ import { useApi } from "../api/context";
 import { listAllPages } from "../api/paginate";
 import type {
   AgentDelegate,
+  AgentDetail,
   AgentSummary,
   AgentVersionConfig,
   HarnessOperationDefinition,
@@ -1219,34 +1220,59 @@ function AgentEditor({
   const [skillIds, setSkillIds] = useState(baseConfig.skillIds ?? []);
   const [mcpBindings, setMcpBindings] = useState(baseConfig.mcpBindings ?? []);
   const [delegates, setDelegates] = useState(baseConfig.delegates ?? []);
-  // An older pin's owner is found by its version, among every agent's
-  // versions: the delegate key may be custom, or reused by another agent.
-  // Following an agent needs that owner confirmed.
-  const hasOlderPins = delegates.some(
+  // An older pin's owner is found by its version. The agent its key matches
+  // is checked first; only a pin it does not own (a custom key, or one that
+  // another agent reused) loads the other agents' versions. Following an
+  // agent needs that owner confirmed.
+  const olderPins = delegates.filter(
     (delegate) =>
       delegate.agentId === undefined &&
       !availableAgents.some(
         (item) => item.latestVersionId === delegate.agentVersionId,
       ),
   );
-  const olderPinAgentIds = hasOlderPins
-    ? availableAgents.map((item) => item.id)
-    : [];
-  const olderPinAgents = useQueries({
-    queries: olderPinAgentIds.map((id) => ({
-      queryKey: ["agent", id],
-      queryFn: () => api.getAgent(id),
-    })),
+  const keyMatchedAgentIds = [
+    ...new Set(
+      olderPins.flatMap((delegate) => {
+        const match = availableAgents.find((item) => item.key === delegate.key);
+        return match ? [match.id] : [];
+      }),
+    ),
+  ];
+  const agentVersionQuery = (id: string) => ({
+    queryKey: ["agent", id],
+    queryFn: () => api.getAgent(id),
   });
-  const versionOwners = new Map(
-    olderPinAgents.flatMap((result) =>
+  const keyMatchedAgents = useQueries({
+    queries: keyMatchedAgentIds.map(agentVersionQuery),
+  });
+  const ownersOf = (
+    results: readonly { readonly data?: AgentDetail | undefined }[],
+  ): (readonly [string, string])[] =>
+    results.flatMap((result) =>
       result.data
         ? result.data.versions.map(
-            (version) => [version.id, result.data.id] as const,
+            (version) => [version.id, result.data!.id] as const,
           )
         : [],
-    ),
-  );
+    );
+  const keyMatchedOwners = new Map(ownersOf(keyMatchedAgents));
+  const otherAgentIds =
+    keyMatchedAgents.every((result) => !result.isPending) &&
+    olderPins.some(
+      (delegate) => !keyMatchedOwners.has(delegate.agentVersionId ?? ""),
+    )
+      ? availableAgents
+          .map((item) => item.id)
+          .filter((id) => !keyMatchedAgentIds.includes(id))
+      : [];
+  const otherAgents = useQueries({
+    queries: otherAgentIds.map(agentVersionQuery),
+  });
+  const versionOwners = new Map<string, string>([
+    ...keyMatchedOwners,
+    ...ownersOf(otherAgents),
+  ]);
   const [delegatePicker, setDelegatePicker] = useState(false);
   const [oaoTools, setOaoTools] = useState(baseConfig.oaoTools);
   const [tools, setTools] = useState<readonly ToolDefinition[]>(
