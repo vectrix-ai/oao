@@ -4566,6 +4566,87 @@ describe("management console", () => {
     expect(pin).toHaveValue("pinned");
   });
 
+  it("finds bound Skills past the first page of the Skill list", async () => {
+    const user = userEvent.setup();
+    // One Skill per page, as a large project would page them.
+    class PagedSkillsApi extends DemoConsoleApi {
+      override async listSkills(
+        filters: Parameters<DemoConsoleApi["listSkills"]>[0],
+      ) {
+        const all = await super.listSkills({});
+        const page = filters.page ?? 1;
+        return {
+          ...all,
+          data: all.data.slice(page - 1, page),
+          page,
+          pageSize: 1,
+          total: all.data.length,
+        };
+      }
+    }
+    const api = new PagedSkillsApi({ eventDelayMs: 60_000 });
+    const coordinatorId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const base = (await api.getAgent(coordinatorId)).versions[0]!.config;
+    await api.publishAgentVersion(coordinatorId, {
+      ...base,
+      skillVersionIds: ["44444444-4444-4444-8444-444444444447"],
+      skillIds: ["44444444-4444-4444-8444-444444444444"],
+    });
+    renderConsole(`/agents/${coordinatorId}`, api);
+    await openSection(user, "Skills");
+    expect(
+      await screen.findByRole("checkbox", {
+        name: /Shipment Intake · latest version/u,
+      }),
+    ).toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: /Carrier Codes · v1/u }),
+    ).toBeChecked();
+    expect(
+      screen.queryByRole("list", { name: "Unavailable Skill bindings" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("lets a followed Skill whose latest version was deprecated be removed", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const coordinatorId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const base = (await api.getAgent(coordinatorId)).versions[0]!.config;
+    await api.publishAgentVersion(coordinatorId, {
+      ...base,
+      skillVersionIds: [],
+      skillIds: ["44444444-4444-4444-8444-444444444444"],
+    });
+    await api.updateSkillVersionLifecycle(
+      "44444444-4444-4444-8444-444444444444",
+      "44444444-4444-4444-8444-444444444445",
+      "deprecated",
+    );
+    renderConsole(`/agents/${coordinatorId}`, api);
+    await openSection(user, "Skills");
+    const bound = await screen.findByRole("checkbox", {
+      name: /Shipment Intake · latest version/u,
+    });
+    expect(bound).toBeEnabled();
+    // Pinning would take the deprecated latest version, so only removal
+    // repairs the binding.
+    expect(
+      within(
+        screen.getByRole("combobox", {
+          name: "Version of Skill Shipment Intake",
+        }),
+      ).getByRole("option", { name: "Pinned v1" }),
+    ).toBeDisabled();
+    await user.click(bound);
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 5")).toBeInTheDocument();
+    const config = (await api.getAgent(coordinatorId)).versions[0]?.config;
+    expect(config?.skillIds).toBeUndefined();
+    expect(config?.skillVersionIds).toEqual([]);
+  });
+
   it("refuses followed links the demo API cannot resolve", async () => {
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     const coordinator = await api.getAgent(

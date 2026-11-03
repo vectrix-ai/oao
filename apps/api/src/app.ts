@@ -1532,6 +1532,25 @@ function sharedSandboxPolicy(
   });
 }
 
+/**
+ * A delegate that follows an agent turns that agent's next publication into
+ * a change of this roster, so two concurrent publications could each close
+ * half of a cycle. Rosters are checked one at a time per project. Taken
+ * before any agent row is locked: a followed delegate's foreign key waits on
+ * the followed agent's row, which its own publication may hold.
+ */
+async function lockDelegateRosters(
+  transaction: PgClient,
+  actor: Principal,
+  config: ManagedAgentPublicationConfig,
+): Promise<void> {
+  if (config.delegates.length === 0) return;
+  await transaction.query(
+    "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+    [`oao:agent-delegates:${actor.organizationId}:${actor.projectId}`],
+  );
+}
+
 async function assertAgentDelegatesCompatible(
   transaction: PgClient,
   actor: Principal,
@@ -1539,13 +1558,6 @@ async function assertAgentDelegatesCompatible(
   config: ManagedAgentPublicationConfig,
 ): Promise<void> {
   if (config.delegates.length === 0) return;
-  // A delegate that follows an agent turns that agent's next publication
-  // into a change of this roster, so two concurrent publications could each
-  // close half of a cycle. Rosters are checked one at a time per project.
-  await transaction.query(
-    "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
-    [`oao:agent-delegates:${actor.organizationId}:${actor.projectId}`],
-  );
   const versionIds = config.delegates.flatMap((delegate) =>
     "agentVersionId" in delegate ? [delegate.agentVersionId] : [],
   );
@@ -6997,6 +7009,7 @@ function registerAgentRoutes(
         ...(config.oaoTools?.scopes ?? []),
       ],
       async (tx) => {
+        await lockDelegateRosters(tx, actor, config);
         await assertModelPresetApproved(
           tx,
           actor,
@@ -7222,6 +7235,7 @@ function registerAgentRoutes(
         ...(config.oaoTools?.scopes ?? []),
       ],
       async (tx) => {
+        await lockDelegateRosters(tx, actor, config);
         await assertModelPresetApproved(
           tx,
           actor,

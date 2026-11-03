@@ -1073,9 +1073,11 @@ export function AgentDetailPage() {
     queryKey: ["sandbox-providers"],
     queryFn: () => api.listSandboxProviders(),
   });
+  // Every page: the editor tells a bound Skill that was removed from one
+  // that is merely past the first page.
   const skills = useQuery({
-    queryKey: ["skills"],
-    queryFn: () => api.listSkills({}),
+    queryKey: ["skills", "agent-editor"],
+    queryFn: () => listAllPages((page) => api.listSkills({ page })),
   });
   const agents = useQuery({
     queryKey: ["agents", "delegate-roster"],
@@ -1133,7 +1135,7 @@ export function AgentDetailPage() {
       modelPresets={modelPresets.data?.data ?? []}
       sandboxProviders={sandboxProviders.data?.data ?? []}
       sandboxProvidersError={sandboxProviders.error}
-      skills={skills.data?.data ?? []}
+      skills={skills.data ?? []}
       skillsLoaded={skills.isSuccess}
       mcpToolsets={mcpToolsets.data?.data ?? []}
       mcpPolicies={mcpPolicies.data?.data ?? []}
@@ -1815,7 +1817,11 @@ function AgentEditor({
                           : skill.description
                       }
                       checked={checked}
-                      disabled={!isLatest || skill.status !== "active"}
+                      // A new binding needs an active version; an existing
+                      // one can always be removed.
+                      disabled={
+                        !isLatest || (!checked && skill.status !== "active")
+                      }
                       onChange={(event) => {
                         const enabled = event.target.checked;
                         setSkillIds((current) =>
@@ -1860,7 +1866,12 @@ function AgentEditor({
                             });
                           }}
                         >
-                          <option value="pinned">
+                          <option
+                            value="pinned"
+                            // Pinning from a followed binding takes the latest
+                            // version, which must be usable.
+                            disabled={followed && skill.status !== "active"}
+                          >
                             {olderPin
                               ? "Pinned older version"
                               : `Pinned v${skill.version}`}
