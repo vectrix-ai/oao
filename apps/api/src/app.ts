@@ -81,6 +81,10 @@ import { McpAdminService, lockMcpBindings } from "./mcp.js";
 import { registerOaoMcpRoute } from "./oao-mcp.js";
 import { registerConfigurationBackupRoutes } from "./configuration-backup.js";
 import {
+  bindSessionVersions,
+  resolveSessionVersions,
+} from "./version-resolution.js";
+import {
   decodeListCursor,
   encodeListCursor,
   idempotencyKey,
@@ -1483,7 +1487,28 @@ function parseAgentConfig(value: unknown): ManagedAgentPublicationConfig {
     );
   }
   assertPublicPayload(config as Readonly<Record<string, PublicValue>>);
-  return config;
+  return withStoredFollowedIds(config);
+}
+
+/**
+ * Followed agent and Skill IDs in the lowercase form PostgreSQL returns, so
+ * publication checks, the stored config, and the runtime's comparison with a
+ * session's resolved versions all use one spelling.
+ */
+function withStoredFollowedIds(
+  config: ManagedAgentPublicationConfig,
+): ManagedAgentPublicationConfig {
+  return {
+    ...config,
+    ...(config.skillIds
+      ? { skillIds: config.skillIds.map((id) => id.toLowerCase()) }
+      : {}),
+    delegates: config.delegates.map((delegate) =>
+      "agentId" in delegate
+        ? { ...delegate, agentId: delegate.agentId.toLowerCase() }
+        : delegate,
+    ),
+  };
 }
 
 async function assertAgentToolNamespaceAvailable(
@@ -1528,6 +1553,25 @@ function sharedSandboxPolicy(
   });
 }
 
+/**
+ * A delegate that follows an agent turns that agent's next publication into
+ * a change of this roster, so two concurrent publications could each close
+ * half of a cycle. Rosters are checked one at a time per project. Taken
+ * before any agent row is locked: a followed delegate's foreign key waits on
+ * the followed agent's row, which its own publication may hold.
+ */
+async function lockDelegateRosters(
+  transaction: PgClient,
+  actor: Principal,
+  config: ManagedAgentPublicationConfig,
+): Promise<void> {
+  if (config.delegates.length === 0) return;
+  await transaction.query(
+    "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+    [`oao:agent-delegates:${actor.organizationId}:${actor.projectId}`],
+  );
+}
+
 async function assertAgentDelegatesCompatible(
   transaction: PgClient,
   actor: Principal,
@@ -1535,8 +1579,11 @@ async function assertAgentDelegatesCompatible(
   config: ManagedAgentPublicationConfig,
 ): Promise<void> {
   if (config.delegates.length === 0) return;
-  const versionIds = config.delegates.map(
-    (delegate) => delegate.agentVersionId,
+  const versionIds = config.delegates.flatMap((delegate) =>
+    "agentVersionId" in delegate ? [delegate.agentVersionId] : [],
+  );
+  const followedIds = config.delegates.flatMap((delegate) =>
+    "agentId" in delegate ? [delegate.agentId] : [],
   );
   const result = await transaction.query<{
     id: string;
@@ -1557,7 +1604,54 @@ async function assertAgentDelegatesCompatible(
     [actor.organizationId, actor.projectId, versionIds],
   );
   const byId = new Map(result.rows.map((row) => [row.id, row]));
+  const followed = await transaction.query<{
+    id: string;
+    name: string;
+    latest_version_id: string | null;
+    version: number | null;
+    sandbox: ManagedAgentPublicationConfig["sandbox"] | null;
+  }>(
+    `SELECT definition.id,definition.name,definition.latest_version_id,
+            latest.version,latest.config->'sandbox' AS sandbox
+       FROM oao.agent_definitions definition
+       LEFT JOIN oao.agent_versions latest
+         ON latest.organization_id=definition.organization_id
+        AND latest.project_id=definition.project_id
+        AND latest.id=definition.latest_version_id
+      WHERE definition.organization_id=$1 AND definition.project_id=$2
+        AND definition.archived_at IS NULL
+        AND definition.id=ANY($3::uuid[])`,
+    [actor.organizationId, actor.projectId, followedIds],
+  );
+  const followedById = new Map(followed.rows.map((row) => [row.id, row]));
   for (const delegate of config.delegates) {
+    if ("agentId" in delegate) {
+      if (delegate.agentId === agentDefinitionId)
+        throw new HttpApiError(
+          "bad_request",
+          `Delegate ${delegate.key} cannot follow the coordinator agent itself`,
+        );
+      const agent = followedById.get(delegate.agentId);
+      if (!agent)
+        throw new HttpApiError(
+          "bad_request",
+          `Delegate ${delegate.key} follows an agent that is not available in this project`,
+        );
+      if (agent.latest_version_id === null || agent.sandbox === null)
+        throw new HttpApiError(
+          "bad_request",
+          `Delegate ${delegate.key} follows agent ${agent.name}, which has no published version`,
+        );
+      if (
+        sharedSandboxPolicy(agent.sandbox) !==
+        sharedSandboxPolicy(config.sandbox)
+      )
+        throw new HttpApiError(
+          "bad_request",
+          `Delegate ${agent.name} must use the same sandbox enabled state, provider, snapshot, and network policy as the coordinator; its latest version ${agent.version} does not, so publish a compatible child version first`,
+        );
+      continue;
+    }
     const child = byId.get(delegate.agentVersionId);
     if (!child)
       throw new HttpApiError(
@@ -1578,30 +1672,136 @@ async function assertAgentDelegatesCompatible(
       );
   }
   if (agentDefinitionId) {
+    // Followed delegates are walked through their agent's latest version,
+    // and an edge that follows the coordinator closes a cycle through the
+    // version being published.
     const cycle = await transaction.query(
-      `WITH RECURSIVE reachable(agent_version_id) AS (
-         SELECT unnest($3::uuid[])
+      `WITH RECURSIVE reachable(agent_definition_id,agent_version_id) AS (
+         SELECT COALESCE(followed.id,child.agent_definition_id),
+                COALESCE(child.id,followed.latest_version_id)
+           FROM unnest($3::uuid[],$4::uuid[]) AS requested(version_id,agent_id)
+           LEFT JOIN oao.agent_versions child
+             ON child.organization_id=$1 AND child.project_id=$2
+            AND child.id=requested.version_id
+           LEFT JOIN oao.agent_definitions followed
+             ON followed.organization_id=$1 AND followed.project_id=$2
+            AND followed.id=requested.agent_id
          UNION
-         SELECT edge.child_agent_version_id
+         SELECT COALESCE(edge.child_agent_definition_id,child.agent_definition_id),
+                COALESCE(edge.child_agent_version_id,followed.latest_version_id)
            FROM reachable
            JOIN oao.agent_version_delegates edge
              ON edge.organization_id=$1 AND edge.project_id=$2
             AND edge.parent_agent_version_id=reachable.agent_version_id
+           LEFT JOIN oao.agent_versions child
+             ON child.organization_id=edge.organization_id
+            AND child.project_id=edge.project_id
+            AND child.id=edge.child_agent_version_id
+           LEFT JOIN oao.agent_definitions followed
+             ON followed.organization_id=edge.organization_id
+            AND followed.project_id=edge.project_id
+            AND followed.id=edge.child_agent_definition_id
        )
-       SELECT 1
-         FROM reachable
-         JOIN oao.agent_versions version
-           ON version.organization_id=$1 AND version.project_id=$2
-          AND version.id=reachable.agent_version_id
-        WHERE version.agent_definition_id=$4
-        LIMIT 1`,
-      [actor.organizationId, actor.projectId, versionIds, agentDefinitionId],
+       SELECT 1 FROM reachable WHERE agent_definition_id=$5 LIMIT 1`,
+      [
+        actor.organizationId,
+        actor.projectId,
+        config.delegates.map((delegate) =>
+          "agentVersionId" in delegate ? delegate.agentVersionId : null,
+        ),
+        config.delegates.map((delegate) =>
+          "agentId" in delegate ? delegate.agentId : null,
+        ),
+        agentDefinitionId,
+      ],
     );
     if (cycle.rowCount)
       throw new HttpApiError(
         "bad_request",
         "The delegate roster would create an agent cycle",
       );
+  }
+}
+
+/**
+ * Followed Skills must be usable now: present, enabled, with an active latest
+ * version whose name no other bound Skill uses. A later Skill publication is
+ * checked again when a session resolves it.
+ */
+async function assertFollowedSkillsAvailable(
+  transaction: PgClient,
+  actor: Principal,
+  config: ManagedAgentPublicationConfig,
+): Promise<void> {
+  const skillIds = config.skillIds ?? [];
+  if (skillIds.length === 0) return;
+  const followed = await transaction.query<{
+    id: string;
+    display_name: string;
+    disabled: boolean;
+    version: number | null;
+    skill_name: string | null;
+    status: string | null;
+  }>(
+    `SELECT skill.id,skill.display_name,skill.disabled_at IS NOT NULL AS disabled,
+            latest.version,latest.skill_name,lifecycle.status
+       FROM oao.skills skill
+       LEFT JOIN oao.skill_versions latest
+         ON latest.organization_id=skill.organization_id
+        AND latest.project_id=skill.project_id
+        AND latest.id=skill.latest_version_id
+       LEFT JOIN oao.skill_version_lifecycle lifecycle
+         ON lifecycle.organization_id=latest.organization_id
+        AND lifecycle.project_id=latest.project_id
+        AND lifecycle.skill_version_id=latest.id
+      WHERE skill.organization_id=$1 AND skill.project_id=$2
+        AND skill.archived_at IS NULL AND skill.id=ANY($3::uuid[])`,
+    [actor.organizationId, actor.projectId, skillIds],
+  );
+  const pinned = await transaction.query<{
+    skill_id: string;
+    skill_name: string;
+  }>(
+    `SELECT skill_id,skill_name FROM oao.skill_versions
+      WHERE organization_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])`,
+    [actor.organizationId, actor.projectId, config.skillVersionIds],
+  );
+  const byId = new Map(followed.rows.map((row) => [row.id, row]));
+  const pinnedSkills = new Set(pinned.rows.map((row) => row.skill_id));
+  const names = new Set(pinned.rows.map((row) => row.skill_name));
+  for (const skillId of skillIds) {
+    const skill = byId.get(skillId);
+    if (!skill)
+      throw new HttpApiError(
+        "bad_request",
+        "config.skillIds names a Skill that is not available in this project",
+      );
+    if (skill.disabled)
+      throw new HttpApiError(
+        "bad_request",
+        `Skill ${skill.display_name} is disabled and cannot be followed`,
+      );
+    if (skill.version === null || skill.skill_name === null)
+      throw new HttpApiError(
+        "bad_request",
+        `Skill ${skill.display_name} has no published version to follow`,
+      );
+    if (skill.status !== "active")
+      throw new HttpApiError(
+        "bad_request",
+        `Skill ${skill.display_name} cannot be followed while its latest version ${skill.version} is ${skill.status ?? "unavailable"}`,
+      );
+    if (pinnedSkills.has(skillId))
+      throw new HttpApiError(
+        "bad_request",
+        `Skill ${skill.display_name} is both pinned and followed; choose one`,
+      );
+    if (names.has(skill.skill_name))
+      throw new HttpApiError(
+        "bad_request",
+        `Two bound Skills are named ${skill.skill_name}`,
+      );
+    names.add(skill.skill_name);
   }
 }
 
@@ -6822,12 +7022,15 @@ function registerAgentRoutes(
       actor,
       [
         "agent:write",
-        ...(config.skillVersionIds.length ? (["skill:bind"] as const) : []),
+        ...(config.skillVersionIds.length || config.skillIds?.length
+          ? (["skill:bind"] as const)
+          : []),
         ...(config.mcpBindings.length ? (["mcp:bind"] as const) : []),
         // An agent's OAO tools may hold only scopes its publisher holds.
         ...(config.oaoTools?.scopes ?? []),
       ],
       async (tx) => {
+        await lockDelegateRosters(tx, actor, config);
         await assertModelPresetApproved(
           tx,
           actor,
@@ -6844,13 +7047,16 @@ function registerAgentRoutes(
           dependencies.sandboxSnapshotCatalog,
         );
         await assertAgentToolNamespaceAvailable(tx, actor, config);
-        await assertAgentDelegatesCompatible(tx, actor, undefined, config);
         const response = await dependencies.store.idempotent(tx, actor, {
           scope: "POST:/agents",
           key: idem,
           hash: requestHash(body),
           status: 201,
           execute: async () => {
+            // Checked only for a new request: a retry replays its saved
+            // result even if a delegate or Skill changed since.
+            await assertAgentDelegatesCompatible(tx, actor, undefined, config);
+            await assertFollowedSkillsAvailable(tx, actor, config);
             const agentId = randomUUID();
             const versionId = randomUUID();
             await tx.query(
@@ -7042,12 +7248,15 @@ function registerAgentRoutes(
       actor,
       [
         "agent:write",
-        ...(config.skillVersionIds.length ? (["skill:bind"] as const) : []),
+        ...(config.skillVersionIds.length || config.skillIds?.length
+          ? (["skill:bind"] as const)
+          : []),
         ...(config.mcpBindings.length ? (["mcp:bind"] as const) : []),
         // An agent's OAO tools may hold only scopes its publisher holds.
         ...(config.oaoTools?.scopes ?? []),
       ],
       async (tx) => {
+        await lockDelegateRosters(tx, actor, config);
         await assertModelPresetApproved(
           tx,
           actor,
@@ -7064,12 +7273,6 @@ function registerAgentRoutes(
           dependencies.sandboxSnapshotCatalog,
         );
         await assertAgentToolNamespaceAvailable(tx, actor, config);
-        await assertAgentDelegatesCompatible(
-          tx,
-          actor,
-          c.req.param("agentId"),
-          config,
-        );
         // Locked: a concurrent delete waits here and, once this publish
         // commits, archives the definition together with the new version.
         const live = await tx.query(
@@ -7086,6 +7289,15 @@ function registerAgentRoutes(
           hash: requestHash(body),
           status: 201,
           execute: async () => {
+            // Checked only for a new request: a retry replays its saved
+            // result even if a delegate or Skill changed since.
+            await assertAgentDelegatesCompatible(
+              tx,
+              actor,
+              c.req.param("agentId"),
+              config,
+            );
+            await assertFollowedSkillsAvailable(tx, actor, config);
             if (config.mcpBindings.length > 0)
               await lockMcpBindings(tx, actor.organizationId);
             const result = await tx.query(
@@ -7345,8 +7557,8 @@ function registerRunRoutes(
                   "conflict",
                   "Agent does not have a published version",
                 );
-              const owner = await tx.query(
-                `SELECT 1 FROM oao.agent_versions v
+              const owner = await tx.query<{ id: string }>(
+                `SELECT v.id FROM oao.agent_versions v
                  JOIN oao.agent_definitions d ON d.organization_id=v.organization_id
                    AND d.project_id=v.project_id AND d.id=v.agent_definition_id
                  WHERE v.organization_id=$1 AND v.project_id=$2 AND v.id=$3
@@ -7354,14 +7566,25 @@ function registerRunRoutes(
                  FOR SHARE OF d`,
                 [actor.organizationId, actor.projectId, agentVersionId],
               );
-              if (!owner.rowCount)
+              if (!owner.rows[0])
                 throw new HttpApiError("not_found", "Agent version not found");
+              // The stored, lowercase form, so the version resolution and
+              // its lookups compare one spelling of the ID.
+              agentVersionId = owner.rows[0].id;
               await assertAgentCanInspectRunFiles(
                 tx,
                 actor,
                 agentVersionId,
                 files,
               );
+              // Delegates and Skills that follow the latest version resolve
+              // now, once for the whole session tree, so a later publication
+              // never changes what this session runs.
+              const resolvedVersions = await resolveSessionVersions(tx, actor, {
+                rootSessionId: sessionId,
+                rootAgentVersionId: agentVersionId,
+                resolvedAt: new Date().toISOString(),
+              });
               const uploaded = await storeRunFiles(
                 dependencies.runFileStorage,
                 actor,
@@ -7413,24 +7636,17 @@ function registerRunRoutes(
               const run = publicValue(result.rows[0]?.run) as Readonly<
                 Record<string, unknown>
               >;
-              const skillBindings = await tx.query(
-                `INSERT INTO oao.session_skill_bindings (
-                 organization_id,project_id,session_id,agent_version_id,
-                 skill_version_id,skill_name
-               )
-               SELECT organization_id,project_id,$3,agent_version_id,
-                      skill_version_id,skill_name
-               FROM oao.agent_version_skill_bindings
-               WHERE organization_id=$1 AND project_id=$2
-                 AND agent_version_id=$4
-               RETURNING skill_version_id`,
-                [
-                  actor.organizationId,
-                  actor.projectId,
-                  sessionId,
-                  agentVersionId,
-                ],
+              await bindSessionVersions(
+                tx,
+                actor,
+                sessionId,
+                agentVersionId,
+                resolvedVersions,
               );
+              const skillCount =
+                resolvedVersions.agentVersions.find(
+                  (entry) => entry.agentVersionId === agentVersionId,
+                )?.skills.length ?? 0;
               const mcpBindings = await tx.query(
                 `INSERT INTO oao.session_mcp_bindings (
                    organization_id,project_id,session_id,agent_version_id,
@@ -7482,7 +7698,7 @@ function registerRunRoutes(
                 detail: {
                   initialRunId: runId,
                   fileCount: files.length,
-                  skillCount: skillBindings.rowCount ?? 0,
+                  skillCount,
                   mcpBindingCount: mcpBindings.rowCount ?? 0,
                 },
               });
@@ -7493,7 +7709,13 @@ function registerRunRoutes(
                 kind: "admit",
                 payload: { reason: "api_session_created" },
               });
-              return { ...session, run, latestRunId: runId, status: "queued" };
+              return {
+                ...session,
+                run,
+                latestRunId: runId,
+                status: "queued",
+                resolvedVersions,
+              };
             },
           });
           c.header("idempotency-replayed", String(response.replayed));
@@ -7763,9 +7985,17 @@ function registerRunRoutes(
             ORDER BY delegation.created_at,delegation.id`,
         values,
       );
+      const resolution = await tx.query<{ resolution: unknown }>(
+        `SELECT resolution FROM oao.session_version_resolutions
+          WHERE organization_id=$1 AND project_id=$2 AND session_id=$3`,
+        values,
+      );
       return c.json({
         ...session,
         skills: rows(skills),
+        // The exact versions this session tree runs; null for sessions that
+        // started before versions were recorded.
+        resolvedVersions: resolution.rows[0]?.resolution ?? null,
         delegations: rows(delegations),
         runs: rows(runs),
         transcript: rows(transcript),

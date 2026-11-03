@@ -523,10 +523,10 @@ export function SkillsPage() {
           <article>
             <h3>Attach it to an agent</h3>
             <p>
-              An agent version stores exact Skill version IDs. New sessions
-              inherit those bindings automatically, so an older agent version
-              continues using the same Skill version after newer ones are
-              published.
+              An agent version pins an exact Skill version or follows the
+              Skill&apos;s latest published version. A followed Skill resolves
+              when a session starts and stays fixed for that session; a pinned
+              one keeps the same version after newer ones are published.
             </p>
           </article>
           <article>

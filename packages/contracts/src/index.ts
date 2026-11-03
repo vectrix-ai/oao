@@ -1412,20 +1412,54 @@ const SandboxCapabilitiesSchema = v.pipe(
   ),
 );
 
-export const ManagedAgentDelegateSchema = v.strictObject({
-  key: v.pipe(
-    v.string(),
-    v.minLength(1),
-    v.maxLength(64),
-    v.regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u),
+export const ManagedAgentDelegateKeySchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(64),
+  v.regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u),
+);
+const ManagedAgentDelegateDescriptionSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(1_024),
+);
+const ManagedAgentDelegateMaxParallelSchema = v.optional(
+  v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(8)),
+  1,
+);
+
+/** A delegate pinned to one exact, immutable agent version. */
+export const ManagedAgentPinnedDelegateSchema = v.strictObject({
+  key: ManagedAgentDelegateKeySchema,
+  description: ManagedAgentDelegateDescriptionSchema,
+  agentVersionId: v.pipe(
+    IdSchema,
+    v.description("Pins this exact agent version."),
   ),
-  description: v.pipe(v.string(), v.minLength(1), v.maxLength(1_024)),
-  agentVersionId: IdSchema,
-  maxParallel: v.optional(
-    v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(8)),
-    1,
-  ),
+  maxParallel: ManagedAgentDelegateMaxParallelSchema,
 });
+
+/**
+ * A delegate that follows an agent: each new session uses the agent's latest
+ * published version, resolved when the session starts and fixed for it.
+ */
+export const ManagedAgentFollowingDelegateSchema = v.strictObject({
+  key: ManagedAgentDelegateKeySchema,
+  description: ManagedAgentDelegateDescriptionSchema,
+  agentId: v.pipe(
+    IdSchema,
+    v.description(
+      "Follows this agent's latest published version, resolved when a session starts.",
+    ),
+  ),
+  maxParallel: ManagedAgentDelegateMaxParallelSchema,
+});
+
+/** A delegate names exactly one of agentVersionId (pinned) or agentId (latest). */
+export const ManagedAgentDelegateSchema = v.union([
+  ManagedAgentPinnedDelegateSchema,
+  ManagedAgentFollowingDelegateSchema,
+]);
 
 /**
  * The tools of OAO's own MCP server: what each does, the scopes a caller
@@ -1513,7 +1547,7 @@ export const OAO_MCP_TOOL_CATALOG: readonly OaoMcpToolDescriptor[] = [
     name: "get_session",
     title: "Get session",
     description:
-      "Reads a session: its agent, runs, full transcript, timeline, delegations, and pending work. includeDebug adds model invocations, tool calls, and sandbox detail.",
+      "Reads a session: its agent, runs, full transcript, timeline, delegations, pending work, and resolvedVersions, the exact agent, delegate, and Skill versions its tree runs. includeDebug adds model invocations, tool calls, and sandbox detail.",
     scopes: ["session:read"],
     readOnly: true,
   },
@@ -1788,6 +1822,14 @@ export const ManagedAgentOaoToolsSchema = v.strictObject({
   approval: v.optional(v.picklist(["never", "always"]), "always"),
 });
 
+function delegateTarget(
+  delegate: v.InferOutput<typeof ManagedAgentDelegateSchema>,
+): string {
+  return "agentId" in delegate
+    ? `agent:${delegate.agentId}`
+    : `version:${delegate.agentVersionId}`;
+}
+
 const ManagedAgentDelegatesSchema = v.pipe(
   v.array(ManagedAgentDelegateSchema),
   v.maxLength(32),
@@ -1795,9 +1837,32 @@ const ManagedAgentDelegatesSchema = v.pipe(
     (delegates) =>
       new Set(delegates.map((delegate) => delegate.key)).size ===
         delegates.length &&
-      new Set(delegates.map((delegate) => delegate.agentVersionId)).size ===
-        delegates.length,
-    "delegate keys and agent versions must be unique",
+      new Set(delegates.map(delegateTarget)).size === delegates.length,
+    "delegate keys, agent versions, and followed agents must be unique",
+  ),
+);
+
+/** A session's snapshot carries each delegate resolved to an exact version. */
+const ManagedAgentResolvedDelegatesSchema = v.pipe(
+  v.array(ManagedAgentPinnedDelegateSchema),
+  v.maxLength(32),
+  v.check(
+    (delegates) =>
+      new Set(delegates.map((delegate) => delegate.key)).size ===
+      delegates.length,
+    "delegate keys must be unique",
+  ),
+);
+
+const ManagedAgentSkillIdsSchema = v.pipe(
+  v.array(IdSchema),
+  v.maxLength(64),
+  v.check(
+    (ids) => new Set(ids).size === ids.length,
+    "followed Skills must be unique",
+  ),
+  v.description(
+    "Skills to follow at their latest published version, resolved when a session starts. skillVersionIds pins exact versions instead.",
   ),
 );
 
@@ -1819,6 +1884,9 @@ export const ManagedAgentPublicationConfigSchema = v.pipe(
       ),
     ),
     skillVersionIds: v.optional(v.array(IdSchema), []),
+    // Optional without a default, so a config that pins every Skill keeps
+    // the exact shape, and content hash, it had before Skills could follow.
+    skillIds: v.optional(ManagedAgentSkillIdsSchema),
     harnessOperations: v.optional(ManagedHarnessOperationsSchema, []),
     mcpBindings: v.optional(
       v.pipe(
@@ -1865,6 +1933,11 @@ export const ManagedAgentPublicationConfigSchema = v.pipe(
       !config.sandbox.enabled || config.sandbox.snapshotId !== undefined,
     "sandbox.snapshotId is required when the sandbox is enabled",
   ),
+  v.check(
+    (config) =>
+      config.skillVersionIds.length + (config.skillIds?.length ?? 0) <= 64,
+    "an agent version binds at most 64 Skills",
+  ),
   v.check((config) => {
     const names = [
       ...MANAGED_AGENT_RESERVED_TOOL_NAMES,
@@ -1893,7 +1966,7 @@ export const ManagedAgentSnapshotSchema = v.strictObject({
   harnessOperations: v.optional(ManagedHarnessOperationsSchema, []),
   skills: v.optional(v.array(ManagedSkillBindingSnapshotSchema), []),
   mcpTools: v.optional(v.array(ManagedMcpToolSnapshotSchema), []),
-  delegates: v.optional(ManagedAgentDelegatesSchema, []),
+  delegates: v.optional(ManagedAgentResolvedDelegatesSchema, []),
   oaoTools: v.optional(ManagedAgentOaoToolsSchema),
   sandbox: v.strictObject({
     enabled: v.boolean(),
@@ -1923,6 +1996,64 @@ export const ManagedAgentInstanceDataSchema = v.object({
   snapshot: ManagedAgentSnapshotSchema,
 });
 
+/** One Skill binding of an agent version as a session tree resolved it. */
+export const SessionResolvedSkillSchema = v.strictObject({
+  skillId: IdSchema,
+  skillVersionId: IdSchema,
+  version: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(64)),
+  /** True when the binding follows the Skill's latest published version. */
+  followsLatest: v.boolean(),
+});
+
+/** One delegate of an agent version as a session tree resolved it. */
+export const SessionResolvedDelegateSchema = v.strictObject({
+  key: ManagedAgentDelegateKeySchema,
+  agentId: IdSchema,
+  agentVersionId: IdSchema,
+  version: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  /** True when the delegate follows the agent's latest published version. */
+  followsLatest: v.boolean(),
+});
+
+export const SessionResolvedAgentVersionSchema = v.strictObject({
+  agentId: IdSchema,
+  agentVersionId: IdSchema,
+  version: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  skills: v.array(SessionResolvedSkillSchema),
+  delegates: v.array(SessionResolvedDelegateSchema),
+});
+
+/**
+ * The exact agent and Skill versions a session tree runs. It is resolved
+ * once, when the root session starts, for the root agent version and every
+ * delegate it can reach; delegated child sessions carry the same record, so
+ * a publication during the session never changes what it runs.
+ */
+export const SessionVersionResolutionSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  /** The session whose start fixed this resolution. */
+  rootSessionId: IdSchema,
+  rootAgentVersionId: IdSchema,
+  resolvedAt: TimestampSchema,
+  agentVersions: v.pipe(
+    v.array(SessionResolvedAgentVersionSchema),
+    v.minLength(1),
+    v.check(
+      (entries) =>
+        new Set(entries.map((entry) => entry.agentVersionId)).size ===
+        entries.length,
+      "each agent version is resolved once",
+    ),
+  ),
+});
+
+export function parseSessionVersionResolution(
+  input: unknown,
+): SessionVersionResolution {
+  return v.parse(SessionVersionResolutionSchema, input);
+}
+
 export const AgentDelegationStateSchema = v.picklist(["active", "cancelled"]);
 
 export const AgentDelegationSchema = v.object({
@@ -1933,7 +2064,7 @@ export const AgentDelegationSchema = v.object({
   parentThreadId: IdSchema,
   parentSessionId: IdSchema,
   parentAgentVersionId: IdSchema,
-  delegateKey: ManagedAgentDelegateSchema.entries.key,
+  delegateKey: ManagedAgentDelegateKeySchema,
   childAgentVersionId: IdSchema,
   childThreadId: IdSchema,
   childSessionId: IdSchema,
@@ -2080,6 +2211,24 @@ export type ManagedSkillBindingSnapshot = v.InferOutput<
 >;
 export type ManagedAgentDelegate = v.InferOutput<
   typeof ManagedAgentDelegateSchema
+>;
+export type ManagedAgentPinnedDelegate = v.InferOutput<
+  typeof ManagedAgentPinnedDelegateSchema
+>;
+export type ManagedAgentFollowingDelegate = v.InferOutput<
+  typeof ManagedAgentFollowingDelegateSchema
+>;
+export type SessionResolvedSkill = v.InferOutput<
+  typeof SessionResolvedSkillSchema
+>;
+export type SessionResolvedDelegate = v.InferOutput<
+  typeof SessionResolvedDelegateSchema
+>;
+export type SessionResolvedAgentVersion = v.InferOutput<
+  typeof SessionResolvedAgentVersionSchema
+>;
+export type SessionVersionResolution = v.InferOutput<
+  typeof SessionVersionResolutionSchema
 >;
 export type ManagedHarnessOperation = v.InferOutput<
   typeof ManagedHarnessOperationSchema
@@ -3903,12 +4052,23 @@ export function agentVersionPublicationOrder(agents: readonly BackupAgent[]):
     agent.versions.map((version, position) => ({ agent, version, position })),
   );
   const ids = new Set(entries.map((entry) => entry.version.id));
+  // A delegate that follows an agent needs that agent to have a published
+  // version; earlier original publication orders the rest.
+  const firstVersions = new Map(
+    agents.flatMap((agent) =>
+      agent.versions[0] ? [[agent.id, agent.versions[0].id] as const] : [],
+    ),
+  );
   const remaining = new Map<string, number>();
   const dependents = new Map<string, string[]>();
   for (const entry of entries) {
     const dependencies = new Set(
       objectArray(entry.version.config.delegates)
-        .map((delegate) => String(delegate.agentVersionId))
+        .map((delegate) =>
+          delegate.agentId === undefined
+            ? String(delegate.agentVersionId)
+            : (firstVersions.get(String(delegate.agentId)) ?? ""),
+        )
         .filter((id) => ids.has(id)),
     );
     const previous = entry.agent.versions[entry.position - 1];
@@ -4073,6 +4233,7 @@ export function checkConfigurationBackupReferences(
     uniqueKeys(removed(project.mcpToolsets), `${where} MCP toolset`);
     uniqueKeys(project.agents, `${where} agent`);
     const skillVersions = new Set<string>();
+    const skills = new Set(project.skills.map((skill) => skill.id));
     for (const skill of project.skills) {
       unique(skill.id, `${where} Skill ${skill.key}`);
       for (const version of skill.versions) {
@@ -4107,6 +4268,7 @@ export function checkConfigurationBackupReferences(
       }
     }
     const agentVersions = new Set<string>();
+    const agents = new Set(project.agents.map((agent) => agent.id));
     for (const agent of project.agents) {
       unique(agent.id, `${where} agent ${agent.key}`);
       for (const version of agent.versions) {
@@ -4130,6 +4292,11 @@ export function checkConfigurationBackupReferences(
             problems.push(
               `${label} uses a Skill version that is not in this project's backup`,
             );
+        for (const id of uuidArray(config.skillIds))
+          if (!skills.has(id))
+            problems.push(
+              `${label} follows a Skill that is not in this project's backup`,
+            );
         for (const binding of objectArray(config.mcpBindings)) {
           if (!toolsetVersions.has(String(binding.toolsetVersionId)))
             problems.push(
@@ -4141,7 +4308,12 @@ export function checkConfigurationBackupReferences(
             );
         }
         for (const delegate of objectArray(config.delegates))
-          if (!agentVersions.has(String(delegate.agentVersionId)))
+          if (delegate.agentId !== undefined) {
+            if (!agents.has(String(delegate.agentId)))
+              problems.push(
+                `${label} follows a delegate agent that is not in this project's backup`,
+              );
+          } else if (!agentVersions.has(String(delegate.agentVersionId)))
             problems.push(
               `${label} delegates to an agent version that is not in this project's backup`,
             );

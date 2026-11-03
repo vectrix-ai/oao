@@ -113,7 +113,8 @@ For every invocation, the scratch conversation inherits:
 - the exact model preset pinned to the parent Agent version;
 - the parent's fully rendered system instructions;
 - the callable tools and sandbox capabilities admitted for the parent run;
-- all exact Skill versions mounted on the parent Agent version; and
+- all exact Skill versions bound to the parent session, including the versions
+  it resolved for Skills that follow the latest version; and
 - the same live session sandbox and workspace files.
 
 The operation adds its immutable focused instructions and the invocation's

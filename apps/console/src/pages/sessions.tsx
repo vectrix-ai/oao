@@ -46,6 +46,7 @@ import {
 } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { useApi } from "../api/context";
+import { listAllPages } from "../api/paginate";
 import type {
   RunFileUpload,
   SessionDetail,
@@ -1472,6 +1473,7 @@ function SessionSidebar({
           </ul>
         </section>
       ) : null}
+      <ResolvedVersions session={session} />
       {session.workspaceFiles.length > 0 ? (
         <section>
           <header className="panel-row">
@@ -1588,6 +1590,117 @@ function SessionSidebar({
         </dl>
       </section>
     </aside>
+  );
+}
+
+/** Whether a resolved link pinned its version or followed the latest one. */
+function VersionMode({ followsLatest }: { readonly followsLatest: boolean }) {
+  return (
+    <span
+      className={`usage-state${followsLatest ? " usage-state--latest" : ""}`}
+      title={
+        followsLatest
+          ? "Follows the latest published version: this one was the latest when the session started."
+          : "Pinned to this exact version."
+      }
+    >
+      {followsLatest ? "Latest" : "Pinned"}
+    </span>
+  );
+}
+
+/**
+ * What the session tree runs: its agent version and every delegate it can
+ * reach, with the exact Skill and delegate versions fixed when it started.
+ * Sessions from before OAO recorded this carry no resolution and show nothing.
+ */
+function ResolvedVersions({ session }: { readonly session: SessionDetail }) {
+  const api = useApi();
+  const resolution = session.resolvedVersions;
+  const needsNames =
+    resolution?.agentVersions.some(
+      (entry) => entry.agentId !== session.agentId,
+    ) ?? false;
+  const agents = useQuery({
+    queryKey: ["agents", "delegate-roster"],
+    queryFn: () => listAllPages((page) => api.listAgents({ page })),
+    enabled: needsNames,
+  });
+  if (!resolution) return null;
+  // A deleted agent leaves the roster; its delegate key still names it.
+  const keys = new Map(
+    resolution.agentVersions.flatMap((entry) =>
+      entry.delegates.map((delegate) => [delegate.agentId, delegate.key]),
+    ),
+  );
+  const agentName = (agentId: string): string =>
+    agentId === session.agentId
+      ? session.agentName
+      : (agents.data?.find((agent) => agent.id === agentId)?.name ??
+        keys.get(agentId) ??
+        shortId(agentId));
+  return (
+    <section aria-label="Resolved versions">
+      <header className="panel-row">
+        <h3>Versions</h3>
+        <span
+          className="panel-sub"
+          title={`Resolved ${formatDate(resolution.resolvedAt)}`}
+        >
+          Fixed at session start
+        </span>
+      </header>
+      <div className="resolved-versions">
+        {resolution.agentVersions.map((entry) => {
+          const name = agentName(entry.agentId);
+          return (
+            <div className="resolved-agent" key={entry.agentVersionId}>
+              <p className="resolved-agent-name">
+                <Bot size={13} aria-hidden="true" />
+                <Link to={`/agents/${entry.agentId}`}>{name}</Link>
+                <span className="mono">v{entry.version}</span>
+              </p>
+              {entry.skills.length + entry.delegates.length === 0 ? (
+                <p className="panel-note">No Skills or delegates.</p>
+              ) : (
+                <ul
+                  className="usage-list"
+                  aria-label={`${name} v${entry.version} Skills and delegates`}
+                >
+                  {entry.skills.map((skill) => (
+                    <li key={`skill:${skill.skillVersionId}`}>
+                      <BookOpen size={15} aria-hidden="true" />
+                      <span className="usage-name">
+                        <strong>
+                          <Link to={`/skills/${skill.skillId}`}>
+                            {skill.name}
+                          </Link>
+                        </strong>
+                        <span>Skill · v{skill.version}</span>
+                      </span>
+                      <VersionMode followsLatest={skill.followsLatest} />
+                    </li>
+                  ))}
+                  {entry.delegates.map((delegate) => (
+                    <li key={`delegate:${delegate.key}`}>
+                      <GitBranch size={15} aria-hidden="true" />
+                      <span className="usage-name">
+                        <strong>{delegate.key}</strong>
+                        <span>
+                          Delegate → {agentName(delegate.agentId)} · v
+                          {delegate.version}
+                        </span>
+                      </span>
+                      <VersionMode followsLatest={delegate.followsLatest} />
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 

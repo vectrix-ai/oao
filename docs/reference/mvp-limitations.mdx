@@ -55,8 +55,14 @@ and should shape integrations:
   checkpoint commits may repeat that model work. OAO adds no scheduler or
   file-locking layer for sequential/batched operation calls that share the
   workspace.
-- **Delegate rosters are publication-time and exact.** A coordinator version
-  can pin up to 32 child versions and allow 1–8 parallel calls per delegate.
+- **Delegate rosters are publication-time; versions are fixed per session.** A
+  coordinator version can name up to 32 delegates, each pinning an exact child
+  version or following a child agent's latest published version, and allow
+  1–8 parallel calls per delegate. Followed versions are resolved once, when a
+  root session starts; a running session is never upgraded. OAO does not
+  refuse a child publication that breaks a following coordinator's sandbox
+  match; new sessions of that coordinator fail with `409` until a compatible
+  coordinator version is published or the delegate is pinned.
   OAO creates persistent child sessions and shares the root Daytona workspace,
   but it does not dynamically discover agents, mutate a published roster,
   merge child conversation histories, move a child to another workspace, or

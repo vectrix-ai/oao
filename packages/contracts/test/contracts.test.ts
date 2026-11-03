@@ -20,6 +20,7 @@ import {
   parseCreateProjectSandboxProviderInput,
   parseCreateProjectStorageProviderInput,
   parseManagedAgentSnapshotForPublication,
+  parseSessionVersionResolution,
   parseModelRoutingPolicy,
   validateToolJsonSchema,
   validateToolJsonValue,
@@ -680,6 +681,119 @@ test("agent publications pin a unique, bounded delegate roster", () => {
         },
       ],
     }),
+  );
+});
+
+test("delegates and Skills pin a version or follow the latest one", () => {
+  const base = {
+    systemPrompt: "Coordinate shipment analysis with approved child agents.",
+    modelPreset: "coordinator-v1",
+    tools: [],
+    sandbox: { enabled: false, provider: "daytona-primary", network: "none" },
+    limits: { maxTurns: PLATFORM_MAX_TURNS, timeoutMs: 60_000 },
+  };
+  const agentId = "00000000-0000-4000-8000-000000000010";
+  const versionId = "00000000-0000-4000-8000-000000000011";
+  const skillId = "00000000-0000-4000-8000-000000000012";
+  const skillVersionId = "00000000-0000-4000-8000-000000000013";
+  const parsed = parseManagedAgentSnapshotForPublication({
+    ...base,
+    skillVersionIds: [skillVersionId],
+    skillIds: [skillId],
+    delegates: [
+      {
+        key: "pinned",
+        description: "Pinned child.",
+        agentVersionId: versionId,
+      },
+      { key: "latest", description: "Following child.", agentId },
+    ],
+  });
+  assert.deepEqual(parsed.skillIds, [skillId]);
+  assert.deepEqual(parsed.delegates, [
+    {
+      key: "pinned",
+      description: "Pinned child.",
+      agentVersionId: versionId,
+      maxParallel: 1,
+    },
+    { key: "latest", description: "Following child.", agentId, maxParallel: 1 },
+  ]);
+  // A config that pins everything keeps the exact shape it always had.
+  assert.equal(
+    "skillIds" in parseManagedAgentSnapshotForPublication(base),
+    false,
+  );
+  for (const delegates of [
+    // Both targets, or neither.
+    [{ key: "both", description: "Both.", agentId, agentVersionId: versionId }],
+    [{ key: "neither", description: "Neither." }],
+    // The same followed agent twice.
+    [
+      { key: "one", description: "One.", agentId },
+      { key: "two", description: "Two.", agentId },
+    ],
+  ])
+    assert.throws(
+      () => parseManagedAgentSnapshotForPublication({ ...base, delegates }),
+      v.ValiError,
+      JSON.stringify(delegates),
+    );
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...base,
+      skillIds: [skillId, skillId],
+    }),
+  );
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...base,
+      skillVersionIds: Array.from(
+        { length: 60 },
+        (_, index) =>
+          `00000000-0000-4000-8000-${String(100 + index).padStart(12, "0")}`,
+      ),
+      skillIds: Array.from(
+        { length: 5 },
+        (_, index) =>
+          `00000000-0000-4000-9000-${String(index).padStart(12, "0")}`,
+      ),
+    }),
+  );
+});
+
+test("a session version resolution lists each agent version once", () => {
+  const entry = {
+    agentId: "00000000-0000-4000-8000-000000000020",
+    agentVersionId: "00000000-0000-4000-8000-000000000021",
+    version: 3,
+    skills: [
+      {
+        skillId: "00000000-0000-4000-8000-000000000022",
+        skillVersionId: "00000000-0000-4000-8000-000000000023",
+        version: 4,
+        name: "import-contract",
+        followsLatest: true,
+      },
+    ],
+    delegates: [],
+  };
+  const resolution = {
+    schemaVersion: 1,
+    rootSessionId: "00000000-0000-4000-8000-000000000024",
+    rootAgentVersionId: entry.agentVersionId,
+    resolvedAt: "2026-11-03T12:00:00.000Z",
+    agentVersions: [entry],
+  };
+  assert.deepEqual(parseSessionVersionResolution(resolution), resolution);
+  assert.throws(() =>
+    parseSessionVersionResolution({
+      ...resolution,
+      agentVersions: [entry, entry],
+    }),
+  );
+  assert.throws(() =>
+    parseSessionVersionResolution({ ...resolution, agentVersions: [] }),
   );
 });
 

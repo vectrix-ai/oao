@@ -1155,6 +1155,32 @@ code.mcp-connection-card-subtitle {
 .delegate-row-sub--warn {
   color: var(--warning-fg);
 }
+.delegate-row-badge {
+  margin-left: var(--sp-2);
+  vertical-align: middle;
+}
+.delegate-row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+/* A bound Skill or delegate either pins its version or follows the latest. */
+.link-binding {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.link-mode {
+  flex: none;
+  width: 168px;
+}
+.link-mode-note {
+  margin: 0;
+  font-size: 12px;
+}
 .delegate-picker-list {
   max-height: 50vh;
   overflow-y: auto;
@@ -2318,6 +2344,41 @@ code.mcp-connection-card-subtitle {
   color: var(--success-fg);
   background: var(--success-bg);
 }
+.usage-state--latest {
+  color: var(--info-fg);
+  background: var(--info-bg);
+  border-color: var(--info-bd);
+}
+.resolved-versions {
+  display: grid;
+  gap: var(--sp-3);
+}
+.resolved-agent {
+  display: grid;
+  gap: var(--sp-2);
+}
+.resolved-agent-name {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+}
+.resolved-agent-name > svg {
+  flex: none;
+  color: var(--text-3);
+}
+.resolved-agent-name > a {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.resolved-agent-name > .mono {
+  color: var(--text-3);
+}
 
 /* Cost chart marks: data wears the accent; text wears text tokens. */
 .cost-chart {
@@ -2968,6 +3029,10 @@ code.mcp-connection-card-subtitle {
   }
   .wf-track {
     display: none;
+  }
+  .delegate-row,
+  .link-binding {
+    flex-wrap: wrap;
   }
 }
 

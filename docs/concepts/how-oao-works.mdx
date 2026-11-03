@@ -88,14 +88,19 @@ The MVP uses one PostgreSQL deployment for:
 correctness source. A reconnecting client resumes from a committed product-event
 position.
 
-At admission, OAO resolves only the exact Skill versions copied from the agent
-version into the session. Flue initially shows the model their small name and
+At admission, OAO resolves only the exact Skill versions recorded on the
+session when it started: the agent version's pinned Skill versions, plus the
+latest versions of Skills it follows as they were when the session was created.
+Flue initially shows the model their small name and
 description catalog entries, then loads full instructions and individual
 resources only when the model activates or reads them. See
 [Versioned Skills](/concepts/skills).
 
-A coordinator version can also pin a named roster of exact child-agent
-versions. Delegation creates a separate child thread and Flue instance, binds it
+A coordinator version can also name a roster of child agents, each pinned to an
+exact version or following the agent's latest published version. Followed
+versions are resolved once, when the root session starts, and stay fixed for
+every session in that tree. Delegation creates a separate child thread and
+Flue instance, binds it
 to the coordinator's workspace, and returns an ID that can receive later
 follow-up turns. See [Multi-agent orchestration](/concepts/multi-agent-orchestration).
 

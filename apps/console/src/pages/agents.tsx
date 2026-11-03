@@ -8,12 +8,19 @@ import {
   Trash2,
   Wrench,
 } from "lucide-react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useEffect, useId, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../api/context";
 import { listAllPages } from "../api/paginate";
 import type {
+  AgentDelegate,
+  AgentDetail,
   AgentSummary,
   AgentVersionConfig,
   HarnessOperationDefinition,
@@ -230,6 +237,61 @@ function delegateSandboxMismatch(
   return undefined;
 }
 
+/** One identity per link: a pinned version or a followed agent. */
+function delegateTarget(delegate: AgentDelegate): string {
+  return delegate.agentId !== undefined
+    ? `agent:${delegate.agentId}`
+    : `version:${delegate.agentVersionId}`;
+}
+
+/**
+ * The roster entry a delegate links to. A followed delegate names its agent;
+ * a pinned one is matched by version: the agent's latest, or an older one
+ * whose owner is known. An older pin whose owner is not known yet falls back
+ * to the delegate key, which defaults to the child agent's key; that match
+ * is for display only and never lets the delegate follow the agent.
+ */
+function delegateCandidate(
+  delegate: AgentDelegate,
+  candidates: readonly AgentSummary[],
+  versionOwners: ReadonlyMap<string, string> = new Map(),
+): AgentSummary | undefined {
+  if (delegate.agentId !== undefined)
+    return candidates.find((item) => item.id === delegate.agentId);
+  const owner = versionOwners.get(delegate.agentVersionId);
+  return (
+    candidates.find(
+      (item) => item.latestVersionId === delegate.agentVersionId,
+    ) ??
+    (owner === undefined
+      ? undefined
+      : candidates.find((item) => item.id === owner)) ??
+    candidates.find((item) => item.key === delegate.key)
+  );
+}
+
+/** Whether a roster entry is already linked, pinned at its latest or followed. */
+function isLinkedDelegate(
+  candidate: AgentSummary,
+  delegates: readonly AgentDelegate[],
+): boolean {
+  return delegates.some((delegate) =>
+    delegate.agentId !== undefined
+      ? delegate.agentId === candidate.id
+      : candidate.latestVersionId != null &&
+        delegate.agentVersionId === candidate.latestVersionId,
+  );
+}
+
+/** A config without followed Skills, so the editor's own list replaces them. */
+function withoutFollowedSkills(config: AgentVersionConfig): AgentVersionConfig {
+  const copy: { -readonly [Key in keyof AgentVersionConfig]?: unknown } = {
+    ...config,
+  };
+  delete copy.skillIds;
+  return copy as AgentVersionConfig;
+}
+
 /**
  * Searchable roster of every other agent in the project. Only sandbox-
  * compatible published agents can be picked; the rest stay visible with the
@@ -237,13 +299,13 @@ function delegateSandboxMismatch(
  */
 function DelegatePickerDialog({
   candidates,
-  linkedVersionIds,
+  linked,
   coordinatorSandbox,
   onClose,
   onAdd,
 }: {
   readonly candidates: readonly AgentSummary[];
-  readonly linkedVersionIds: readonly string[];
+  readonly linked: readonly AgentDelegate[];
   readonly coordinatorSandbox: AgentVersionConfig["sandbox"];
   readonly onClose: () => void;
   readonly onAdd: (picked: readonly AgentSummary[]) => void;
@@ -251,9 +313,7 @@ function DelegatePickerDialog({
   const [search, setSearch] = useState("");
   const [pickedIds, setPickedIds] = useState<readonly string[]>([]);
   const unlinked = candidates.filter(
-    (candidate) =>
-      candidate.latestVersionId == null ||
-      !linkedVersionIds.includes(candidate.latestVersionId),
+    (candidate) => !isLinkedDelegate(candidate, linked),
   );
   const needle = search.trim().toLowerCase();
   const matches = needle
@@ -269,7 +329,7 @@ function DelegatePickerDialog({
   return (
     <Dialog
       title="Add delegates"
-      description="Pick published agents this coordinator may hand work to. Each pick pins that agent's exact latest version."
+      description="Pick published agents this coordinator may hand work to. Each pick pins the agent's current version; switch a linked delegate to Latest version to follow new publications instead."
       wide
       onClose={onClose}
       onSubmit={(event) => {
@@ -1022,9 +1082,11 @@ export function AgentDetailPage() {
     queryKey: ["sandbox-providers"],
     queryFn: () => api.listSandboxProviders(),
   });
+  // Every page: the editor tells a bound Skill that was removed from one
+  // that is merely past the first page.
   const skills = useQuery({
-    queryKey: ["skills"],
-    queryFn: () => api.listSkills({}),
+    queryKey: ["skills", "agent-editor"],
+    queryFn: () => listAllPages((page) => api.listSkills({ page })),
   });
   const agents = useQuery({
     queryKey: ["agents", "delegate-roster"],
@@ -1082,7 +1144,8 @@ export function AgentDetailPage() {
       modelPresets={modelPresets.data?.data ?? []}
       sandboxProviders={sandboxProviders.data?.data ?? []}
       sandboxProvidersError={sandboxProviders.error}
-      skills={skills.data?.data ?? []}
+      skills={skills.data ?? []}
+      skillsLoaded={skills.isSuccess}
       mcpToolsets={mcpToolsets.data?.data ?? []}
       mcpPolicies={mcpPolicies.data?.data ?? []}
       availableAgents={(agents.data ?? []).filter(
@@ -1105,6 +1168,7 @@ function AgentEditor({
   sandboxProviders,
   sandboxProvidersError,
   skills,
+  skillsLoaded,
   mcpToolsets,
   mcpPolicies,
   availableAgents,
@@ -1121,6 +1185,7 @@ function AgentEditor({
   readonly sandboxProviders: readonly ProjectSandboxProvider[];
   readonly sandboxProvidersError: Error | null;
   readonly skills: readonly SkillSummary[];
+  readonly skillsLoaded: boolean;
   readonly mcpToolsets: readonly McpToolset[];
   readonly mcpPolicies: readonly McpCredentialPolicy[];
   readonly availableAgents: readonly AgentSummary[];
@@ -1152,8 +1217,62 @@ function AgentEditor({
   const [skillVersionIds, setSkillVersionIds] = useState(
     baseConfig.skillVersionIds ?? [],
   );
+  const [skillIds, setSkillIds] = useState(baseConfig.skillIds ?? []);
   const [mcpBindings, setMcpBindings] = useState(baseConfig.mcpBindings ?? []);
   const [delegates, setDelegates] = useState(baseConfig.delegates ?? []);
+  // An older pin's owner is found by its version. The agent its key matches
+  // is checked first; only a pin it does not own (a custom key, or one that
+  // another agent reused) loads the other agents' versions. Following an
+  // agent needs that owner confirmed.
+  const olderPins = delegates.filter(
+    (delegate) =>
+      delegate.agentId === undefined &&
+      !availableAgents.some(
+        (item) => item.latestVersionId === delegate.agentVersionId,
+      ),
+  );
+  const keyMatchedAgentIds = [
+    ...new Set(
+      olderPins.flatMap((delegate) => {
+        const match = availableAgents.find((item) => item.key === delegate.key);
+        return match ? [match.id] : [];
+      }),
+    ),
+  ];
+  const agentVersionQuery = (id: string) => ({
+    queryKey: ["agent", id],
+    queryFn: () => api.getAgent(id),
+  });
+  const keyMatchedAgents = useQueries({
+    queries: keyMatchedAgentIds.map(agentVersionQuery),
+  });
+  const ownersOf = (
+    results: readonly { readonly data?: AgentDetail | undefined }[],
+  ): (readonly [string, string])[] =>
+    results.flatMap((result) =>
+      result.data
+        ? result.data.versions.map(
+            (version) => [version.id, result.data!.id] as const,
+          )
+        : [],
+    );
+  const keyMatchedOwners = new Map(ownersOf(keyMatchedAgents));
+  const otherAgentIds =
+    keyMatchedAgents.every((result) => !result.isPending) &&
+    olderPins.some(
+      (delegate) => !keyMatchedOwners.has(delegate.agentVersionId ?? ""),
+    )
+      ? availableAgents
+          .map((item) => item.id)
+          .filter((id) => !keyMatchedAgentIds.includes(id))
+      : [];
+  const otherAgents = useQueries({
+    queries: otherAgentIds.map(agentVersionQuery),
+  });
+  const versionOwners = new Map<string, string>([
+    ...keyMatchedOwners,
+    ...ownersOf(otherAgents),
+  ]);
   const [delegatePicker, setDelegatePicker] = useState(false);
   const [oaoTools, setOaoTools] = useState(baseConfig.oaoTools);
   const [tools, setTools] = useState<readonly ToolDefinition[]>(
@@ -1193,6 +1312,7 @@ function AgentEditor({
     setTimeoutValue(next.config.limits.timeoutMs);
     setMaxTurns(next.config.limits.maxTurns);
     setSkillVersionIds(next.config.skillVersionIds ?? []);
+    setSkillIds(next.config.skillIds ?? []);
     setMcpBindings(next.config.mcpBindings ?? []);
     setDelegates(next.config.delegates ?? []);
     setOaoTools(next.config.oaoTools);
@@ -1200,12 +1320,14 @@ function AgentEditor({
     setHarnessOperations(next.config.harnessOperations ?? []);
   };
   const config: AgentVersionConfig = {
-    ...withoutOaoTools(baseConfig),
+    ...withoutFollowedSkills(withoutOaoTools(baseConfig)),
     systemPrompt: instructions,
     modelPreset,
     tools,
     harnessOperations,
     skillVersionIds,
+    // Omitted when empty, so a config that pins every Skill keeps its shape.
+    ...(skillIds.length > 0 ? { skillIds } : {}),
     mcpBindings,
     delegates,
     ...(oaoTools ? { oaoTools } : {}),
@@ -1218,10 +1340,16 @@ function AgentEditor({
     },
     limits: { maxTurns, timeoutMs: timeout },
   };
+  // An older pinned version's sandbox is unknown here, so only a pin of the
+  // latest version or a followed agent (whose latest version is what runs)
+  // is compared with the draft sandbox.
   const incompatibleSelectedDelegates = delegates.flatMap((delegate) => {
-    const candidate = availableAgents.find(
-      (item) => item.latestVersionId === delegate.agentVersionId,
-    );
+    const candidate =
+      delegate.agentId !== undefined
+        ? availableAgents.find((item) => item.id === delegate.agentId)
+        : availableAgents.find(
+            (item) => item.latestVersionId === delegate.agentVersionId,
+          );
     if (!candidate) return [];
     const mismatch = delegateSandboxMismatch(config.sandbox, candidate.sandbox);
     return mismatch ? [{ delegate, candidate, mismatch }] : [];
@@ -1341,6 +1469,41 @@ function AgentEditor({
     validation.push(
       `${candidate.name} cannot be delegated: ${mismatch}. Publish a compatible child version first or remove it from this version.`,
     );
+  const duplicateDelegates = delegates.filter(
+    (delegate, index) =>
+      delegates.findIndex(
+        (item) => delegateTarget(item) === delegateTarget(delegate),
+      ) !== index,
+  );
+  for (const delegate of duplicateDelegates)
+    validation.push(
+      `${delegateCandidate(delegate, availableAgents, versionOwners)?.name ?? delegate.key} is linked twice the same way. Remove one link, or pin one and let the other follow the latest version.`,
+    );
+  // A removed Skill leaves every list, but a binding to it stays in this
+  // version's config; show it so it can be removed before publishing.
+  const listedSkillIds = new Set(skills.map((skill) => skill.id));
+  const listedSkillVersionIds = new Set(
+    skills.flatMap((skill) => skill.versionIds),
+  );
+  const unavailableSkillBindings = skillsLoaded
+    ? [
+        ...skillIds
+          .filter((id) => !listedSkillIds.has(id))
+          .map((id) => ({ followed: true, id })),
+        ...skillVersionIds
+          .filter((id) => !listedSkillVersionIds.has(id))
+          .map((id) => ({ followed: false, id })),
+      ]
+    : [];
+  for (const binding of unavailableSkillBindings)
+    validation.push(
+      `A ${binding.followed ? "followed Skill" : "pinned Skill version"} is no longer available (${binding.id}). Remove it from the Skills section before publishing.`,
+    );
+  const followedSkillCount = skillIds.length;
+  const boundSkillCount = skillVersionIds.length + followedSkillCount;
+  const followedDelegateCount = delegates.filter(
+    (delegate) => delegate.agentId !== undefined,
+  ).length;
 
   return (
     <Page>
@@ -1589,12 +1752,55 @@ function AgentEditor({
           collapsible
           defaultCollapsed
           description={
-            skillVersionIds.length === 0
+            boundSkillCount === 0
               ? "No Skills are bound. Instructions and resources load only after activation."
-              : `${skillVersionIds.length} ${skillVersionIds.length === 1 ? "Skill version is" : "Skill versions are"} bound to this version.`
+              : `${boundSkillCount} ${boundSkillCount === 1 ? "Skill is" : "Skills are"} bound to this version: ${skillVersionIds.length} pinned, ${followedSkillCount} following the latest version.`
           }
           actions={<Link to="/skills">Manage Skills</Link>}
         >
+          {unavailableSkillBindings.length > 0 ? (
+            <ul
+              className="delegate-list"
+              aria-label="Unavailable Skill bindings"
+            >
+              {unavailableSkillBindings.map((binding) => (
+                <li
+                  className="delegate-row"
+                  key={`${binding.followed ? "skill" : "version"}:${binding.id}`}
+                >
+                  <div className="delegate-row-main">
+                    <strong>
+                      {binding.followed
+                        ? "Followed Skill unavailable"
+                        : "Pinned Skill version unavailable"}
+                    </strong>
+                    <span className="delegate-row-sub delegate-row-sub--warn">
+                      This Skill is no longer in the project, so a new version
+                      cannot bind it. <span className="mono">{binding.id}</span>
+                    </span>
+                  </div>
+                  <div className="delegate-row-actions">
+                    <IconButton
+                      label={`Remove unavailable Skill binding ${binding.id}`}
+                      title="Remove binding"
+                      disabled={!isLatest}
+                      onClick={() =>
+                        binding.followed
+                          ? setSkillIds((current) =>
+                              current.filter((id) => id !== binding.id),
+                            )
+                          : setSkillVersionIds((current) =>
+                              current.filter((id) => id !== binding.id),
+                            )
+                      }
+                    >
+                      <Trash2 size={14} aria-hidden="true" />
+                    </IconButton>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : null}
           {skills.length === 0 ? (
             <EmptyState
               icon="◇"
@@ -1603,42 +1809,110 @@ function AgentEditor({
             />
           ) : (
             <div className="stack">
+              <p className="muted link-mode-note">
+                A pinned Skill keeps its exact version. A Skill that follows the
+                latest version binds the version published when each session
+                starts.
+              </p>
               {skills.map((skill) => {
                 const selectedId = skill.versionIds.find((id) =>
                   skillVersionIds.includes(id),
                 );
-                const checked = selectedId !== undefined;
-                // Disabled Skills stay visible only while this version pins
+                const followed = skillIds.includes(skill.id);
+                const checked = selectedId !== undefined || followed;
+                // Disabled Skills stay visible only while this version binds
                 // them, so the operator can see why publishing is refused.
                 if (skill.disabledAt && !checked) return null;
+                const olderPin =
+                  selectedId !== undefined &&
+                  selectedId !== skill.latestVersionId;
+                const followable =
+                  !skill.disabledAt && skill.status === "active";
                 return (
-                  <CheckboxRow
-                    key={skill.id}
-                    label={`${skill.displayName} · ${
-                      selectedId === skill.latestVersionId
-                        ? `v${skill.version}`
-                        : checked
-                          ? "older pinned version"
-                          : `v${skill.version}`
-                    }${skill.disabledAt ? " · disabled" : ""}`}
-                    description={
-                      skill.disabledAt
-                        ? "This Skill is disabled. Unselect it or enable it again before publishing a new version."
-                        : skill.description
-                    }
-                    checked={checked}
-                    disabled={!isLatest || skill.status !== "active"}
-                    onChange={(event) =>
-                      setSkillVersionIds((current) => {
-                        const withoutSkill = current.filter(
-                          (id) => !skill.versionIds.includes(id),
+                  <div className="link-binding" key={skill.id}>
+                    <CheckboxRow
+                      label={`${skill.displayName} · ${
+                        followed
+                          ? `latest version, now v${skill.version}`
+                          : olderPin
+                            ? "older pinned version"
+                            : `v${skill.version}`
+                      }${skill.disabledAt ? " · disabled" : ""}`}
+                      description={
+                        skill.disabledAt
+                          ? "This Skill is disabled. Unselect it or enable it again before publishing a new version."
+                          : skill.description
+                      }
+                      checked={checked}
+                      // A new binding needs an active version; an existing
+                      // one can always be removed.
+                      disabled={
+                        !isLatest || (!checked && skill.status !== "active")
+                      }
+                      onChange={(event) => {
+                        const enabled = event.target.checked;
+                        setSkillIds((current) =>
+                          current.filter((id) => id !== skill.id),
                         );
-                        return event.target.checked
-                          ? [...withoutSkill, skill.latestVersionId]
-                          : withoutSkill;
-                      })
-                    }
-                  />
+                        setSkillVersionIds((current) => {
+                          const withoutSkill = current.filter(
+                            (id) => !skill.versionIds.includes(id),
+                          );
+                          return enabled
+                            ? [...withoutSkill, skill.latestVersionId]
+                            : withoutSkill;
+                        });
+                      }}
+                    />
+                    {checked ? (
+                      <Field
+                        label={`Version of Skill ${skill.displayName}`}
+                        labelHidden
+                        className="link-mode"
+                      >
+                        <Select
+                          value={followed ? "latest" : "pinned"}
+                          disabled={!isLatest}
+                          onChange={(event) => {
+                            const follow = event.target.value === "latest";
+                            setSkillVersionIds((current) => {
+                              const withoutSkill = current.filter(
+                                (id) => !skill.versionIds.includes(id),
+                              );
+                              return follow
+                                ? withoutSkill
+                                : [...withoutSkill, skill.latestVersionId];
+                            });
+                            setSkillIds((current) => {
+                              const withoutSkill = current.filter(
+                                (id) => id !== skill.id,
+                              );
+                              return follow
+                                ? [...withoutSkill, skill.id]
+                                : withoutSkill;
+                            });
+                          }}
+                        >
+                          <option
+                            value="pinned"
+                            // Pinning from a followed binding takes the latest
+                            // version, which must be usable.
+                            disabled={followed && skill.status !== "active"}
+                          >
+                            {olderPin
+                              ? "Pinned older version"
+                              : `Pinned v${skill.version}`}
+                          </option>
+                          <option
+                            value="latest"
+                            disabled={!followed && !followable}
+                          >
+                            Latest version
+                          </option>
+                        </Select>
+                      </Field>
+                    ) : null}
+                  </div>
                 );
               })}
             </div>
@@ -1746,8 +2020,8 @@ function AgentEditor({
           defaultCollapsed
           description={
             delegates.length === 0
-              ? "No delegates are linked. A coordinator pins exact child-agent versions that share its workspace."
-              : `${delegates.length} child ${delegates.length === 1 ? "agent version is" : "agent versions are"} pinned${
+              ? "No delegates are linked. A coordinator hands work to child agents that share its workspace; each link pins an exact version or follows the agent's latest published version."
+              : `${delegates.length} child ${delegates.length === 1 ? "agent is" : "agents are"} linked: ${delegates.length - followedDelegateCount} pinned, ${followedDelegateCount} following the latest version${
                   incompatibleSelectedDelegates.length > 0
                     ? ` · ${incompatibleSelectedDelegates.length} incompatible with the draft sandbox`
                     : ""
@@ -1790,8 +2064,8 @@ function AgentEditor({
                           (delegate) =>
                             !incompatibleSelectedDelegates.some(
                               (entry) =>
-                                entry.delegate.agentVersionId ===
-                                delegate.agentVersionId,
+                                delegateTarget(entry.delegate) ===
+                                delegateTarget(delegate),
                             ),
                         ),
                       )
@@ -1815,74 +2089,166 @@ function AgentEditor({
                   }
                 />
               ) : (
-                <ul className="delegate-list" aria-label="Linked delegates">
-                  {delegates.map((delegate) => {
-                    const candidate =
-                      availableAgents.find(
-                        (item) =>
-                          item.latestVersionId === delegate.agentVersionId,
-                      ) ??
-                      availableAgents.find((item) => item.key === delegate.key);
-                    const pinnedLatest =
-                      candidate?.latestVersionId === delegate.agentVersionId;
-                    const mismatch = candidate
-                      ? delegateSandboxMismatch(
-                          config.sandbox,
-                          candidate.sandbox,
-                        )
-                      : undefined;
-                    return (
-                      <li
-                        className="delegate-row"
-                        key={delegate.agentVersionId}
-                      >
-                        <div className="delegate-row-main">
-                          <strong>
-                            {candidate?.name ?? delegate.key}
-                            {candidate && candidate.version != null ? (
-                              <span className="delegate-row-version">
-                                {pinnedLatest
-                                  ? ` · v${candidate.version}`
-                                  : " · older pinned version"}
-                              </span>
-                            ) : null}
-                          </strong>
-                          <span className="delegate-row-sub">
-                            <code>{delegate.key}</code>
-                            {" · "}
-                            {delegate.description}
-                          </span>
-                          <span
-                            className={`delegate-row-sub${mismatch ? " delegate-row-sub--warn" : ""}`}
-                          >
-                            {mismatch
-                              ? `Incompatible — ${mismatch}.`
-                              : "Sandbox-compatible with this coordinator."}{" "}
-                            <span className="mono">
-                              {delegate.agentVersionId}
+                <>
+                  <p className="muted link-mode-note">
+                    A pinned delegate keeps its exact version. A delegate that
+                    follows the latest version runs the version published when
+                    each session starts, fixed for that session.
+                  </p>
+                  <ul className="delegate-list" aria-label="Linked delegates">
+                    {delegates.map((delegate, index) => {
+                      const followed = delegate.agentId !== undefined;
+                      const candidate = delegateCandidate(
+                        delegate,
+                        availableAgents,
+                        versionOwners,
+                      );
+                      const name = candidate?.name ?? delegate.key;
+                      const pinnedLatest =
+                        !followed &&
+                        candidate?.latestVersionId === delegate.agentVersionId;
+                      const followable =
+                        followed ||
+                        pinnedLatest ||
+                        (candidate !== undefined &&
+                          versionOwners.get(delegate.agentVersionId ?? "") ===
+                            candidate.id);
+                      const published =
+                        candidate?.status === "published" &&
+                        candidate.version != null &&
+                        candidate.latestVersionId != null;
+                      // The roster carries each agent's latest sandbox, which
+                      // is what a followed delegate runs.
+                      const mismatch = candidate
+                        ? delegateSandboxMismatch(
+                            config.sandbox,
+                            candidate.sandbox,
+                          )
+                        : undefined;
+                      const unavailable = followed
+                        ? !candidate
+                          ? "This agent is not available in this project."
+                          : !published
+                            ? "This agent has no published version to follow."
+                            : undefined
+                        : undefined;
+                      const warning = unavailable
+                        ? unavailable
+                        : mismatch
+                          ? `Incompatible — ${mismatch}.`
+                          : undefined;
+                      // Rows are edited by position: two rows may briefly
+                      // share a target, which validation then refuses.
+                      const target = `${index}:${delegateTarget(delegate)}`;
+                      return (
+                        <li className="delegate-row" key={target}>
+                          <div className="delegate-row-main">
+                            <strong>
+                              {name}
+                              {followed ? (
+                                <span className="delegate-row-version">
+                                  {candidate?.version != null
+                                    ? ` · now v${candidate.version}`
+                                    : ""}
+                                </span>
+                              ) : candidate && candidate.version != null ? (
+                                <span className="delegate-row-version">
+                                  {pinnedLatest
+                                    ? ` · v${candidate.version}`
+                                    : " · older pinned version"}
+                                </span>
+                              ) : null}
+                              {followed ? (
+                                <span className="delegate-row-badge">
+                                  <Chip tone="info" showDot={false}>
+                                    Latest
+                                  </Chip>
+                                </span>
+                              ) : null}
+                            </strong>
+                            <span className="delegate-row-sub">
+                              <code>{delegate.key}</code>
+                              {" · "}
+                              {delegate.description}
                             </span>
-                          </span>
-                        </div>
-                        <IconButton
-                          label={`Remove delegate ${candidate?.name ?? delegate.key}`}
-                          title="Remove delegate"
-                          disabled={!isLatest}
-                          onClick={() =>
-                            setDelegates((current) =>
-                              current.filter(
-                                (item) =>
-                                  item.agentVersionId !==
-                                  delegate.agentVersionId,
-                              ),
-                            )
-                          }
-                        >
-                          <Trash2 size={14} aria-hidden="true" />
-                        </IconButton>
-                      </li>
-                    );
-                  })}
-                </ul>
+                            <span
+                              className={`delegate-row-sub${warning ? " delegate-row-sub--warn" : ""}`}
+                            >
+                              {warning ??
+                                "Sandbox-compatible with this coordinator."}{" "}
+                              <span className="mono">
+                                {followed
+                                  ? `follows ${delegate.agentId}`
+                                  : delegate.agentVersionId}
+                              </span>
+                            </span>
+                          </div>
+                          <div className="delegate-row-actions">
+                            <Field
+                              label={`Version of delegate ${name}`}
+                              labelHidden
+                              className="link-mode"
+                            >
+                              <Select
+                                value={followed ? "latest" : "pinned"}
+                                disabled={!isLatest || !candidate || !published}
+                                onChange={(event) => {
+                                  if (!candidate?.latestVersionId) return;
+                                  const follow =
+                                    event.target.value === "latest";
+                                  const next: AgentDelegate = follow
+                                    ? {
+                                        key: delegate.key,
+                                        description: delegate.description,
+                                        agentId: candidate.id,
+                                        maxParallel: delegate.maxParallel,
+                                      }
+                                    : {
+                                        key: delegate.key,
+                                        description: delegate.description,
+                                        agentVersionId:
+                                          candidate.latestVersionId,
+                                        maxParallel: delegate.maxParallel,
+                                      };
+                                  setDelegates((current) =>
+                                    current.map((item, position) =>
+                                      position === index ? next : item,
+                                    ),
+                                  );
+                                }}
+                              >
+                                <option value="pinned">
+                                  {!followed && candidate && !pinnedLatest
+                                    ? "Pinned older version"
+                                    : candidate?.version != null
+                                      ? `Pinned v${candidate.version}`
+                                      : "Pinned"}
+                                </option>
+                                <option value="latest" disabled={!followable}>
+                                  Latest version
+                                </option>
+                              </Select>
+                            </Field>
+                            <IconButton
+                              label={`Remove delegate ${name}`}
+                              title="Remove delegate"
+                              disabled={!isLatest}
+                              onClick={() =>
+                                setDelegates((current) =>
+                                  current.filter(
+                                    (_, position) => position !== index,
+                                  ),
+                                )
+                              }
+                            >
+                              <Trash2 size={14} aria-hidden="true" />
+                            </IconButton>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </>
               )}
             </div>
           )}
@@ -1920,9 +2286,7 @@ function AgentEditor({
         {delegatePicker ? (
           <DelegatePickerDialog
             candidates={availableAgents}
-            linkedVersionIds={delegates.map(
-              (delegate) => delegate.agentVersionId,
-            )}
+            linked={delegates}
             coordinatorSandbox={config.sandbox}
             onClose={() => setDelegatePicker(false)}
             onAdd={(picked) => {
@@ -1932,10 +2296,7 @@ function AgentEditor({
                   .filter(
                     (candidate) =>
                       candidate.latestVersionId != null &&
-                      !current.some(
-                        (item) =>
-                          item.agentVersionId === candidate.latestVersionId,
-                      ),
+                      !isLinkedDelegate(candidate, current),
                   )
                   .map((candidate) => ({
                     key: candidate.key,

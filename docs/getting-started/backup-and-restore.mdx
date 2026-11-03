@@ -133,8 +133,13 @@ that the backup does not need, and with `409` if the preview is not ready.
   (active, deprecated, revoked), disabled and archived flags, delegates, Skill
   and MCP bindings, and Harness Operations match the source.
 - **IDs are new.** Every restored row gets a new ID, and references inside agent
-  configurations are rewritten to match. Agent version content hashes are
-  recomputed from the rewritten configuration.
+  configurations are rewritten to match, including delegates and Skills that
+  follow the latest version. Agent version content hashes are recomputed from
+  the rewritten configuration.
+- **Following stays following.** A delegate that follows an agent, or a Skill
+  in `skillIds`, still follows after the restore and resolves to the restored
+  agent's or Skill's latest version when a session starts. Restore publishes a
+  coordinator version only after the first version of each agent it follows.
 - **Keys are kept.** Agent versions refer to model presets and sandbox
   providers by key, so those keys are restored unchanged.
 - **Credentials are the ones you enter.** Each connection gets a fresh
@@ -168,6 +173,9 @@ address on a production server, blocks the restore.
 The file is JSON with `"format": "oao.organization-configuration"` and
 `"formatVersion": 1`. Every entry has an `id`; IDs only connect entries within
 the file, for example an agent version's `skillVersionIds` or a model preset's
-`providerId`. Agent `config` objects are stored exactly as published. OAO
-checks the file's structure and references before it changes anything, and
-validates each Skill and agent version as it restores it.
+`providerId`. Agent `config` objects are stored exactly as published, so a
+followed Skill appears as its Skill ID in `skillIds` and a followed delegate as
+its agent ID in `agentId`. A followed agent or Skill must be in the same
+project's backup, like a pinned version. OAO checks the file's structure and
+references before it changes anything, and validates each Skill and agent
+version as it restores it.

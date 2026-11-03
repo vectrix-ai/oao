@@ -1,3 +1,4 @@
+import { parseSessionVersionResolution } from "@oao/contracts";
 import type {
   AgentDetail,
   AgentSummary,
@@ -35,6 +36,7 @@ import type {
   StorageProviderList,
   SessionDetail,
   SessionSummary,
+  SessionVersionResolution,
   SkillDetail,
   SkillFileInput,
   SkillDraft,
@@ -851,6 +853,20 @@ function workspaceFiles(
   );
 }
 
+/**
+ * The versions a session tree runs, as the API recorded them. Sessions that
+ * started before OAO recorded them, or a record this console cannot read,
+ * map to null so the page hides the section instead of failing.
+ */
+function resolvedVersions(value: unknown): SessionVersionResolution | null {
+  if (value === null || value === undefined) return null;
+  try {
+    return parseSessionVersionResolution(value);
+  } catch {
+    return null;
+  }
+}
+
 function sessionDetail(
   value: Readonly<Record<string, unknown>>,
 ): SessionDetail {
@@ -1421,6 +1437,7 @@ function sessionDetail(
         state: text(delegation.state, "active") as "active" | "cancelled",
       };
     }),
+    resolvedVersions: resolvedVersions(value.resolvedVersions),
     runs,
     transcript: transcriptRecords,
     pendingWork: Array.isArray(value.pendingWork)

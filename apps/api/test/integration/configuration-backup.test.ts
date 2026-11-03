@@ -487,6 +487,8 @@ async function seedSource(
         systemPrompt: "Handle one order.",
         modelPreset: "backup-model-v1",
         tools: [],
+        // Follows the Skill's latest version instead of pinning one.
+        skillIds: [skill.id],
         sandbox,
         limits,
       },
@@ -536,6 +538,14 @@ async function seedSource(
         modelPreset: "backup-model-v1",
         tools: [caller],
         skillVersionIds: [skillV2.id, retiredSkill.latestVersionId],
+        // Follows the child's latest version instead of pinning one.
+        delegates: [
+          {
+            key: "child",
+            description: "Handles one order.",
+            agentId: child.id,
+          },
+        ],
         harnessOperations: [
           {
             key: "summarise",
@@ -1204,8 +1214,41 @@ test(
            AS count`,
           [target.organizationId, restoredProject],
         );
-        // Skills: v1 → 1, v2 → 2; MCP: 1; delegates: 1; Harness Operations: 1.
-        assert.equal(bindings.rows[0]?.count, 6);
+        // Skills: v1 → 1, v2 → 2; MCP: 1; delegates: v1 pins and v2
+        // follows → 2; Harness Operations: 1.
+        assert.equal(bindings.rows[0]?.count, 7);
+        // The followed links point at the restored agent and Skill.
+        const followed = await pool.query<{
+          child_agent_definition_id: string;
+          agent_key: string;
+        }>(
+          `SELECT edge.child_agent_definition_id,definition.agent_key
+             FROM oao.agent_version_delegates edge
+             JOIN oao.agent_definitions definition
+               ON definition.organization_id=edge.organization_id
+              AND definition.project_id=edge.project_id
+              AND definition.id=edge.child_agent_definition_id
+            WHERE edge.organization_id=$1 AND edge.project_id=$2`,
+          [target.organizationId, restoredProject],
+        );
+        assert.deepEqual(
+          followed.rows.map((row) => row.agent_key),
+          ["order-child"],
+        );
+        const followedSkills = await pool.query<{ skill_key: string }>(
+          `SELECT skill.skill_key
+             FROM oao.agent_versions version
+             JOIN oao.skills skill
+               ON skill.organization_id=version.organization_id
+              AND skill.project_id=version.project_id
+              AND skill.id=(version.config->'skillIds'->>0)::uuid
+            WHERE version.organization_id=$1 AND version.project_id=$2`,
+          [target.organizationId, restoredProject],
+        );
+        assert.deepEqual(
+          followedSkills.rows.map((row) => row.skill_key),
+          ["order-triage"],
+        );
         const providers = await pool.query<{
           provider_key: string;
           encrypted_api_key: Buffer;

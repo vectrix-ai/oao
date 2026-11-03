@@ -36,6 +36,7 @@ import type {
   ConfigurationRestoreCredentialsInput,
   ConfigurationRestorePlan,
   ConfigurationRestoreResult,
+  SessionVersionResolution,
 } from "@oao/contracts";
 
 export type {
@@ -70,6 +71,7 @@ export type {
   ConfigurationRestoreCredentialsInput,
   ConfigurationRestorePlan,
   ConfigurationRestoreResult,
+  SessionVersionResolution,
 };
 
 export interface McpServerList {
@@ -251,23 +253,46 @@ export interface ToolDefinition {
 
 export type HarnessOperationDefinition = ManagedHarnessOperation;
 
+/**
+ * A child agent a coordinator may hand work to. It pins one exact version
+ * with `agentVersionId`, or follows the agent with `agentId`: each new
+ * session then runs the agent's latest published version, fixed when the
+ * session starts.
+ */
+export type AgentDelegate =
+  | {
+      readonly key: string;
+      readonly description: string;
+      readonly agentVersionId: string;
+      readonly agentId?: never;
+      readonly maxParallel: number;
+    }
+  | {
+      readonly key: string;
+      readonly description: string;
+      readonly agentId: string;
+      readonly agentVersionId?: never;
+      readonly maxParallel: number;
+    };
+
 export interface AgentVersionConfig {
   readonly systemPrompt: string;
   readonly modelPreset: string;
   readonly tools: readonly ToolDefinition[];
   readonly harnessOperations?: readonly HarnessOperationDefinition[];
+  /** Skill versions pinned exactly. */
   readonly skillVersionIds?: readonly string[];
+  /**
+   * Skills that follow their latest published version, resolved when a
+   * session starts. A Skill is pinned or followed, never both.
+   */
+  readonly skillIds?: readonly string[];
   readonly mcpBindings?: readonly {
     readonly toolsetVersionId: string;
     readonly credentialPolicyVersionId: string;
     readonly namespace: string;
   }[];
-  readonly delegates?: readonly {
-    readonly key: string;
-    readonly description: string;
-    readonly agentVersionId: string;
-    readonly maxParallel: number;
-  }[];
+  readonly delegates?: readonly AgentDelegate[];
   /** Lets the agent use the OAO MCP tools in its runs. */
   readonly oaoTools?: ManagedAgentOaoTools;
   readonly sandbox: {
@@ -534,6 +559,11 @@ export interface SessionDetail extends SessionSummary {
     readonly latestChildRunState: RunState;
     readonly state: "active" | "cancelled";
   }[];
+  /**
+   * The agent, delegate, and Skill versions fixed when the session tree
+   * started; null for sessions that started before OAO recorded them.
+   */
+  readonly resolvedVersions: SessionVersionResolution | null;
   readonly runs?: readonly Readonly<Record<string, unknown>>[];
   readonly transcript?: readonly Readonly<Record<string, unknown>>[];
   readonly pendingWork?: readonly Readonly<Record<string, unknown>>[];

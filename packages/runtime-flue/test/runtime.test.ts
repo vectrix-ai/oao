@@ -11,6 +11,7 @@ import * as v from "valibot";
 import { createDeterministicModelProvider } from "@oao/models-openrouter";
 import { MODEL_IMAGE_MAX_TOTAL_BYTES } from "@oao/model-images";
 import { createNoisePng, createTestPng, pngDimensions } from "@oao/testkit";
+import { parseManagedAgentSnapshotForPublication } from "@oao/contracts";
 import {
   FLUE_PACKAGE_VERSIONS,
   MODEL_WITHOUT_IMAGE_INPUT,
@@ -28,6 +29,7 @@ import {
   prepareManagedRunImages,
   registerRuntimeModelProvider,
   runtimeModelAcceptsImages,
+  sessionBindings,
   runtimeTesting,
   type ManagedRunFileContent,
 } from "../src/index.js";
@@ -1484,4 +1486,168 @@ test("permanent Skill activation errors settle admission; transient errors retry
       ),
     );
   }
+});
+
+test("a session runs the delegate and Skill versions it resolved at start", () => {
+  const publication = parseManagedAgentSnapshotForPublication({
+    systemPrompt: "Coordinate.",
+    modelPreset: "coordinator-v1",
+    tools: [],
+    skillVersionIds: ["00000000-0000-4000-8000-000000000001"],
+    skillIds: ["00000000-0000-4000-8000-000000000002"],
+    delegates: [
+      {
+        key: "pinned",
+        description: "Pinned child.",
+        agentVersionId: "00000000-0000-4000-8000-000000000003",
+      },
+      {
+        key: "latest",
+        description: "Following child.",
+        agentId: "00000000-0000-4000-8000-000000000004",
+        maxParallel: 2,
+      },
+    ],
+    sandbox: { enabled: false, provider: "daytona-primary", network: "none" },
+    limits: { maxTurns: 8, timeoutMs: 60_000 },
+  });
+  const agentVersionId = "00000000-0000-4000-8000-000000000005";
+  const entry = {
+    agentId: "00000000-0000-4000-8000-000000000006",
+    agentVersionId,
+    version: 2,
+    skills: [
+      {
+        skillId: "00000000-0000-4000-8000-000000000007",
+        skillVersionId: "00000000-0000-4000-8000-000000000001",
+        version: 1,
+        name: "pinned-skill",
+        followsLatest: false,
+      },
+      {
+        skillId: "00000000-0000-4000-8000-000000000002",
+        skillVersionId: "00000000-0000-4000-8000-000000000008",
+        version: 5,
+        name: "followed-skill",
+        followsLatest: true,
+      },
+    ],
+    delegates: [
+      {
+        key: "latest",
+        agentId: "00000000-0000-4000-8000-000000000004",
+        agentVersionId: "00000000-0000-4000-8000-000000000009",
+        version: 7,
+        followsLatest: true,
+      },
+      {
+        key: "pinned",
+        agentId: "00000000-0000-4000-8000-000000000010",
+        agentVersionId: "00000000-0000-4000-8000-000000000003",
+        version: 1,
+        followsLatest: false,
+      },
+    ],
+  };
+  const resolution = {
+    schemaVersion: 1 as const,
+    rootSessionId: "00000000-0000-4000-8000-000000000011",
+    rootAgentVersionId: agentVersionId,
+    resolvedAt: "2026-11-03T12:00:00.000Z",
+    agentVersions: [entry],
+  };
+  const bindings = sessionBindings(publication, agentVersionId, resolution);
+  assert.deepEqual(bindings.skillVersionIds, [
+    "00000000-0000-4000-8000-000000000001",
+    "00000000-0000-4000-8000-000000000008",
+  ]);
+  // The roster keeps the config's order and descriptions, with each
+  // followed delegate fixed to its resolved version.
+  assert.deepEqual(bindings.delegates, [
+    {
+      key: "pinned",
+      description: "Pinned child.",
+      agentVersionId: "00000000-0000-4000-8000-000000000003",
+      maxParallel: 1,
+    },
+    {
+      key: "latest",
+      description: "Following child.",
+      agentVersionId: "00000000-0000-4000-8000-000000000009",
+      maxParallel: 2,
+    },
+  ]);
+
+  // A resolution that disagrees with the version's links is refused.
+  assert.throws(
+    () =>
+      sessionBindings(publication, agentVersionId, {
+        ...resolution,
+        agentVersions: [
+          {
+            ...entry,
+            delegates: entry.delegates.map((delegate) =>
+              delegate.key === "pinned"
+                ? {
+                    ...delegate,
+                    agentVersionId: "00000000-0000-4000-8000-000000000012",
+                  }
+                : delegate,
+            ),
+          },
+        ],
+      }),
+    /resolved delegates do not match/u,
+  );
+  assert.throws(
+    () =>
+      sessionBindings(publication, agentVersionId, {
+        ...resolution,
+        agentVersions: [{ ...entry, skills: entry.skills.slice(0, 1) }],
+      }),
+    /resolved Skills do not match/u,
+  );
+  assert.throws(
+    () =>
+      sessionBindings(
+        publication,
+        "00000000-0000-4000-8000-000000000013",
+        resolution,
+      ),
+    /does not cover its agent version/u,
+  );
+  // A session from before resolutions cannot run a version that follows.
+  assert.throws(
+    () => sessionBindings(publication, agentVersionId, undefined),
+    /no version resolution/u,
+  );
+});
+
+test("a session from before version resolutions runs its pinned links", () => {
+  const publication = parseManagedAgentSnapshotForPublication({
+    systemPrompt: "Coordinate.",
+    modelPreset: "coordinator-v1",
+    tools: [],
+    skillVersionIds: ["00000000-0000-4000-8000-000000000001"],
+    delegates: [
+      {
+        key: "pinned",
+        description: "Pinned child.",
+        agentVersionId: "00000000-0000-4000-8000-000000000003",
+      },
+    ],
+    sandbox: { enabled: false, provider: "daytona-primary", network: "none" },
+    limits: { maxTurns: 8, timeoutMs: 60_000 },
+  });
+  assert.deepEqual(
+    sessionBindings(
+      publication,
+      "00000000-0000-4000-8000-000000000005",
+      undefined,
+    ),
+    {
+      skillVersionIds: ["00000000-0000-4000-8000-000000000001"],
+      delegates: publication.delegates,
+    },
+  );
 });

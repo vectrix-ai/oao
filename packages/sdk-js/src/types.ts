@@ -29,6 +29,10 @@ import type {
   SandboxSnapshotEntry,
   Run,
   Session,
+  SessionResolvedAgentVersion,
+  SessionResolvedDelegate,
+  SessionResolvedSkill,
+  SessionVersionResolution,
   Thread,
   ToolCall,
   ToolResultEnvelope,
@@ -87,6 +91,10 @@ export type {
   SandboxSnapshotEntry,
   Run,
   Session,
+  SessionResolvedAgentVersion,
+  SessionResolvedDelegate,
+  SessionResolvedSkill,
+  SessionVersionResolution,
   Thread,
   ToolCall,
   ToolResultEnvelope,
@@ -264,23 +272,45 @@ export interface HarnessOperationInput {
   readonly timeoutMs: number;
 }
 
+/**
+ * A delegate pins an exact agent version with `agentVersionId`, or follows
+ * an agent with `agentId`: each new session then runs the agent's latest
+ * published version, resolved when the session starts and fixed for it.
+ */
+export type DelegateInput =
+  | {
+      readonly key: string;
+      readonly description: string;
+      readonly agentVersionId: string;
+      readonly agentId?: never;
+      readonly maxParallel?: number;
+    }
+  | {
+      readonly key: string;
+      readonly description: string;
+      readonly agentId: string;
+      readonly agentVersionId?: never;
+      readonly maxParallel?: number;
+    };
+
 export interface PublishAgentVersionInput {
   readonly systemPrompt: string;
   readonly modelPreset: string;
   readonly tools: readonly AgentToolInput[];
+  /** Skill versions to pin exactly. */
   readonly skillVersionIds?: readonly string[];
+  /**
+   * Skills to follow: each new session binds the Skill's latest published
+   * version, resolved when the session starts and fixed for it.
+   */
+  readonly skillIds?: readonly string[];
   readonly harnessOperations?: readonly HarnessOperationInput[];
   readonly mcpBindings?: readonly {
     readonly toolsetVersionId: string;
     readonly credentialPolicyVersionId: string;
     readonly namespace: string;
   }[];
-  readonly delegates?: readonly {
-    readonly key: string;
-    readonly description: string;
-    readonly agentVersionId: string;
-    readonly maxParallel?: number;
-  }[];
+  readonly delegates?: readonly DelegateInput[];
   /**
    * Lets the agent use the OAO MCP tools in its runs, acting as the run's
    * creator narrowed to these scopes. `approval` (default `always`) applies
@@ -660,7 +690,22 @@ export interface CreatedSession {
   readonly lastActivityAt: string;
   readonly latestRunId: string;
   readonly run: Run;
+  /**
+   * The agent, delegate, and Skill versions this session tree runs. Absent
+   * only when an idempotent retry replays a response from an OAO release
+   * that did not record them.
+   */
+  readonly resolvedVersions?: SessionVersionResolution;
 }
+
+/** A session as `getSession` returns it. */
+export type SessionDetail = Session & {
+  /**
+   * The agent, delegate, and Skill versions fixed when the session tree
+   * started; null for sessions that started before OAO recorded them.
+   */
+  readonly resolvedVersions: SessionVersionResolution | null;
+};
 
 export interface DelegationMessageResult {
   readonly delegationId: string;

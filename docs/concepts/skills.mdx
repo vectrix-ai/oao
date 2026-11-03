@@ -1,6 +1,6 @@
 ---
 title: "Versioned Skills"
-description: "Publish reusable procedural knowledge, pin exact versions to agents, and load it progressively at runtime."
+description: "Publish reusable procedural knowledge, pin exact versions to agents or follow the latest one, and load it progressively at runtime."
 ---
 
 A Skill is a reusable, versioned package of instructions and supporting
@@ -28,24 +28,56 @@ hard operation-to-Skill binding.
 
 ## Version binding and session inheritance
 
-OAO stores Skills in PostgreSQL and binds exact Skill version IDs to immutable
-agent versions. When you create a session, OAO copies those bindings to the
-session automatically. You do not send Skills again at session creation.
+OAO stores Skills in PostgreSQL and binds them to immutable agent versions.
+When you create a session, OAO binds the exact Skill versions to the session
+automatically. You do not send Skills again at session creation.
 
 ```text
 Skill -> immutable Skill version -> immutable agent version -> session binding
 ```
 
-Publishing version 2 of a Skill does not change an agent that references
-version 1. Publish a new agent version and select version 2 when you want new
-sessions to use it. Existing sessions remain on their recorded agent and Skill
-versions.
+### Pin or follow a Skill
 
-The binding is therefore made when an **agent version** is published, not every
-time a session starts. A new session created from an agent automatically
-inherits the exact Skill versions on the selected agent version. Session
-creation does not accept a mutable "latest Skill" pointer and does not require
-the caller to repeat the Skill list.
+An agent version binds each Skill in one of two ways:
+
+| Config field      | Binding                                                                                                            |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `skillVersionIds` | **Pins** exact Skill versions. Publishing version 2 of the Skill does not change the binding.                      |
+| `skillIds`        | **Follows** Skills. Each new session binds the Skill's latest published version, resolved when the session starts. |
+
+```json
+{
+  "skillVersionIds": ["44444444-4444-4444-8444-444444444445"],
+  "skillIds": ["55555555-5555-4555-8555-555555555555"]
+}
+```
+
+A Skill is pinned or followed, not both, and one agent version binds at most 64
+Skills across both fields. In the console agent editor, selecting a Skill pins
+its current version; switch its version selector to **Latest version** to
+follow it instead.
+
+With a pinned Skill, publish a new agent version and select version 2 when you
+want new sessions to use it. With a followed Skill, publishing version 2 of the
+Skill is enough: new sessions bind it without a new agent version.
+
+Either way, a session's Skill versions are fixed when the session starts.
+Follow-up runs, and delegated child sessions in the same session tree, keep
+the versions resolved then. Existing sessions remain on their recorded agent
+and Skill versions. Session creation does not accept a Skill list; the session
+create response and session detail report the resolved versions as
+`resolvedVersions`, with `followsLatest: true` on followed Skills. See
+[Versions are resolved when a session
+starts](/concepts/multi-agent-orchestration#versions-are-resolved-when-a-session-starts).
+
+When an agent version is published, every followed Skill must exist, be
+enabled, and have an active latest version, and the latest version's name must
+not collide with another bound Skill. OAO checks the same rules again when each
+session starts, because the Skill may have changed since. If a followed Skill
+was removed, is disabled, has no published version, has a deprecated or revoked
+latest version, or now shares a name with another bound Skill, session creation
+returns `409 conflict` with a message that names the agent version and the
+Skill.
 
 ## Package contract
 
@@ -249,8 +281,9 @@ visible to shell commands.
 4. In **Resource workspace**, create package folders and Markdown files, or
    select a folder and upload multiple `.md` files. Select any file to edit and
    preview its complete rendered Markdown.
-5. Publish the Skill, then create or publish an agent version and select the
-   exact Skill version to attach.
+5. Publish the Skill, then create or publish an agent version and attach the
+   Skill. It is pinned to its current version; choose **Latest version** in its
+   version selector to follow it instead.
 6. Start a session from that agent. The session inherits the binding; do not
    submit the Skill again.
 7. Inspect the session timeline for `skill.activated` and, when a reference was
@@ -259,6 +292,8 @@ visible to shell commands.
 When publishing an update, review the complete rendered instructions and
 reference content before selecting the new version on a new agent version.
 Older agents and sessions remain pinned to their previous Skill versions.
+Agent versions that follow the Skill bind the update in every new session as
+soon as it is published, so review it before publishing.
 
 ## Troubleshoot supporting-file reads
 
@@ -299,6 +334,13 @@ Lifecycle only moves forward: `active` to `deprecated` or `revoked`, and
 `deprecated` to `revoked`. Version rows, contents, checksums, agent bindings,
 and session bindings are immutable.
 
+A followed Skill resolves only to its latest version, and only when that
+version is `active`. OAO does not skip a deprecated or revoked latest version
+to an older active one: new sessions of agent versions that follow the Skill
+fail with `409 conflict` until you publish a new Skill version, or pin an
+active version on a new agent version. Sessions that already started keep the
+version they resolved, subject to the lifecycle rules above.
+
 ### Disable or remove a whole Skill
 
 Version lifecycle is per version. Two Skill-level controls cover the whole
@@ -310,12 +352,16 @@ through the API:
   it keep running with it: thread incarnations pin an immutable snapshot of
   the bound Skill set, so nothing changes mid-session. The agent editor keeps
   showing a disabled Skill only while the version being edited pins it, so the
-  operator knows to unselect or re-enable it before publishing.
+  operator knows to unselect or re-enable it before publishing. Agent versions
+  that follow a disabled Skill cannot start new sessions until it is enabled
+  again; their running sessions are not affected.
 - **Remove Skill** archives it permanently. The Skill leaves the list and the
   agent picker, its open drafts are discarded, and its key becomes free for a
   new Skill. Published versions stay stored because agent versions and session
-  history reference them, so agents that pin them keep working. To also stop
-  existing sessions from using a version, revoke that version.
+  history reference them, so agents that pin them keep working. Agent versions
+  that follow a removed Skill cannot start new sessions; publish a version that
+  pins another Skill version or drops the binding. To also stop existing
+  sessions from using a version, revoke that version.
 
 Both actions confirm before they run and require `skill:revoke`.
 
@@ -329,13 +375,14 @@ Both actions confirm before they run and require `skill:revoke`.
 ## Authorization
 
 Project-scoped actions are `skill:read`, `skill:write`, `skill:bind`, and
-`skill:revoke`. Publishing an agent version also requires `agent:write` and
-validates every selected Skill version within the same tenant transaction.
+`skill:revoke`. Publishing an agent version also requires `agent:write`, plus
+`skill:bind` when it pins or follows any Skill, and validates every selected
+Skill version and followed Skill within the same tenant transaction.
 
 The console provides API parity for listing and creating Skills, publishing
 new versions, deprecating or revoking versions, disabling, enabling, and
-removing Skills, selecting exact versions on a new agent version, and viewing
-the Skill versions inherited by a session.
+removing Skills, pinning exact versions or following the latest version on a
+new agent version, and viewing the Skill versions a session resolved.
 
 ## Package integrity and startup failures
 
