@@ -4291,6 +4291,70 @@ test(
     );
 
     await t.test(
+      "an agent version may publish its text before tool calls",
+      async () => {
+        const agentConfig = (extra: Record<string, unknown> = {}) => ({
+          systemPrompt: "Say what you do before each tool call.",
+          modelPreset: baseModelPresetKey,
+          tools: [],
+          sandbox: disabledSandbox,
+          limits: { maxTurns: 32, timeoutMs: 60_000 },
+          ...extra,
+        });
+        const invalid = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "publish-text-invalid",
+              name: "Invalid setting",
+              config: agentConfig({ publishTextBeforeToolCalls: "yes" }),
+            },
+            "publish-text-agent-invalid-1",
+          ),
+        );
+        assert.equal(invalid.status, 400);
+        const created = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "publish-text-narrator",
+              name: "Narrator",
+              config: agentConfig(),
+            },
+            "publish-text-agent-1",
+          ),
+        );
+        assert.equal(created.status, 201, await created.clone().text());
+        const agent = (await created.json()) as { id: string };
+        const published = await app.request(
+          `${projectPath}/agents/${agent.id}/versions`,
+          jsonRequest(
+            { config: agentConfig({ publishTextBeforeToolCalls: true }) },
+            "publish-text-version-2",
+          ),
+        );
+        assert.equal(published.status, 201, await published.clone().text());
+        const versions = (await (
+          await app.request(`${projectPath}/agents/${agent.id}/versions`)
+        ).json()) as {
+          data: { version: number; config: Record<string, unknown> }[];
+        };
+        const byVersion = new Map(
+          versions.data.map((entry) => [entry.version, entry.config]),
+        );
+        assert.equal(byVersion.get(2)?.publishTextBeforeToolCalls, true);
+        // Omitted, the setting is off and the config keeps its shape.
+        assert.ok(!("publishTextBeforeToolCalls" in (byVersion.get(1) ?? {})));
+        // The database refuses anything but a boolean, whatever the caller.
+        const shape = await pool.query<{ valid: boolean }>(
+          "SELECT oao.is_valid_agent_publication_config_with_mcp($1) AS valid",
+          [{ ...agentConfig(), publishTextBeforeToolCalls: "yes" }],
+        );
+        assert.equal(shape.rows[0]?.valid, false);
+      },
+    );
+
+    await t.test(
       "an agent's run token acts as the run's creator, narrowed, while the run is unsettled",
       async () => {
         const agentConfig = (oaoTools: unknown) => ({

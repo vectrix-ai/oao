@@ -1176,3 +1176,16 @@ When exhausted, `model.invocation_failed` public payloads and model invocation
 `safeResponse` include `errorCode: "model_turn_limit_exceeded"` and a safe
 `errorExplanation` containing the configured maximum and next steps. No raw
 provider error or credentials are exposed. Historical failures are not backfilled.
+
+### Publish text before tool calls
+
+Agent creation and version publication accept the optional boolean
+`config.publishTextBeforeToolCalls`. When `true`, each model turn that writes
+text and calls tools saves that text as its own assistant message, with a
+`message.created` event whose payload names the message in `messageId`, before
+the turn's tool calls run. The run's final assistant message then holds only the
+text after the last tool call; `GET /sessions/{sessionId}` and
+`GET /runs/{runId}/messages` list all of a run's messages. Omit the field, the
+default, to keep text in the reply until the run settles. A value other than a
+boolean returns `400`. See [Publish text before tool
+calls](/agents/create-agent#publish-text-before-tool-calls).

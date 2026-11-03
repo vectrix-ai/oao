@@ -295,6 +295,11 @@ export interface AgentVersionConfig {
   readonly delegates?: readonly AgentDelegate[];
   /** Lets the agent use the OAO MCP tools in its runs. */
   readonly oaoTools?: ManagedAgentOaoTools;
+  /**
+   * Publishes each turn's text as its own assistant message before the
+   * turn's tool calls run. Off when omitted.
+   */
+  readonly publishTextBeforeToolCalls?: boolean;
   readonly sandbox: {
     readonly enabled: boolean;
     readonly provider: string;

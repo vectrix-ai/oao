@@ -56,6 +56,22 @@ export interface ToolObligationInput extends TenantContext {
   readonly pendingAssistantText?: string;
 }
 
+/**
+ * The assistant text of one model turn that requested tool calls. The turn's
+ * first tool call names the transcript message, so every call of the turn,
+ * and any retry, commits the same message once.
+ */
+export interface AssistantTextSegment {
+  readonly toolCallId: string;
+  readonly text: string;
+}
+
+export interface AssistantTextCommitInput extends TenantContext {
+  readonly runId: RunId;
+  /** In turn order; empty text is skipped. */
+  readonly segments: readonly AssistantTextSegment[];
+}
+
 interface ToolRow {
   id: string;
   stage:
@@ -201,10 +217,62 @@ async function appendEventOnce(
   );
 }
 
+function assistantTextMessageId(runId: string, toolCallId: string): string {
+  return stableUuid(`message:tool:${runId}:${toolCallId}:assistant`);
+}
+
 function pendingAssistantMessageId(input: ToolObligationInput): string {
-  return stableUuid(
-    `message:tool:${input.runId}:${input.flueToolCallId}:assistant`,
+  return assistantTextMessageId(input.runId, input.flueToolCallId);
+}
+
+/**
+ * Saves assistant text as its own transcript message named by a tool call and
+ * returns its id when this call inserted it. The stable id makes a replay a
+ * no-op, and a concurrent insert of the same message waits for the first one,
+ * so the message is saved once and before whatever its caller records next.
+ */
+async function insertAssistantMessage(
+  transaction: Queryable,
+  input: TenantContext & {
+    readonly runId: RunId;
+    readonly toolCallId: string;
+    readonly text: string;
+  },
+): Promise<string | undefined> {
+  // PostgreSQL text rejects NUL, which model output can contain.
+  const text = jsonbSafeText(input.text).trim();
+  if (!text) return undefined;
+  const messageId = assistantTextMessageId(input.runId, input.toolCallId);
+  const inserted = await transaction.query(
+    `INSERT INTO oao.messages (
+       organization_id,project_id,id,thread_id,run_id,role,redacted_content
+     ) SELECT organization_id,project_id,$3,thread_id,id,'assistant',$5
+         FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$4
+     ON CONFLICT (organization_id,project_id,id) DO NOTHING
+     RETURNING id`,
+    [input.organizationId, input.projectId, messageId, input.runId, text],
   );
+  return inserted.rowCount ? messageId : undefined;
+}
+
+async function appendAssistantMessageEvent(
+  transaction: Queryable,
+  input: TenantContext & {
+    readonly runId: RunId;
+    readonly toolCallId: string;
+    readonly messageId: string;
+  },
+): Promise<void> {
+  await appendEventOnce(transaction, {
+    ...input,
+    eventId: stableUuid(
+      `event:tool:${input.runId}:${input.toolCallId}:assistant-message`,
+    ),
+    aggregateType: "run",
+    aggregateId: input.runId,
+    kind: "message.created",
+    payload: { role: "assistant", messageId: input.messageId },
+  });
 }
 
 /**
@@ -215,31 +283,66 @@ function pendingAssistantMessageId(input: ToolObligationInput): string {
 async function commitPendingAssistantText(
   transaction: Queryable,
   input: ToolObligationInput,
-  requestKey: string,
 ): Promise<void> {
-  // PostgreSQL text rejects NUL, which model output can contain.
-  const text = input.pendingAssistantText
-    ? jsonbSafeText(input.pendingAssistantText).trim()
-    : undefined;
-  if (!text) return;
-  const messageId = pendingAssistantMessageId(input);
-  const inserted = await transaction.query(
-    `INSERT INTO oao.messages (
-       organization_id,project_id,id,thread_id,run_id,role,redacted_content
-     ) SELECT organization_id,project_id,$3,thread_id,id,'assistant',$5
-         FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$4
-     ON CONFLICT (organization_id,project_id,id) DO NOTHING
-     RETURNING id`,
-    [input.organizationId, input.projectId, messageId, input.runId, text],
-  );
-  if (!inserted.rowCount) return;
-  await appendEventOnce(transaction, {
+  if (!input.pendingAssistantText) return;
+  const segment = {
     ...input,
-    eventId: stableUuid(`event:${requestKey}:assistant-message`),
-    aggregateType: "run",
-    aggregateId: input.runId,
-    kind: "message.created",
-    payload: { role: "assistant", messageId },
+    toolCallId: input.flueToolCallId,
+    text: input.pendingAssistantText,
+  };
+  const messageId = await insertAssistantMessage(transaction, segment);
+  if (messageId)
+    await appendAssistantMessageEvent(transaction, { ...segment, messageId });
+}
+
+/**
+ * Commits each turn's assistant text as its own transcript message, in turn
+ * order, in one transaction. Returns false when the run has already settled:
+ * its reply then holds the text.
+ *
+ * Every message is inserted before any event is appended, and always in turn
+ * order. A commit therefore never waits for another commit's message while it
+ * holds the project's event position, so concurrent commits of overlapping
+ * turns cannot deadlock.
+ *
+ * The settled check takes no lock. Settlement locks the dispatch before the
+ * project's event position and cancellation the other way round, so a lock
+ * here could deadlock with one of them. A commit can therefore still land
+ * while a settlement is in flight; the reply then repeats that text.
+ */
+export async function commitAssistantText(
+  pool: PgPool,
+  input: AssistantTextCommitInput,
+): Promise<boolean> {
+  if (!input.segments.some((segment) => segment.text.trim())) return true;
+  return withTenantTransaction(pool, input, async (transaction) => {
+    const settled = await transaction.query(
+      `SELECT 1 FROM oao.runtime_dispatches
+        WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+          AND state='settled'`,
+      [input.organizationId, input.projectId, input.runId],
+    );
+    if (settled.rowCount) return false;
+    const inserted: { toolCallId: string; messageId: string }[] = [];
+    for (const segment of input.segments) {
+      const messageId = await insertAssistantMessage(transaction, {
+        organizationId: input.organizationId,
+        projectId: input.projectId,
+        runId: input.runId,
+        toolCallId: segment.toolCallId,
+        text: segment.text,
+      });
+      if (messageId)
+        inserted.push({ toolCallId: segment.toolCallId, messageId });
+    }
+    for (const message of inserted)
+      await appendAssistantMessageEvent(transaction, {
+        organizationId: input.organizationId,
+        projectId: input.projectId,
+        runId: input.runId,
+        ...message,
+      });
+    return true;
   });
 }
 
@@ -310,6 +413,11 @@ export class PostgresToolBroker {
     return this.publish(input, "platform");
   }
 
+  /** Commits assistant text ahead of a run's next tool call; see {@link commitAssistantText}. */
+  async commitAssistantText(input: AssistantTextCommitInput): Promise<boolean> {
+    return commitAssistantText(this.pool, input);
+  }
+
   /** Whether publishing this call saved its pending assistant text. */
   async hasPendingAssistantText(input: ToolObligationInput): Promise<boolean> {
     const result = await withTenantTransaction(
@@ -342,7 +450,7 @@ export class PostgresToolBroker {
       // A child gate also pauses the runs that requested its delegation.
       if (input.approval === "always") {
         await lockApprovalDeadlines(transaction, input);
-        await commitPendingAssistantText(transaction, input, requestKey);
+        await commitPendingAssistantText(transaction, input);
       }
       await transaction.query(
         "SELECT oao.publish_runtime_tool_call($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",

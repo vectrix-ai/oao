@@ -126,6 +126,10 @@ An assistant `message.created` event can arrive before the run settles: when a
 tool call pauses for approval, the explanation the agent wrote ahead of it is
 committed first. See
 [Explanation before an approval](/agents/add-tools#explanation-before-an-approval).
+An agent version with `publishTextBeforeToolCalls` commits the text of every
+model turn that calls tools this way, before the turn's tool call events; see
+[Publish text before tool
+calls](/agents/create-agent#publish-text-before-tool-calls).
 
 <Note>
   Event bodies contain public state and identifiers, not raw model reasoning,

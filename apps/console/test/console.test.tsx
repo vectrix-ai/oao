@@ -3871,6 +3871,57 @@ describe("management console", () => {
     });
   });
 
+  it("publishes an agent version that publishes its text before tool calls", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const agentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    renderConsole(`/agents/${agentId}`, api);
+    await user.click(
+      await screen.findByRole("button", { name: "Live messages" }),
+    );
+    expect(
+      screen.getByText(
+        /reaches the transcript in its reply when the run settles/u,
+      ),
+    ).toBeInTheDocument();
+    const setting = screen.getByRole("checkbox", {
+      name: /^Publish text before tool calls/u,
+    });
+    expect(setting).not.toBeChecked();
+    await user.click(setting);
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 6")).toBeInTheDocument();
+    const published = await api.getAgent(agentId);
+    expect(published.versions[0]?.config.publishTextBeforeToolCalls).toBe(true);
+    // The previous version keeps its config without the setting.
+    expect(
+      published.versions[1]?.config.publishTextBeforeToolCalls,
+    ).toBeUndefined();
+
+    // Turning it off leaves the setting out of the next version.
+    await user.click(screen.getByRole("button", { name: "Live messages" }));
+    expect(
+      screen.getByText(
+        /published as its own message before the turn's tool calls run/u,
+      ),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: /^Publish text before tool calls/u,
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 7")).toBeInTheDocument();
+    expect(
+      (await api.getAgent(agentId)).versions[0]?.config
+        .publishTextBeforeToolCalls,
+    ).toBeUndefined();
+  });
+
   it("adds, edits, and removes one tool through the modal editor", async () => {
     const user = userEvent.setup();
     renderConsole(

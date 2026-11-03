@@ -736,6 +736,7 @@ test("client publishes the exact managed-agent configuration contract", async ()
         timeoutMs: 45_000,
       },
     ],
+    publishTextBeforeToolCalls: true,
     sandbox: {
       enabled: false,
       provider: "daytona-primary",
