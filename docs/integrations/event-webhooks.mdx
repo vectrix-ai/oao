@@ -345,10 +345,22 @@ batch stays far below Convex's per-mutation write limits.
 By default, `message.created` carries only metadata such as the role. With
 `includeMessageContent: true`, OAO adds a `message` object with the text of
 the user or assistant message named by the event's `messageId`. That is the same
-transcript text an authorized reader gets from `GET /sessions/{sessionId}`. A run
-that paused for approval delivers one assistant `message.created` event for the
-explanation committed before the gate and another for the rest of its reply; see
+transcript text an authorized reader gets from `GET /sessions/{sessionId}`.
+
+When an assistant `message.created` event fires depends on the agent version:
+
+| Agent version                      | Assistant `message.created` events                                                                                                                                                         |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Default                            | One when the run settles, with its reply. A run that paused for approval adds one for the explanation committed before the gate.                                                           |
+| `publishTextBeforeToolCalls: true` | One for each model turn that writes text and calls tools, before that turn's tool calls run, and one when the run settles with the text written after the last tool call, if there is any. |
+
+The second form lets a receiver show what the agent is doing while it works,
+one message per model turn. Each message is a separate delivery event, so join
+a run's assistant messages in order to read its whole reply. See [Publish text
+before tool calls](/agents/create-agent#publish-text-before-tool-calls) and
 [Explanation before an approval](/agents/add-tools#explanation-before-an-approval).
+Each event commit wakes the runtime worker, so a published message normally
+leaves OAO within tens of milliseconds; see **Latency** above.
 
 <Warning>
   Message content leaves OAO in every delivery. Enable it only for receivers you

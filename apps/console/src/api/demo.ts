@@ -224,7 +224,8 @@ const agentsSeed: AgentDetail[] = [
         contentHash: "8fd2e5d2bfe74a12",
         createdAt: "2026-08-20T07:18:00.000Z",
         createdBy: "Demo Operator",
-        config: supportConfig,
+        // Its sessions show what the agent says before each tool call live.
+        config: { ...supportConfig, publishTextBeforeToolCalls: true },
       },
       {
         id: "aaaaaaa2-aaaa-4aaa-8aaa-aaaaaaaaaaaa",

@@ -1822,6 +1822,18 @@ export const ManagedAgentOaoToolsSchema = v.strictObject({
   approval: v.optional(v.picklist(["never", "always"]), "always"),
 });
 
+/**
+ * When true, the text the model writes in a turn is committed as its own
+ * assistant message (and `message.created` event) before that turn's tool
+ * calls run, instead of only in the reply when the run settles.
+ */
+export const ManagedAgentPublishTextSchema = v.pipe(
+  v.boolean(),
+  v.description(
+    "Publish the assistant text of each model turn as its own message before the turn's tool calls run. Off when omitted.",
+  ),
+);
+
 function delegateTarget(
   delegate: v.InferOutput<typeof ManagedAgentDelegateSchema>,
 ): string {
@@ -1909,6 +1921,8 @@ export const ManagedAgentPublicationConfigSchema = v.pipe(
     ),
     delegates: v.optional(ManagedAgentDelegatesSchema, []),
     oaoTools: v.optional(ManagedAgentOaoToolsSchema),
+    // Optional without a default, so existing configs keep their shape.
+    publishTextBeforeToolCalls: v.optional(ManagedAgentPublishTextSchema),
     sandbox: v.strictObject({
       enabled: v.boolean(),
       provider: ProjectSandboxProviderKeySchema,
@@ -1968,6 +1982,7 @@ export const ManagedAgentSnapshotSchema = v.strictObject({
   mcpTools: v.optional(v.array(ManagedMcpToolSnapshotSchema), []),
   delegates: v.optional(ManagedAgentResolvedDelegatesSchema, []),
   oaoTools: v.optional(ManagedAgentOaoToolsSchema),
+  publishTextBeforeToolCalls: v.optional(ManagedAgentPublishTextSchema),
   sandbox: v.strictObject({
     enabled: v.boolean(),
     provider: v.optional(LegacySandboxProviderKeySchema, "local-fake"),

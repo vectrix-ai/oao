@@ -221,7 +221,10 @@ after the last committed explanation. A run that paused for approval can
 therefore have several assistant messages; join them in order to read the
 complete reply. A delegated child run returns all of its assistant messages, in
 order, to its parent. Text written before tools without an approval gate stays
-in the final message.
+in the final message, unless the agent version publishes text before every tool
+call: then each turn's text is its own message, committed before the turn's tool
+calls whether they are gated or not. See [Publish text before tool
+calls](/agents/create-agent#publish-text-before-tool-calls).
 
 ## Approval waiting window
 

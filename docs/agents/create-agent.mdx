@@ -684,6 +684,54 @@ followed agent is published and sandbox-compatible. See [Versioned
 Skills](/concepts/skills#pin-or-follow-a-skill) and [Multi-agent
 orchestration](/concepts/multi-agent-orchestration).
 
+### Publish text before tool calls
+
+Models often say what they are about to do before they call a tool. By
+default OAO keeps that text with the run's reply, so the transcript, the
+[event stream](/reference/events), and
+[event webhooks](/integrations/event-webhooks) receive it only when the run
+settles. To show what an agent is doing while it works, for example in a status
+view, set `publishTextBeforeToolCalls` to `true`:
+
+```json
+{
+  "publishTextBeforeToolCalls": true
+}
+```
+
+In the console, open **Live messages** on the agent and select **Publish text
+before tool calls**, then publish the version.
+
+With the setting on:
+
+- OAO saves the text of each model turn that calls tools as its own assistant
+  message, with a `message.created` event, before any of that turn's tool calls
+  run. That holds for every kind of tool: caller and platform tools, MCP tools,
+  OAO tools, delegation, sandbox tools, Skills, and Harness Operations.
+- The message comes first: its event precedes the turn's `tool_call.*`,
+  `approval.requested`, `mcp.call_*`, `sandbox.command_*`, `skill.*`,
+  `harness.operation_*`, and `delegation.*` events. Parallel calls from one turn
+  share one message.
+- There is one message per turn, never per token. A turn without text adds no
+  message, and text from a turn that called no tools joins the next turn's
+  message.
+- The run's final assistant message holds only the text written after the last
+  tool call. Join a run's assistant messages in order to read its whole reply. A
+  delegated child returns all of its assistant messages, joined, to its parent.
+- Each run follows its own agent version: a delegated child publishes its text
+  only when the child's version has the setting on.
+
+The setting is off when the field is omitted, so existing versions keep their
+content hash and behavior. Like every version field it is immutable: start a new
+session to use a newly published version.
+
+The text waits in the runtime worker's memory until its message is saved. If
+the worker restarts during a turn, text that was not yet saved stays in the
+final reply, which can then also repeat messages published earlier in the run.
+If saving a message fails, the tool call still runs, and the text is published
+with the next turn's message or in the final reply. Text the model
+writes inside a Harness Operation is scratch work and is never published.
+
 ### Model presets
 
 `config.modelPreset` must name a durable project preset linked to an
@@ -1146,7 +1194,8 @@ and delegate bindings reference its immutable versions:
   published twice for one agent.
 - The console can edit instructions, model preset, sandbox provider, sandbox
   capabilities, network policy, and timeout while creating an agent and on its
-  latest version. Caller/platform tools are authored as JSON in the **Tools**
+  latest version. Publishing text before tool calls is set on the latest
+  version only. Caller/platform tools are authored as JSON in the **Tools**
   panel; there is no form-based schema builder.
 - Model presets can be added, duplicated into a new key, and archived, but never
   edited in place. Preset rows are append-only by design.

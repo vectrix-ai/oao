@@ -36,6 +36,7 @@ import type {
   FlueExecutionOperation,
   Sandbox,
   SandboxFactory,
+  SandboxToolFactory,
   SkillDefinition,
   ToolInputSchema,
   ToolOutputSchema,
@@ -117,7 +118,13 @@ import {
   type ModelImage,
 } from "@oao/model-images";
 import type { PostgresWakeQueue, RuntimeWakeJob } from "@oao/queue-postgres";
-import type { PostgresToolBroker, ToolObligationInput } from "@oao/tool-broker";
+import {
+  commitAssistantText,
+  type AssistantTextCommitInput,
+  type AssistantTextSegment,
+  type PostgresToolBroker,
+  type ToolObligationInput,
+} from "@oao/tool-broker";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { NodeSDK } from "@opentelemetry/sdk-node";
@@ -363,8 +370,8 @@ function harnessObservationCorrelation(
 }
 
 // Flue joins the text parts of a submission's reply with a blank line;
-// committed approval-gate messages use the same separator so they stay an
-// exact prefix of the settled reply.
+// committed assistant messages use the same separator so they stay an exact
+// prefix of the settled reply.
 const REPLY_TEXT_SEPARATOR = "\n\n";
 // Flue emits a turn right after persisting the completed assistant message and
 // before executing its tool calls; this bounds the wait for that observation.
@@ -379,28 +386,36 @@ interface PendingAssistantTextClaim {
   settle(persisted: boolean): void;
 }
 
+interface PendingSubmissionText {
+  readonly parts: string[];
+  /**
+   * Turns that requested tool calls, in order: the first call names the turn
+   * and `end` is the number of text parts through it.
+   */
+  readonly turns: { readonly toolCallId: string; readonly end: number }[];
+  committed: number;
+  reserved: number;
+  /** The per-turn commit in flight, which a turn's parallel calls share. */
+  publishing?: { readonly end: number; readonly done: Promise<void> };
+}
+
 /**
  * The assistant text of each running submission, captured synchronously from
- * Flue `turn` observations, so a tool call that pauses for approval can commit
- * the text the model wrote ahead of it. Memory-only: after a worker restart the
- * text simply stays in the settled reply.
+ * Flue `turn` observations, so a tool call can commit the text the model wrote
+ * ahead of it. Memory-only: after a worker restart the text simply stays in the
+ * settled reply.
  */
 class PendingAssistantText {
-  readonly #submissions = new Map<
-    string,
-    { readonly parts: string[]; committed: number; reserved: number }
-  >();
+  readonly #submissions = new Map<string, PendingSubmissionText>();
   readonly #calls = new Map<
     string,
     { readonly submissionId: string; readonly end: number }
   >();
   readonly #waiters = new Map<string, Set<() => void>>();
+  /** Runs whose agent version publishes text before every tool call. */
+  readonly #publishingRuns = new Set<string>();
 
   observe(event: FlueObservation): void {
-    if (event.type === "submission_settled") {
-      this.#forget(event.submissionId);
-      return;
-    }
     if (
       event.type !== "turn" ||
       event.purpose !== "agent" ||
@@ -418,7 +433,7 @@ class PendingAssistantText {
     if (!Array.isArray(content)) return;
     let submission = this.#submissions.get(event.submissionId);
     if (!submission) {
-      submission = { parts: [], committed: 0, reserved: 0 };
+      submission = { parts: [], turns: [], committed: 0, reserved: 0 };
       this.#submissions.set(event.submissionId, submission);
       this.#evictOverflow();
     }
@@ -434,6 +449,11 @@ class PendingAssistantText {
         submission.parts.push(text);
       else if (type === "toolCall" && typeof id === "string") callIds.push(id);
     }
+    if (callIds[0] !== undefined)
+      submission.turns.push({
+        toolCallId: callIds[0],
+        end: submission.parts.length,
+      });
     for (const callId of callIds) {
       this.#calls.set(callId, {
         submissionId: event.submissionId,
@@ -442,6 +462,25 @@ class PendingAssistantText {
       for (const wake of this.#waiters.get(callId) ?? []) wake();
       this.#waiters.delete(callId);
     }
+  }
+
+  /** Marks a run whose agent version publishes text before every tool call. */
+  publishBeforeToolCalls(runId: string): void {
+    this.#publishingRuns.delete(runId);
+    this.#publishingRuns.add(runId);
+    for (const oldest of this.#publishingRuns) {
+      if (this.#publishingRuns.size <= PENDING_ASSISTANT_TEXT_MAX_SUBMISSIONS)
+        break;
+      this.#publishingRuns.delete(oldest);
+    }
+  }
+
+  publishesBeforeToolCalls(runId: string): boolean {
+    return this.#publishingRuns.has(runId);
+  }
+
+  forgetRun(runId: string): void {
+    this.#publishingRuns.delete(runId);
   }
 
   /**
@@ -476,6 +515,65 @@ class PendingAssistantText {
     };
   }
 
+  /**
+   * Commits the text of every turn not yet committed, through the turn that
+   * requested `toolCallId`, one message per turn. Each turn's text runs from
+   * the end of the previous turn that called tools, so a message never
+   * depends on which call commits it and the messages stay a prefix of the
+   * reply. The parallel calls of one turn wait for one shared commit, so none
+   * of them starts before its turn's message is saved. A failed commit is not
+   * retried here: the next turn's commit or the settled reply keeps the text.
+   */
+  async publishThrough(
+    toolCallId: string,
+    commit: (segments: readonly AssistantTextSegment[]) => Promise<boolean>,
+    options: {
+      readonly signal?: AbortSignal | undefined;
+      /** False when the turn has certainly been observed already. */
+      readonly wait?: boolean;
+    } = {},
+  ): Promise<void> {
+    if (options.wait !== false && !this.#calls.has(toolCallId))
+      await this.#waitFor(toolCallId, options.signal);
+    const call = this.#calls.get(toolCallId);
+    const submission = call && this.#submissions.get(call.submissionId);
+    if (!call || !submission || submission.committed >= call.end) return;
+    const shared = submission.publishing;
+    if (shared && shared.end >= call.end) {
+      await shared.done;
+      return;
+    }
+    const segments: AssistantTextSegment[] = [];
+    let from = submission.committed;
+    for (const turn of submission.turns) {
+      if (turn.end <= submission.committed) continue;
+      if (turn.end > call.end) break;
+      const text = submission.parts
+        .slice(from, turn.end)
+        .join(REPLY_TEXT_SEPARATOR)
+        .trim();
+      if (text) segments.push({ toolCallId: turn.toolCallId, text });
+      from = turn.end;
+    }
+    if (segments.length === 0) {
+      submission.committed = call.end;
+      return;
+    }
+    const publishing = {
+      end: call.end,
+      done: commit(segments).then(
+        (persisted) => {
+          if (persisted)
+            submission.committed = Math.max(submission.committed, call.end);
+        },
+        () => undefined,
+      ),
+    };
+    submission.publishing = publishing;
+    await publishing.done;
+    if (submission.publishing === publishing) delete submission.publishing;
+  }
+
   #waitFor(toolCallId: string, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return Promise.resolve();
     return new Promise((resolve) => {
@@ -493,6 +591,15 @@ class PendingAssistantText {
       signal?.addEventListener("abort", done, { once: true });
       waiters.add(done);
     });
+  }
+
+  /**
+   * Drops a settled submission. The runtime projection calls this once it has
+   * projected the settlement, so a turn still queued for projection can commit
+   * its text first; the submission cap bounds memory without a projection.
+   */
+  forget(submissionId: string): void {
+    this.#forget(submissionId);
   }
 
   #forget(submissionId: string): void {
@@ -514,10 +621,10 @@ const pendingAssistantText = new PendingAssistantText();
 let stopObservingAssistantText: (() => void) | undefined;
 
 /**
- * The settled reply without the text already committed ahead of approval
- * gates. Flue's reply joins every text part of the run, so committed messages
- * form its prefix; any other layout keeps the whole reply rather than risk
- * dropping text.
+ * The settled reply without the text already committed as earlier assistant
+ * messages. Flue's reply joins every text part of the run, so committed
+ * messages form its prefix; any other layout keeps the whole reply rather than
+ * risk dropping text.
  */
 function replyAfterCommittedText(
   reply: string,
@@ -534,18 +641,65 @@ function replyAfterCommittedText(
   return rest.trim();
 }
 
+type AssistantTextBroker = Pick<
+  PostgresToolBroker,
+  "hasPendingAssistantText" | "commitAssistantText"
+>;
+
 /**
- * Publishes a gated obligation with the text the model wrote before requesting
- * it, then records whether the broker saved that text. Text from a publication
- * that rolled back stays available to the next gate and the settled reply.
+ * Commits the text of the turns through the one that requested `toolCallId`,
+ * for an agent version that publishes text before every tool call. A failed
+ * commit never fails the tool call: the text stays for the next commit or the
+ * settled reply.
+ */
+async function publishAssistantTextBefore(
+  broker: Pick<PostgresToolBroker, "commitAssistantText">,
+  run: Omit<AssistantTextCommitInput, "segments">,
+  toolCallId: string,
+  signal: AbortSignal | undefined,
+  pending: PendingAssistantText = pendingAssistantText,
+): Promise<void> {
+  // A Harness Operation's scratch turns are not part of the reply.
+  if (activeHarnessOperation.getStore()) return;
+  await pending.publishThrough(
+    toolCallId,
+    (segments) =>
+      broker.commitAssistantText({
+        organizationId: run.organizationId,
+        projectId: run.projectId,
+        runId: run.runId,
+        segments,
+      }),
+    { signal },
+  );
+}
+
+/**
+ * Publishes an obligation after the text the model wrote before requesting it.
+ * With `publishText` every call first commits its turn's text as its own
+ * message. Otherwise only a gated call carries the text, which the broker saves
+ * in the gate's transaction; whether it did is then recorded, so text from a
+ * publication that rolled back stays available to the next gate and the
+ * settled reply.
  */
 async function withPendingAssistantText<T>(
-  broker: Pick<PostgresToolBroker, "hasPendingAssistantText">,
+  broker: AssistantTextBroker,
   obligation: ToolObligationInput,
   signal: AbortSignal | undefined,
   publish: (obligation: ToolObligationInput) => Promise<T>,
   pending: PendingAssistantText = pendingAssistantText,
+  publishText = false,
 ): Promise<T> {
+  if (publishText) {
+    await publishAssistantTextBefore(
+      broker,
+      obligation,
+      obligation.flueToolCallId,
+      signal,
+      pending,
+    );
+    return publish(obligation);
+  }
   if (obligation.approval !== "always") return publish(obligation);
   const claim = await pending.take(obligation.flueToolCallId, signal);
   if (!claim) return publish(obligation);
@@ -569,6 +723,29 @@ async function withPendingAssistantText<T>(
     await settle();
     throw error;
   }
+}
+
+/**
+ * Sandbox tools that commit their turn's text before the durable command
+ * record, so the message precedes the command's events.
+ */
+function withAssistantTextBeforeSandboxTools(
+  factory: PersistableSandboxFactory,
+  publish: (toolCallId: string, signal?: AbortSignal) => Promise<void>,
+): PersistableSandboxFactory {
+  const tools = factory.tools;
+  if (!tools) return factory;
+  const wrapped: SandboxToolFactory = (sandbox, options) =>
+    tools.call(factory, sandbox, options).map((tool) => ({
+      ...tool,
+      async execute(toolCallId, params, signal, onUpdate) {
+        await publish(toolCallId, signal);
+        return tool.execute(toolCallId, params, signal, onUpdate);
+      },
+    }));
+  return Object.assign(Object.create(factory) as PersistableSandboxFactory, {
+    tools: wrapped,
+  });
 }
 
 const HARNESS_OPERATION_TASK_MAX_CHARACTERS = 100_000;
@@ -601,10 +778,12 @@ function harnessOperationSignal(
 /**
  * Builds one version-pinned Harness Operation as a Flue harness tool. Keeping
  * the prompt inside a durable step makes recovery replay the validated value
- * instead of repeating completed model work.
+ * instead of repeating completed model work. `beforeRun` runs before the
+ * scratch conversation starts, outside its context.
  */
 export function createManagedHarnessOperationTool(
   operation: ManagedHarnessOperation,
+  beforeRun?: (toolCallId: string, signal?: AbortSignal) => Promise<void>,
 ) {
   const result = compileObjectSchema(
     operation.resultSchema,
@@ -628,6 +807,9 @@ export function createManagedHarnessOperationTool(
         throw new Error(
           `Nested Harness Operation calls are not allowed (${parent.key} -> ${operation.key})`,
         );
+      // Scratch tools record their own events, so the turn's text is
+      // committed before any of them can run.
+      await beforeRun?.(toolCallId, signal);
       const startedAt = Date.now();
       log.info("Harness Operation started", {
         operationKey: operation.key,
@@ -1563,9 +1745,37 @@ export function ManagedAgent(): string {
         }
       : {}),
   });
+  // Each run follows its own agent version, so a delegated child decides
+  // for itself whether its text is published before its tool calls.
+  const publishText = initial.snapshot.publishTextBeforeToolCalls === true;
+  const run = {
+    organizationId: initial.organizationId as OrganizationId,
+    projectId: initial.projectId as ProjectId,
+    runId: delivery.runId as RunId,
+  };
+  const publishTextBefore = (toolCallId: string, signal?: AbortSignal) =>
+    publishAssistantTextBefore(config.broker, run, toolCallId, signal);
+  if (publishText) pendingAssistantText.publishBeforeToolCalls(run.runId);
+  const withTextBefore = <T>(
+    obligation: ToolObligationInput,
+    signal: AbortSignal | undefined,
+    publish: (obligation: ToolObligationInput) => Promise<T>,
+  ) =>
+    withPendingAssistantText(
+      config.broker,
+      obligation,
+      signal,
+      publish,
+      pendingAssistantText,
+      publishText,
+    );
   if (initial.snapshot.sandbox.enabled && config.sandboxFactory) {
     const sandbox = config.sandboxFactory(initial, delivery);
-    useSandbox(sandbox);
+    useSandbox(
+      publishText
+        ? withAssistantTextBeforeSandboxTools(sandbox, publishTextBefore)
+        : sandbox,
+    );
     if (sandbox.persistWorkspace)
       useAgentFinish(async ({ harness }) =>
         sandbox.persistWorkspace?.(harness.sandbox),
@@ -1613,7 +1823,12 @@ export function ManagedAgent(): string {
     );
 
   for (const operation of initial.snapshot.harnessOperations)
-    useTool(createManagedHarnessOperationTool(operation));
+    useTool(
+      createManagedHarnessOperationTool(
+        operation,
+        publishText ? publishTextBefore : undefined,
+      ),
+    );
 
   const delegationValue = v.strictObject({
     delegationId: v.string(),
@@ -1674,24 +1889,26 @@ export function ManagedAgent(): string {
           approval: "never",
         };
         const outcome = await step.do("execute-delegation", () =>
-          config.broker.executePlatform(
-            obligation,
-            async (executeSignal) => {
-              const result = await config.delegations!.delegate({
-                organizationId: initial.organizationId,
-                projectId: initial.projectId,
-                parentRunId: delivery.runId,
-                parentThreadId: initial.threadId,
-                parentSessionId: initial.sessionId,
-                parentAgentVersionId: initial.snapshot.agentVersionId,
-                delegateKey: data.agent,
-                prompt: data.prompt,
-                idempotencyKey: `delegate:${delivery.runId}:${toolCallId}`,
-                ...(executeSignal ? { signal: executeSignal } : {}),
-              });
-              return { ...result } as Readonly<Record<string, PublicValue>>;
-            },
-            signal,
+          withTextBefore(obligation, signal, (gated) =>
+            config.broker.executePlatform(
+              gated,
+              async (executeSignal) => {
+                const result = await config.delegations!.delegate({
+                  organizationId: initial.organizationId,
+                  projectId: initial.projectId,
+                  parentRunId: delivery.runId,
+                  parentThreadId: initial.threadId,
+                  parentSessionId: initial.sessionId,
+                  parentAgentVersionId: initial.snapshot.agentVersionId,
+                  delegateKey: data.agent,
+                  prompt: data.prompt,
+                  idempotencyKey: `delegate:${delivery.runId}:${toolCallId}`,
+                  ...(executeSignal ? { signal: executeSignal } : {}),
+                });
+                return { ...result } as Readonly<Record<string, PublicValue>>;
+              },
+              signal,
+            ),
           ),
         );
         return { output: outcome };
@@ -1721,22 +1938,24 @@ export function ManagedAgent(): string {
           approval: "never",
         };
         const outcome = await step.do("execute-delegation-follow-up", () =>
-          config.broker.executePlatform(
-            obligation,
-            async (executeSignal) => {
-              const result = await config.delegations!.followUp({
-                organizationId: initial.organizationId,
-                projectId: initial.projectId,
-                parentRunId: delivery.runId,
-                parentSessionId: initial.sessionId,
-                delegationId: data.delegationId,
-                prompt: data.prompt,
-                idempotencyKey: `delegate-follow-up:${delivery.runId}:${toolCallId}`,
-                ...(executeSignal ? { signal: executeSignal } : {}),
-              });
-              return { ...result } as Readonly<Record<string, PublicValue>>;
-            },
-            signal,
+          withTextBefore(obligation, signal, (gated) =>
+            config.broker.executePlatform(
+              gated,
+              async (executeSignal) => {
+                const result = await config.delegations!.followUp({
+                  organizationId: initial.organizationId,
+                  projectId: initial.projectId,
+                  parentRunId: delivery.runId,
+                  parentSessionId: initial.sessionId,
+                  delegationId: data.delegationId,
+                  prompt: data.prompt,
+                  idempotencyKey: `delegate-follow-up:${delivery.runId}:${toolCallId}`,
+                  ...(executeSignal ? { signal: executeSignal } : {}),
+                });
+                return { ...result } as Readonly<Record<string, PublicValue>>;
+              },
+              signal,
+            ),
           ),
         );
         return { output: outcome };
@@ -1784,7 +2003,7 @@ export function ManagedAgent(): string {
         const retryBlocked = await config.broker.retryAdmission(obligation);
         if (retryBlocked) return { output: retryBlocked };
         const outcome = await step.do("execute-mcp-obligation", () =>
-          withPendingAssistantText(config.broker, obligation, signal, (gated) =>
+          withTextBefore(obligation, signal, (gated) =>
             config.broker.executePlatform(
               gated,
               (executeSignal) =>
@@ -1831,7 +2050,7 @@ export function ManagedAgent(): string {
         const retryBlocked = await config.broker.retryAdmission(obligation);
         if (retryBlocked) return { output: retryBlocked };
         const outcome = await step.do("execute-oao-obligation", () =>
-          withPendingAssistantText(config.broker, obligation, signal, (gated) =>
+          withTextBefore(obligation, signal, (gated) =>
             config.broker.executePlatform(
               gated,
               async (executeSignal) => {
@@ -1884,11 +2103,8 @@ export function ManagedAgent(): string {
         if (retryBlocked) return { output: retryBlocked };
         if (tool.owner === "caller") {
           await step.do("publish-caller-obligation", () =>
-            withPendingAssistantText(
-              config.broker,
-              obligation,
-              signal,
-              (gated) => config.broker.publishCaller(gated),
+            withTextBefore(obligation, signal, (gated) =>
+              config.broker.publishCaller(gated),
             ),
           );
           const outcome = await step.do("commit-caller-result", () =>
@@ -1906,7 +2122,7 @@ export function ManagedAgent(): string {
         }
         const handler = config.platformTools.get(tool.name);
         const outcome = await step.do("execute-platform-obligation", () =>
-          withPendingAssistantText(config.broker, obligation, signal, (gated) =>
+          withTextBefore(obligation, signal, (gated) =>
             config.broker.executePlatform(
               gated,
               async (executeSignal) => {
@@ -4060,6 +4276,10 @@ export class ManagedRuntimeOrchestrator {
         mcpTools,
         delegates: bindings.delegates,
         ...(publication.oaoTools ? { oaoTools: publication.oaoTools } : {}),
+        // Only when on, so existing snapshots keep their exact shape.
+        ...(publication.publishTextBeforeToolCalls
+          ? { publishTextBeforeToolCalls: true }
+          : {}),
         sandbox: publication.sandbox,
         limits: publication.limits,
       };
@@ -4170,6 +4390,23 @@ export class ManagedRuntimeOrchestrator {
   }
 }
 
+function firstToolCallId(output: unknown): string | undefined {
+  const content =
+    output && typeof output === "object"
+      ? (output as { readonly content?: unknown }).content
+      : undefined;
+  if (!Array.isArray(content)) return undefined;
+  for (const part of content as unknown[]) {
+    if (!part || typeof part !== "object") continue;
+    const { type, id } = part as {
+      readonly type?: unknown;
+      readonly id?: unknown;
+    };
+    if (type === "toolCall" && typeof id === "string") return id;
+  }
+  return undefined;
+}
+
 /** Skip stream deltas before they enter the serialized database projection queue. */
 function shouldProjectObservation(event: FlueObservation): boolean {
   switch (event.type) {
@@ -4233,7 +4470,12 @@ export class RuntimeProjection {
       const harnessCorrelation = harnessObservationCorrelation(event);
       this.#pending = this.#pending
         .then(() => this.project(event, harnessCorrelation))
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .then(() => {
+          // Every earlier turn of the submission has been projected by now.
+          if (event.type === "submission_settled")
+            pendingAssistantText.forget(event.submissionId);
+        });
     });
   }
 
@@ -4415,6 +4657,8 @@ export class RuntimeProjection {
         event,
       });
       await this.projectTurn(runtimeDispatch, event, harnessCorrelation);
+      if (!harnessCorrelation)
+        await this.publishTurnText(runtimeDispatch, event);
       if (harnessCorrelation) {
         const usage = event.response.usage;
         const actionSummary = harnessModelActionSummary(
@@ -4458,6 +4702,41 @@ export class RuntimeProjection {
     }
     if (event.type === "submission_settled")
       await this.settle(runtimeDispatch, event.outcome, event.submissionId);
+  }
+
+  /**
+   * Commits a tool-calling turn's text for an agent version that publishes
+   * text before tool calls. A tool call usually commits it first; this covers
+   * the calls that commit nothing themselves (Skill and Harness Operation
+   * tools). Projections are serialized, so the message precedes the events
+   * projected for the turn's tool calls.
+   */
+  private async publishTurnText(
+    runtimeDispatch: DispatchRow,
+    event: Extract<FlueObservation, { type: "turn" }>,
+  ): Promise<void> {
+    if (
+      event.purpose !== "agent" ||
+      event.isError ||
+      !pendingAssistantText.publishesBeforeToolCalls(runtimeDispatch.run_id)
+    )
+      return;
+    const toolCallId = firstToolCallId(event.response.output);
+    if (!toolCallId) return;
+    // The turn was observed before it was queued for projection, and its
+    // submission stays known until its settlement has been projected. A run
+    // that already settled refuses the commit; its reply holds the text.
+    await pendingAssistantText.publishThrough(
+      toolCallId,
+      (segments) =>
+        commitAssistantText(this.pool, {
+          organizationId: runtimeDispatch.organization_id,
+          projectId: runtimeDispatch.project_id,
+          runId: runtimeDispatch.run_id,
+          segments,
+        }),
+      { wait: false },
+    );
   }
 
   private async watchAdmission(
@@ -4815,6 +5094,7 @@ export class RuntimeProjection {
     );
     const run = runResult.rows[0];
     if (!run) return;
+    pendingAssistantText.forgetRun(runtimeDispatch.run_id);
     const state =
       outcome === "completed"
         ? "completed"
@@ -6070,6 +6350,8 @@ export const runtimeTesting = {
   createPendingAssistantText: () => new PendingAssistantText(),
   replyAfterCommittedText,
   withPendingAssistantText,
+  withAssistantTextBeforeSandboxTools,
+  publishAssistantTextBefore,
   shouldProjectObservation,
   observe,
   eventUuid,

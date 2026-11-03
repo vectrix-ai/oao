@@ -1029,3 +1029,24 @@ test("followed delegates and Skills keep pinned links and freeze per session", a
   );
   assert.doesNotMatch(sql, /DROP TABLE|DROP FUNCTION/u);
 });
+
+test("publishing text before tool calls is an optional boolean on agent versions", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0062_publish_text_before_tool_calls.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  // The new validator wraps the previous one, which never sees the new key.
+  assert.match(
+    sql,
+    /RENAME TO is_valid_agent_publication_config_without_text_publication/u,
+  );
+  assert.match(
+    sql,
+    /jsonb_typeof\(p_config->'publishTextBeforeToolCalls'\) IS DISTINCT FROM 'boolean'/u,
+  );
+  assert.match(sql, /p_config - 'publishTextBeforeToolCalls'/u);
+  assert.doesNotMatch(sql, /DROP TABLE|DROP FUNCTION|UPDATE oao\./u);
+});

@@ -283,12 +283,16 @@ function isLinkedDelegate(
   );
 }
 
-/** A config without followed Skills, so the editor's own list replaces them. */
+/**
+ * A config without followed Skills or the text publication setting, so the
+ * editor's own values replace them.
+ */
 function withoutFollowedSkills(config: AgentVersionConfig): AgentVersionConfig {
   const copy: { -readonly [Key in keyof AgentVersionConfig]?: unknown } = {
     ...config,
   };
   delete copy.skillIds;
+  delete copy.publishTextBeforeToolCalls;
   return copy as AgentVersionConfig;
 }
 
@@ -1275,6 +1279,9 @@ function AgentEditor({
   ]);
   const [delegatePicker, setDelegatePicker] = useState(false);
   const [oaoTools, setOaoTools] = useState(baseConfig.oaoTools);
+  const [publishText, setPublishText] = useState(
+    baseConfig.publishTextBeforeToolCalls === true,
+  );
   const [tools, setTools] = useState<readonly ToolDefinition[]>(
     baseConfig.tools,
   );
@@ -1316,6 +1323,7 @@ function AgentEditor({
     setMcpBindings(next.config.mcpBindings ?? []);
     setDelegates(next.config.delegates ?? []);
     setOaoTools(next.config.oaoTools);
+    setPublishText(next.config.publishTextBeforeToolCalls === true);
     setTools(next.config.tools);
     setHarnessOperations(next.config.harnessOperations ?? []);
   };
@@ -1331,6 +1339,8 @@ function AgentEditor({
     mcpBindings,
     delegates,
     ...(oaoTools ? { oaoTools } : {}),
+    // Omitted when off, so existing configs keep their shape.
+    ...(publishText ? { publishTextBeforeToolCalls: true } : {}),
     sandbox: {
       enabled: sandboxEnabled,
       provider: sandboxProvider,
@@ -2425,6 +2435,24 @@ function AgentEditor({
               )}
             </div>
           </div>
+        </Panel>
+        <Panel
+          title="Live messages"
+          collapsible
+          defaultCollapsed
+          description={
+            publishText
+              ? "Each model turn's text is published as its own message before the turn's tool calls run."
+              : "The agent's text reaches the transcript in its reply when the run settles."
+          }
+        >
+          <CheckboxRow
+            label="Publish text before tool calls"
+            description="Saves the text the model writes in a turn as an assistant message, with a message.created event, before that turn's tool calls run. Event webhooks, the event stream, and the transcript then show what the agent is doing while it works. The final reply keeps only the text written after the last tool call."
+            checked={publishText}
+            disabled={!isLatest}
+            onChange={(event) => setPublishText(event.currentTarget.checked)}
+          />
         </Panel>
         <Panel
           title="Run limits"

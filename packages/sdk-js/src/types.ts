@@ -320,6 +320,13 @@ export interface PublishAgentVersionInput {
     readonly scopes: readonly string[];
     readonly approval?: "never" | "always";
   };
+  /**
+   * Publish the text the model writes in each turn as its own assistant
+   * message, with a `message.created` event, before that turn's tool calls
+   * run. Off when omitted: the text then reaches the transcript in the reply
+   * when the run settles.
+   */
+  readonly publishTextBeforeToolCalls?: boolean;
   readonly sandbox: SandboxPolicyInput;
   readonly limits: {
     /** Maximum model turns per run, an integer from 1 through 256. Default: 32. */
