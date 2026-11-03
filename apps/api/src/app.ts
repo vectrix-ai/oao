@@ -1487,7 +1487,28 @@ function parseAgentConfig(value: unknown): ManagedAgentPublicationConfig {
     );
   }
   assertPublicPayload(config as Readonly<Record<string, PublicValue>>);
-  return config;
+  return withStoredFollowedIds(config);
+}
+
+/**
+ * Followed agent and Skill IDs in the lowercase form PostgreSQL returns, so
+ * publication checks, the stored config, and the runtime's comparison with a
+ * session's resolved versions all use one spelling.
+ */
+function withStoredFollowedIds(
+  config: ManagedAgentPublicationConfig,
+): ManagedAgentPublicationConfig {
+  return {
+    ...config,
+    ...(config.skillIds
+      ? { skillIds: config.skillIds.map((id) => id.toLowerCase()) }
+      : {}),
+    delegates: config.delegates.map((delegate) =>
+      "agentId" in delegate
+        ? { ...delegate, agentId: delegate.agentId.toLowerCase() }
+        : delegate,
+    ),
+  };
 }
 
 async function assertAgentToolNamespaceAvailable(

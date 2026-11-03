@@ -608,6 +608,29 @@ test(
     );
 
     await t.test(
+      "followed IDs in another spelling are stored as PostgreSQL returns them",
+      async () => {
+        const skill = await createSkill("spelled-skill");
+        const child = await createAgent("spelled-child");
+        const coordinator = await createAgent("spelled-coordinator", {
+          skillIds: [skill.id.toUpperCase()],
+          delegates: [{ key: "child", agentId: child.id.toUpperCase() }],
+        });
+        const stored = await pool.query<{
+          config: { skillIds: string[]; delegates: { agentId: string }[] };
+        }>("SELECT config FROM oao.agent_versions WHERE id=$1", [
+          coordinator.versionId,
+        ]);
+        assert.deepEqual(stored.rows[0]?.config.skillIds, [skill.id]);
+        assert.equal(stored.rows[0]?.config.delegates[0]?.agentId, child.id);
+        const session = await startSessionOk(coordinator.id);
+        const root = entry(session.resolvedVersions, coordinator.versionId);
+        assert.equal(root.delegates[0]?.agentId, child.id);
+        assert.equal(root.skills[0]?.skillId, skill.id);
+      },
+    );
+
+    await t.test(
       "a retried publication replays even after its followed Skill changed",
       async () => {
         const skill = await createSkill("replayed-skill");
