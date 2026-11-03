@@ -187,5 +187,11 @@ the work twice. Without it, each call is a new write.
 
 Results are the API's JSON. `get_session` leaves out the debug block (model
 invocations, tool calls, and sandbox detail) unless `includeDebug` is `true`.
+It always includes `resolvedVersions`, the exact agent, Skill, and delegate
+versions the session runs. `create_agent` and `publish_agent_version` take the
+same configuration as the API, so a delegate can pin `agentVersionId` or follow
+`agentId`, and Skills can be pinned in `skillVersionIds` or followed in
+`skillIds`. See [Multi-agent
+orchestration](/concepts/multi-agent-orchestration#versions-are-resolved-when-a-session-starts).
 A failed call is a tool error carrying the API's `status`, `code`, `message`,
 and `requestId`.

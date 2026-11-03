@@ -1534,6 +1534,87 @@ describe("HTTP console adapter", () => {
     );
   });
 
+  it("maps the versions a session resolved, and null for older sessions", async () => {
+    const resolvedVersions = {
+      schemaVersion: 1,
+      rootSessionId: "77777777-7777-4777-8777-77777777777a",
+      rootAgentVersionId: "aaaaaaa4-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      resolvedAt: "2026-08-20T10:00:00.000Z",
+      agentVersions: [
+        {
+          agentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          agentVersionId: "aaaaaaa4-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          version: 4,
+          skills: [
+            {
+              skillId: "44444444-4444-4444-8444-444444444444",
+              skillVersionId: "44444444-4444-4444-8444-444444444445",
+              version: 1,
+              name: "shipment-intake",
+              followsLatest: true,
+            },
+          ],
+          delegates: [
+            {
+              key: "document-analyst",
+              agentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              agentVersionId: "bbbbbbb5-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              version: 5,
+              followsLatest: true,
+            },
+          ],
+        },
+        {
+          agentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          agentVersionId: "bbbbbbb5-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          version: 5,
+          skills: [],
+          delegates: [],
+        },
+      ],
+    };
+    const base = {
+      title: "Resolved versions",
+      status: "completed",
+      agentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentName: "Support operator",
+      agentVersion: 4,
+      createdAt: "2026-08-20T10:00:00.000Z",
+      lastActivityAt: "2026-08-20T10:00:05.000Z",
+      runs: [],
+      transcript: [],
+      timeline: [],
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          id: "77777777-7777-4777-8777-77777777777a",
+          resolvedVersions,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          id: "77777777-7777-4777-8777-77777777777b",
+          resolvedVersions: null,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+
+    expect(
+      (await api.getSession("77777777-7777-4777-8777-77777777777a"))
+        .resolvedVersions,
+    ).toEqual(resolvedVersions);
+    expect(
+      (await api.getSession("77777777-7777-4777-8777-77777777777b"))
+        .resolvedVersions,
+    ).toBeNull();
+  });
+
   it("orders ordinary session activity chronologically and treats a running sandbox as ready", async () => {
     const runId = "88888888-8888-4888-8888-888888888880";
     const session = {

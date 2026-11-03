@@ -161,9 +161,13 @@ cookies.
     Linking a different model, Skill version, or MCP toolset/policy version is
     always a publication. Configure remote tools under **MCP connections**, then
     select the immutable toolset and exact-origin policy on the agent editor.
-    Publishing a newer Skill does not update an existing agent version.
-    Existing sessions stay attached to the agent and Skill versions they were
-    created with. See [Versioned Skills](/concepts/skills).
+    Selecting a Skill pins its current version. Switch a bound Skill's
+    version selector to **Latest version** to follow the Skill instead, so
+    that each new session binds its latest published version. Publishing a
+    newer Skill does not change an existing agent version or a pinned
+    binding. Existing sessions stay attached to the agent and Skill versions
+    they were created with. See
+    [Versioned Skills](/concepts/skills#pin-or-follow-a-skill).
 
     Harness Operations are authored under their own editor section. Each one
     becomes a focused model-callable tool that inherits this Agent version's
@@ -172,14 +176,16 @@ cookies.
     object. It is not a separate Agent, and there is no per-operation Skill
     selection. See [Harness Operations](/concepts/harness-operations).
 
-    Delegate selection works the same way: the editor records the selected
-    agent's exact latest version. The **Delegates** section lists only the
-    agents linked to this version; **Add delegate** opens a dialog where you
-    can search every other agent in the project by name, key, or description
-    and pick one or more published, sandbox-compatible agents. Unavailable
-    candidates stay visible with the reason. A coordinator can delegate only
-    to that published roster, and each child keeps its own persistent session
-    while sharing the coordinator workspace. See
+    Delegate selection works the same way: each pick pins the agent's
+    current version, and switching a linked delegate to **Latest version**
+    makes it follow the agent's latest published version instead.
+    The **Delegates** section lists only the agents linked to this version;
+    **Add delegate** opens a dialog where you can search every other agent in
+    the project by name, key, or description and pick one or more published,
+    sandbox-compatible agents. Unavailable candidates stay visible with the
+    reason. A coordinator can delegate only to that published roster, and each
+    child keeps its own persistent session while sharing the coordinator
+    workspace. See
     [Multi-agent orchestration](/concepts/multi-agent-orchestration).
 
     Console validation requires:
@@ -200,7 +206,9 @@ cookies.
     Office, PDF, or email files, and submit.
 
     The session pins the agent's latest version at that moment and automatically
-    copies its exact Skill bindings. Do not send Skills in the session request.
+    binds its Skills. Skills and delegates that follow the latest version are
+    resolved to exact versions now and stay fixed for the session. Do not send
+    Skills in the session request.
     Creation returns while the first run is `queued`; the runtime finishes it
     asynchronously.
 
@@ -641,6 +649,41 @@ consecutive-failure count.
   the safe `platform_tool_failed` outcome until the operator supplies a handler.
 </Warning>
 
+### Skills and delegates
+
+An agent version binds Skills and delegates either by pinning an exact version
+or by following the latest published version:
+
+| Config field              | Pins                               | Follows             |
+| ------------------------- | ---------------------------------- | ------------------- |
+| Skills                    | `skillVersionIds`: Skill versions  | `skillIds`: Skills  |
+| Each entry of `delegates` | `agentVersionId`: an agent version | `agentId`: an agent |
+
+```json
+{
+  "skillVersionIds": ["44444444-4444-4444-8444-444444444445"],
+  "skillIds": ["55555555-5555-4555-8555-555555555555"],
+  "delegates": [
+    {
+      "key": "shipment-extraction",
+      "description": "Extract shipment facts into the shared workspace.",
+      "agentId": "33333333-3333-4333-8333-333333333333",
+      "maxParallel": 2
+    }
+  ]
+}
+```
+
+A pinned link never changes. A followed Skill or delegate is resolved to its
+latest published version when each session starts, and that version stays
+fixed for the session and its delegated children. A Skill is pinned or
+followed, not both, and a version binds at most 64 Skills in total.
+Binding Skills either way requires `skill:bind`. Publication checks that each
+followed Skill is enabled and has an active latest version, and that each
+followed agent is published and sandbox-compatible. See [Versioned
+Skills](/concepts/skills#pin-or-follow-a-skill) and [Multi-agent
+orchestration](/concepts/multi-agent-orchestration).
+
 ### Model presets
 
 `config.modelPreset` must name a durable project preset linked to an
@@ -693,9 +736,12 @@ connection configuration. See [Daytona sandboxes](/sandboxes/daytona).
 
 When a coordinator version has delegates, its sandbox enabled state, provider,
 snapshot, and network policy must match every selected child version because
-their threads share one workspace sandbox. After changing the coordinator
-snapshot, publish compatible child versions first or remove the incompatible
-delegate bindings before publishing.
+their threads share one workspace sandbox. A followed delegate is checked
+against its agent's latest version at publication and again when each session
+starts. After changing the coordinator snapshot, publish compatible child
+versions first or remove the incompatible delegate bindings before publishing.
+See [Change the sandbox of a followed
+agent](/concepts/multi-agent-orchestration#change-the-sandbox-of-a-followed-agent).
 
 The publication contract does not expose arbitrary CPU, memory, disk, image, or
 target selection. Those settings come from the selected Daytona snapshot.
@@ -755,9 +801,32 @@ Created` without waiting for the model:
     "createdAt": "2026-08-20T10:03:00.000Z",
     "updatedAt": "2026-08-20T10:03:00.000Z"
   },
-  "latestRunId": "3b1d696c-70c8-4bfd-90df-79772205ee3c"
+  "latestRunId": "3b1d696c-70c8-4bfd-90df-79772205ee3c",
+  "resolvedVersions": {
+    "schemaVersion": 1,
+    "rootSessionId": "7fd65b84-30ea-4ca9-aa40-ac219698e718",
+    "rootAgentVersionId": "9f7e7819-6075-4b82-a7c0-47ca7bc45f76",
+    "resolvedAt": "2026-08-20T10:03:00.000Z",
+    "agentVersions": [
+      {
+        "agentId": "5c0b8a52-1f7e-4c3a-9d55-2b1f3c8e6a10",
+        "agentVersionId": "9f7e7819-6075-4b82-a7c0-47ca7bc45f76",
+        "version": 3,
+        "skills": [],
+        "delegates": []
+      }
+    ]
+  }
 }
 ```
+
+`resolvedVersions` records the exact agent, Skill, and delegate versions the
+session runs, including the ones resolved from Skills and delegates that follow
+the latest version. See [Versions are resolved when a session
+starts](/concepts/multi-agent-orchestration#versions-are-resolved-when-a-session-starts).
+If a followed agent or Skill can no longer be used, for example because it was
+deleted or disabled, session creation returns `409 conflict` with a message
+that names the link to fix.
 
 Save the session and run IDs from the real response:
 
@@ -789,6 +858,8 @@ curl --fail-with-body \
 
 The detailed response contains the session summary plus:
 
+- `resolvedVersions`: the exact agent, Skill, and delegate versions the
+  session tree runs, or `null` for a session created before OAO recorded them.
 - `runs`: every run in chronological order.
 - `transcript`: public, redacted messages across the session.
 - `timeline`: safe runtime entries.
@@ -846,9 +917,10 @@ Accepted` with the new run object:
 }
 ```
 
-Follow-up runs retain the session's `agentVersionId`. Publishing a newer agent
-version does not upgrade an existing session; create a new session to use the
-new version.
+Follow-up runs retain the session's `agentVersionId` and its
+`resolvedVersions`. Publishing a newer agent, Skill, or delegate version does
+not upgrade an existing session, even when the agent version follows the
+latest version; create a new session to use the new version.
 
 <Note>
   `POST /runs/:runId/resume` also accepts `message` or `redactedInput`, but only
@@ -870,6 +942,8 @@ Open a session and use:
   is ready for the session and is not shown as pending work.
 - The session sidebar for the Agent name and exact pinned Agent version used by
   the session, alongside its model, Tools, Skills, files, cost, and token usage.
+  Skills and delegates that follow the latest version show the exact version
+  the session resolved.
   Files present in the latest persistent workspace backup can be downloaded
   through the secured Files API without reopening the Daytona sandbox.
 - The sessions overview and compact session facts for the latest run's elapsed
@@ -1057,6 +1131,9 @@ and delegate bindings reference its immutable versions:
   `agentId` or by one of its `agentVersionId`s.
 - Existing sessions keep their full transcripts and still show the agent's
   name. Coordinators that already pin one of its versions keep delegating to it.
+  Coordinators that follow it can no longer start sessions (`409 conflict`)
+  until you publish a coordinator version that pins a version or drops the
+  delegate; sessions they already started keep running.
 - Its key is released, so a new agent can reuse it.
 - The audit log records `agent.deleted`. There is no restore.
 

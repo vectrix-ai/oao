@@ -52,6 +52,13 @@ incompatible. Publish a matching child version and select it, or use **Remove
 incompatible delegate(s)** in the coordinator editor before publishing the new
 version. The UI never silently removes an immutable delegate binding.
 
+A delegate that follows an agent's latest version is checked again when each
+session starts. Publishing a child version with a different sandbox makes new
+sessions of the coordinators that follow it fail with `409` until a matching
+coordinator version is published. Publish from the deepest child up; see
+[Change the sandbox of a followed
+agent](/concepts/multi-agent-orchestration#change-the-sandbox-of-a-followed-agent).
+
 | Capability         | Model-facing tools                                         |
 | ------------------ | ---------------------------------------------------------- |
 | `filesystem_read`  | `read`                                                     |

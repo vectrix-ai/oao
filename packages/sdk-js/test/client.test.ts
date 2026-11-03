@@ -702,6 +702,22 @@ test("client publishes the exact managed-agent configuration contract", async ()
       },
     ],
     skillVersionIds: ["00000000-0000-4000-8000-000000000042"],
+    // Followed links travel as written: a Skill by ID and a delegate by
+    // its agent, beside a delegate pinned to an exact version.
+    skillIds: ["00000000-0000-4000-8000-000000000043"],
+    delegates: [
+      {
+        key: "pinned-reviewer",
+        description: "Reviews with one exact version.",
+        agentVersionId: "00000000-0000-4000-8000-000000000044",
+      },
+      {
+        key: "latest-reviewer",
+        description: "Reviews with the latest published version.",
+        agentId: "00000000-0000-4000-8000-000000000045",
+        maxParallel: 2,
+      },
+    ],
     harnessOperations: [
       {
         key: "review_changes",

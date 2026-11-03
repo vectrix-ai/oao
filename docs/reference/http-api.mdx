@@ -56,6 +56,13 @@ is `completed`, `failed`, `cancelled`, or `timed_out`. It throws
 `run_wait_timeout` when the configured deadline expires; it does not cancel the
 durable run.
 
+The SDK types mirror the version-binding contract: `PublishAgentVersionInput`
+accepts `skillIds` next to `skillVersionIds`, and each `DelegateInput` names
+either `agentVersionId` or `agentId`. `createSession` returns
+`resolvedVersions`, absent only when an idempotent retry replays a response
+from an OAO release that did not record it, and `getSession` returns a
+`SessionDetail` whose `resolvedVersions` is `null` for older sessions.
+
 ## Browser authentication
 
 | Method | Path                   | Purpose                                                    |
@@ -620,8 +627,9 @@ the body `{ "enabled": false }` or `{ "enabled": true }`. It returns
 `{ "id", "key", "enabled", "disabledAt" }`. Disabling is reversible and never
 touches bindings: a disabled Skill cannot be attached to a new agent version
 (`400`) and stays in the list with a non-null `disabledAt`, while published
-agent versions that pin it keep running with it. Enabling makes it attachable
-again. Repeating the current state is a no-op that still returns `200`. The
+agent versions that pin it keep running with it. Agent versions that follow it
+cannot start new sessions (`409`) until it is enabled again. Enabling makes it
+attachable again. Repeating the current state is a no-op that still returns `200`. The
 audit log and product events record `skill.disabled` and `skill.enabled` only
 when the state changed.
 
@@ -629,7 +637,8 @@ when the state changed.
 returns `{ "id", "key", "deleted": true }` and archives the Skill rather than
 removing rows: versions, package files, agent-version bindings, and session
 bindings are immutable and stay stored, so published agent versions and their
-sessions keep running with it. After removal the Skill returns `404` from reads
+sessions keep running with it. Agent versions that follow it cannot start new
+sessions (`409`). After removal the Skill returns `404` from reads
 and version publication, disappears from the list, cannot be attached to a new
 agent version, and its open drafts are discarded. Its `key` becomes free for a
 new Skill. Removal cannot be undone. To also stop existing sessions from using
@@ -678,8 +687,10 @@ deletion the agent returns `404` from reads, disappears from the list, cannot
 publish new versions, cannot start sessions (by `agentId` or by
 `agentVersionId`), and cannot be picked as a new delegate. Its `key` becomes
 free for a new agent. Coordinators that already pin one of its versions keep
-working. The audit log records `agent.deleted`. Deleting an already deleted
-agent returns `404`.
+working. Coordinators that follow it can no longer start sessions: session
+creation returns `409 conflict` until a coordinator version pins a version or
+drops the delegate. The audit log records `agent.deleted`. Deleting an already
+deleted agent returns `404`.
 Set `initialConfig.sandbox.enabled`, `provider`, `snapshotId`, `network`, and
 `capabilities`
 to make the same sandbox selection available in API-driven creation as in the
@@ -687,9 +698,19 @@ console. `provider` must be a key returned by the sandbox provider list route;
 there is no public fake-sandbox provider.
 
 Set `config.skillVersionIds` to a unique array of active, exact Skill version
-UUIDs from the same project whose Skills are enabled and not removed. Names must also be unique within one agent
-version. The server records immutable agent-version bindings; the array is not
-a reference to each Skill's moving latest version.
+UUIDs from the same project whose Skills are enabled and not removed. The
+server records immutable agent-version bindings; the array is not a reference
+to each Skill's moving latest version.
+
+Set `config.skillIds` to a unique array of Skill UUIDs to follow instead: each
+new session binds each Skill's latest published version, resolved when the
+session starts. A followed Skill must be enabled, not removed, and have an
+`active` latest version. A Skill is pinned or followed, not both; the two
+arrays hold at most 64 Skills together, and Skill names (pinned versions plus
+the latest versions of followed Skills) must be unique within one agent
+version. Either field requires `skill:bind`. `skillIds` is optional and has no
+default, so a configuration that only pins keeps the same shape and content
+hash as before. A violation returns `400`.
 
 Set `config.harnessOperations` to up to 32 immutable entries with `{ key,
 description, instructions, resultSchema, timeoutMs }`. Keys are 1–64
@@ -707,14 +728,23 @@ model, capability policy, sandbox, or `skillVersionId`. See [Harness
 Operations](/concepts/harness-operations) for lifetime, shared-document,
 structured-output, and sequential/batch behavior.
 
-Set `config.delegates` to a unique roster of `{ key, description,
-agentVersionId, maxParallel }`. Each UUID names an exact version of another
-agent in the same project. The maximum is 32 bindings and `maxParallel` is 1–8.
-The reserved platform tools `delegate_agent` and `message_agent` are supplied
-by OAO and must not appear in `config.tools`. Coordinator and child versions
-must have the same sandbox enabled state, provider, snapshot, and network
-policy. An incompatible publication returns a `bad_request` that identifies the
-child and directs the caller to publish a compatible child version first.
+Set `config.delegates` to a unique roster. Each entry is either `{ key,
+description, agentVersionId, maxParallel }`, which pins an exact version of
+another agent in the same project, or `{ key, description, agentId,
+maxParallel }`, which follows that agent's latest published version, resolved
+when each session starts. An entry names exactly one of `agentVersionId` and
+`agentId`. Keys, pinned versions, and followed agents must each be unique. The
+maximum is 32 bindings and `maxParallel` is 1–8. The reserved platform tools
+`delegate_agent` and `message_agent` are supplied by OAO and must not appear in
+`config.tools`. Coordinator and child versions must have the same sandbox
+enabled state, provider, snapshot, and network policy; for a followed agent
+the check uses its latest version. A followed agent must be live and published
+and must not be the coordinator itself. Cycles are rejected, walking followed
+agents through their latest versions. Each violation returns a `bad_request`
+that identifies the delegate; a sandbox mismatch directs the caller to publish
+a compatible child version first. Publications with delegates are serialized
+per project. See [Multi-agent
+orchestration](/concepts/multi-agent-orchestration#safety-checks).
 
 `config.modelPreset` must be an available deployment preset key or a preset
 this project approved against a provider connection; the check runs inside
@@ -743,10 +773,68 @@ POST /v1/projects/{projectId}/sessions
 
 Use `agentVersionId` instead of `agentId` to pin an exact version yourself. If
 you send `agentId`, OAO resolves its latest published version during the same
-transaction. The response contains the session, `latestRunId`, and first queued
-`run`. OAO copies the selected agent version's Skill bindings into immutable
-session bindings in that transaction. Session create and follow-up bodies do
-not accept a Skill list.
+transaction. The response contains the session, `latestRunId`, first queued
+`run`, and `resolvedVersions`. Session create and follow-up bodies do not
+accept a Skill list.
+
+In that transaction OAO also resolves every Skill and delegate the agent
+version follows, for the version itself and for every delegate it can reach,
+from one database snapshot. It binds the resulting exact Skill versions to the
+session and stores the record, which delegated child sessions copy.
+`resolvedVersions` has this shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "rootSessionId": "7fd65b84-30ea-4ca9-aa40-ac219698e718",
+  "rootAgentVersionId": "11111111-1111-4111-8111-111111111111",
+  "resolvedAt": "2026-11-03T09:00:00.000Z",
+  "agentVersions": [
+    {
+      "agentId": "10000000-0000-4000-8000-000000000001",
+      "agentVersionId": "11111111-1111-4111-8111-111111111111",
+      "version": 4,
+      "skills": [
+        {
+          "skillId": "55555555-5555-4555-8555-555555555555",
+          "skillVersionId": "66666666-6666-4666-8666-666666666666",
+          "version": 5,
+          "name": "shipment-intake",
+          "followsLatest": true
+        }
+      ],
+      "delegates": [
+        {
+          "key": "shipment-extraction",
+          "agentId": "33333333-3333-4333-8333-333333333333",
+          "agentVersionId": "88888888-8888-4888-8888-888888888888",
+          "version": 7,
+          "followsLatest": true
+        }
+      ]
+    },
+    {
+      "agentId": "33333333-3333-4333-8333-333333333333",
+      "agentVersionId": "88888888-8888-4888-8888-888888888888",
+      "version": 7,
+      "skills": [],
+      "delegates": []
+    }
+  ]
+}
+```
+
+`agentVersions` lists the root version first, then each reachable delegate
+version once. `followsLatest` is `true` for links resolved from `skillIds` or a
+delegate's `agentId`, and `false` for pinned links.
+
+Session creation returns `409 conflict`, and creates nothing, when a followed
+link cannot be resolved: a followed agent was deleted or has no published
+version, its latest version uses a different sandbox than its coordinator, a
+followed Skill was removed or disabled or has no `active` latest version, two
+bound Skills would share a name, or the delegates form a cycle. The message
+names the agent, version, and link. See [Multi-agent
+orchestration](/concepts/multi-agent-orchestration#safety-checks).
 
 | Method | Path                                                      | Purpose                                                             |
 | ------ | --------------------------------------------------------- | ------------------------------------------------------------------- |
@@ -864,6 +952,11 @@ The same response includes top-level `skills` metadata with `skillId`, exact
 `skillVersionId`, version number, name, description, content hash, and current
 lifecycle status. It never includes Skill instructions or resource bytes.
 
+It also includes top-level `resolvedVersions`, the record described under
+[Sessions and runs](#sessions-and-runs) that fixes the session tree's agent,
+Skill, and delegate versions. A delegated child session returns its root's
+record. It is `null` for sessions created before OAO recorded resolutions.
+
 It also includes top-level `tools`: the tool list of the pinned agent version
 as `name`, `description`, `owner`, and `approval` per tool, in authored order
 and without the input or output schemas. The console session sidebar lists
@@ -917,7 +1010,8 @@ and Harness Operation internal steps display the same timestamps.
 The session detail response includes a top-level `delegations` array for
 coordinator and child sessions. It contains the delegate key, exact child
 version, child thread/session, shared workspace ID, relation state, and latest
-child run/state.
+child run/state. For a delegate that follows an agent, the child version is the
+one recorded in the session's `resolvedVersions`.
 
 | Method | Path                                                        | Scope                                 |
 | ------ | ----------------------------------------------------------- | ------------------------------------- |

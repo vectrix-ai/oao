@@ -307,6 +307,26 @@ test("references that cannot be restored are reported", () => {
     );
 });
 
+test("followed delegates and Skills must be in the project's backup", () => {
+  const backup = fixture();
+  const project = backup.projects[0]!;
+  const coordinator = project.agents[1]!.versions[0]!;
+  coordinator.config = {
+    ...coordinator.config,
+    skillIds: [id(998)],
+    delegates: [{ key: "child", description: "Child.", agentId: id(997) }],
+  };
+  const problems = checkConfigurationBackupReferences(backup);
+  for (const expected of [
+    /follows a Skill that is not in this project's backup/u,
+    /follows a delegate agent that is not in this project's backup/u,
+  ])
+    assert.ok(
+      problems.some((problem) => expected.test(problem)),
+      `missing ${expected}: ${problems.join(" | ")}`,
+    );
+});
+
 test("restore credentials validate their formats", () => {
   const backup = fixture();
   assert.deepEqual(parseConfigurationRestoreInput({ backup }).credentials, {
@@ -355,4 +375,52 @@ test("delegates are ordered before their coordinators even when timestamps tie",
     ["child@1", "child@2", "coordinator@1"],
   );
   assert.deepEqual(checkConfigurationBackupReferences(backup), []);
+});
+
+test("a coordinator that follows an agent is restored after that agent's first version", () => {
+  const backup = fixture();
+  const [child, coordinator] = backup.projects[0]!.agents;
+  // The coordinator was published first in time, but follows the child.
+  coordinator!.versions[0]!.publishedAt = "2026-09-01T00:00:00.000Z";
+  child!.versions[0]!.publishedAt = "2026-10-01T00:00:00.000Z";
+  child!.versions.push({
+    id: id(72),
+    version: 2,
+    publishedAt: "2026-10-02T00:00:00.000Z",
+    config: { modelPreset: "fast-v1", sandbox },
+  });
+  coordinator!.versions[0]!.config = {
+    ...coordinator!.versions[0]!.config,
+    delegates: [{ key: "child", description: "Child.", agentId: child!.id }],
+  };
+  const order = agentVersionPublicationOrder(backup.projects[0]!.agents);
+  assert.deepEqual(
+    order?.map(({ agent, version }) => `${agent.key}@${version.version}`),
+    ["child@1", "coordinator@1", "child@2"],
+  );
+  assert.deepEqual(checkConfigurationBackupReferences(backup), []);
+});
+
+test("agents that follow each other form a cycle the backup reports", () => {
+  const backup = fixture();
+  const [child, coordinator] = backup.projects[0]!.agents;
+  coordinator!.versions[0]!.config = {
+    ...coordinator!.versions[0]!.config,
+    delegates: [{ key: "child", description: "Child.", agentId: child!.id }],
+  };
+  child!.versions[0]!.config = {
+    ...child!.versions[0]!.config,
+    delegates: [
+      { key: "back", description: "Back.", agentId: coordinator!.id },
+    ],
+  };
+  assert.equal(
+    agentVersionPublicationOrder(backup.projects[0]!.agents),
+    undefined,
+  );
+  assert.ok(
+    checkConfigurationBackupReferences(backup).some((problem) =>
+      /delegate to each other in a cycle/u.test(problem),
+    ),
+  );
 });

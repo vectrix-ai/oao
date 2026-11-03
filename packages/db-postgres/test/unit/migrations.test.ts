@@ -978,3 +978,49 @@ test("a run another agent started keeps only the read scopes of its grant", asyn
   assert.match(sql, /run\.requested_by_run_id IS NULL/u);
   assert.match(sql, /SET ROLE oao_auth;[\s\S]*RESET ROLE;/u);
 });
+
+test("followed delegates and Skills keep pinned links and freeze per session", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0061_follow_latest_versions.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  // A delegate names exactly one target, and the edge records which.
+  assert.match(
+    sql,
+    /\(delegate \? 'agentVersionId'\) = \(delegate \? 'agentId'\)/u,
+  );
+  assert.match(
+    sql,
+    /num_nonnulls\(child_agent_version_id, child_agent_definition_id\) = 1/u,
+  );
+  // Cycles are walked through followed agents' latest versions.
+  assert.match(
+    sql,
+    /COALESCE\(edge\.child_agent_version_id, followed\.latest_version_id\)/u,
+  );
+  // Followed Skills need an enabled Skill with an active latest version.
+  assert.match(
+    sql,
+    /latest\.id=skill\.latest_version_id[\s\S]*?lifecycle\.status='active'[\s\S]*?skill\.disabled_at IS NULL[\s\S]*?skill\.archived_at IS NULL/u,
+  );
+  assert.match(sql, /a Skill is either pinned or followed, not both/u);
+  // The per-session record is append-only, tenant-scoped, and goes with
+  // its session in a project purge.
+  assert.match(sql, /CREATE TABLE oao\.session_version_resolutions/u);
+  assert.match(
+    sql,
+    /REFERENCES oao\.sessions \(organization_id, project_id, id\) ON DELETE CASCADE/u,
+  );
+  assert.match(
+    sql,
+    /ALTER TABLE oao\.session_version_resolutions FORCE ROW LEVEL SECURITY/u,
+  );
+  assert.match(
+    sql,
+    /GRANT SELECT, INSERT ON oao\.session_version_resolutions TO oao_app;/u,
+  );
+  assert.doesNotMatch(sql, /DROP TABLE|DROP FUNCTION/u);
+});

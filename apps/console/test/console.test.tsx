@@ -1148,13 +1148,9 @@ describe("management console", () => {
     // The explainer is a collapsed disclosure below the list.
     const explainer = screen.getByRole("button", { name: "How Skills work" });
     expect(explainer).toHaveAttribute("aria-expanded", "false");
-    expect(
-      screen.getByText(/sessions inherit those bindings automatically/u),
-    ).not.toBeVisible();
+    expect(screen.getByText(/stays fixed for that session/u)).not.toBeVisible();
     await user.click(explainer);
-    expect(
-      screen.getByText(/sessions inherit those bindings automatically/u),
-    ).toBeVisible();
+    expect(screen.getByText(/stays fixed for that session/u)).toBeVisible();
     expect(screen.getByText(/\.flue\/packaged-skills\//u)).toBeVisible();
     await user.click(explainer);
     expect(await screen.findByText("Shipment Intake")).toBeInTheDocument();
@@ -4347,6 +4343,252 @@ describe("management console", () => {
       }),
     );
     expect(screen.getByText("No delegates linked")).toBeInTheDocument();
+  });
+
+  it("publishes a delegate and a Skill that follow their latest version", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/agents/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", api);
+    await user.click(
+      await screen.findByRole("button", { name: "Add delegate" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "Add delegates" });
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: /Document analyst · v5/u }),
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "Add delegate" }),
+    );
+
+    await openSection(user, "Delegates");
+    const linked = screen.getByRole("list", { name: "Linked delegates" });
+    // A new link pins the agent's current version by default.
+    const delegateVersion = within(linked).getByRole("combobox", {
+      name: "Version of delegate Document analyst",
+    });
+    expect(delegateVersion).toHaveValue("pinned");
+    expect(
+      within(delegateVersion).getByRole("option", { name: "Pinned v5" }),
+    ).toBeInTheDocument();
+    expect(within(linked).queryByText("Latest")).not.toBeInTheDocument();
+    await user.selectOptions(delegateVersion, "latest");
+    expect(within(linked).getByText("Latest")).toBeInTheDocument();
+    expect(within(linked).getByText(/now v5/u)).toBeInTheDocument();
+    expect(
+      within(linked).getByText(/Sandbox-compatible with this coordinator/u),
+    ).toBeInTheDocument();
+
+    await openSection(user, "Skills");
+    await user.click(
+      screen.getByRole("checkbox", { name: /Shipment Intake · v1/u }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", { name: /Carrier Codes · v1/u }),
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", {
+        name: "Version of Skill Shipment Intake",
+      }),
+      "latest",
+    );
+    expect(
+      screen.getByRole("checkbox", {
+        name: /Shipment Intake · latest version, now v1/u,
+      }),
+    ).toBeChecked();
+    expect(
+      screen.getByRole("combobox", { name: "Version of Skill Carrier Codes" }),
+    ).toHaveValue("pinned");
+
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 4")).toBeInTheDocument();
+    const config = (await api.getAgent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"))
+      .versions[0]?.config;
+    expect(config?.delegates).toEqual([
+      {
+        key: "document-analyst",
+        description: "Extracts structured facts from uploaded documents.",
+        agentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        maxParallel: 1,
+      },
+    ]);
+    expect(config?.skillIds).toEqual(["44444444-4444-4444-8444-444444444444"]);
+    expect(config?.skillVersionIds).toEqual([
+      "44444444-4444-4444-8444-444444444447",
+    ]);
+
+    // The published version reads back with both modes.
+    await openSection(user, "Delegates");
+    expect(
+      await screen.findByRole("combobox", {
+        name: "Version of delegate Document analyst",
+      }),
+    ).toHaveValue("latest");
+    expect(
+      screen.getByText(
+        /1 child agent is linked: 0 pinned, 1 following the latest version/u,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /2 Skills are bound to this version: 1 pinned, 1 following the latest version/u,
+      ),
+    ).toBeInTheDocument();
+    // Pinning again records the exact version and drops the followed link.
+    await openSection(user, "Skills");
+    await user.selectOptions(
+      screen.getByRole("combobox", {
+        name: "Version of Skill Shipment Intake",
+      }),
+      "pinned",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 5")).toBeInTheDocument();
+    const repinned = (
+      await api.getAgent("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    ).versions[0]?.config;
+    expect(repinned?.skillIds).toBeUndefined();
+    expect(repinned?.skillVersionIds).toEqual([
+      "44444444-4444-4444-8444-444444444447",
+      "44444444-4444-4444-8444-444444444445",
+    ]);
+  });
+
+  it("refuses followed links the demo API cannot resolve", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const coordinator = await api.getAgent(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    );
+    const base = coordinator.versions[0]!.config;
+    await expect(
+      api.publishAgentVersion(coordinator.id, {
+        ...base,
+        delegates: [
+          {
+            key: "order-triage",
+            description: "Route exceptions.",
+            agentId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            maxParallel: 1,
+          },
+        ],
+      }),
+    ).rejects.toThrow(/follows agent Order triage, which has no published/u);
+    await expect(
+      api.publishAgentVersion(coordinator.id, {
+        ...base,
+        skillVersionIds: ["44444444-4444-4444-8444-444444444445"],
+        skillIds: ["44444444-4444-4444-8444-444444444444"],
+      }),
+    ).rejects.toThrow(/both pinned and followed/u);
+    await api.setSkillEnabled("44444444-4444-4444-8444-444444444446", false);
+    await expect(
+      api.publishAgentVersion(coordinator.id, {
+        ...base,
+        skillIds: ["44444444-4444-4444-8444-444444444446"],
+      }),
+    ).rejects.toThrow(/Carrier Codes is disabled and cannot be followed/u);
+
+    // A followed agent deleted after publication refuses the next session.
+    await api.publishAgentVersion(coordinator.id, {
+      ...base,
+      delegates: [
+        {
+          key: "document-analyst",
+          description: "Extract facts.",
+          agentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          maxParallel: 1,
+        },
+      ],
+    });
+    await api.deleteAgent("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    await expect(
+      api.createSession({
+        agentId: coordinator.id,
+        title: "Unavailable delegate",
+        initialMessage: "Start.",
+      }),
+    ).rejects.toThrow(
+      /delegate document-analyst follows an agent that was deleted/u,
+    );
+  });
+
+  it("shows the versions a session resolved, fixed when it started", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const coordinator = await api.getAgent(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    );
+    await api.publishAgentVersion(coordinator.id, {
+      ...coordinator.versions[0]!.config,
+      skillVersionIds: ["44444444-4444-4444-8444-444444444447"],
+      skillIds: ["44444444-4444-4444-8444-444444444444"],
+      delegates: [
+        {
+          key: "document-analyst",
+          description: "Extract facts.",
+          agentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          maxParallel: 1,
+        },
+      ],
+    });
+    const session = await api.createSession({
+      agentId: coordinator.id,
+      title: "Resolved tree",
+      initialMessage: "Extract the shipment.",
+    });
+    // A later publication of the followed agent does not change this session.
+    const analyst = await api.getAgent("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    await api.publishAgentVersion(analyst.id, analyst.versions[0]!.config);
+
+    renderConsole(`/sessions/${session.id}`, api);
+    const region = await screen.findByRole("region", {
+      name: "Resolved versions",
+    });
+    expect(
+      within(region).getByText("Fixed at session start"),
+    ).toBeInTheDocument();
+    const root = within(region).getByRole("list", {
+      name: "Support operator v4 Skills and delegates",
+    });
+    const followedSkill = within(root)
+      .getByRole("link", { name: "shipment-intake" })
+      .closest("li") as HTMLElement;
+    expect(within(followedSkill).getByText("Skill · v1")).toBeInTheDocument();
+    expect(within(followedSkill).getByText("Latest")).toBeInTheDocument();
+    const pinnedSkill = within(root)
+      .getByRole("link", { name: "carrier-codes" })
+      .closest("li") as HTMLElement;
+    expect(within(pinnedSkill).getByText("Pinned")).toBeInTheDocument();
+    const delegate = within(root)
+      .getByText("document-analyst")
+      .closest("li") as HTMLElement;
+    expect(
+      await within(delegate).findByText("Delegate → Document analyst · v5"),
+    ).toBeInTheDocument();
+    expect(within(delegate).getByText("Latest")).toBeInTheDocument();
+    expect(
+      within(region).getByRole("link", { name: "Document analyst" }),
+    ).toHaveAttribute("href", "/agents/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    expect(
+      within(region).getByText("No Skills or delegates."),
+    ).toBeInTheDocument();
+    // The session's own Skill list includes the followed Skill too.
+    expect(
+      within(
+        screen.getByRole("complementary", { name: "Session details" }),
+      ).getByRole("region", { name: "Skills" }),
+    ).toHaveTextContent(/shipment-intake/u);
+  });
+
+  it("hides resolved versions for sessions that predate them", async () => {
+    renderConsole("/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V");
+    await screen.findByRole("complementary", { name: "Session details" });
+    expect(
+      screen.queryByRole("region", { name: "Resolved versions" }),
+    ).not.toBeInTheDocument();
   });
 
   it("creates a model preset from the provider catalog and links it to a new agent version", async () => {

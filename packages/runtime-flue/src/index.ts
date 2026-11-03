@@ -47,6 +47,7 @@ import {
   ManagedAgentInstanceDataSchema,
   OAO_AGENT_TOOL_PREFIX,
   parseManagedAgentSnapshotForPublication,
+  parseSessionVersionResolution,
   ManagedRunDeliverySchema,
   ManagedRunInputV1Schema,
   ModelGenerationSettingsSchema,
@@ -58,6 +59,10 @@ import {
   type ManagedHarnessOperation,
   type ManagedMcpToolSnapshot,
   type ManagedSkillBindingSnapshot,
+  type ManagedAgentPinnedDelegate,
+  type ManagedAgentPublicationConfig,
+  type SessionResolvedAgentVersion,
+  type SessionVersionResolution,
   type ManagedAgentInstanceData,
   type ManagedRunDelivery,
   type ManagedRunInputV1,
@@ -1156,6 +1161,100 @@ function mcpToolName(namespace: string, remoteToolName: string): string {
 
 const MANAGED_RUN_FILE_DIRECTORY = ".oao/attachments";
 
+/**
+ * The Skill versions and delegates a session's agent version runs with. A
+ * session that recorded a version resolution uses it, after checking that it
+ * matches the agent version's pinned and followed links; a session from
+ * before resolutions were recorded uses the version's pinned links, which is
+ * all such a version can have.
+ */
+export function sessionBindings(
+  publication: ManagedAgentPublicationConfig,
+  agentVersionId: string,
+  resolution: SessionVersionResolution | undefined,
+): {
+  readonly skillVersionIds: readonly string[];
+  readonly delegates: readonly ManagedAgentPinnedDelegate[];
+} {
+  const followedSkillIds = publication.skillIds ?? [];
+  if (!resolution) {
+    if (
+      followedSkillIds.length > 0 ||
+      publication.delegates.some((delegate) => "agentId" in delegate)
+    )
+      throw new Error(
+        "The session has no version resolution for an agent version that follows latest versions",
+      );
+    return {
+      skillVersionIds: publication.skillVersionIds,
+      delegates: publication.delegates as readonly ManagedAgentPinnedDelegate[],
+    };
+  }
+  const entry = resolvedAgentVersion(resolution, agentVersionId);
+  const pinned = entry.skills.filter((skill) => !skill.followsLatest);
+  const followed = entry.skills.filter((skill) => skill.followsLatest);
+  const sameSet = (left: readonly string[], right: readonly string[]) =>
+    left.length === right.length &&
+    new Set(left).size === left.length &&
+    left.every((value) => right.includes(value));
+  if (
+    !sameSet(
+      pinned.map((skill) => skill.skillVersionId),
+      publication.skillVersionIds,
+    ) ||
+    !sameSet(
+      followed.map((skill) => skill.skillId),
+      followedSkillIds,
+    )
+  )
+    throw new Error(
+      "The session's resolved Skills do not match the agent version",
+    );
+  if (entry.delegates.length !== publication.delegates.length)
+    throw new Error(
+      "The session's resolved delegates do not match the agent version",
+    );
+  const delegates = publication.delegates.map((delegate) => {
+    const resolved = entry.delegates.find(
+      (candidate) => candidate.key === delegate.key,
+    );
+    const matches =
+      resolved !== undefined &&
+      ("agentId" in delegate
+        ? resolved.followsLatest && resolved.agentId === delegate.agentId
+        : !resolved.followsLatest &&
+          resolved.agentVersionId === delegate.agentVersionId);
+    if (!matches)
+      throw new Error(
+        "The session's resolved delegates do not match the agent version",
+      );
+    return {
+      key: delegate.key,
+      description: delegate.description,
+      agentVersionId: resolved.agentVersionId,
+      maxParallel: delegate.maxParallel,
+    } satisfies ManagedAgentPinnedDelegate;
+  });
+  return {
+    skillVersionIds: entry.skills.map((skill) => skill.skillVersionId),
+    delegates,
+  };
+}
+
+function resolvedAgentVersion(
+  resolution: SessionVersionResolution,
+  agentVersionId: string,
+): SessionResolvedAgentVersion {
+  const entry = resolution.agentVersions.find(
+    (candidate) => candidate.agentVersionId === agentVersionId,
+  );
+  if (!entry)
+    throw new Error(
+      "The session's version resolution does not cover its agent version",
+    );
+  return entry;
+}
+
 export function managedRunFileSandboxPath(runId: string, name: string): string {
   if (
     name === "." ||
@@ -2228,12 +2327,14 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
 
         const parentResult = await transaction.query<{
           created_by_principal_id: string;
-          child_agent_version_id: string;
+          child_agent_version_id: string | null;
           max_parallel: number;
           workspace_id: string;
+          resolution: unknown;
         }>(
           `SELECT parent.created_by_principal_id,delegate.child_agent_version_id,
-                  delegate.max_parallel,binding.workspace_id
+                  delegate.max_parallel,binding.workspace_id,
+                  resolution.resolution
              FROM oao.runs parent
              JOIN oao.agent_version_delegates delegate
                ON delegate.organization_id=parent.organization_id
@@ -2244,6 +2345,10 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
                ON binding.organization_id=parent.organization_id
               AND binding.project_id=parent.project_id
               AND binding.thread_id=parent.thread_id
+             LEFT JOIN oao.session_version_resolutions resolution
+               ON resolution.organization_id=parent.organization_id
+              AND resolution.project_id=parent.project_id
+              AND resolution.session_id=parent.session_id
             WHERE parent.organization_id=$1 AND parent.project_id=$2
               AND parent.id=$3 AND parent.thread_id=$4 AND parent.session_id=$5
               AND parent.agent_version_id=$6
@@ -2261,6 +2366,35 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
         const parent = parentResult.rows[0];
         if (!parent)
           throw new Error("Delegate is not allowed for this agent version");
+        // The child runs the version the session tree resolved when it
+        // started, even if the delegate's agent has published since.
+        const resolution =
+          parent.resolution === null || parent.resolution === undefined
+            ? undefined
+            : parseSessionVersionResolution(parent.resolution);
+        let childAgentVersionId: string;
+        let childSkillVersionIds: readonly string[] | undefined;
+        if (resolution) {
+          const resolved = resolvedAgentVersion(
+            resolution,
+            input.parentAgentVersionId,
+          ).delegates.find((delegate) => delegate.key === input.delegateKey);
+          if (!resolved)
+            throw new Error(
+              "The session's version resolution does not cover this delegate",
+            );
+          childAgentVersionId = resolved.agentVersionId;
+          childSkillVersionIds = resolvedAgentVersion(
+            resolution,
+            childAgentVersionId,
+          ).skills.map((skill) => skill.skillVersionId);
+        } else {
+          if (!parent.child_agent_version_id)
+            throw new Error(
+              "The delegate follows the latest version, but the session has no version resolution",
+            );
+          childAgentVersionId = parent.child_agent_version_id;
+        }
         const activeResult = await transaction.query<{ count: string }>(
           `SELECT count(*)::text AS count
              FROM oao.agent_delegations delegation
@@ -2310,7 +2444,7 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
             input.projectId,
             childSessionId,
             childThreadId,
-            parent.child_agent_version_id,
+            childAgentVersionId,
           ],
         );
         await transaction.query(
@@ -2339,7 +2473,7 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
             childRunId,
             childThreadId,
             childSessionId,
-            parent.child_agent_version_id,
+            childAgentVersionId,
             parent.created_by_principal_id,
             input.idempotencyKey,
             { message: prompt },
@@ -2359,22 +2493,49 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
             prompt,
           ],
         );
-        await transaction.query(
-          `INSERT INTO oao.session_skill_bindings (
-             organization_id,project_id,session_id,agent_version_id,
-             skill_version_id,skill_name
-           )
-           SELECT organization_id,project_id,$3,agent_version_id,
-                  skill_version_id,skill_name
-             FROM oao.agent_version_skill_bindings
-            WHERE organization_id=$1 AND project_id=$2 AND agent_version_id=$4`,
-          [
-            input.organizationId,
-            input.projectId,
-            childSessionId,
-            parent.child_agent_version_id,
-          ],
-        );
+        if (resolution && childSkillVersionIds) {
+          // The child carries the root's resolution, so its own delegates
+          // resolve to the same versions when it delegates in turn.
+          await transaction.query(
+            `INSERT INTO oao.session_version_resolutions
+               (organization_id,project_id,session_id,resolution)
+             VALUES ($1,$2,$3,$4)`,
+            [input.organizationId, input.projectId, childSessionId, resolution],
+          );
+          await transaction.query(
+            `INSERT INTO oao.session_skill_bindings (
+               organization_id,project_id,session_id,agent_version_id,
+               skill_version_id,skill_name
+             )
+             SELECT $1,$2,$3,$4,sv.id,sv.skill_name
+               FROM oao.skill_versions sv
+              WHERE sv.organization_id=$1 AND sv.project_id=$2
+                AND sv.id=ANY($5::uuid[])`,
+            [
+              input.organizationId,
+              input.projectId,
+              childSessionId,
+              childAgentVersionId,
+              childSkillVersionIds,
+            ],
+          );
+        } else
+          await transaction.query(
+            `INSERT INTO oao.session_skill_bindings (
+               organization_id,project_id,session_id,agent_version_id,
+               skill_version_id,skill_name
+             )
+             SELECT organization_id,project_id,$3,agent_version_id,
+                    skill_version_id,skill_name
+               FROM oao.agent_version_skill_bindings
+              WHERE organization_id=$1 AND project_id=$2 AND agent_version_id=$4`,
+            [
+              input.organizationId,
+              input.projectId,
+              childSessionId,
+              childAgentVersionId,
+            ],
+          );
         await transaction.query(
           `INSERT INTO oao.session_mcp_bindings (
              organization_id,project_id,session_id,agent_version_id,
@@ -2388,7 +2549,7 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
             input.organizationId,
             input.projectId,
             childSessionId,
-            parent.child_agent_version_id,
+            childAgentVersionId,
           ],
         );
         await transaction.query(
@@ -2407,7 +2568,7 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
             input.parentSessionId,
             input.parentAgentVersionId,
             input.delegateKey,
-            parent.child_agent_version_id,
+            childAgentVersionId,
             childThreadId,
             childSessionId,
             parent.workspace_id,
@@ -2441,7 +2602,7 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
             delegateKey: input.delegateKey,
             childSessionId,
             childRunId,
-            childAgentVersionId: parent.child_agent_version_id,
+            childAgentVersionId,
           },
         });
         await appendEventOnce(transaction, {
@@ -3663,6 +3824,21 @@ export class ManagedRuntimeOrchestrator {
       if (!result.rowCount) throw new Error("Run not found");
       const row = result.rows[0] as Record<string, unknown>;
       const publication = parseManagedAgentSnapshotForPublication(row.config);
+      const resolutionResult = await transaction.query<{
+        resolution: unknown;
+      }>(
+        `SELECT resolution FROM oao.session_version_resolutions
+          WHERE organization_id=$1 AND project_id=$2 AND session_id=$3`,
+        [tenant.organizationId, tenant.projectId, row.session_id],
+      );
+      const stored = resolutionResult.rows[0]?.resolution;
+      const bindings = sessionBindings(
+        publication,
+        String(row.agent_version_id),
+        stored === undefined
+          ? undefined
+          : parseSessionVersionResolution(stored),
+      );
       const skillResult = await transaction.query<{
         skill_id: string;
         skill_version_id: string;
@@ -3689,7 +3865,7 @@ export class ManagedRuntimeOrchestrator {
          ORDER BY binding.skill_name`,
         [tenant.organizationId, tenant.projectId, row.session_id],
       );
-      const expectedSkillIds = [...publication.skillVersionIds].sort();
+      const expectedSkillIds = [...bindings.skillVersionIds].sort();
       const boundSkillIds = skillResult.rows
         .map((binding) => binding.skill_version_id)
         .sort();
@@ -3882,7 +4058,7 @@ export class ManagedRuntimeOrchestrator {
         tools: publication.tools,
         harnessOperations,
         mcpTools,
-        delegates: publication.delegates,
+        delegates: bindings.delegates,
         ...(publication.oaoTools ? { oaoTools: publication.oaoTools } : {}),
         sandbox: publication.sandbox,
         limits: publication.limits,

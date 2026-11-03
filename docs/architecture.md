@@ -59,12 +59,22 @@ OTel SDK -> optional Collector -> configured OTLP backend
     log contain safe metadata only, with image data omitted.
 12. Skill definitions, version contents, lifecycle, agent-version bindings,
     and session bindings are tenant-scoped PostgreSQL records. Agent versions
-    pin exact active Skill version IDs; session creation copies those bindings.
+    pin exact active Skill version IDs or follow a Skill's latest published
+    version; root session creation resolves followed Skills to exact versions
+    and records the session's bindings, which never change afterwards.
     Runtime admission revalidates lifecycle and canonical/file SHA-256 values,
     exposes only discovery metadata initially, and lets Flue load instructions
     and resources progressively. Mutable `.agents/skills` workspace discovery
     is excluded from the authoritative runtime path.
-13. Agent versions pin exact named delegate versions. Every delegation creates
+13. Agent versions name each delegate by key and either pin an exact child
+    version or follow a child agent's latest published version. Root session
+    creation resolves every followed link the session tree can reach, from one
+    database snapshot, into an immutable per-session record; delegated child
+    sessions copy the root's record, so a publication during a session never
+    mixes versions in its tree. A followed link that is no longer usable
+    (deleted, disabled, unpublished, deprecated or revoked,
+    sandbox-incompatible, or cyclic) fails session creation instead of being
+    skipped. Every delegation creates
     a separate thread, session, Flue identity, and ordered child-run ledger,
     while an immutable thread binding points coordinator and child threads at
     one PostgreSQL-authoritative workspace identity. Tool replay is keyed and
@@ -168,13 +178,13 @@ OTel SDK -> optional Collector -> configured OTLP backend
 ## Required console screens
 
 - Skills list/detail, immutable packages and versions, and publication workflow
-- Agents list/detail, immutable versions, prompts, models, exact Skill and delegate bindings, tools, and sandbox policy
+- Agents list/detail, immutable versions, prompts, models, pinned or followed Skill and delegate bindings, tools, and sandbox policy
 - Organization-shared OpenRouter/OpenAI/Anthropic/xAI/Bedrock provider connections, write-only encrypted API keys, and approval of project model presets from the matching provider catalog
 - Organization-shared S3-compatible storage connections, automatic latest-thread workspace backup, and safe restore diagnostics
 - Organization-shared remote MCP servers, write-only credentials, exact-origin
   policies, discovery snapshots, project-scoped restricted toolsets, and agent bindings
 - Sessions list with status, agent, usage, cost, creation and last activity
-- Session detail with Transcript and Debug tabs plus persistent child-session links
+- Session detail with Transcript and Debug tabs, resolved agent, Skill, and delegate versions, plus persistent child-session links
 - Pending tool calls and approvals
 - Event webhooks with write-only signing secrets, delivery status, and secret rotation
 - Errors, attempts/recovery, timing waterfall, usage/cost provenance, and redacted payload inspection

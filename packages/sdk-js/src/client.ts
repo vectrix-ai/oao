@@ -31,6 +31,7 @@ import type {
   CreateProjectInput,
   CreateProjectMemberInput,
   CreatedSession,
+  SessionDetail,
   DelegationMessageResult,
   CreateSessionInput,
   CreatedPlatformApiKey,
@@ -1273,7 +1274,7 @@ export class OaoClient {
     projectId: string,
     sessionId: string,
     options?: RequestOptions,
-  ): Promise<Session> {
+  ): Promise<SessionDetail> {
     return this.#request(this.routes.session(projectId, sessionId), options);
   }
 

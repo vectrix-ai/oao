@@ -984,6 +984,8 @@ function remapAgentConfig(
     remapped.skillVersionIds = config.skillVersionIds.map((id) =>
       ids.get(id, label),
     );
+  if (Array.isArray(config.skillIds))
+    remapped.skillIds = config.skillIds.map((id) => ids.get(id, label));
   if (Array.isArray(config.mcpBindings))
     remapped.mcpBindings = config.mcpBindings.map((binding) => {
       const entry = binding as Readonly<Record<string, unknown>>;
@@ -999,7 +1001,10 @@ function remapAgentConfig(
   if (Array.isArray(config.delegates))
     remapped.delegates = config.delegates.map((delegate) => {
       const entry = delegate as Readonly<Record<string, unknown>>;
-      return { ...entry, agentVersionId: ids.get(entry.agentVersionId, label) };
+      // A delegate follows an agent or pins a version of one.
+      return entry.agentId === undefined
+        ? { ...entry, agentVersionId: ids.get(entry.agentVersionId, label) }
+        : { ...entry, agentId: ids.get(entry.agentId, label) };
     });
   return remapped;
 }

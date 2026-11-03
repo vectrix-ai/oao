@@ -13,12 +13,17 @@ import {
   parseUpdateEventWebhookInput,
   type ConfigurationBackupProject,
   type ProductEvent,
+  type SessionResolvedAgentVersion,
+  type SessionResolvedDelegate,
+  type SessionResolvedSkill,
 } from "@oao/contracts";
 import { configurationBackupProblem } from "../configuration-backup";
 import type {
+  AgentDelegate,
   AgentDetail,
   AgentSummary,
   AgentVersionConfig,
+  AgentVersionView,
   ApiKeySummary,
   ConfigurationBackup,
   ConfigurationRestoreCredentialKind,
@@ -48,6 +53,7 @@ import type {
   RotateEventWebhookCredentialInput,
   RunFileUpload,
   SessionDetail,
+  SessionVersionResolution,
   SkillDetail,
   SkillDraft,
   SkillFileInput,
@@ -176,6 +182,25 @@ function sessionTools(config: AgentVersionConfig): SessionDetail["tools"] {
     owner: tool.owner,
     approval: tool.approval,
   }));
+}
+
+/** The sandbox fields a coordinator and its delegates must share. */
+function demoSandboxPolicy(sandbox: AgentVersionConfig["sandbox"]): string {
+  return JSON.stringify({
+    enabled: sandbox.enabled,
+    provider: sandbox.provider,
+    snapshotId: sandbox.snapshotId ?? null,
+    network: sandbox.network,
+  });
+}
+
+/** An agent's latest published version; drafts have none to follow. */
+function demoPublishedVersion(
+  agent: AgentDetail,
+): AgentVersionView | undefined {
+  if (agent.status !== "published" || agent.latestVersionId == null)
+    return undefined;
+  return agent.versions.find((version) => version.id === agent.latestVersionId);
 }
 
 const agentsSeed: AgentDetail[] = [
@@ -395,6 +420,7 @@ const sessionsSeed: SessionDetail[] = [
       },
     ],
     delegations: [],
+    resolvedVersions: null,
     capabilities: { canCancel: true, canResume: false, canBranchReplay: false },
     events: [
       {
@@ -741,6 +767,7 @@ const sessionsSeed: SessionDetail[] = [
     tools: [],
     skills: [],
     delegations: [],
+    resolvedVersions: null,
     capabilities: { canCancel: false, canResume: false, canBranchReplay: true },
     events: [
       {
@@ -809,6 +836,7 @@ const sessionsSeed: SessionDetail[] = [
     tools: sessionTools(supportConfig),
     skills: [],
     delegations: [],
+    resolvedVersions: null,
     capabilities: { canCancel: false, canResume: true, canBranchReplay: true },
     events: [
       {
@@ -1485,6 +1513,8 @@ export class DemoConsoleApi implements ConsoleApi {
     const agent = this.#agents.find((item) => item.id === id);
     if (!agent) throw new Error("Agent not found");
     this.#assertApprovedPreset(config.modelPreset);
+    this.#assertDelegatesPublishable(agent, config);
+    this.#assertFollowedSkillsAvailable(config);
     const version = (agent.version ?? 0) + 1;
     const now = new Date().toISOString();
     this.#counter += 1;
@@ -1514,6 +1544,270 @@ export class DemoConsoleApi implements ConsoleApi {
       item.id === id ? updated : item,
     );
     return structuredClone(updated);
+  }
+
+  /** The agent version a delegate runs now: its pin, or the latest version. */
+  #delegateTarget(
+    delegate: AgentDelegate,
+  ):
+    | { readonly agent: AgentDetail; readonly version: AgentVersionView }
+    | undefined {
+    if (delegate.agentId !== undefined) {
+      const agent = this.#agents.find((item) => item.id === delegate.agentId);
+      const version = agent ? demoPublishedVersion(agent) : undefined;
+      return agent && version ? { agent, version } : undefined;
+    }
+    for (const agent of this.#agents) {
+      const version = agent.versions.find(
+        (item) => item.id === delegate.agentVersionId,
+      );
+      if (version) return { agent, version };
+    }
+    return undefined;
+  }
+
+  /** Mirrors the API's publish-time delegate checks for followed agents. */
+  #assertDelegatesPublishable(
+    coordinator: AgentDetail,
+    config: AgentVersionConfig,
+  ): void {
+    const delegates = config.delegates ?? [];
+    const keys = new Set(delegates.map((delegate) => delegate.key));
+    const targets = new Set(
+      delegates.map((delegate) =>
+        delegate.agentId !== undefined
+          ? `agent:${delegate.agentId}`
+          : `version:${delegate.agentVersionId}`,
+      ),
+    );
+    if (keys.size !== delegates.length || targets.size !== delegates.length)
+      throw new Error(
+        "delegate keys, agent versions, and followed agents must be unique",
+      );
+    for (const delegate of delegates) {
+      if (delegate.agentId === undefined) continue;
+      if (delegate.agentId === coordinator.id)
+        throw new Error(
+          `Delegate ${delegate.key} cannot follow the coordinator agent itself`,
+        );
+      const followed = this.#agents.find(
+        (item) => item.id === delegate.agentId,
+      );
+      if (!followed)
+        throw new Error(
+          `Delegate ${delegate.key} follows an agent that is not available in this project`,
+        );
+      const latest = demoPublishedVersion(followed);
+      if (!latest)
+        throw new Error(
+          `Delegate ${delegate.key} follows agent ${followed.name}, which has no published version`,
+        );
+      if (
+        demoSandboxPolicy(latest.config.sandbox) !==
+        demoSandboxPolicy(config.sandbox)
+      )
+        throw new Error(
+          `Delegate ${followed.name} must use the same sandbox enabled state, provider, snapshot, and network policy as the coordinator; its latest version ${latest.version} does not, so publish a compatible child version first`,
+        );
+    }
+    // A followed delegate whose own roster leads back to this agent would
+    // make the coordinator's next session recurse into itself.
+    const seen = new Set<string>();
+    const pending = [...delegates];
+    while (pending.length > 0) {
+      const target = this.#delegateTarget(pending.pop()!);
+      if (!target) continue;
+      if (target.agent.id === coordinator.id)
+        throw new Error("The delegate roster would create an agent cycle");
+      if (seen.has(target.version.id)) continue;
+      seen.add(target.version.id);
+      pending.push(...(target.version.config.delegates ?? []));
+    }
+  }
+
+  /** Mirrors the API's publish-time checks for followed Skills. */
+  #assertFollowedSkillsAvailable(config: AgentVersionConfig): void {
+    const skillIds = config.skillIds ?? [];
+    if (new Set(skillIds).size !== skillIds.length)
+      throw new Error("followed Skills must be unique");
+    if ((config.skillVersionIds?.length ?? 0) + skillIds.length > 64)
+      throw new Error("an agent version binds at most 64 Skills");
+    const pinned = new Set<string>();
+    const names = new Set<string>();
+    for (const versionId of config.skillVersionIds ?? []) {
+      const skill = this.#skills.find((item) =>
+        item.versionIds.includes(versionId),
+      );
+      if (!skill) continue;
+      pinned.add(skill.id);
+      names.add(
+        skill.versions.find((version) => version.id === versionId)?.name ??
+          skill.name,
+      );
+    }
+    for (const skillId of skillIds) {
+      const skill = this.#skills.find((item) => item.id === skillId);
+      if (!skill)
+        throw new Error(
+          "config.skillIds names a Skill that is not available in this project",
+        );
+      if (skill.disabledAt)
+        throw new Error(
+          `Skill ${skill.displayName} is disabled and cannot be followed`,
+        );
+      if (skill.status !== "active")
+        throw new Error(
+          `Skill ${skill.displayName} cannot be followed while its latest version ${skill.version} is ${skill.status}`,
+        );
+      if (pinned.has(skill.id))
+        throw new Error(
+          `Skill ${skill.displayName} is both pinned and followed; choose one`,
+        );
+      if (names.has(skill.name))
+        throw new Error(`Two bound Skills are named ${skill.name}`);
+      names.add(skill.name);
+    }
+  }
+
+  /**
+   * Resolves the versions a new session tree runs, like the API does when a
+   * root session starts: followed delegates and Skills bind their latest
+   * version now, and the record stays fixed for the session.
+   */
+  #resolveSessionVersions(
+    rootAgent: AgentDetail,
+    rootVersion: AgentVersionView,
+    rootSessionId: string,
+    resolvedAt: string,
+  ): SessionVersionResolution {
+    const resolved = new Map<string, SessionResolvedAgentVersion>();
+    const visiting: string[] = [];
+    const labels = new Map<string, string>();
+    const visit = (agent: AgentDetail, version: AgentVersionView): void => {
+      if (resolved.has(version.id)) return;
+      const owner = `Agent ${JSON.stringify(agent.name)} version ${version.version}`;
+      labels.set(version.id, owner.slice("Agent ".length));
+      if (visiting.includes(version.id))
+        throw new Error(
+          `The delegates form a cycle: ${[
+            ...visiting.slice(visiting.indexOf(version.id)),
+            version.id,
+          ]
+            .map((id) => labels.get(id))
+            .join(" → ")}. Pin a version to break it.`,
+        );
+      visiting.push(version.id);
+      const config = version.config;
+      const delegates: SessionResolvedDelegate[] = [];
+      const children: { agent: AgentDetail; version: AgentVersionView }[] = [];
+      for (const delegate of config.delegates ?? []) {
+        const link = `${owner}: delegate ${delegate.key}`;
+        if (delegate.agentId !== undefined) {
+          const followed = this.#agents.find(
+            (item) => item.id === delegate.agentId,
+          );
+          if (!followed)
+            throw new Error(
+              `${link} follows an agent that was deleted. Pin a version or publish a version of the coordinator without this delegate.`,
+            );
+          if (!demoPublishedVersion(followed))
+            throw new Error(
+              `${link} follows agent ${JSON.stringify(followed.name)}, which has no published version.`,
+            );
+        }
+        const child = this.#delegateTarget(delegate);
+        if (!child)
+          throw new Error(
+            `${link} refers to an agent version that is not available.`,
+          );
+        if (
+          delegate.agentId !== undefined &&
+          demoSandboxPolicy(child.version.config.sandbox) !==
+            demoSandboxPolicy(config.sandbox)
+        )
+          throw new Error(
+            `${link} follows agent ${JSON.stringify(child.agent.name)}, whose latest version ${child.version.version} uses a different sandbox enabled state, provider, snapshot, or network policy than the coordinator. Publish a compatible coordinator version, or pin a compatible version of the delegate.`,
+          );
+        delegates.push({
+          key: delegate.key,
+          agentId: child.agent.id,
+          agentVersionId: child.version.id,
+          version: child.version.version,
+          followsLatest: delegate.agentId !== undefined,
+        });
+        children.push(child);
+      }
+      const skills: SessionResolvedSkill[] = [];
+      for (const versionId of config.skillVersionIds ?? []) {
+        const skill = this.#skills.find((item) =>
+          item.versionIds.includes(versionId),
+        );
+        const pinned = skill?.versions.find((item) => item.id === versionId);
+        if (!skill) continue;
+        skills.push({
+          skillId: skill.id,
+          skillVersionId: versionId,
+          version: pinned?.version ?? skill.version,
+          name: pinned?.name ?? skill.name,
+          followsLatest: false,
+        });
+      }
+      for (const skillId of config.skillIds ?? []) {
+        const skill = this.#skills.find((item) => item.id === skillId);
+        const link = `${owner} follows Skill ${JSON.stringify(skill?.displayName ?? skillId)}`;
+        if (!skill) throw new Error(`${link}, which was deleted.`);
+        if (skill.disabledAt) throw new Error(`${link}, which is disabled.`);
+        if (skill.status !== "active")
+          throw new Error(
+            `${link}, whose latest version ${skill.version} is ${skill.status}. Publish a new version of the Skill, or pin an active one.`,
+          );
+        skills.push({
+          skillId: skill.id,
+          skillVersionId: skill.latestVersionId,
+          version: skill.version,
+          name: skill.name,
+          followsLatest: true,
+        });
+      }
+      const names = new Set<string>();
+      for (const skill of skills) {
+        if (names.has(skill.name))
+          throw new Error(
+            `${owner} would bind two Skills named ${skill.name}. Publish a version that binds one of them, or pin a version with a different name.`,
+          );
+        names.add(skill.name);
+      }
+      skills.sort((left, right) => left.name.localeCompare(right.name));
+      for (const child of children) visit(child.agent, child.version);
+      visiting.pop();
+      resolved.set(version.id, {
+        agentId: agent.id,
+        agentVersionId: version.id,
+        version: version.version,
+        skills,
+        delegates,
+      });
+    };
+    visit(rootAgent, rootVersion);
+    // Root first, then the order delegates were reached in.
+    const agentVersions: SessionResolvedAgentVersion[] = [];
+    const queue = [rootVersion.id];
+    const seen = new Set<string>();
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const entry = resolved.get(id)!;
+      agentVersions.push(entry);
+      queue.push(...entry.delegates.map((delegate) => delegate.agentVersionId));
+    }
+    return {
+      schemaVersion: 1,
+      rootSessionId,
+      rootAgentVersionId: rootVersion.id,
+      resolvedAt,
+      agentVersions,
+    };
   }
 
   async listSkills(filters: ListFilters) {
@@ -2478,13 +2772,25 @@ export class DemoConsoleApi implements ConsoleApi {
   }) {
     const agent = this.#agents.find((item) => item.id === input.agentId);
     if (!agent) throw new Error("Agent not found");
-    if (agent.version == null)
+    const rootVersion =
+      agent.versions.find((version) => version.id === agent.latestVersionId) ??
+      agent.versions[0];
+    if (agent.version == null || !rootVersion)
       throw new Error("Publish an Agent version before creating a session");
-    this.#counter += 1;
     const now = new Date().toISOString();
+    const sessionId = `session_demo_${this.#counter + 1}`;
+    // Resolved before anything is recorded, so an unavailable followed
+    // delegate or Skill refuses the session like the API's 409 does.
+    const resolvedVersions = this.#resolveSessionVersions(
+      agent,
+      rootVersion,
+      sessionId,
+      now,
+    );
+    this.#counter += 1;
     const messageId = `message_demo_${this.#counter}`;
     const detail: SessionDetail = {
-      id: `session_demo_${this.#counter}`,
+      id: sessionId,
       title: input.title,
       status: "queued",
       agentId: agent.id,
@@ -2503,8 +2809,9 @@ export class DemoConsoleApi implements ConsoleApi {
       completedAt: null,
       attempt: 1,
       workspaceFiles: [],
-      tools: agent.versions[0] ? sessionTools(agent.versions[0].config) : [],
+      tools: sessionTools(rootVersion.config),
       delegations: [],
+      resolvedVersions,
       events: [
         {
           id: messageId,
@@ -2524,26 +2831,24 @@ export class DemoConsoleApi implements ConsoleApi {
         canResume: false,
         canBranchReplay: false,
       },
-      skills: (agent.versions[0]?.config.skillVersionIds ?? []).flatMap(
-        (versionId) => {
-          const skill = this.#skills.find(
-            (candidate) => candidate.latestVersionId === versionId,
-          );
-          return skill
-            ? [
-                {
-                  skillId: skill.id,
-                  skillVersionId: versionId,
-                  version: skill.version,
-                  name: skill.name,
-                  description: skill.description,
-                  contentHash: skill.contentHash,
-                  status: skill.status,
-                },
-              ]
-            : [];
-        },
-      ),
+      skills: resolvedVersions.agentVersions[0]!.skills.flatMap((binding) => {
+        const version = this.#skills
+          .find((candidate) => candidate.id === binding.skillId)
+          ?.versions.find((item) => item.id === binding.skillVersionId);
+        return version
+          ? [
+              {
+                skillId: binding.skillId,
+                skillVersionId: binding.skillVersionId,
+                version: binding.version,
+                name: binding.name,
+                description: version.description,
+                contentHash: version.contentHash,
+                status: version.status,
+              },
+            ]
+          : [];
+      }),
     };
     this.#sessions.unshift(detail);
     return detail;
