@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/vectrix-ai/oao/compare/v0.12.0...v0.13.0) (2026-11-03)
+
+
+### Features
+
+* **VEC-2359:** publish assistant text before tool calls ([#56](https://github.com/vectrix-ai/oao/issues/56)) ([4907848](https://github.com/vectrix-ai/oao/commit/49078480084547b74ea17e4d2b53ed49cdb11359))
+
 ## [0.12.0](https://github.com/vectrix-ai/oao/compare/v0.11.0...v0.12.0) (2026-11-03)
 
 
