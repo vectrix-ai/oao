@@ -5960,7 +5960,12 @@ function registerModelPresetRoutes(
                 tenant: actor,
                 presetId,
                 rates,
-                validFrom,
+                // A start a moment ago means now, so a call already running
+                // keeps its price and this price outranks the ones before it.
+                validFrom:
+                  validFrom !== undefined && Date.parse(validFrom) > Date.now()
+                    ? validFrom
+                    : undefined,
                 createdByPrincipalId: actor.id,
               });
               await dependencies.store.appendAudit(tx, actor, {

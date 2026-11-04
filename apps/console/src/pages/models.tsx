@@ -1441,6 +1441,16 @@ function PresetPriceSection({ preset }: { readonly preset: ModelPreset }) {
       notify("Price saved. Runs already made keep their cost.");
     },
   });
+  if (history.isLoadingError)
+    return (
+      <section className="stack">
+        <h3>Price</h3>
+        <ErrorState
+          error={history.error}
+          retry={() => void history.refetch()}
+        />
+      </section>
+    );
   return (
     <section className="stack">
       <h3>Price</h3>
@@ -1549,7 +1559,7 @@ function PresetDetailDialog({
     <Dialog
       wide
       title={preset.displayName}
-      description="Presets are immutable so every published agent version keeps the exact model it was reviewed with. To change one, duplicate it into a new key. Only its price can change, for later runs."
+      description="Presets are immutable so every published agent version keeps the exact model it was reviewed with. To change one, duplicate it into a new key. Only its price can change, for later model calls."
       onClose={onClose}
       footer={
         <>

@@ -236,7 +236,7 @@ stays immutable, but its price does not have to: the new price is added to the
 preset's history and applies to later model calls, from now or from a later
 time you pick, such as the day a promotion ends. A start in the past is
 refused. Past runs keep the cost they were given, because each model call
-records the rates it was charged in `debug.modelInvocations[].pricingSnapshot`.
+records what it was charged in `debug.modelInvocations[].pricingSnapshot`.
 
 OAO prices each model call from the first of these that applies:
 

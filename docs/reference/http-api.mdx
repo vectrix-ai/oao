@@ -240,8 +240,9 @@ and optionally `longContext` with `aboveInputTokens` and the same four rates.
 `POST /model-presets` accepts it as `price`; each preset in the list returns the
 price in effect now as `price`, or `null`. `POST /model-presets/{id}/prices`
 takes the rates and an optional future `validFrom`, and refuses a start in the
-past (`400`). Prices are append-only and apply to later model calls, so past runs
-keep the cost they were given. A catalog entry carries `listPrice` where OAO knows
+past (`400`), except that one from the last five minutes counts as now. Prices
+are append-only and apply to later model calls, so past runs keep the cost they
+were given. A catalog entry carries `listPrice` where OAO knows
 the model's list price. See
 [Set a model preset's price](/models/adding-models#set-a-model-presets-price).
 

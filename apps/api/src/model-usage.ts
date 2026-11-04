@@ -311,10 +311,11 @@ export async function readSessionUsage(
         endedAt === null || running ? null : new Date(endedAt).toISOString(),
       wallMs: startedAt === null || endedAt === null ? 0 : endedAt - startedAt,
       activeMs: mergedWindowMs(
-        runs.rows.map((run): Window => [
-          (run.admitted_at ?? run.created_at).getTime(),
-          run.settled_at?.getTime() ?? now,
-        ]),
+        runs.rows.flatMap((run): Window[] =>
+          run.admitted_at
+            ? [[run.admitted_at.getTime(), run.settled_at?.getTime() ?? now]]
+            : [],
+        ),
       ),
       modelMs: mergedWindowMs(modelWindows),
       toolMs: mergedWindowMs(

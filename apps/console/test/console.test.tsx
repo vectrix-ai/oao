@@ -18,6 +18,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ConsoleApp } from "../src/app";
 import { DemoConsoleApi } from "../src/api/context";
 import type { SessionUsage } from "../src/api/types";
+import type { ProductEvent } from "@oao/contracts";
 
 /** Editor sections other than the definition start collapsed; open one by its heading. */
 async function openSection(
@@ -2814,6 +2815,28 @@ describe("management console", () => {
     expect(created?.price?.outputUsdPerMillion).toBe(12.5);
   });
 
+  it("says a preset's price failed to load rather than that it has none", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    vi.spyOn(api, "listModelPresetPrices").mockRejectedValue(
+      new Error("Price read failed"),
+    );
+    renderConsole("/models", api);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Claude Sonnet 4\.6 \(zero retention\)/u,
+      }),
+    );
+    const detail = within(
+      screen.getByRole("dialog", {
+        name: "Claude Sonnet 4.6 (zero retention)",
+      }),
+    );
+    expect(await detail.findByText("Price read failed")).toBeInTheDocument();
+    expect(detail.queryByText(/^No price/u)).toBeNull();
+    expect(detail.queryByRole("button", { name: "Set price" })).toBeNull();
+  });
+
   it("changes a preset's price and lists its history", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
@@ -2993,6 +3016,69 @@ describe("management console", () => {
     });
     await queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
     await waitFor(() => expect(total()).toHaveTextContent("$0.0175"));
+  });
+
+  it("says a whole run's usage failed to load, and that a call without usage has no known cost", async () => {
+    const user = userEvent.setup();
+    const sessionId = "session_01J5QTXE7W9M2R6C4A8K3N1P0V";
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const usage = await api.getSessionUsage(sessionId);
+    const getUsage = vi
+      .spyOn(api, "getSessionUsage")
+      .mockRejectedValue(new Error("Usage read failed"));
+    renderConsole(`/sessions/${sessionId}`, api);
+    const panel = within(
+      await screen.findByRole("complementary", { name: "Session details" }),
+    );
+    expect(await panel.findByText("Usage read failed")).toBeInTheDocument();
+
+    getUsage.mockResolvedValue({
+      ...usage,
+      modelCalls: 1,
+      inputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      outputTokens: 0,
+      costMicrounits: 0,
+      unpricedCalls: 0,
+      costProvenance: "unavailable",
+      byAgent: [],
+      byModel: [],
+    });
+    await user.click(panel.getByRole("button", { name: "Try again" }));
+    const whole = await panel.findByText("Whole run");
+    expect(
+      whole.parentElement?.querySelector(".panel-total"),
+    ).toHaveTextContent("—");
+  });
+
+  it("refreshes a coordinator's whole run when its delegate finishes a model call", async () => {
+    const sessionId = "session_01J5QTXE7W9M2R6C4A8K3N1P0V";
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const usage = await api.getSessionUsage(sessionId);
+    const counted = { ...usage, byAgent: [], byModel: [], unpricedCalls: 0 };
+    const getUsage = vi
+      .spyOn(api, "getSessionUsage")
+      .mockResolvedValue({ ...counted, modelCalls: 1, costMicrounits: 1_000 });
+    const connectEvents = vi.spyOn(api, "connectEvents");
+    renderConsole(`/sessions/${sessionId}`, api);
+    const panel = within(
+      await screen.findByRole("complementary", { name: "Session details" }),
+    );
+    await panel.findByText("$0.0010");
+    await waitFor(() => expect(connectEvents).toHaveBeenCalled());
+
+    getUsage.mockResolvedValue({
+      ...counted,
+      modelCalls: 2,
+      costMicrounits: 2_000,
+    });
+    connectEvents.mock.lastCall?.[0].onEvent({
+      kind: "model.invocation_completed",
+      aggregateId: "delegate-run",
+      publicPayload: { sessionId: "delegate-session" },
+    } as unknown as ProductEvent);
+    expect(await panel.findByText("$0.0020")).toBeInTheDocument();
   });
 
   it("opens a model preset, duplicates it into a prefilled new preset, and archives it", async () => {

@@ -3095,7 +3095,10 @@ export class DemoConsoleApi implements ConsoleApi {
       cacheWriteUsdPerMillion: input.cacheWriteUsdPerMillion,
       outputUsdPerMillion: input.outputUsdPerMillion,
       longContext: input.longContext ?? null,
-      validFrom: input.validFrom ?? now,
+      validFrom:
+        input.validFrom !== undefined && input.validFrom > now
+          ? input.validFrom
+          : now,
       createdByPrincipalId: principalId,
       createdAt: now,
     };

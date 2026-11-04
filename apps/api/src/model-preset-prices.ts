@@ -86,7 +86,11 @@ export async function currentModelPresetPrices(
   );
 }
 
-/** Adds a price to a preset's history, starting now unless `validFrom` says later. */
+/**
+ * Adds a price to a preset's history, starting now unless `validFrom` says later.
+ * Starts are unique per preset and leave the API and backups in milliseconds, so
+ * they are stored that way too: two that differ by less could not be restored.
+ */
 export async function insertModelPresetPrice(
   transaction: PgClient,
   input: {
@@ -110,7 +114,7 @@ export async function insertModelPresetPrice(
        long_context_output_usd_per_million,
        valid_from,created_by_principal_id
      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
-               COALESCE($14::timestamptz,clock_timestamp()),$15)
+               date_trunc('milliseconds',COALESCE($14::timestamptz,clock_timestamp())),$15)
      RETURNING ${MODEL_PRESET_PRICE_COLUMNS}`,
     [
       input.tenant.organizationId,

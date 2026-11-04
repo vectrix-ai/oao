@@ -149,6 +149,22 @@ test(
     );
     assert.equal(past.status, 400);
     assert.match(await past.text(), /past/u);
+    // A start a moment ago means now: it outranks the current price, and a call
+    // that began in that moment keeps the price it began under.
+    const moment = await post<ModelPresetPrice>(
+      `/model-presets/${priced.id}/prices`,
+      { ...rates, validFrom: new Date(Date.now() - 60_000).toISOString() },
+    );
+    assert.ok(moment.validFrom > (priced.price?.validFrom ?? ""));
+    assert.equal(
+      (
+        await pool.query(
+          "SELECT 1 FROM oao.model_preset_prices WHERE id=$1 AND valid_from=date_trunc('milliseconds',valid_from)",
+          [moment.id],
+        )
+      ).rowCount,
+      1,
+    );
     const missing = await app.request(
       `${projectPath}/model-presets/${randomUUID()}/prices`,
       write(rates),
@@ -171,7 +187,7 @@ test(
     );
     assert.deepEqual(
       history.data.map((entry) => entry.outputUsdPerMillion),
-      [20, 10],
+      [20, 10, 10],
     );
 
     // Prices are append-only: triggers refuse changes even on this admin pool.
@@ -425,6 +441,8 @@ test(
 
     const pricedUsage = await get<SessionUsage>(`/sessions/${first.id}/usage`);
     assert.equal(pricedUsage.time.toolMs, 2_000 + 3_000 + 4_000);
+    // No worker runs in this test, so the run was never admitted: only queued.
+    assert.equal(pricedUsage.time.activeMs, 0);
     assert.equal(pricedUsage.sessionCount, 1);
     assert.equal(pricedUsage.modelCalls, 2);
     assert.equal(pricedUsage.cacheReadTokens, 2 * usage.cacheRead);
@@ -540,6 +558,6 @@ test(
     });
     assert.equal(deleted.status, 200, await deleted.clone().text());
     assert.equal(await pricesIn(otherProject.id), 0);
-    assert.equal(await pricesIn(principal.projectId), 2);
+    assert.equal(await pricesIn(principal.projectId), 3);
   },
 );

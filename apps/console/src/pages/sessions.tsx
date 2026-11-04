@@ -1306,13 +1306,25 @@ function toolCallCounts(session: SessionDetail): ReadonlyMap<string, number> {
 
 function usageCost(usage: {
   readonly modelCalls: number;
+  readonly inputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
+  readonly outputTokens: number;
   readonly costMicrounits: number;
   readonly unpricedCalls: number;
 }): string {
   if (usage.modelCalls === 0) return "—";
-  return usage.costMicrounits === 0 && usage.unpricedCalls > 0
-    ? "no price"
-    : formatCost(usage.costMicrounits / 1_000_000);
+  if (usage.costMicrounits > 0)
+    return formatCost(usage.costMicrounits / 1_000_000);
+  if (usage.unpricedCalls > 0) return "no price";
+  // A call whose usage never arrived records no tokens: unknown, not free.
+  return usage.inputTokens +
+    usage.cacheReadTokens +
+    usage.cacheWriteTokens +
+    usage.outputTokens ===
+    0
+    ? "—"
+    : formatCost(0);
 }
 
 function callCount(count: number, noun = "call"): string {
@@ -1691,7 +1703,11 @@ function SessionSidebar({
           </div>
         </dl>
       </section>
-      {usage.data ? <RunUsageSection usage={usage.data} /> : null}
+      {usage.data ? (
+        <RunUsageSection usage={usage.data} />
+      ) : usage.isError ? (
+        <ErrorState error={usage.error} retry={() => void usage.refetch()} />
+      ) : null}
     </aside>
   );
 }
