@@ -3,6 +3,8 @@ import {
   CreateMcpServerInputSchema,
   CreateMcpToolsetInputSchema,
   CreateModelPresetInputSchema,
+  ProjectUsageGroupSchema,
+  SetModelPresetPriceInputSchema,
   DiscoverMcpServerInputSchema,
   ManagedAgentPublicationConfigSchema,
   OAO_MCP_TOOL_CATALOG,
@@ -14,6 +16,7 @@ import {
   OaoApiError,
   type CreateAgentInput,
   type CreateModelPresetInput,
+  type SetModelPresetPriceInput,
   type CreateSessionInput,
   type OaoClient,
   type PublishAgentVersionInput,
@@ -406,6 +409,32 @@ export const OAO_TOOLS: readonly OaoTool[] = [
       return input.includeDebug === true ? session : without(session, "debug");
     },
   }),
+  tool("get_session_usage", {
+    input: { sessionId: Id },
+    run: (input, context) =>
+      context.client.getSessionUsage(
+        context.projectId,
+        input.sessionId,
+        withSignal(context),
+      ),
+  }),
+  tool("get_project_usage", {
+    input: {
+      from: v.optional(v.pipe(v.string(), v.isoTimestamp())),
+      to: v.optional(v.pipe(v.string(), v.isoTimestamp())),
+      groupBy: v.optional(ProjectUsageGroupSchema),
+    },
+    run: (input, context) =>
+      context.client.getProjectUsage(
+        context.projectId,
+        {
+          ...(input.from === undefined ? {} : { from: input.from }),
+          ...(input.to === undefined ? {} : { to: input.to }),
+          ...(input.groupBy === undefined ? {} : { groupBy: input.groupBy }),
+        },
+        withSignal(context),
+      ),
+  }),
   tool("start_session", {
     input: {
       agentId: v.optional(Id),
@@ -657,6 +686,32 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         context.projectId,
         preset as CreateModelPresetInput,
         write(context, "create_model_preset"),
+      );
+    },
+  }),
+  tool("list_model_preset_prices", {
+    input: { presetId: Id, limit: Limit, cursor: Cursor },
+    run: (input, context) =>
+      context.client.listModelPresetPrices(
+        context.projectId,
+        input.presetId,
+        page(input),
+        withSignal(context),
+      ),
+  }),
+  tool("set_model_preset_price", {
+    input: {
+      presetId: Id,
+      ...SetModelPresetPriceInputSchema.entries,
+      idempotencyKey: IdempotencyKey,
+    },
+    run: (input, context) => {
+      const price = without(without(input, "idempotencyKey"), "presetId");
+      return context.client.setModelPresetPrice(
+        context.projectId,
+        input.presetId,
+        price as SetModelPresetPriceInput,
+        write(context, "set_model_preset_price"),
       );
     },
   }),

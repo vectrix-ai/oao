@@ -1,8 +1,11 @@
 import type {
+  CostProvenance,
   ManagedAgentOaoTools,
   ModelCatalogEntry,
   ModelGenerationSettings,
   ModelPreset,
+  ModelPresetPrice,
+  ModelPriceRates,
   ModelRoutingPolicy,
   ProjectModelProvider,
   ProjectSandboxProvider,
@@ -10,6 +13,7 @@ import type {
   SandboxSnapshotEntry,
   ProductEvent,
   RunState,
+  SessionUsage,
   ToolOwner,
   ToolStage,
   McpServer,
@@ -40,9 +44,13 @@ import type {
 } from "@oao/contracts";
 
 export type {
+  CostProvenance,
+  SessionUsage,
   ModelCatalogEntry,
   ModelGenerationSettings,
   ModelPreset,
+  ModelPresetPrice,
+  ModelPriceRates,
   ModelRoutingPolicy,
   ProjectModelProvider,
   ProjectSandboxProvider,
@@ -112,6 +120,13 @@ export interface CreateModelPresetInput {
   readonly model: string;
   readonly routing: ModelRoutingPolicy;
   readonly settings?: ModelGenerationSettings | null;
+  /** The preset's first price, per one million tokens in USD. */
+  readonly price?: ModelPriceRates | null;
+}
+
+export interface SetModelPresetPriceInput extends ModelPriceRates {
+  /** When the price starts. Defaults to now. */
+  readonly validFrom?: string;
 }
 
 export interface CreateModelProviderInput {
@@ -425,7 +440,7 @@ export interface SessionSummary {
   readonly cacheReadTokens: number;
   readonly cacheWriteTokens: number;
   readonly observedCostUsd: number | null;
-  readonly costProvenance: "provider_observed" | "estimated" | "unavailable";
+  readonly costProvenance: CostProvenance;
   /** Latest run timestamps, used for settled and live elapsed time. */
   readonly startedAt: string | null;
   readonly completedAt: string | null;
@@ -816,6 +831,7 @@ export interface ConsoleApi {
   createMcpToolset(input: CreateMcpToolsetInput): Promise<McpToolset>;
   listSessions(filters: ListFilters): Promise<PageResult<SessionSummary>>;
   getSession(id: string): Promise<SessionDetail>;
+  getSessionUsage(id: string): Promise<SessionUsage>;
   getSessionFile(sessionId: string, path: string): Promise<Uint8Array>;
   createSession(input: {
     readonly agentId: string;
@@ -907,6 +923,11 @@ export interface ConsoleApi {
     search?: string,
   ): Promise<ModelCatalogList>;
   createModelPreset(input: CreateModelPresetInput): Promise<ModelPreset>;
+  listModelPresetPrices(presetId: string): Promise<readonly ModelPresetPrice[]>;
+  setModelPresetPrice(
+    presetId: string,
+    input: SetModelPresetPriceInput,
+  ): Promise<ModelPresetPrice>;
   getSettings(): Promise<SettingsData>;
   addMember(
     input:

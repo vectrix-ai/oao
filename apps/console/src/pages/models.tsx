@@ -21,12 +21,18 @@ import type {
   ModelPreset,
   ModelRoutingPolicy,
   ProjectModelProvider,
+  SetModelPresetPriceInput,
 } from "../api/types";
 import {
   MODEL_PRESET_KEY_PATTERN,
   describePresetRouting,
+  describePrice,
   describeRouting,
+  formatUsdRate,
+  priceFormFromRates,
+  ratesFromPriceForm,
   suggestPresetKey,
+  type PriceForm,
 } from "../model-presets";
 import type { ComboboxOption } from "../components/ui";
 import {
@@ -372,6 +378,7 @@ export function ModelsPage() {
                 <th>Model</th>
                 <th>Source</th>
                 <th>Policy / settings</th>
+                <th>Price per 1M (in / out)</th>
                 <th>Used by</th>
                 <th>Created</th>
               </tr>
@@ -405,6 +412,17 @@ export function ModelsPage() {
                     />
                   </td>
                   <td>{describePresetRouting(preset)}</td>
+                  <td
+                    title={
+                      preset.price ? describePrice(preset.price) : undefined
+                    }
+                  >
+                    {preset.origin === "deployment"
+                      ? "—"
+                      : preset.price
+                        ? `${formatUsdRate(preset.price.inputUsdPerMillion)} / ${formatUsdRate(preset.price.outputUsdPerMillion)}`
+                        : "No price"}
+                  </td>
                   <td>
                     {agents.isPending
                       ? "…"
@@ -560,6 +578,12 @@ function CreateModelPresetDialog({
   const [displayNameEdited, setDisplayNameEdited] = useState(
     initial !== undefined,
   );
+  // A duplicate keeps the source's price; picking a model only fills an
+  // untouched form, so a typed price is never replaced.
+  const [priceForm, setPriceForm] = useState<PriceForm>(
+    priceFormFromRates(initial?.price ?? undefined),
+  );
+  const [priceEdited, setPriceEdited] = useState(Boolean(initial?.price));
   const initialRouting = initial?.routing ?? {};
   const tristateOf = (value: boolean | undefined): Tristate =>
     value === undefined ? "" : value ? "yes" : "no";
@@ -710,6 +734,7 @@ function CreateModelPresetDialog({
     }
     if (!keyEdited) setKey(suggestPresetKey(entry.name, existingKeys));
     if (!displayNameEdited) setDisplayName(entry.name);
+    if (!priceEdited) setPriceForm(priceFormFromRates(entry.listPrice));
   };
 
   const routing: ModelRoutingPolicy = useMemo(() => {
@@ -777,6 +802,7 @@ function CreateModelPresetDialog({
       Number.isNaN(routing.maxCompletionPriceUsdPerMillion)
     )
       errors.push("Price caps must be numbers.");
+    errors.push(...ratesFromPriceForm(priceForm).errors);
     if (
       provider?.providerType === "anthropic" &&
       (!Number.isInteger(anthropicMaxTokens) || anthropicMaxTokens < 1)
@@ -797,6 +823,7 @@ function CreateModelPresetDialog({
     existingKeys,
     key,
     model,
+    priceForm,
     provider,
     routing,
   ]);
@@ -823,6 +850,7 @@ function CreateModelPresetDialog({
           model: model.model,
           routing,
           settings,
+          price: ratesFromPriceForm(priceForm).rates,
         });
       }}
       footer={
@@ -849,6 +877,7 @@ function CreateModelPresetDialog({
             setProviderId(event.target.value);
             setModel(null);
             setCatalogSearch("");
+            if (!priceEdited) setPriceForm(priceFormFromRates());
           }}
         >
           {providers.map((entry) => (
@@ -1109,6 +1138,18 @@ function CreateModelPresetDialog({
           </div>
         </details>
       ) : null}
+      <PresetPriceFields
+        form={priceForm}
+        hint={
+          model?.listPrice
+            ? "USD per one million tokens, prefilled with the list price OAO knows. Check it against the provider's current price."
+            : "USD per one million tokens. OAO has no list price for this model, so enter it here. Without a price, its runs show no cost."
+        }
+        onChange={(next) => {
+          setPriceEdited(true);
+          setPriceForm(next);
+        }}
+      />
       <FieldRow>
         <Field
           label="Preset key"
@@ -1286,7 +1327,216 @@ function CreateModelPresetDialog({
 
 const PROVIDER_KEY_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u;
 
-/** Read-only view of one preset; changing it means duplicating into a new key. */
+function PresetPriceFields({
+  form,
+  hint,
+  onChange,
+}: {
+  readonly form: PriceForm;
+  readonly hint: string;
+  readonly onChange: (form: PriceForm) => void;
+}) {
+  const rate = (label: string, field: keyof PriceForm) => (
+    <Field label={label}>
+      <Input
+        aria-label={label}
+        inputMode="decimal"
+        className="input--mono"
+        value={String(form[field])}
+        onChange={(event) => onChange({ ...form, [field]: event.target.value })}
+        placeholder="0.00"
+      />
+    </Field>
+  );
+  return (
+    <details className="policy-details" open>
+      <summary>
+        Price
+        <span className="policy-summary">
+          {form.input.trim() ? `$${form.input} input` : "No price"}
+          {form.output.trim() ? ` · $${form.output} output` : ""}
+        </span>
+      </summary>
+      <div className="policy-body">
+        <small>{hint}</small>
+        <FieldRow>
+          {rate("Input", "input")}
+          {rate("Cached input", "cachedInput")}
+        </FieldRow>
+        <FieldRow>
+          {rate("Cache write", "cacheWrite")}
+          {rate("Output", "output")}
+        </FieldRow>
+        <label>
+          <input
+            type="checkbox"
+            checked={form.longContext}
+            onChange={(event) =>
+              onChange({ ...form, longContext: event.target.checked })
+            }
+          />{" "}
+          Higher price for long inputs
+        </label>
+        {form.longContext ? (
+          <>
+            <Field
+              label="Long input starts above"
+              hint="Input tokens of one model call, cached ones included."
+            >
+              <Input
+                aria-label="Long input starts above"
+                inputMode="numeric"
+                className="input--mono"
+                value={form.longAbove}
+                onChange={(event) =>
+                  onChange({ ...form, longAbove: event.target.value })
+                }
+                placeholder="272000"
+              />
+            </Field>
+            <FieldRow>
+              {rate("Long input", "longInput")}
+              {rate("Long cached input", "longCachedInput")}
+            </FieldRow>
+            <FieldRow>
+              {rate("Long cache write", "longCacheWrite")}
+              {rate("Long output", "longOutput")}
+            </FieldRow>
+          </>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+/**
+ * The one part of a preset that can change: a new price is added to its
+ * history and applies to later model calls, so past runs keep their cost.
+ */
+function PresetPriceSection({ preset }: { readonly preset: ModelPreset }) {
+  const presetId = preset.id ?? "";
+  const api = useApi();
+  const notify = useToast();
+  const queryClient = useQueryClient();
+  const history = useQuery({
+    queryKey: ["model-preset-prices", presetId],
+    queryFn: () => api.listModelPresetPrices(presetId),
+  });
+  const prices = history.data ?? [];
+  const now = Date.now();
+  const current = prices.find((price) => Date.parse(price.validFrom) <= now);
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState<PriceForm>(priceFormFromRates());
+  const [startsAt, setStartsAt] = useState("");
+  const parsed = ratesFromPriceForm(form);
+  const save = useMutation({
+    mutationFn: (input: SetModelPresetPriceInput) =>
+      api.setModelPresetPrice(presetId, input),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["model-preset-prices", presetId],
+      });
+      await queryClient.invalidateQueries({ queryKey: ["model-presets"] });
+      setEditing(false);
+      notify("Price saved. Runs already made keep their cost.");
+    },
+  });
+  if (history.isLoadingError)
+    return (
+      <section className="stack">
+        <h3>Price</h3>
+        <ErrorState
+          error={history.error}
+          retry={() => void history.refetch()}
+        />
+      </section>
+    );
+  return (
+    <section className="stack">
+      <h3>Price</h3>
+      <p className="muted">
+        {current
+          ? `${describePrice(current)}, per one million tokens.`
+          : history.isPending
+            ? "Loading price…"
+            : "No price. Runs of this preset use OAO's built-in price list, or show no cost when the list does not know the model."}
+      </p>
+      {current?.longContext ? (
+        <p className="muted">
+          Above {formatNumber(current.longContext.aboveInputTokens)} input
+          tokens: {describePrice(current.longContext)}.
+        </p>
+      ) : null}
+      {editing ? (
+        <>
+          <PresetPriceFields
+            form={form}
+            hint="USD per one million tokens. This applies to later model calls only; runs already made keep their cost."
+            onChange={setForm}
+          />
+          <Field
+            label="Starts"
+            hint="Leave empty to start now, or pick a later time, such as when a promotion ends."
+          >
+            <Input
+              aria-label="Starts"
+              type="datetime-local"
+              value={startsAt}
+              onChange={(event) => setStartsAt(event.target.value)}
+            />
+          </Field>
+          {parsed.errors[0] ? <FormError>{parsed.errors[0]}</FormError> : null}
+          {save.error ? <FormError>{save.error.message}</FormError> : null}
+          <ButtonGroup>
+            <Button onClick={() => setEditing(false)}>Cancel</Button>
+            <Button
+              variant="primary"
+              loading={save.isPending}
+              disabled={parsed.rates === null}
+              onClick={() => {
+                if (!parsed.rates) return;
+                save.mutate({
+                  ...parsed.rates,
+                  ...(startsAt
+                    ? { validFrom: new Date(startsAt).toISOString() }
+                    : {}),
+                });
+              }}
+            >
+              Save price
+            </Button>
+          </ButtonGroup>
+        </>
+      ) : (
+        <div>
+          <Button
+            onClick={() => {
+              save.reset();
+              setForm(priceFormFromRates(current));
+              setStartsAt("");
+              setEditing(true);
+            }}
+          >
+            {current ? "Change price" : "Set price"}
+          </Button>
+        </div>
+      )}
+      {prices.length > 0 ? (
+        <ul className="preset-usage">
+          {prices.map((price) => (
+            <li key={price.id}>
+              {formatDate(price.validFrom)}
+              {Date.parse(price.validFrom) > now ? " (scheduled)" : ""}
+              <span className="muted"> · {describePrice(price)}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  );
+}
+
+/** Read-only view of one preset, apart from its price; changing anything else means duplicating into a new key. */
 function PresetDetailDialog({
   preset,
   provider,
@@ -1309,7 +1559,7 @@ function PresetDetailDialog({
     <Dialog
       wide
       title={preset.displayName}
-      description="Presets are immutable so every published agent version keeps the exact model it was reviewed with. To change one, duplicate it into a new key."
+      description="Presets are immutable so every published agent version keeps the exact model it was reviewed with. To change one, duplicate it into a new key. Only its price can change, for later model calls."
       onClose={onClose}
       footer={
         <>
@@ -1367,6 +1617,7 @@ function PresetDetailDialog({
           },
         ]}
       />
+      {isProject ? <PresetPriceSection preset={preset} /> : null}
       <section className="stack">
         <h3>{preset.settings ? "Generation settings" : "Routing policy"}</h3>
         <p className="muted">{describePresetRouting(preset)}</p>

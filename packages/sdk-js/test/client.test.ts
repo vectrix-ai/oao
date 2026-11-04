@@ -1295,3 +1295,71 @@ test("client downloads, previews, and restores an organization configuration bac
     credentials: { modelProviders: {} },
   });
 });
+
+test("reads and sets model preset prices and reads usage", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({ data: [], pageInfo: { hasMore: false } });
+    },
+  });
+  await client.listModelPresetPrices("project-1", "preset/1", { limit: 5 });
+  const price = {
+    inputUsdPerMillion: 2,
+    cachedInputUsdPerMillion: 0.1,
+    cacheWriteUsdPerMillion: 2.5,
+    outputUsdPerMillion: 10,
+    longContext: null,
+    validFrom: "2026-11-22T00:00:00.000Z",
+  };
+  await client.setModelPresetPrice("project-1", "preset/1", price, {
+    idempotencyKey: "price-1",
+  });
+  await client.getSessionUsage("project-1", "session-1");
+  await client.getProjectUsage("project-1", {
+    from: "2026-10-01T00:00:00.000Z",
+    groupBy: "agent",
+  });
+  assert.equal(
+    requests[0]?.url,
+    "https://api.example.test/v1/projects/project-1/model-presets/preset%2F1/prices?limit=5",
+  );
+  assert.equal(requests[1]?.method, "POST");
+  assert.equal(
+    requests[1]?.url,
+    "https://api.example.test/v1/projects/project-1/model-presets/preset%2F1/prices",
+  );
+  assert.equal(requests[1]?.headers.get("idempotency-key"), "price-1");
+  assert.deepEqual(await requests[1]?.json(), price);
+  assert.equal(
+    requests[2]?.url,
+    "https://api.example.test/v1/projects/project-1/sessions/session-1/usage",
+  );
+  assert.equal(
+    requests[3]?.url,
+    "https://api.example.test/v1/projects/project-1/usage?from=2026-10-01T00%3A00%3A00.000Z&groupBy=agent",
+  );
+});
+
+test("price writes require an idempotency key", async () => {
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async () => Response.json({}),
+  });
+  await assert.rejects(
+    client.setModelPresetPrice(
+      "project-1",
+      "preset-1",
+      {
+        inputUsdPerMillion: 2,
+        cachedInputUsdPerMillion: 0.1,
+        cacheWriteUsdPerMillion: 2.5,
+        outputUsdPerMillion: 10,
+        longContext: null,
+      },
+      { idempotencyKey: "" },
+    ),
+  );
+});

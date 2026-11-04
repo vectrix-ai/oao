@@ -243,6 +243,59 @@ test("a tool call reaches the API with the caller's own credential", async () =>
   await client.close();
 });
 
+test("prices and usage reach their API routes", async () => {
+  const { client, api } = await connect([
+    "agent:read",
+    "project:admin",
+    "session:read",
+  ]);
+  const presetId = "66666666-6666-4666-8666-666666666666";
+  const price = {
+    inputUsdPerMillion: 2,
+    cachedInputUsdPerMillion: 0.1,
+    cacheWriteUsdPerMillion: 2.5,
+    outputUsdPerMillion: 10,
+    validFrom: "2026-11-22T00:00:00.000Z",
+  };
+  await client.callTool({
+    name: "set_model_preset_price",
+    arguments: { presetId, ...price },
+  });
+  await client.callTool({
+    name: "list_model_preset_prices",
+    arguments: { presetId },
+  });
+  await client.callTool({
+    name: "get_session_usage",
+    arguments: { sessionId: SESSION },
+  });
+  await client.callTool({
+    name: "get_project_usage",
+    arguments: { groupBy: "model" },
+  });
+  const [set, list, session, project] = api.requests;
+  assert.equal(set?.method, "POST");
+  assert.equal(
+    set?.path,
+    `/v1/projects/${PROJECT}/model-presets/${presetId}/prices`,
+  );
+  assert.ok(set?.idempotencyKey);
+  assert.deepEqual(set?.body, { ...price, longContext: null });
+  assert.match(
+    list?.path ?? "",
+    new RegExp(`/model-presets/${presetId}/prices`, "u"),
+  );
+  assert.equal(
+    session?.path,
+    `/v1/projects/${PROJECT}/sessions/${SESSION}/usage`,
+  );
+  assert.match(
+    project?.path ?? "",
+    new RegExp(`/v1/projects/${PROJECT}/usage`, "u"),
+  );
+  await client.close();
+});
+
 test("send_message asks the agent in its session and returns its answer", async () => {
   const { client, api } = await connect(["run:create", "run:read"]);
   const result = await client.callTool({

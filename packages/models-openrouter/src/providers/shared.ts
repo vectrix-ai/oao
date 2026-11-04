@@ -2,6 +2,7 @@ import type { Api, ApiKeyAuth, Model, Provider } from "@earendil-works/pi-ai";
 import type {
   ModelCatalogEntry,
   ModelGenerationSettings,
+  ModelPriceRates,
   ModelProviderType,
 } from "@oao/contracts";
 
@@ -90,6 +91,32 @@ export function credentialAuth(
   };
 }
 
+/** The list price built into the model catalog, or undefined when it has none. */
+export function listPriceFromModelCost(
+  cost: Model<Api>["cost"],
+): ModelPriceRates | undefined {
+  if (cost.input + cost.output + cost.cacheRead + cost.cacheWrite <= 0)
+    return undefined;
+  const [longContext] = [...(cost.tiers ?? [])].sort(
+    (left, right) => left.inputTokensAbove - right.inputTokensAbove,
+  );
+  return {
+    inputUsdPerMillion: cost.input,
+    cachedInputUsdPerMillion: cost.cacheRead,
+    cacheWriteUsdPerMillion: cost.cacheWrite,
+    outputUsdPerMillion: cost.output,
+    longContext: longContext
+      ? {
+          aboveInputTokens: longContext.inputTokensAbove,
+          inputUsdPerMillion: longContext.input,
+          cachedInputUsdPerMillion: longContext.cacheRead,
+          cacheWriteUsdPerMillion: longContext.cacheWrite,
+          outputUsdPerMillion: longContext.output,
+        }
+      : null,
+  };
+}
+
 export function staticCatalogEntry(input: {
   readonly providerType: ModelProviderType;
   readonly prefix: string;
@@ -100,6 +127,7 @@ export function staticCatalogEntry(input: {
     "low" | "medium" | "high" | "xhigh" | "max"
   )[];
 }): ModelCatalogEntry {
+  const listPrice = listPriceFromModelCost(input.model.cost);
   return {
     providerType: input.providerType,
     model: `${input.prefix}${input.model.id}`,
@@ -111,6 +139,7 @@ export function staticCatalogEntry(input: {
     adaptiveThinking: input.adaptiveThinking ?? false,
     thinkingCanBeDisabled: input.thinkingCanBeDisabled ?? true,
     effortLevels: [...(input.effortLevels ?? [])],
+    ...(listPrice ? { listPrice } : {}),
   };
 }
 

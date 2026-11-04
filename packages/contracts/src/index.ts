@@ -1552,6 +1552,22 @@ export const OAO_MCP_TOOL_CATALOG: readonly OaoMcpToolDescriptor[] = [
     readOnly: true,
   },
   {
+    name: "get_session_usage",
+    title: "Get session usage",
+    description:
+      "Reads what a session and its delegates used and cost, per agent and model, with cached tokens and where the time went.",
+    scopes: ["session:read"],
+    readOnly: true,
+  },
+  {
+    name: "get_project_usage",
+    title: "Get project usage",
+    description:
+      "Reads the project's model usage and cost over a period, per day, agent, or model.",
+    scopes: ["session:read"],
+    readOnly: true,
+  },
+  {
     name: "start_session",
     title: "Start session",
     description:
@@ -1684,7 +1700,22 @@ export const OAO_MCP_TOOL_CATALOG: readonly OaoMcpToolDescriptor[] = [
     name: "create_model_preset",
     title: "Create model preset",
     description:
-      "Creates a project model preset on an existing model provider connection.",
+      "Creates a project model preset on an existing model provider connection, optionally with its price per one million tokens in USD.",
+    scopes: ["project:admin"],
+    readOnly: false,
+  },
+  {
+    name: "list_model_preset_prices",
+    title: "List model preset prices",
+    description: "Lists a model preset's price history, newest first.",
+    scopes: ["agent:read"],
+    readOnly: true,
+  },
+  {
+    name: "set_model_preset_price",
+    title: "Set model preset price",
+    description:
+      "Sets a model preset's price per one million tokens in USD, from now or a later time. Past runs keep the cost they were given.",
     scopes: ["project:admin"],
     readOnly: false,
   },
@@ -3284,6 +3315,145 @@ export const CreateProjectStorageProviderInputSchema = v.strictObject({
 export const RotateProjectStorageProviderCredentialInputSchema =
   v.strictObject(S3CredentialFields);
 
+const UsdPerMillionSchema = v.pipe(
+  v.number(),
+  v.finite(),
+  v.minValue(0),
+  v.maxValue(99_999_999),
+);
+
+const ModelPriceTierEntries = {
+  inputUsdPerMillion: UsdPerMillionSchema,
+  cachedInputUsdPerMillion: UsdPerMillionSchema,
+  cacheWriteUsdPerMillion: UsdPerMillionSchema,
+  outputUsdPerMillion: UsdPerMillionSchema,
+};
+
+const ModelPriceLongContextSchema = v.strictObject({
+  aboveInputTokens: v.pipe(
+    v.number(),
+    v.integer(),
+    v.minValue(1),
+    v.maxValue(Number.MAX_SAFE_INTEGER),
+  ),
+  ...ModelPriceTierEntries,
+});
+
+/** What a model preset charges, per one million tokens in USD. */
+export const ModelPriceRatesSchema = v.strictObject({
+  ...ModelPriceTierEntries,
+  longContext: v.optional(v.nullable(ModelPriceLongContextSchema), null),
+});
+
+/** One entry of a preset's append-only price history. */
+export const ModelPresetPriceSchema = v.object({
+  id: IdSchema,
+  presetId: IdSchema,
+  ...ModelPriceTierEntries,
+  longContext: v.nullable(ModelPriceLongContextSchema),
+  validFrom: TimestampSchema,
+  createdByPrincipalId: v.nullable(IdSchema),
+  createdAt: TimestampSchema,
+});
+
+/** Adds a price to a preset's history, starting now or at a later time. */
+export const SetModelPresetPriceInputSchema = v.strictObject({
+  ...ModelPriceRatesSchema.entries,
+  validFrom: v.optional(TimestampSchema),
+});
+
+const UsageTotalsEntries = {
+  modelCalls: v.number(),
+  inputTokens: v.number(),
+  cacheReadTokens: v.number(),
+  cacheWriteTokens: v.number(),
+  outputTokens: v.number(),
+  /** Millionths of a USD. */
+  costMicrounits: v.number(),
+  /** Model calls that used tokens but had no price, so the cost leaves them out. */
+  unpricedCalls: v.number(),
+};
+
+/** A cost split by the kind of token; null when a charged call has no split recorded. */
+const CostByKindEntries = {
+  costByKind: v.nullable(
+    v.object({
+      inputMicrounits: v.number(),
+      cacheReadMicrounits: v.number(),
+      cacheWriteMicrounits: v.number(),
+      outputMicrounits: v.number(),
+    }),
+  ),
+};
+
+export const CostProvenanceSchema = v.picklist([
+  "provider_observed",
+  "estimated",
+  "unpriced",
+  "unavailable",
+]);
+
+/** What a session and the delegates it started used and cost, and where the time went. */
+export const SessionUsageSchema = v.object({
+  sessionId: IdSchema,
+  sessionCount: v.number(),
+  costProvenance: CostProvenanceSchema,
+  ...UsageTotalsEntries,
+  ...CostByKindEntries,
+  time: v.object({
+    startedAt: v.nullable(TimestampSchema),
+    completedAt: v.nullable(TimestampSchema),
+    /** First run start to last run end, including any wait between runs. */
+    wallMs: v.number(),
+    /** Time at least one run was active. */
+    activeMs: v.number(),
+    /** Time at least one model call was running. */
+    modelMs: v.number(),
+    /**
+     * Time at least one tool was running. An approval wait is left out, and a
+     * delegate's tool call too, since its child session's time counts itself.
+     */
+    toolMs: v.number(),
+  }),
+  byAgent: v.array(
+    v.object({
+      agentId: IdSchema,
+      agentName: v.string(),
+      sessionCount: v.number(),
+      modelMs: v.number(),
+      ...UsageTotalsEntries,
+      ...CostByKindEntries,
+    }),
+  ),
+  byModel: v.array(
+    v.object({
+      modelPreset: v.nullable(v.string()),
+      model: v.string(),
+      modelMs: v.number(),
+      ...UsageTotalsEntries,
+      ...CostByKindEntries,
+    }),
+  ),
+});
+
+export const ProjectUsageGroupSchema = v.picklist(["day", "agent", "model"]);
+
+/** A project's model usage over a period, one row per day, agent, or model. */
+export const ProjectUsageSchema = v.object({
+  from: TimestampSchema,
+  to: TimestampSchema,
+  groupBy: ProjectUsageGroupSchema,
+  totals: v.object({ sessionCount: v.number(), ...UsageTotalsEntries }),
+  data: v.array(
+    v.object({
+      key: v.string(),
+      label: v.string(),
+      sessionCount: v.number(),
+      ...UsageTotalsEntries,
+    }),
+  ),
+});
+
 export const ModelPresetSchema = v.object({
   id: v.nullable(IdSchema),
   organizationId: v.nullable(IdSchema),
@@ -3300,6 +3470,8 @@ export const ModelPresetSchema = v.object({
   available: v.boolean(),
   createdByPrincipalId: v.nullable(IdSchema),
   createdAt: v.nullable(TimestampSchema),
+  /** The price in effect now; null when none is set. */
+  price: v.optional(v.nullable(ModelPresetPriceSchema)),
 });
 
 export const CreateModelPresetInputSchema = v.strictObject({
@@ -3325,6 +3497,8 @@ export const CreateModelPresetInputSchema = v.strictObject({
   ),
   routing: v.optional(ModelRoutingPolicySchema, {}),
   settings: v.optional(v.nullable(ModelGenerationSettingsSchema), null),
+  /** The preset's first price. Later changes add to its price history. */
+  price: v.optional(v.nullable(ModelPriceRatesSchema), null),
 });
 
 /** Safe, credential-free metadata for one provider catalog model or preset. */
@@ -3343,6 +3517,8 @@ export const ModelCatalogEntrySchema = v.object({
   effortLevels: v.optional(
     v.array(v.picklist(["low", "medium", "high", "xhigh", "max"])),
   ),
+  /** The provider's list price where OAO knows it, to prefill a new preset. */
+  listPrice: v.optional(ModelPriceRatesSchema),
 });
 
 export function parseCreateProjectInput(input: unknown): CreateProjectInput {
@@ -3353,6 +3529,12 @@ export function parseCreateProjectMemberInput(
   input: unknown,
 ): CreateProjectMemberInput {
   return v.parse(CreateProjectMemberInputSchema, input);
+}
+
+export function parseSetModelPresetPriceInput(
+  input: unknown,
+): SetModelPresetPriceInput {
+  return v.parse(SetModelPresetPriceInputSchema, input);
 }
 
 export function parseCreateModelPresetInput(
@@ -3581,6 +3763,15 @@ export type CreateModelPresetInput = v.InferOutput<
   typeof CreateModelPresetInputSchema
 >;
 export type ModelCatalogEntry = v.InferOutput<typeof ModelCatalogEntrySchema>;
+export type ModelPriceRates = v.InferOutput<typeof ModelPriceRatesSchema>;
+export type ModelPresetPrice = v.InferOutput<typeof ModelPresetPriceSchema>;
+export type SetModelPresetPriceInput = v.InferOutput<
+  typeof SetModelPresetPriceInputSchema
+>;
+export type CostProvenance = v.InferOutput<typeof CostProvenanceSchema>;
+export type SessionUsage = v.InferOutput<typeof SessionUsageSchema>;
+export type ProjectUsageGroup = v.InferOutput<typeof ProjectUsageGroupSchema>;
+export type ProjectUsage = v.InferOutput<typeof ProjectUsageSchema>;
 
 // ---------------------------------------------------------------------------
 // Organization configuration backups
@@ -3735,6 +3926,18 @@ const BackupModelPresetSchema = v.strictObject({
   routing: ModelRoutingPolicySchema,
   settings: v.nullable(ModelGenerationSettingsSchema),
   archived: v.boolean(),
+  /** The price history. Backups made before prices existed leave it out. */
+  prices: v.optional(
+    v.array(
+      v.strictObject({
+        id: IdSchema,
+        ...ModelPriceTierEntries,
+        longContext: v.nullable(ModelPriceLongContextSchema),
+        validFrom: TimestampSchema,
+      }),
+    ),
+    [],
+  ),
 });
 
 const BackupSkillSchema = v.strictObject({
@@ -4243,6 +4446,8 @@ export function checkConfigurationBackupReferences(
         problems.push(
           `${where} model preset ${preset.key} uses a model provider that is not in the backup`,
         );
+      for (const price of preset.prices)
+        unique(price.id, `${where} price of model preset ${preset.key}`);
     }
     uniqueKeys(project.skills, `${where} Skill`);
     uniqueKeys(removed(project.mcpToolsets), `${where} MCP toolset`);

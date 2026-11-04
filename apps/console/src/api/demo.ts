@@ -34,6 +34,9 @@ import type {
   CreateEventWebhookInput,
   CreateModelProviderInput,
   CreateModelPresetInput,
+  ModelPresetPrice,
+  SessionUsage,
+  SetModelPresetPriceInput,
   CreateSandboxProviderInput,
   CreateSkillInput,
   CreateStorageProviderInput,
@@ -992,6 +995,13 @@ const modelCatalogSeed: readonly ModelCatalogEntry[] = [
     contextWindow: 200_000,
     maxOutputTokens: 64_000,
     reasoning: true,
+    listPrice: {
+      inputUsdPerMillion: 3,
+      cachedInputUsdPerMillion: 0.3,
+      cacheWriteUsdPerMillion: 3.75,
+      outputUsdPerMillion: 15,
+      longContext: null,
+    },
   },
   {
     providerType: "openrouter",
@@ -1334,6 +1344,20 @@ export class DemoConsoleApi implements ConsoleApi {
     settingsSeed.members,
   ) as SettingsData["members"][number][];
   #modelPresets = structuredClone(modelPresetsSeed) as ModelPreset[];
+  #modelPresetPrices: ModelPresetPrice[] = [
+    {
+      id: "44444444-4444-4444-8444-000000000901",
+      presetId: SONNET_PRESET_ID,
+      inputUsdPerMillion: 3,
+      cachedInputUsdPerMillion: 0.3,
+      cacheWriteUsdPerMillion: 3.75,
+      outputUsdPerMillion: 15,
+      longContext: null,
+      validFrom: "2026-01-01T00:00:00.000Z",
+      createdByPrincipalId: principalId,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+  ];
   #modelProviders = structuredClone(
     modelProvidersSeed,
   ) as ProjectModelProvider[];
@@ -2757,6 +2781,53 @@ export class DemoConsoleApi implements ConsoleApi {
     return this.#page(data, filters.page);
   }
 
+  async getSessionUsage(id: string): Promise<SessionUsage> {
+    this.#guard();
+    const session = await this.getSession(id);
+    const costMicrounits = Math.round(
+      (session.observedCostUsd ?? 0) * 1_000_000,
+    );
+    const totals = {
+      modelCalls: 2,
+      inputTokens: session.inputTokens,
+      cacheReadTokens: session.cacheReadTokens,
+      cacheWriteTokens: session.cacheWriteTokens,
+      outputTokens: session.outputTokens,
+      costMicrounits,
+      unpricedCalls: 0,
+      costByKind: null,
+    };
+    const wallMs = Math.max(
+      Date.parse(session.lastActivityAt) -
+        Date.parse(session.startedAt ?? session.createdAt),
+      0,
+    );
+    return {
+      sessionId: id,
+      sessionCount: 1,
+      costProvenance: session.costProvenance,
+      ...totals,
+      time: {
+        startedAt: session.startedAt,
+        completedAt: session.completedAt,
+        wallMs,
+        activeMs: wallMs,
+        modelMs: Math.round(wallMs * 0.7),
+        toolMs: Math.round(wallMs * 0.2),
+      },
+      byAgent: [
+        {
+          agentId: session.agentId,
+          agentName: session.agentName,
+          sessionCount: 1,
+          modelMs: Math.round(wallMs * 0.7),
+          ...totals,
+        },
+      ],
+      byModel: [],
+    };
+  }
+
   async getSession(id: string) {
     this.#guard();
     const value = this.#sessions.find((session) => session.id === id);
@@ -2959,12 +3030,80 @@ export class DemoConsoleApi implements ConsoleApi {
     this.#pending = this.#pending.filter((work) => work.id !== id);
   }
 
+  #currentPresetPrice(presetId: string | null): ModelPresetPrice | null {
+    const now = Date.now();
+    return (
+      this.#modelPresetPrices
+        .filter(
+          (price) =>
+            price.presetId === presetId && Date.parse(price.validFrom) <= now,
+        )
+        .sort((left, right) =>
+          right.validFrom.localeCompare(left.validFrom),
+        )[0] ?? null
+    );
+  }
+
   async listModelPresets() {
     this.#guard();
     return {
-      data: structuredClone(this.#modelPresets),
+      data: structuredClone(this.#modelPresets).map((preset) => ({
+        ...preset,
+        price: this.#currentPresetPrice(preset.id),
+      })),
       credentialEncryptionConfigured: true,
     };
+  }
+
+  async listModelPresetPrices(presetId: string) {
+    this.#guard();
+    return structuredClone(
+      this.#modelPresetPrices
+        .filter((price) => price.presetId === presetId)
+        .sort((left, right) => right.validFrom.localeCompare(left.validFrom)),
+    );
+  }
+
+  async setModelPresetPrice(
+    presetId: string,
+    input: SetModelPresetPriceInput,
+  ): Promise<ModelPresetPrice> {
+    this.#guard();
+    if (!this.#modelPresets.some((preset) => preset.id === presetId))
+      throw new Error("Model preset not found.");
+    if (
+      input.validFrom !== undefined &&
+      Date.parse(input.validFrom) < Date.now() - 5 * 60_000
+    )
+      throw new Error(
+        "A price cannot start in the past. Past runs keep the cost they were given.",
+      );
+    return structuredClone(this.#addPresetPrice(presetId, input));
+  }
+
+  #addPresetPrice(
+    presetId: string,
+    input: SetModelPresetPriceInput,
+  ): ModelPresetPrice {
+    this.#counter += 1;
+    const now = new Date().toISOString();
+    const price: ModelPresetPrice = {
+      id: `44444444-4444-4444-8444-${String(this.#counter).padStart(12, "0")}`,
+      presetId,
+      inputUsdPerMillion: input.inputUsdPerMillion,
+      cachedInputUsdPerMillion: input.cachedInputUsdPerMillion,
+      cacheWriteUsdPerMillion: input.cacheWriteUsdPerMillion,
+      outputUsdPerMillion: input.outputUsdPerMillion,
+      longContext: input.longContext ?? null,
+      validFrom:
+        input.validFrom !== undefined && input.validFrom > now
+          ? input.validFrom
+          : now,
+      createdByPrincipalId: principalId,
+      createdAt: now,
+    };
+    this.#modelPresetPrices = [...this.#modelPresetPrices, price];
+    return price;
   }
 
   async listModelProviders() {
@@ -3580,7 +3719,10 @@ export class DemoConsoleApi implements ConsoleApi {
       createdAt: new Date().toISOString(),
     };
     this.#modelPresets = [...this.#modelPresets, created];
-    return structuredClone(created);
+    const price = input.price
+      ? this.#addPresetPrice(created.id ?? "", input.price)
+      : null;
+    return structuredClone({ ...created, price });
   }
 
   async getSettings(): Promise<SettingsData> {
@@ -3743,6 +3885,17 @@ export class DemoConsoleApi implements ConsoleApi {
                 routing: preset.routing,
                 settings: preset.settings,
                 archived: false,
+                prices: this.#modelPresetPrices
+                  .filter((price) => price.presetId === preset.id)
+                  .map((price) => ({
+                    id: price.id,
+                    inputUsdPerMillion: price.inputUsdPerMillion,
+                    cachedInputUsdPerMillion: price.cachedInputUsdPerMillion,
+                    cacheWriteUsdPerMillion: price.cacheWriteUsdPerMillion,
+                    outputUsdPerMillion: price.outputUsdPerMillion,
+                    longContext: price.longContext,
+                    validFrom: price.validFrom,
+                  })),
               },
             ]
           : [],

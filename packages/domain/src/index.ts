@@ -551,3 +551,12 @@ export {
   serializeSkillPackageForHash,
   serializeLegacySkillPackageForHash,
 } from "./skill-package.js";
+
+export {
+  priceModelCall,
+  type ModelCallCost,
+  type ModelCostByKind,
+  type ModelPriceRates,
+  type ModelPriceTier,
+  type ModelUsageCounts,
+} from "./model-pricing.js";

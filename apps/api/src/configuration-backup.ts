@@ -27,6 +27,12 @@ import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import { HttpApiError, mapPostgresError } from "./errors.js";
 import { mcpCredentialFingerprint } from "./mcp.js";
 import { idempotencyKey, readJsonObject, requestHash } from "./http.js";
+import {
+  insertModelPresetPrice,
+  MODEL_PRESET_PRICE_COLUMNS,
+  modelPresetPriceView,
+  type ModelPresetPriceRow,
+} from "./model-preset-prices.js";
 
 /** What the backup routes need from the API that owns them. */
 export interface ConfigurationBackupContext {
@@ -158,6 +164,12 @@ async function exportProject(
       ORDER BY created_at,id`,
     scope,
   );
+  const presetPrices = await transaction.query<ModelPresetPriceRow>(
+    `SELECT ${MODEL_PRESET_PRICE_COLUMNS} FROM oao.model_preset_prices
+      WHERE organization_id=$1 AND project_id=$2
+      ORDER BY valid_from,id`,
+    scope,
+  );
   const skills = await transaction.query<Row>(
     `SELECT id,skill_key,display_name,disabled_at IS NOT NULL AS disabled,
             archived_at IS NOT NULL AS archived
@@ -247,6 +259,20 @@ async function exportProject(
       settings: (row.settings ??
         null) as ConfigurationBackupProject["modelPresets"][number]["settings"],
       archived: row.archived === true,
+      prices: presetPrices.rows
+        .filter((price) => price.preset_id === row.id)
+        .map((price) => {
+          const view = modelPresetPriceView(price);
+          return {
+            id: view.id,
+            inputUsdPerMillion: view.inputUsdPerMillion,
+            cachedInputUsdPerMillion: view.cachedInputUsdPerMillion,
+            cacheWriteUsdPerMillion: view.cacheWriteUsdPerMillion,
+            outputUsdPerMillion: view.outputUsdPerMillion,
+            longContext: view.longContext,
+            validFrom: view.validFrom,
+          };
+        }),
     })),
     skills: skills.rows.map((row) => ({
       id: String(row.id),
@@ -1418,6 +1444,7 @@ async function restoreProject(
 
   for (const preset of project.modelPresets)
     await step(`${where}, model preset ${preset.key}`, async () => {
+      const presetId = ids.add(preset.id);
       await transaction.query(
         `INSERT INTO oao.project_model_presets
            (organization_id,project_id,id,preset_key,display_name,provider_id,
@@ -1426,7 +1453,7 @@ async function restoreProject(
                  CASE WHEN $11 THEN clock_timestamp() END)`,
         [
           ...scope,
-          ids.add(preset.id),
+          presetId,
           preset.key,
           preset.displayName,
           ids.get(preset.providerId, `Model preset ${preset.key}`),
@@ -1437,6 +1464,15 @@ async function restoreProject(
           preset.archived,
         ],
       );
+      for (const { id, validFrom, ...rates } of preset.prices)
+        await insertModelPresetPrice(transaction, {
+          tenant: projectActor,
+          id: ids.add(id),
+          presetId,
+          rates,
+          validFrom,
+          createdByPrincipalId: projectActor.id,
+        });
     });
 
   for (const skill of project.skills)

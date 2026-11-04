@@ -87,7 +87,9 @@ policies.
 | `message_delegation`                                                           | `delegation:message`, `run:create`, `run:read` |
 | `list_skills`, `get_skill`                                                     | `skill:read`                                   |
 | `create_skill`, `publish_skill_version`                                        | `skill:write`                                  |
-| `create_model_preset`                                                          | `project:admin`                                |
+| `create_model_preset`, `set_model_preset_price`                                | `project:admin`                                |
+| `list_model_preset_prices`                                                     | `agent:read`                                   |
+| `get_session_usage`, `get_project_usage`                                       | `session:read`                                 |
 | `list_mcp_servers`, `list_mcp_credential_policies`, `list_mcp_toolsets`        | `mcp:read`                                     |
 | `list_mcp_credentials`                                                         | `credential:read_metadata`                     |
 | `create_mcp_server`, `create_mcp_credential_policy`, `create_mcp_toolset`      | `mcp:write`                                    |

@@ -22,6 +22,7 @@ import {
   parseCreateMcpToolsetInput,
   parseDiscoverMcpServerInput,
   parseCreateModelPresetInput,
+  parseSetModelPresetPriceInput,
   parseManagedAgentSnapshotForPublication,
   parseRotateProjectModelProviderCredentialInput,
   parseRotateProjectSandboxProviderCredentialInput,
@@ -40,6 +41,8 @@ import {
   type CreateProjectSandboxProviderInput,
   type CreateProjectStorageProviderInput,
   type CreateModelPresetInput,
+  type ProjectUsageGroup,
+  type SetModelPresetPriceInput,
   type CreateProjectModelProviderInput,
   type ManagedAgentPublicationConfig,
   type ModelCatalogEntry,
@@ -80,6 +83,18 @@ import { errorEnvelope, HttpApiError } from "./errors.js";
 import { McpAdminService, lockMcpBindings } from "./mcp.js";
 import { registerOaoMcpRoute } from "./oao-mcp.js";
 import { registerConfigurationBackupRoutes } from "./configuration-backup.js";
+import {
+  currentModelPresetPrices,
+  insertModelPresetPrice,
+  MODEL_PRESET_PRICE_COLUMNS,
+  modelPresetPriceView,
+  type ModelPresetPriceRow,
+} from "./model-preset-prices.js";
+import {
+  readProjectUsage,
+  readSessionUsage,
+  UNPRICED_INVOCATION_SQL,
+} from "./model-usage.js";
 import {
   bindSessionVersions,
   resolveSessionVersions,
@@ -324,6 +339,11 @@ function rethrowProjectLifecycleError(error: unknown): never {
     throw new HttpApiError("bad_request", pgError.message);
   throw error;
 }
+
+/** Clock skew allowed on a price's start, so "now" from a client is not refused. */
+const PRICE_START_LEEWAY_MS = 5 * 60_000;
+const USAGE_DEFAULT_PERIOD_MS = 30 * 24 * 60 * 60_000;
+const USAGE_MAX_PERIOD_MS = 366 * 24 * 60 * 60_000;
 
 function pagination<T>(items: T[], limit: number, dateKey: string) {
   const hasMore = items.length > limit;
@@ -5557,7 +5577,17 @@ function registerModelPresetRoutes(
           limit + 1,
         ],
       );
-      const project = rows(result) as Readonly<Record<string, unknown>>[];
+      const prices = await currentModelPresetPrices(
+        tx,
+        actor,
+        result.rows.map((row) => (row as { readonly id: string }).id),
+      );
+      const project = (rows(result) as Readonly<Record<string, unknown>>[]).map(
+        (preset) => ({
+          ...preset,
+          price: prices.get(String(preset.id)) ?? null,
+        }),
+      );
       const page = pagination(project, limit, "createdAt");
       const projectKeys = new Set(await listProjectModelPresetKeys(tx, actor));
       return c.json({
@@ -5586,7 +5616,7 @@ function registerModelPresetRoutes(
     } catch {
       throw new HttpApiError(
         "bad_request",
-        "Request must contain a versioned key, display name, approved model, and supported model settings",
+        "Request must contain a versioned key, display name, approved model, supported model settings, and a complete price if one is given",
       );
     }
     if (activeModelPresetKeys.has(input.key))
@@ -5819,13 +5849,21 @@ function registerModelPresetRoutes(
             const preset = publicValue(result.rows[0]) as Readonly<
               Record<string, unknown>
             >;
+            const price = input.price
+              ? await insertModelPresetPrice(tx, {
+                  tenant: actor,
+                  presetId,
+                  rates: input.price,
+                  createdByPrincipalId: actor.id,
+                })
+              : null;
             await dependencies.store.appendAudit(tx, actor, {
               action: "model_preset.created",
               resourceType: "model_preset",
               resourceId: presetId,
               detail: { key: input.key, model: input.model },
             });
-            return preset;
+            return { ...preset, price };
           },
         });
         c.header("idempotency-replayed", String(response.replayed));
@@ -5833,6 +5871,118 @@ function registerModelPresetRoutes(
       },
     );
   });
+
+  app.get(
+    "/v1/projects/:projectId/model-presets/:presetId/prices",
+    async (c) => {
+      const actor = assertProject(c);
+      const presetId = c.req.param("presetId");
+      const limit = parseLimit(c.req.query("limit"));
+      const cursor = decodeListCursor(c.req.query("cursor"));
+      return dependencies.store.transaction(actor, "agent:read", async (tx) => {
+        const preset = await tx.query(
+          `SELECT 1 FROM oao.project_model_presets
+          WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+          [actor.organizationId, actor.projectId, presetId],
+        );
+        if (!preset.rowCount)
+          throw new HttpApiError("not_found", "Model preset not found");
+        const condition = dependencies.store.cursorCondition(
+          cursor,
+          "valid_from",
+          4,
+        );
+        const result = await tx.query<ModelPresetPriceRow>(
+          `SELECT ${MODEL_PRESET_PRICE_COLUMNS} FROM oao.model_preset_prices
+          WHERE organization_id=$1 AND project_id=$2 AND preset_id=$3${condition.sql}
+          ORDER BY valid_from DESC,id DESC LIMIT $${4 + condition.values.length}`,
+          [
+            actor.organizationId,
+            actor.projectId,
+            presetId,
+            ...condition.values,
+            limit + 1,
+          ],
+        );
+        return c.json(
+          pagination(result.rows.map(modelPresetPriceView), limit, "validFrom"),
+        );
+      });
+    },
+  );
+
+  app.post(
+    "/v1/projects/:projectId/model-presets/:presetId/prices",
+    async (c) => {
+      const actor = assertProject(c);
+      const presetId = c.req.param("presetId");
+      const body = await readJsonObject(c.req.raw);
+      const idem = idempotencyKey(c.req.raw);
+      let input: SetModelPresetPriceInput;
+      try {
+        input = parseSetModelPresetPriceInput(body);
+      } catch {
+        throw new HttpApiError(
+          "bad_request",
+          "Request must contain the input, cached input, cache write, and output prices per one million tokens in USD",
+        );
+      }
+      return dependencies.store.transaction(
+        actor,
+        "project:admin",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `POST:/model-presets/${presetId}/prices`,
+            key: idem,
+            hash: requestHash(body),
+            status: 201,
+            execute: async () => {
+              // A price only ever applies from now on: calls already made keep
+              // the rates recorded with them, so an earlier start changes nothing.
+              if (
+                input.validFrom !== undefined &&
+                Date.parse(input.validFrom) < Date.now() - PRICE_START_LEEWAY_MS
+              )
+                throw new HttpApiError(
+                  "bad_request",
+                  "A price cannot start in the past. Past runs keep the cost they were given.",
+                );
+              const preset = await tx.query<{ preset_key: string }>(
+                `SELECT preset_key FROM oao.project_model_presets
+                  WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+                [actor.organizationId, actor.projectId, presetId],
+              );
+              const key = preset.rows[0]?.preset_key;
+              if (key === undefined)
+                throw new HttpApiError("not_found", "Model preset not found");
+              const { validFrom, ...rates } = input;
+              const price = await insertModelPresetPrice(tx, {
+                tenant: actor,
+                presetId,
+                rates,
+                // A start a moment ago means now, so a call already running
+                // keeps its price and this price outranks the ones before it.
+                validFrom:
+                  validFrom !== undefined && Date.parse(validFrom) > Date.now()
+                    ? validFrom
+                    : undefined,
+                createdByPrincipalId: actor.id,
+              });
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "model_preset.price_set",
+                resourceType: "model_preset",
+                resourceId: presetId,
+                detail: { key, validFrom: price.validFrom },
+              });
+              return price;
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body, 201);
+        },
+      );
+    },
+  );
 }
 
 function registerSkillRoutes(
@@ -7363,6 +7513,7 @@ function registerRunRoutes(
                 COALESCE(ss.cost_microunits,0)::float8 AS cost_microunits,
                 CASE WHEN COALESCE(mi.invocations,0)=0 THEN 'unavailable'
                      WHEN mi.unavailable=mi.invocations THEN 'unavailable'
+                     WHEN mi.unpriced>0 THEN 'unpriced'
                      WHEN mi.provider_observed=mi.invocations THEN 'provider_observed'
                      ELSE 'estimated' END AS cost_provenance,
                 delegation.parent_session_id,delegation.delegate_key,
@@ -7380,6 +7531,7 @@ function registerRunRoutes(
          LEFT JOIN LATERAL (
            SELECT count(*)::int AS invocations,
                   count(*) FILTER (WHERE m.usage_source='unavailable')::int AS unavailable,
+                  count(*) FILTER (WHERE ${UNPRICED_INVOCATION_SQL})::int AS unpriced,
                   count(*) FILTER (WHERE m.usage_source='provider_reported')::int AS provider_observed
            FROM oao.model_invocations m JOIN oao.runs r
              ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id
@@ -7728,6 +7880,42 @@ function registerRunRoutes(
     }
   });
 
+  app.get("/v1/projects/:projectId/usage", async (c) => {
+    const actor = assertProject(c);
+    const groupBy = (c.req.query("groupBy") ?? "day") as ProjectUsageGroup;
+    if (!["day", "agent", "model"].includes(groupBy))
+      throw new HttpApiError(
+        "bad_request",
+        "groupBy must be day, agent, or model",
+      );
+    const to = new Date(c.req.query("to") ?? Date.now());
+    const from = new Date(
+      c.req.query("from") ?? to.getTime() - USAGE_DEFAULT_PERIOD_MS,
+    );
+    if (
+      !Number.isFinite(from.getTime()) ||
+      !Number.isFinite(to.getTime()) ||
+      from >= to ||
+      to.getTime() - from.getTime() > USAGE_MAX_PERIOD_MS
+    )
+      throw new HttpApiError(
+        "bad_request",
+        "from and to must be timestamps at most 366 days apart, with from before to",
+      );
+    return dependencies.store.transaction(actor, "session:read", async (tx) =>
+      c.json(await readProjectUsage(tx, actor, { from, to, groupBy })),
+    );
+  });
+
+  app.get("/v1/projects/:projectId/sessions/:sessionId/usage", async (c) => {
+    const actor = assertProject(c);
+    return dependencies.store.transaction(actor, "session:read", async (tx) => {
+      const usage = await readSessionUsage(tx, actor, c.req.param("sessionId"));
+      if (!usage) throw new HttpApiError("not_found", "Session not found");
+      return c.json(usage);
+    });
+  });
+
   app.get("/v1/projects/:projectId/sessions/:sessionId", async (c) => {
     const actor = assertProject(c);
     return dependencies.store.transaction(actor, "session:read", async (tx) => {
@@ -7778,6 +7966,7 @@ function registerRunRoutes(
                 COALESCE(ss.cost_microunits,0)::float8 AS cost_microunits,
                 CASE WHEN COALESCE(mi.invocations,0)=0 THEN 'unavailable'
                      WHEN mi.unavailable=mi.invocations THEN 'unavailable'
+                     WHEN mi.unpriced>0 THEN 'unpriced'
                      WHEN mi.provider_observed=mi.invocations THEN 'provider_observed'
                      ELSE 'estimated' END AS cost_provenance,
                 s.created_at,s.last_activity_at
@@ -7794,6 +7983,7 @@ function registerRunRoutes(
          LEFT JOIN LATERAL (
            SELECT count(*)::int AS invocations,
                   count(*) FILTER (WHERE m.usage_source='unavailable')::int AS unavailable,
+                  count(*) FILTER (WHERE ${UNPRICED_INVOCATION_SQL})::int AS unpriced,
                   count(*) FILTER (WHERE m.usage_source='provider_reported')::int AS provider_observed
            FROM oao.model_invocations m JOIN oao.runs r
              ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id

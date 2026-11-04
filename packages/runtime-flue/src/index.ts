@@ -77,7 +77,10 @@ import type {
   Queryable,
   TenantContext,
 } from "@oao/db-postgres";
-import { withTenantTransaction } from "@oao/db-postgres";
+import {
+  findRunModelPresetPrice,
+  withTenantTransaction,
+} from "@oao/db-postgres";
 import type { ProviderCredentialCipher } from "@oao/provider-credentials";
 import {
   McpRemoteError,
@@ -87,6 +90,7 @@ import {
 } from "@oao/mcp-remote";
 import { availableOaoTools } from "@oao/mcp-server";
 import type {
+  ModelUsageCounts,
   OrganizationId,
   ProjectArtifactStoreResolverPort,
   ProjectId,
@@ -97,6 +101,7 @@ import type {
 import {
   jsonbSafePublicValue,
   jsonbSafeText,
+  priceModelCall,
   redactForPublic,
   serializeSkillPackageForHash,
   serializeLegacySkillPackageForHash,
@@ -2294,6 +2299,76 @@ function eventUuid(value: string): string {
   bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * What a model call cost and where the rates came from. The price set on the
+ * run's model preset wins; otherwise the price list built into the model
+ * catalog, which knows nothing about OpenRouter presets or Bedrock. The rates
+ * go into the invocation, so a later price change leaves this call as it is.
+ * `pricing_snapshot` rejects keys that name tokens, so the keys avoid the word.
+ */
+export async function modelCallPricing(
+  transaction: Queryable,
+  dispatch: Pick<DispatchRow, "organization_id" | "project_id" | "run_id">,
+  usage: ModelUsageCounts & {
+    readonly cost: {
+      readonly input: number;
+      readonly output: number;
+      readonly cacheRead: number;
+      readonly cacheWrite: number;
+      readonly total: number;
+    };
+  },
+  startedAt: Date,
+  model: string,
+): Promise<{
+  readonly costMicrounits: number;
+  readonly snapshot: Record<string, PublicValue>;
+}> {
+  const price = await findRunModelPresetPrice(transaction, {
+    organizationId: dispatch.organization_id,
+    projectId: dispatch.project_id,
+    runId: dispatch.run_id,
+    at: startedAt,
+  });
+  if (price) {
+    const { costMicrounits, costByKind, tier, longContext } = priceModelCall(
+      price.rates,
+      usage,
+    );
+    return {
+      costMicrounits,
+      snapshot: {
+        model,
+        source: "preset_price",
+        costByKind: { ...costByKind },
+        priceId: price.id,
+        inputUsdPerMillion: tier.inputUsdPerMillion,
+        cachedInputUsdPerMillion: tier.cachedInputUsdPerMillion,
+        cacheWriteUsdPerMillion: tier.cacheWriteUsdPerMillion,
+        outputUsdPerMillion: tier.outputUsdPerMillion,
+        longContext,
+      },
+    };
+  }
+  const costMicrounits = Math.round(usage.cost.total * 1_000_000);
+  if (costMicrounits === 0)
+    return { costMicrounits, snapshot: { model, source: "none" } };
+  return {
+    costMicrounits,
+    snapshot: {
+      model,
+      source: "catalog",
+      // The catalog's parts, so a cost from it splits by kind too.
+      costByKind: {
+        inputMicrounits: Math.round(usage.cost.input * 1_000_000),
+        cacheReadMicrounits: Math.round(usage.cost.cacheRead * 1_000_000),
+        cacheWriteMicrounits: Math.round(usage.cost.cacheWrite * 1_000_000),
+        outputMicrounits: Math.round(usage.cost.output * 1_000_000),
+      },
+    },
+  };
 }
 
 /** Flue stamps completed turn observations; recover the actual model window. */
@@ -4920,6 +4995,7 @@ export class RuntimeProjection {
     const invocationId = eventUuid(
       `turn:${runtimeDispatch.run_id}:${event.turnId}`,
     );
+    let costMicrounits = 0;
     await withTenantTransaction(
       this.pool,
       {
@@ -4938,6 +5014,19 @@ export class RuntimeProjection {
         const attempt = Number(
           (attemptResult.rows[0] as { attempt: string }).attempt,
         );
+        const pricing = usage
+          ? await modelCallPricing(
+              transaction,
+              runtimeDispatch,
+              usage,
+              timing.startedAt,
+              event.request.requestedModel,
+            )
+          : {
+              costMicrounits: 0,
+              snapshot: { model: event.request.requestedModel, source: "none" },
+            };
+        costMicrounits = pricing.costMicrounits;
         const inserted = await transaction.query<{ attempt: string }>(
           `INSERT INTO oao.model_invocations (
           organization_id,project_id,id,run_id,attempt,provider_key,model_key,status,
@@ -4960,7 +5049,7 @@ export class RuntimeProjection {
             usage?.output ?? 0,
             usage?.cacheRead ?? 0,
             usage?.cacheWrite ?? 0,
-            Math.round((usage?.cost.total ?? 0) * 1_000_000),
+            costMicrounits,
             {
               purpose: event.purpose,
               ...(harnessCorrelation
@@ -4980,7 +5069,7 @@ export class RuntimeProjection {
             timing.startedAt,
             timing.completedAt,
             usage ? "estimated" : "unavailable",
-            { model: event.request.requestedModel },
+            pricing.snapshot,
             { provider: event.request.providerId },
           ],
         );
@@ -5029,7 +5118,7 @@ export class RuntimeProjection {
             usage?.output ?? 0,
             usage?.cacheRead ?? 0,
             usage?.cacheWrite ?? 0,
-            Math.round((usage?.cost.total ?? 0) * 1_000_000),
+            costMicrounits,
           ],
         );
       },
@@ -5045,7 +5134,7 @@ export class RuntimeProjection {
         outputTokens: usage?.output ?? 0,
         cacheReadTokens: usage?.cacheRead ?? 0,
         cacheWriteTokens: usage?.cacheWrite ?? 0,
-        costMicrounits: Math.round((usage?.cost.total ?? 0) * 1_000_000),
+        costMicrounits,
         ...(harnessCorrelation
           ? {
               harnessOperationKey: harnessCorrelation.operationKey,

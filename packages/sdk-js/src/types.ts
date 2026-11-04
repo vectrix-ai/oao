@@ -8,6 +8,8 @@ import type {
   ModelCatalogEntry,
   ModelGenerationSettings,
   ModelPreset,
+  ModelPresetPrice,
+  ModelPriceRates,
   ProjectModelProvider,
   ModelRoutingPolicy,
   Organization,
@@ -16,6 +18,9 @@ import type {
   Project,
   ProjectMember,
   ProjectMemberRole,
+  ProjectUsage,
+  ProjectUsageGroup,
+  SessionUsage,
   CreateProjectInput,
   CreateProjectMemberInput,
   UpdateProjectMemberInput,
@@ -70,6 +75,8 @@ export type {
   ModelCatalogEntry,
   ModelGenerationSettings,
   ModelPreset,
+  ModelPresetPrice,
+  ModelPriceRates,
   ProjectModelProvider,
   ModelRoutingPolicy,
   Organization,
@@ -78,6 +85,9 @@ export type {
   Project,
   ProjectMember,
   ProjectMemberRole,
+  ProjectUsage,
+  ProjectUsageGroup,
+  SessionUsage,
   CreateProjectInput,
   CreateProjectMemberInput,
   UpdateProjectMemberInput,
@@ -459,6 +469,21 @@ export interface CreateModelPresetInput {
   readonly model: string;
   readonly routing?: ModelRoutingPolicy;
   readonly settings?: ModelGenerationSettings | null;
+  /** The preset's first price, per one million tokens in USD. */
+  readonly price?: ModelPriceRates | null;
+}
+
+export interface SetModelPresetPriceInput extends ModelPriceRates {
+  /** When the price starts. Defaults to now; it cannot be in the past. */
+  readonly validFrom?: string;
+}
+
+export interface ProjectUsageOptions {
+  /** Start of the period. Defaults to 30 days before `to`. */
+  readonly from?: string;
+  /** End of the period. Defaults to now. */
+  readonly to?: string;
+  readonly groupBy?: ProjectUsageGroup;
 }
 
 export interface ModelPresetPage extends Page<ModelPreset> {

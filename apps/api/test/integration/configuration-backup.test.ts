@@ -226,6 +226,19 @@ async function seedSource(
       displayName: "Backup model",
       providerId: provider.id,
       model,
+      price: {
+        inputUsdPerMillion: 2,
+        cachedInputUsdPerMillion: 0.1,
+        cacheWriteUsdPerMillion: 2.5,
+        outputUsdPerMillion: 10,
+        longContext: {
+          aboveInputTokens: 272_000,
+          inputUsdPerMillion: 4,
+          cachedInputUsdPerMillion: 0.2,
+          cacheWriteUsdPerMillion: 5,
+          outputUsdPerMillion: 15,
+        },
+      },
     },
     201,
   );

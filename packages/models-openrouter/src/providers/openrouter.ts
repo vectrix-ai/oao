@@ -8,7 +8,11 @@ import type {
   Provider,
 } from "@earendil-works/pi-ai";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
-import type { ModelCatalogEntry, ModelRoutingPolicy } from "@oao/contracts";
+import type {
+  ModelCatalogEntry,
+  ModelPriceRates,
+  ModelRoutingPolicy,
+} from "@oao/contracts";
 import * as v from "valibot";
 import {
   catalogMatches,
@@ -245,6 +249,31 @@ async function openRouterPages(
   return data;
 }
 
+/** OpenRouter quotes USD per token as strings, and negative for routers without a price. */
+function openRouterListPrice(value: unknown): ModelPriceRates | undefined {
+  const pricing = record(value);
+  if (!pricing) return undefined;
+  const perMillion = (raw: unknown): number | undefined => {
+    const perToken = typeof raw === "string" ? Number(raw) : raw;
+    return typeof perToken === "number" &&
+      Number.isFinite(perToken) &&
+      perToken >= 0
+      ? Math.round(perToken * 1e12) / 1e6
+      : undefined;
+  };
+  const input = perMillion(pricing.prompt);
+  const output = perMillion(pricing.completion);
+  if (input === undefined || output === undefined || input + output <= 0)
+    return undefined;
+  return {
+    inputUsdPerMillion: input,
+    cachedInputUsdPerMillion: perMillion(pricing.input_cache_read) ?? input,
+    cacheWriteUsdPerMillion: perMillion(pricing.input_cache_write) ?? input,
+    outputUsdPerMillion: output,
+    longContext: null,
+  };
+}
+
 function openRouterModelEntry(input: unknown): ModelCatalogEntry | undefined {
   const model = record(input);
   if (!model) return undefined;
@@ -255,6 +284,7 @@ function openRouterModelEntry(input: unknown): ModelCatalogEntry | undefined {
   const topProvider = record(model.top_provider);
   const output = stringArray(architecture?.output_modalities);
   if (output.length > 0 && !output.includes("text")) return undefined;
+  const listPrice = openRouterListPrice(model.pricing);
   return {
     providerType: "openrouter",
     model: `${OPENROUTER_PREFIX}${catalogId}`,
@@ -268,6 +298,7 @@ function openRouterModelEntry(input: unknown): ModelCatalogEntry | undefined {
     adaptiveThinking: false,
     thinkingCanBeDisabled: true,
     effortLevels: [],
+    ...(listPrice ? { listPrice } : {}),
   };
 }
 
@@ -307,16 +338,21 @@ export async function listOpenRouterModelCatalog(input: {
     ),
     openRouterPages("/presets", input.apiKey, fetcher, 100).catch(() => []),
   ]);
-  const entries = [
-    ...models.flatMap((item) => {
-      const entry = openRouterModelEntry(item);
-      return entry ? [entry] : [];
-    }),
-    ...presets.flatMap((item) => {
-      const entry = openRouterPresetEntry(item);
-      return entry ? [entry] : [];
-    }),
-  ]
+  // OpenRouter can list a saved preset in both, and only /models has its price
+  // and context size, so that entry replaces the /presets one.
+  const entriesByModel = new Map(
+    [
+      ...presets.flatMap((item) => {
+        const entry = openRouterPresetEntry(item);
+        return entry ? [entry] : [];
+      }),
+      ...models.flatMap((item) => {
+        const entry = openRouterModelEntry(item);
+        return entry ? [entry] : [];
+      }),
+    ].map((entry) => [entry.model, entry]),
+  );
+  const entries = [...entriesByModel.values()]
     .filter((entry) => catalogMatches(entry, input.search))
     .sort((left, right) => left.catalogId.localeCompare(right.catalogId));
   return entries.slice(0, input.limit ?? entries.length);

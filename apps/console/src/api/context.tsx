@@ -118,6 +118,17 @@ export function useProjectEvents(): {
             void queryClient.invalidateQueries({
               queryKey: ["session", sessionId],
             });
+            // A delegate's calls count towards the sessions above it too, and
+            // its events don't name them.
+            if (
+              event.kind === "model.invocation_completed" ||
+              event.kind === "model.invocation_failed" ||
+              event.kind === "run.state_changed"
+            )
+              void queryClient.invalidateQueries({
+                predicate: ({ queryKey }) =>
+                  queryKey[0] === "session" && queryKey[2] === "usage",
+              });
             if (
               event.kind.startsWith("tool_call.") ||
               event.kind.startsWith("approval.")

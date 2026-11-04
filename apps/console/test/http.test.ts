@@ -1011,6 +1011,73 @@ describe("HTTP console adapter", () => {
     );
   });
 
+  it("reads and sets model preset prices and reads session usage through the public API", async () => {
+    const usage = { sessionId: "session/1", modelCalls: 5 };
+    const price = {
+      id: "66666666-6666-4666-8666-666666666666",
+      presetId: "preset/1",
+      inputUsdPerMillion: 2,
+      cachedInputUsdPerMillion: 0.1,
+      cacheWriteUsdPerMillion: 2.5,
+      outputUsdPerMillion: 10,
+      longContext: null,
+      validFrom: "2026-11-04T00:00:00.000Z",
+      createdByPrincipalId: CONTEXT.principal.id,
+      createdAt: "2026-11-04T00:00:00.000Z",
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(CONTEXT))
+      .mockResolvedValueOnce(
+        Response.json({
+          data: [price],
+          pageInfo: { hasMore: true, nextCursor: "older/prices" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          data: [price],
+          pageInfo: { hasMore: false, nextCursor: null },
+        }),
+      )
+      .mockResolvedValueOnce(Response.json(price, { status: 201 }))
+      .mockResolvedValueOnce(Response.json(usage));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+    await expect(api.listModelPresetPrices("preset/1")).resolves.toEqual([
+      price,
+      price,
+    ]);
+    expect(fetchMock.mock.calls.at(-2)?.[0]).toBe(
+      `/v1/projects/${PROJECT_ID}/model-presets/preset%2F1/prices?limit=200`,
+    );
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
+      `/v1/projects/${PROJECT_ID}/model-presets/preset%2F1/prices?limit=200&cursor=older%2Fprices`,
+    );
+    const input = {
+      inputUsdPerMillion: 4,
+      cachedInputUsdPerMillion: 0.4,
+      cacheWriteUsdPerMillion: 5,
+      outputUsdPerMillion: 20,
+      longContext: null,
+      validFrom: "2026-11-22T00:00:00.000Z",
+    };
+    await api.setModelPresetPrice("preset/1", input);
+    const init = fetchMock.mock.calls.at(-1)?.[1] as RequestInit;
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
+      `/v1/projects/${PROJECT_ID}/model-presets/preset%2F1/prices`,
+    );
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual(
+      expect.objectContaining({ "idempotency-key": expect.any(String) }),
+    );
+    expect(JSON.parse(String(init.body))).toEqual(input);
+    await expect(api.getSessionUsage("session/1")).resolves.toEqual(usage);
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
+      `/v1/projects/${PROJECT_ID}/sessions/session%2F1/usage`,
+    );
+  });
+
   it("reads and creates project model presets through the public API", async () => {
     const preset = {
       id: "44444444-4444-4444-8444-444444444444",

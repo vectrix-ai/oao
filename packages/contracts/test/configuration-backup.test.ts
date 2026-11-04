@@ -120,6 +120,7 @@ function fixture(): ConfigurationBackup {
             routing: {},
             settings: null,
             archived: false,
+            prices: [],
           },
         ],
         skills: [
