@@ -255,18 +255,24 @@ test("the pinned catalog is exposed without provider credentials", () => {
   assert.ok(catalog.length > 0);
   const entry = catalog[0];
   assert.ok(entry);
-  assert.deepEqual(Object.keys(entry).sort(), [
-    "adaptiveThinking",
-    "catalogId",
-    "contextWindow",
-    "effortLevels",
-    "maxOutputTokens",
-    "model",
-    "name",
-    "providerType",
-    "reasoning",
-    "thinkingCanBeDisabled",
-  ]);
+  // `listPrice` is present only where the catalog has a price for the model.
+  assert.deepEqual(
+    Object.keys(entry)
+      .filter((key) => key !== "listPrice")
+      .sort(),
+    [
+      "adaptiveThinking",
+      "catalogId",
+      "contextWindow",
+      "effortLevels",
+      "maxOutputTokens",
+      "model",
+      "name",
+      "providerType",
+      "reasoning",
+      "thinkingCanBeDisabled",
+    ],
+  );
   assert.ok(
     catalog.some((model) => model.providerType === "openrouter") &&
       catalog.some((model) => model.providerType === "openai") &&
@@ -1325,5 +1331,92 @@ test("Anthropic rejects disabled thinking at unsupported Opus 5 effort levels", 
         },
       }),
     /cannot disable thinking at xhigh or max effort/u,
+  );
+});
+
+test("the pinned OpenAI catalog carries list prices, with long-context rates", () => {
+  const entry = listApprovedModelCatalog("openai").find(
+    (candidate) => candidate.catalogId === "gpt-6.1-sol",
+  );
+  assert.ok(entry);
+  assert.deepEqual(entry.listPrice, {
+    inputUsdPerMillion: 2,
+    cachedInputUsdPerMillion: 0.1,
+    cacheWriteUsdPerMillion: 2.5,
+    outputUsdPerMillion: 10,
+    longContext: {
+      aboveInputTokens: 272_000,
+      inputUsdPerMillion: 4,
+      cachedInputUsdPerMillion: 0.2,
+      cacheWriteUsdPerMillion: 5,
+      outputUsdPerMillion: 15,
+    },
+  });
+});
+
+test("the live OpenRouter catalog reads list prices and never invents one", async () => {
+  const model = (id: string, pricing?: Record<string, string>) => ({
+    id,
+    name: id,
+    architecture: { output_modalities: ["text"] },
+    ...(pricing ? { pricing } : {}),
+  });
+  const fetcher = (async (url: string | URL | Request) => {
+    const path = String(url);
+    if (path.includes("/presets"))
+      return Response.json({
+        data: [
+          { slug: "example-preset", name: "Example preset" },
+          { slug: "azure-priced", name: "Azure Priced" },
+        ],
+        total_count: 2,
+      });
+    return Response.json({
+      data: [
+        model("@preset/azure-priced", {
+          prompt: "0.000004",
+          completion: "0.00002",
+        }),
+        model("vendor/priced", {
+          prompt: "0.000002",
+          completion: "0.00001",
+          input_cache_read: "0.0000001",
+          input_cache_write: "0.0000025",
+        }),
+        model("vendor/no-cache", {
+          prompt: "0.000003",
+          completion: "0.000015",
+        }),
+        model("openrouter/auto", { prompt: "-1", completion: "-1" }),
+        model("vendor/free", { prompt: "0", completion: "0" }),
+        model("vendor/unlisted"),
+      ],
+      total_count: 6,
+    });
+  }) as typeof fetch;
+  const catalog = await listOpenRouterModelCatalog({
+    apiKey: "sk-test",
+    fetcher,
+  });
+  const price = (catalogId: string) =>
+    catalog.find((entry) => entry.catalogId === catalogId)?.listPrice;
+  assert.deepEqual(price("vendor/priced"), {
+    inputUsdPerMillion: 2,
+    cachedInputUsdPerMillion: 0.1,
+    cacheWriteUsdPerMillion: 2.5,
+    outputUsdPerMillion: 10,
+    longContext: null,
+  });
+  assert.equal(price("vendor/no-cache")?.cachedInputUsdPerMillion, 3);
+  assert.equal(price("openrouter/auto"), undefined);
+  assert.equal(price("vendor/free"), undefined);
+  assert.equal(price("vendor/unlisted"), undefined);
+  assert.equal(price("@preset/example-preset"), undefined);
+  // A saved preset OpenRouter also lists under /models appears once, priced.
+  assert.equal(price("@preset/azure-priced")?.inputUsdPerMillion, 4);
+  assert.equal(
+    catalog.filter((entry) => entry.catalogId === "@preset/azure-priced")
+      .length,
+    1,
   );
 });

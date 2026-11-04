@@ -222,6 +222,8 @@ project-scoped.
 | `GET`    | `/projects/{projectId}/model-presets`                   | List local, project, and unavailable legacy presets. |
 | `POST`   | `/projects/{projectId}/model-presets`                   | Add an immutable preset linked to a provider.        |
 | `DELETE` | `/projects/{projectId}/model-presets/{id}`              | Archive a project preset.                            |
+| `GET`    | `/projects/{projectId}/model-presets/{id}/prices`       | List a preset's price history, newest first.         |
+| `POST`   | `/projects/{projectId}/model-presets/{id}/prices`       | Add a price, from now or a later time.               |
 
 Reads require `agent:read`; writes require `project:admin`. Every write requires
 an `Idempotency-Key`.
@@ -231,6 +233,17 @@ Create a provider with `{ key, displayName, providerType, apiKey }`, where
 `credentialConfigured`, a 12-character `credentialFingerprint`, and an
 incrementing `credentialVersion`; they never contain the API key or encryption
 material. Rotate a key with `{ "apiKey": "..." }`.
+
+A preset's price is in USD per one million tokens: `inputUsdPerMillion`,
+`cachedInputUsdPerMillion`, `cacheWriteUsdPerMillion`, `outputUsdPerMillion`,
+and optionally `longContext` with `aboveInputTokens` and the same four rates.
+`POST /model-presets` accepts it as `price`; each preset in the list returns the
+price in effect now as `price`, or `null`. `POST /model-presets/{id}/prices`
+takes the rates and an optional future `validFrom`, and refuses a start in the
+past (`400`). Prices are append-only and apply to later model calls, so past runs
+keep the cost they were given. A catalog entry carries `listPrice` where OAO knows
+the model's list price. See
+[Set a model preset's price](/models/adding-models#set-a-model-presets-price).
 
 `DELETE /model-presets/{id}` archives a project preset and returns
 `{ "id", "key", "archived": true }`. Presets stay append-only: the row, key,
@@ -840,6 +853,8 @@ orchestration](/concepts/multi-agent-orchestration#safety-checks).
 | ------ | --------------------------------------------------------- | ------------------------------------------------------------------- |
 | `GET`  | `/projects/{projectId}/sessions`                          | List sessions for the console or an integration.                    |
 | `GET`  | `/projects/{projectId}/sessions/{sessionId}`              | Get transcript, runs, timing, pending work, and safe debug records. |
+| `GET`  | `/projects/{projectId}/sessions/{sessionId}/usage`        | Get tokens, cost, and time of a session and its delegates.          |
+| `GET`  | `/projects/{projectId}/usage`                             | Get the project's model usage per day, agent, or model.             |
 | `GET`  | `/projects/{projectId}/sessions/{sessionId}/files`        | List files in the latest persisted workspace backup.                |
 | `GET`  | `/projects/{projectId}/sessions/{sessionId}/files/{path}` | Download one persisted workspace file.                              |
 | `POST` | `/projects/{projectId}/sessions/{sessionId}/runs`         | Submit a later message after the latest run settles.                |
@@ -859,6 +874,94 @@ Session list and detail responses report cumulative model usage as
 `cacheWriteTokens` counts input tokens newly written to that cache. Providers
 that do not report either value contribute zero. The detailed response repeats
 these fields per model call under `debug.modelInvocations`.
+
+`costMicrounits` is the cost in millionths of a USD. `costProvenance` says how far
+to trust it: `estimated` means tokens multiplied by the preset's price or OAO's
+built-in list price; `unpriced` means at least one model call used tokens with no
+price behind it, so the cost leaves it out; `unavailable` means the provider
+reported no usage. Each `debug.modelInvocations` entry records what it was charged
+in `pricingSnapshot`: its `source` (`preset_price`, `catalog`, or `none`), its
+`costByKind` when charged and, for a preset price, the `priceId` and rates.
+
+### Read usage and cost
+
+`GET /sessions/{sessionId}/usage` needs `session:read` and covers the session and
+every delegate it started, so a coordinator's response is the whole run:
+
+```json
+{
+  "sessionId": "11111111-1111-4111-8111-111111111111",
+  "sessionCount": 3,
+  "costProvenance": "estimated",
+  "modelCalls": 57,
+  "inputTokens": 171,
+  "cacheReadTokens": 1735558,
+  "cacheWriteTokens": 188338,
+  "outputTokens": 20780,
+  "costMicrounits": 852500,
+  "unpricedCalls": 0,
+  "time": {
+    "startedAt": "2026-11-04T12:32:26.016Z",
+    "completedAt": "2026-11-04T12:46:30.016Z",
+    "wallMs": 844000,
+    "activeMs": 610000,
+    "modelMs": 392000,
+    "toolMs": 96000
+  },
+  "byAgent": [
+    {
+      "agentId": "22222222-2222-4222-8222-222222222222",
+      "agentName": "Coordinator",
+      "sessionCount": 1,
+      "modelMs": 140000,
+      "modelCalls": 21,
+      "inputTokens": 63,
+      "cacheReadTokens": 590445,
+      "cacheWriteTokens": 82827,
+      "outputTokens": 6641,
+      "costMicrounits": 332600,
+      "unpricedCalls": 0
+    }
+  ],
+  "byModel": [
+    {
+      "modelPreset": "gpt-6-1-sol-v1",
+      "model": "gpt-6.1-sol",
+      "modelMs": 392000,
+      "modelCalls": 57,
+      "inputTokens": 171,
+      "cacheReadTokens": 1735558,
+      "cacheWriteTokens": 188338,
+      "outputTokens": 20780,
+      "costMicrounits": 852500,
+      "unpricedCalls": 0
+    }
+  ]
+}
+```
+
+The totals, each `byAgent` row, and each `byModel` row also carry `costByKind`, the
+cost split into `inputMicrounits`, `cacheReadMicrounits`, `cacheWriteMicrounits`, and
+`outputMicrounits`. It is `null` when a charged model call has no split recorded, as
+with calls made before OAO recorded them. Each part is rounded on its own, so the
+parts can differ from `costMicrounits` by a few microunits.
+
+`wallMs` runs from the first run's start to the last run's end, including any wait
+between runs. `activeMs`, `modelMs`, and `toolMs` count the time at least one run,
+model call, or tool was running, so parallel work counts once.
+
+`toolMs` covers sandbox tools and tool calls with a committed result. It leaves out
+the wait for an approval, and a delegate's tool call, because the child session's
+own model and tool time already count. A tool that runs on the caller's side counts
+from when the model requested it until the caller's result is committed, so it
+includes the time before the caller picked it up.
+
+`GET /usage` needs `session:read` and reports the project's model calls over a
+period. `from` and `to` are timestamps at most 366 days apart, defaulting to the
+last 30 days, and `groupBy` is `day` (UTC, the default), `agent`, or `model`. It
+returns `{ from, to, groupBy, totals, data }`, where each row in `data` has a `key`,
+a `label`, `sessionCount`, and the usage fields above. Sessions active in several
+rows count once in `totals`.
 
 A later turn accepts either `{ "message": "..." }` or the SDK-compatible
 `{ "redactedInput": "..." }`, plus the same optional `files` array used during

@@ -50,6 +50,7 @@ import { listAllPages } from "../api/paginate";
 import type {
   RunFileUpload,
   SessionDetail,
+  SessionUsage,
   SessionSummary,
   TimelineEvent,
   TimelineKind,
@@ -83,6 +84,7 @@ import {
   formatCompactDuration,
   formatCompactNumber,
   formatCost,
+  formatElapsed,
   formatDate,
   formatDuration,
   formatFileSize,
@@ -217,16 +219,20 @@ function costLabel(provenance: string): string {
   return provenance === "provider_observed"
     ? "Reported by the model provider and stored with the run."
     : provenance === "estimated"
-      ? "Estimated from the configured price table."
-      : "Cost data was not available.";
+      ? "Estimated from the tokens used and the model preset's price, or OAO's built-in price list."
+      : provenance === "unpriced"
+        ? "Some or all model calls have no price, so this cost leaves them out. Set a price on the model preset."
+        : "Cost data was not available.";
 }
 
 function costSuffix(provenance: string): string {
   return provenance === "estimated"
     ? "est."
-    : provenance === "unavailable"
-      ? "n/a"
-      : "observed";
+    : provenance === "unpriced"
+      ? "no price"
+      : provenance === "unavailable"
+        ? "n/a"
+        : "observed";
 }
 
 interface SessionTreeRow {
@@ -1298,6 +1304,97 @@ function toolCallCounts(session: SessionDetail): ReadonlyMap<string, number> {
   );
 }
 
+function usageCost(usage: {
+  readonly modelCalls: number;
+  readonly costMicrounits: number;
+  readonly unpricedCalls: number;
+}): string {
+  if (usage.modelCalls === 0) return "—";
+  return usage.costMicrounits === 0 && usage.unpricedCalls > 0
+    ? "no price"
+    : formatCost(usage.costMicrounits / 1_000_000);
+}
+
+function callCount(count: number, noun = "call"): string {
+  return `${formatNumber(count)} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/** Tokens, cost, and time of the whole run, with the delegates it started. */
+function RunUsageSection({ usage }: { readonly usage: SessionUsage }) {
+  const rows: readonly (readonly [string, string])[] = [
+    ["Model calls", formatNumber(usage.modelCalls)],
+    ["Not cached", formatNumber(usage.inputTokens)],
+    ["Read from cache", formatNumber(usage.cacheReadTokens)],
+    ["Written to cache", formatNumber(usage.cacheWriteTokens)],
+    ["Output", formatNumber(usage.outputTokens)],
+    ["Start to finish", formatElapsed(usage.time.wallMs)],
+    ["Active", formatElapsed(usage.time.activeMs)],
+    ["Waiting for the model", formatElapsed(usage.time.modelMs)],
+    ["Running tools", formatElapsed(usage.time.toolMs)],
+  ];
+  return (
+    <section>
+      <header className="panel-row">
+        <h3>Whole run</h3>
+        <span className="panel-total" title={costLabel(usage.costProvenance)}>
+          {usageCost(usage)}
+        </span>
+      </header>
+      <p className="panel-note">
+        {usage.sessionCount === 1
+          ? "This session."
+          : `This session and its delegates, ${usage.sessionCount} sessions.`}
+      </p>
+      {usage.unpricedCalls > 0 && usage.costMicrounits > 0 ? (
+        <p className="panel-note">
+          {formatNumber(usage.unpricedCalls)} of{" "}
+          {callCount(usage.modelCalls, "model call")}{" "}
+          {usage.unpricedCalls === 1 ? "has" : "have"} no price, so this cost
+          leaves {usage.unpricedCalls === 1 ? "it" : "them"} out.
+        </p>
+      ) : null}
+      <dl className="usage-rows">
+        {rows.map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd className="mono">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      {usage.byAgent.length > 1 ? (
+        <>
+          <p className="panel-note">Per agent</p>
+          <dl className="usage-rows">
+            {usage.byAgent.map((agent) => (
+              <div key={agent.agentId}>
+                <dt>{agent.agentName}</dt>
+                <dd className="mono">
+                  {callCount(agent.modelCalls)} · {usageCost(agent)}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </>
+      ) : null}
+      {usage.byModel.length > 1 ? (
+        <>
+          <p className="panel-note">Per model</p>
+          <dl className="usage-rows">
+            {usage.byModel.map((model) => (
+              <div key={`${model.modelPreset ?? ""}:${model.model}`}>
+                <dt>{model.modelPreset ?? model.model}</dt>
+                <dd className="mono">
+                  {callCount(model.modelCalls)} · {usageCost(model)}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </>
+      ) : null}
+    </section>
+  );
+}
+
 /**
  * Right-hand session panel, in the spirit of hosted agent consoles: identity,
  * cumulative cost, and usage beside the conversation rather than above it.
@@ -1310,6 +1407,11 @@ function SessionSidebar({
   readonly onClose: () => void;
 }) {
   const api = useApi();
+  // Under the session's key, so live events refresh it along with the session.
+  const usage = useQuery({
+    queryKey: ["session", session.id, "usage"],
+    queryFn: () => api.getSessionUsage(session.id),
+  });
   const notify = useToast();
   const downloadFile = useMutation({
     mutationFn: async (file: SessionDetail["workspaceFiles"][number]) => ({
@@ -1589,6 +1691,7 @@ function SessionSidebar({
           </div>
         </dl>
       </section>
+      {usage.data ? <RunUsageSection usage={usage.data} /> : null}
     </aside>
   );
 }

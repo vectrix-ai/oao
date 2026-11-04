@@ -1050,3 +1050,26 @@ test("publishing text before tool calls is an optional boolean on agent versions
   assert.match(sql, /p_config - 'publishTextBeforeToolCalls'/u);
   assert.doesNotMatch(sql, /DROP TABLE|DROP FUNCTION|UPDATE oao\./u);
 });
+
+test("model preset prices are append-only, tenant-scoped rows that leave only with their preset", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0063_model_preset_prices.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE oao\.model_preset_prices/u);
+  assert.match(
+    sql,
+    /REFERENCES oao\.project_model_presets[^;]*ON DELETE CASCADE/su,
+  );
+  assert.match(
+    sql,
+    /BEFORE UPDATE ON oao\.model_preset_prices\nFOR EACH ROW EXECUTE FUNCTION oao\.reject_mutation/u,
+  );
+  assert.match(sql, /pg_trigger_depth\(\) <= 1/u);
+  assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
+  assert.match(
+    sql,
+    /CREATE POLICY tenant_isolation ON oao\.model_preset_prices/u,
+  );
+  assert.doesNotMatch(sql, /GRANT[^;]*UPDATE[^;]*model_preset_prices/su);
+});

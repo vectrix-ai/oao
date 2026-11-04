@@ -191,16 +191,64 @@ Limitations:
 ### Inspect, duplicate, or archive a preset
 
 Select a preset in the **Model presets** table to open it. The dialog shows the
-key, model, provider connection, routing policy or generation settings as JSON,
-and the agents that currently pin the key.
+key, model, provider connection, price and price history, routing policy or
+generation settings as JSON, and the agents that currently pin the key.
 
 - **Duplicate as new preset** opens the add dialog prefilled with the same
-  provider, model, policy, and settings under the next free key. This is how
+  provider, model, policy, settings, and price under the next free key. This is how
   you "change" a preset: the original stays exactly as published agent versions
   reviewed it.
 - **Archive preset** removes it from the table and from the agent editor's
   preset picker. Agents that pin the key keep running on it, but must move to
   another preset before they can publish a new version. The key stays reserved.
+
+## Set a model preset's price
+
+A price belongs to one preset, in USD per one million tokens, so each project
+keeps its own. It has four rates, because providers charge each kind of token
+differently:
+
+| Rate           | What it charges                                     |
+| -------------- | --------------------------------------------------- |
+| `Input`        | Input tokens the provider did not find in its cache |
+| `Cached input` | Input tokens read from the provider's prompt cache  |
+| `Cache write`  | Input tokens newly written to that cache            |
+| `Output`       | Output tokens, including any reasoning tokens       |
+
+Some models charge more once one call's input passes a size. Turn on **Higher
+price for long inputs** to add that threshold, counted over the call's cached
+and uncached input, with its own four rates. They then apply to the whole call.
+
+In **Add model preset**, the **Price** section is prefilled with the list price
+OAO knows for the chosen model. Check it against the provider's current price,
+since OAO's own list changes only with an OAO release. For OpenRouter models and
+saved presets, the prefill is OpenRouter's current price, so it leaves out any
+higher price for long inputs: add that yourself where the model has one. A saved
+preset that OpenRouter does not price, and Amazon Bedrock, start empty, so enter
+those by hand. For a saved preset, use the price of the model it runs.
+
+The prefill only fills the form. A preset saved without a price uses OAO's
+built-in list when a model call is priced, and that list does not cover OpenRouter
+saved presets or Amazon Bedrock, so their runs show **no price** until you set one.
+
+To change a price later, open the preset and select **Change price**. A preset
+stays immutable, but its price does not have to: the new price is added to the
+preset's history and applies to later model calls, from now or from a later
+time you pick, such as the day a promotion ends. A start in the past is
+refused. Past runs keep the cost they were given, because each model call
+records the rates it was charged in `debug.modelInvocations[].pricingSnapshot`.
+
+OAO prices each model call from the first of these that applies:
+
+1. The price set on the run's preset.
+2. OAO's built-in list price for the model.
+3. Nothing. The call counts as unpriced: its session's `costProvenance` is
+   `unpriced` and the console shows **no price**, not $0. Calls made before a
+   preset had a price stay unpriced.
+
+These rates cover standard processing. If you use a data residency endpoint,
+Fast mode, or long cache retention, enter the rates the provider charges for
+those.
 
 ## Model timeouts and retries
 
@@ -419,6 +467,51 @@ accept immutable text-format and effort settings:
   }
 }
 ```
+
+To create the preset with its first price, add `price`:
+
+```json
+{
+  "key": "gpt-6-1-sol-v1",
+  "displayName": "GPT-6.1 Sol",
+  "providerId": "55555555-5555-4555-8555-555555555555",
+  "model": "openai/gpt-6.1-sol",
+  "routing": {},
+  "price": {
+    "inputUsdPerMillion": 2,
+    "cachedInputUsdPerMillion": 0.1,
+    "cacheWriteUsdPerMillion": 2.5,
+    "outputUsdPerMillion": 10,
+    "longContext": {
+      "aboveInputTokens": 272000,
+      "inputUsdPerMillion": 4,
+      "cachedInputUsdPerMillion": 0.2,
+      "cacheWriteUsdPerMillion": 5,
+      "outputUsdPerMillion": 15
+    }
+  }
+}
+```
+
+### Change a preset's price
+
+```bash
+curl -sS -X POST "$API/v1/projects/$PROJECT_ID/model-presets/$PRESET_ID/prices" \
+  -H 'content-type: application/json' \
+  -H 'idempotency-key: model-preset-price-1' \
+  -b "$COOKIE_JAR" \
+  --data '{
+    "inputUsdPerMillion": 5,
+    "cachedInputUsdPerMillion": 0.5,
+    "cacheWriteUsdPerMillion": 6.25,
+    "outputUsdPerMillion": 30,
+    "validFrom": "2026-11-22T00:00:00.000Z"
+  }'
+```
+
+Leave out `validFrom` to start now. `GET` on the same path lists the history,
+newest first. Each preset in `GET /model-presets` carries the price in effect
+now as `price`, or `null`.
 
 ## Tenant and lifecycle guarantees
 

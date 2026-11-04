@@ -17,6 +17,7 @@ import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 import { ConsoleApp } from "../src/app";
 import { DemoConsoleApi } from "../src/api/context";
+import type { SessionUsage } from "../src/api/types";
 
 /** Editor sections other than the definition start collapsed; open one by its heading. */
 async function openSection(
@@ -2777,6 +2778,221 @@ describe("management console", () => {
     expect(screen.getByText(/zero data retention/u)).toBeInTheDocument();
     // Provider secrets are write-only and never rendered.
     expect(document.body.textContent).not.toMatch(/OPENROUTER_API_KEY|apiKey/u);
+  });
+
+  it("prefills a new preset's price from the catalog and keeps what was typed", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/models", api);
+    await user.click(
+      await screen.findByRole("button", { name: "Add model preset" }),
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "Add model preset" }),
+    );
+    await user.click(dialog.getByRole("combobox", { name: "Model" }));
+    await user.click(
+      await dialog.findByRole("option", { name: /Claude Sonnet 4\.6/u }),
+    );
+    expect(dialog.getByRole("textbox", { name: "Input" })).toHaveValue("3");
+    expect(dialog.getByRole("textbox", { name: "Output" })).toHaveValue("15");
+
+    await user.clear(dialog.getByRole("textbox", { name: "Output" }));
+    expect(dialog.getByText(/Enter all four prices/u)).toBeInTheDocument();
+    await user.type(dialog.getByRole("textbox", { name: "Output" }), "12.5");
+    await user.clear(dialog.getByRole("textbox", { name: "Preset key" }));
+    await user.type(
+      dialog.getByRole("textbox", { name: "Preset key" }),
+      "sonnet-negotiated-v1",
+    );
+    await user.click(dialog.getByRole("button", { name: "Add model preset" }));
+    await screen.findByText("sonnet-negotiated-v1");
+    const created = (await api.listModelPresets()).data.find(
+      (preset) => preset.key === "sonnet-negotiated-v1",
+    );
+    expect(created?.price?.inputUsdPerMillion).toBe(3);
+    expect(created?.price?.outputUsdPerMillion).toBe(12.5);
+  });
+
+  it("changes a preset's price and lists its history", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/models", api);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Claude Sonnet 4\.6 \(zero retention\)/u,
+      }),
+    );
+    const detail = within(
+      screen.getByRole("dialog", {
+        name: "Claude Sonnet 4.6 (zero retention)",
+      }),
+    );
+    expect(
+      await detail.findByText(/\$3\.00 input · \$0\.30 cached/u, {
+        selector: "p",
+      }),
+    ).toBeInTheDocument();
+    await user.click(detail.getByRole("button", { name: "Change price" }));
+    await user.clear(detail.getByRole("textbox", { name: "Output" }));
+    await user.type(detail.getByRole("textbox", { name: "Output" }), "20");
+    await user.click(detail.getByRole("button", { name: "Save price" }));
+    expect(
+      await detail.findByText(/\$20\.00 output, per one million tokens/u),
+    ).toBeInTheDocument();
+    const presets = (await api.listModelPresets()).data;
+    const preset = presets.find(
+      (entry) => entry.key === "claude-sonnet-4-6-zdr-v1",
+    );
+    expect(preset?.price?.outputUsdPerMillion).toBe(20);
+    expect(await api.listModelPresetPrices(preset?.id ?? "")).toHaveLength(2);
+  });
+
+  it("clears an untouched price when the provider changes, and keeps a typed one", async () => {
+    const user = userEvent.setup();
+    renderConsole("/models", new DemoConsoleApi({ eventDelayMs: 60_000 }));
+    await user.click(
+      await screen.findByRole("button", { name: "Add model preset" }),
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "Add model preset" }),
+    );
+    const pickModel = async () => {
+      await user.click(dialog.getByRole("combobox", { name: "Model" }));
+      await user.click((await dialog.findAllByRole("option"))[0]!);
+    };
+    const provider = dialog.getByRole("combobox", {
+      name: "Provider connection",
+    });
+    const otherProvider = (index: number) =>
+      within(provider).getAllByRole("option")[index]!;
+    const input = () => dialog.getByRole("textbox", { name: "Input" });
+
+    await user.click(dialog.getByRole("combobox", { name: "Model" }));
+    await user.click(
+      await dialog.findByRole("option", { name: /Claude Sonnet 4\.6/u }),
+    );
+    expect(input()).toHaveValue("3");
+    await user.selectOptions(provider, otherProvider(1));
+    expect(input()).toHaveValue("");
+
+    await user.type(input(), "1.5");
+    await user.selectOptions(provider, otherProvider(0));
+    expect(input()).toHaveValue("1.5");
+    await pickModel();
+    expect(input()).toHaveValue("1.5");
+  });
+
+  it("shows a whole run's usage in the session panel, and no price rather than $0", async () => {
+    const sessionId = "session_01J5QTXE7W9M2R6C4A8K3N1P0V";
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const totals = {
+      modelCalls: 3,
+      inputTokens: 100,
+      cacheReadTokens: 2_000,
+      cacheWriteTokens: 300,
+      outputTokens: 40,
+    };
+    const usage = await api.getSessionUsage(sessionId);
+    const partly: SessionUsage = {
+      ...usage,
+      ...totals,
+      sessionCount: 2,
+      costProvenance: "unpriced",
+      costMicrounits: 12_500,
+      unpricedCalls: 1,
+      time: { ...usage.time, wallMs: 90_000, modelMs: 30_000, toolMs: 2_500 },
+      byAgent: [
+        {
+          agentId: "agent_coordinator",
+          agentName: "Coordinator",
+          costByKind: null,
+          sessionCount: 1,
+          modelMs: 20_000,
+          ...totals,
+          modelCalls: 2,
+          costMicrounits: 12_500,
+          unpricedCalls: 0,
+        },
+        {
+          agentId: "agent_worker",
+          agentName: "Worker",
+          costByKind: null,
+          sessionCount: 1,
+          modelMs: 10_000,
+          ...totals,
+          modelCalls: 1,
+          costMicrounits: 0,
+          unpricedCalls: 1,
+        },
+      ],
+    };
+    const getUsage = vi.spyOn(api, "getSessionUsage").mockResolvedValue(partly);
+    const { unmount } = renderConsole(`/sessions/${sessionId}`, api);
+    const panel = within(
+      await screen.findByRole("complementary", { name: "Session details" }),
+    );
+    expect(await panel.findByText("Whole run")).toBeInTheDocument();
+    expect(panel.getByText("$0.0125")).toBeInTheDocument();
+    expect(
+      panel.getByText(/1 of 3 model calls has no price/u),
+    ).toBeInTheDocument();
+    expect(
+      panel.getByText(/This session and its delegates, 2 sessions/u),
+    ).toBeInTheDocument();
+    expect(panel.getByText(/2 calls · \$0\.0125/u)).toBeInTheDocument();
+    expect(panel.getByText(/1 call · no price/u)).toBeInTheDocument();
+    expect(panel.getByText("1 m 30 s")).toBeInTheDocument();
+    unmount();
+
+    getUsage.mockResolvedValue({
+      ...partly,
+      costMicrounits: 0,
+      unpricedCalls: 3,
+      byAgent: [],
+      byModel: [],
+    });
+    renderConsole(`/sessions/${sessionId}`, api);
+    const unpriced = within(
+      await screen.findByRole("complementary", { name: "Session details" }),
+    );
+    const total = await unpriced.findByText("no price");
+    expect(total).toHaveClass("panel-total");
+    expect(
+      unpriced.queryByText(/model calls? ha(s|ve) no price/u),
+    ).not.toBeInTheDocument();
+  });
+
+  it("refreshes a whole run's usage with its session while the page is open", async () => {
+    const sessionId = "session_01J5QTXE7W9M2R6C4A8K3N1P0V";
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const usage = await api.getSessionUsage(sessionId);
+    const getUsage = vi.spyOn(api, "getSessionUsage").mockResolvedValue({
+      ...usage,
+      modelCalls: 0,
+      costMicrounits: 0,
+      unpricedCalls: 0,
+      byAgent: [],
+      byModel: [],
+    });
+    const { queryClient } = renderConsole(`/sessions/${sessionId}`, api);
+    const panel = within(
+      await screen.findByRole("complementary", { name: "Session details" }),
+    );
+    const total = () =>
+      panel.getByText("Whole run").parentElement?.querySelector(".panel-total");
+    await waitFor(() => expect(total()).toHaveTextContent("—"));
+
+    getUsage.mockResolvedValue({
+      ...usage,
+      modelCalls: 1,
+      costMicrounits: 17_454,
+      unpricedCalls: 0,
+      byAgent: [],
+      byModel: [],
+    });
+    await queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+    await waitFor(() => expect(total()).toHaveTextContent("$0.0175"));
   });
 
   it("opens a model preset, duplicates it into a prefilled new preset, and archives it", async () => {

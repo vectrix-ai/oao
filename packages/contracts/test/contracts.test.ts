@@ -17,6 +17,7 @@ import {
   SessionSchema,
   ToolCallSchema,
   parseCreateModelPresetInput,
+  parseSetModelPresetPriceInput,
   parseCreateProjectSandboxProviderInput,
   parseCreateProjectStorageProviderInput,
   parseManagedAgentSnapshotForPublication,
@@ -1258,5 +1259,69 @@ test("public principal role metadata comes from persisted membership and remains
       ...principal,
       organizationRole: "superadmin",
     }),
+  );
+});
+
+test("a model preset price is complete, non-negative, and may have long-context rates", () => {
+  const price = {
+    inputUsdPerMillion: 2,
+    cachedInputUsdPerMillion: 0.1,
+    cacheWriteUsdPerMillion: 2.5,
+    outputUsdPerMillion: 10,
+  };
+  assert.deepEqual(parseSetModelPresetPriceInput(price), {
+    ...price,
+    longContext: null,
+  });
+  assert.equal(
+    parseSetModelPresetPriceInput({
+      ...price,
+      validFrom: "2026-11-22T00:00:00.000Z",
+    }).validFrom,
+    "2026-11-22T00:00:00.000Z",
+  );
+  assert.equal(
+    parseSetModelPresetPriceInput({
+      ...price,
+      longContext: { aboveInputTokens: 272_000, ...price },
+    }).longContext?.aboveInputTokens,
+    272_000,
+  );
+  const partial: Partial<typeof price> = { ...price };
+  delete partial.outputUsdPerMillion;
+  assert.throws(() => parseSetModelPresetPriceInput(partial));
+  assert.throws(() =>
+    parseSetModelPresetPriceInput({ ...price, inputUsdPerMillion: -1 }),
+  );
+  assert.throws(() =>
+    parseSetModelPresetPriceInput({
+      ...price,
+      longContext: { aboveInputTokens: 0, ...price },
+    }),
+  );
+  assert.throws(() =>
+    parseSetModelPresetPriceInput({ ...price, currency: "EUR" }),
+  );
+});
+
+test("a model preset may be created with its first price", () => {
+  const preset = {
+    key: "gpt-6-1-sol-v1",
+    displayName: "GPT-6.1 Sol",
+    providerId: "11111111-1111-4111-8111-111111111111",
+    model: "openai/gpt-6.1-sol",
+  };
+  assert.equal(parseCreateModelPresetInput(preset).price, null);
+  assert.equal(
+    parseCreateModelPresetInput({
+      ...preset,
+      price: {
+        inputUsdPerMillion: 2,
+        cachedInputUsdPerMillion: 0.1,
+        cacheWriteUsdPerMillion: 2.5,
+        outputUsdPerMillion: 10,
+      },
+    }).price?.outputUsdPerMillion,
+    10,
   );
 });

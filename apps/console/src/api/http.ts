@@ -11,6 +11,9 @@ import type {
   CreateEventWebhookInput,
   CreateModelProviderInput,
   CreateModelPresetInput,
+  ModelPresetPrice,
+  SessionUsage,
+  SetModelPresetPriceInput,
   CreateSandboxProviderInput,
   CreateSkillInput,
   CreateStorageProviderInput,
@@ -662,10 +665,12 @@ function sessionSummary(
     outputTokens: numeric(value.outputTokens),
     cacheReadTokens: numeric(value.cacheReadTokens),
     cacheWriteTokens: numeric(value.cacheWriteTokens),
+    // No price at all is unknown, not free; a partly priced total still shows.
     observedCostUsd:
       costProvenance === "unavailable" ||
       value.costMicrounits === null ||
-      value.costMicrounits === undefined
+      value.costMicrounits === undefined ||
+      (costProvenance === "unpriced" && numeric(value.costMicrounits) === 0)
         ? null
         : numeric(value.costMicrounits) / 1_000_000,
     costProvenance,
@@ -2022,6 +2027,11 @@ export class HttpConsoleApi implements ConsoleApi {
       ),
     );
 
+  getSessionUsage = async (id: string): Promise<SessionUsage> =>
+    this.#projectRequest<SessionUsage>(
+      `/sessions/${encodeURIComponent(id)}/usage`,
+    );
+
   getSessionFile = async (
     sessionId: string,
     path: string,
@@ -2417,6 +2427,24 @@ export class HttpConsoleApi implements ConsoleApi {
       method: "POST",
       body: JSON.stringify(input),
     });
+
+  listModelPresetPrices = async (
+    presetId: string,
+  ): Promise<readonly ModelPresetPrice[]> => {
+    const response = await this.#projectRequest<CursorPage<ModelPresetPrice>>(
+      `/model-presets/${encodeURIComponent(presetId)}/prices?limit=200`,
+    );
+    return response.data;
+  };
+
+  setModelPresetPrice = async (
+    presetId: string,
+    input: SetModelPresetPriceInput,
+  ): Promise<ModelPresetPrice> =>
+    this.#projectRequest<ModelPresetPrice>(
+      `/model-presets/${encodeURIComponent(presetId)}/prices`,
+      { method: "POST", body: JSON.stringify(input) },
+    );
 
   createApiKey = async (input: CreateApiKeyInput): Promise<CreatedApiKey> => {
     const response = await this.#projectRequest<Record<string, unknown>>(

@@ -19,6 +19,17 @@ export function formatDuration(value: number | null): string {
   return value === null ? "—" : `${formatNumber(value)} ms`;
 }
 
+/** Elapsed time for reading, from "850 ms" to "1 h 12 m". */
+export function formatElapsed(ms: number): string {
+  if (ms < 1_000) return `${Math.round(ms)} ms`;
+  const seconds = ms / 1_000;
+  if (seconds < 60) return `${seconds.toFixed(1)} s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60)
+    return `${minutes} m ${Math.round(seconds - minutes * 60)} s`;
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} m`;
+}
+
 export function shortId(value: string): string {
   return value.length > 22 ? `${value.slice(0, 15)}…${value.slice(-4)}` : value;
 }

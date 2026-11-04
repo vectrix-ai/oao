@@ -36,6 +36,8 @@ import type {
   CreateSessionInput,
   CreatedPlatformApiKey,
   CreateModelPresetInput,
+  SetModelPresetPriceInput,
+  ProjectUsageOptions,
   CreateProjectModelProviderInput,
   CreateEventWebhookInput,
   CreateProjectSandboxProviderInput,
@@ -48,6 +50,9 @@ import type {
   Member,
   ModelCatalogPage,
   ModelPreset,
+  ModelPresetPrice,
+  ProjectUsage,
+  SessionUsage,
   ModelPresetPage,
   PaginationOptions,
   PlatformApiKey,
@@ -731,6 +736,61 @@ export class OaoClient {
       this.routes.modelPresets(projectId),
       "POST",
       input,
+      options,
+    );
+  }
+
+  /** A preset's price history, newest first. */
+  listModelPresetPrices(
+    projectId: string,
+    presetId: string,
+    pagination: PaginationOptions = {},
+    options?: RequestOptions,
+  ): Promise<Page<ModelPresetPrice>> {
+    return this.#request(
+      this.#path(
+        this.routes.modelPresetPrices(projectId, presetId),
+        pagination,
+      ),
+      options,
+    );
+  }
+
+  /** Adds a price to a preset's history. Past runs keep the cost they were given. */
+  setModelPresetPrice(
+    projectId: string,
+    presetId: string,
+    input: SetModelPresetPriceInput,
+    options: WriteOptions,
+  ): Promise<ModelPresetPrice> {
+    return this.#write(
+      this.routes.modelPresetPrices(projectId, presetId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
+  /** The project's model usage and cost over a period, per day, agent, or model. */
+  getProjectUsage(
+    projectId: string,
+    usage: ProjectUsageOptions = {},
+    options?: RequestOptions,
+  ): Promise<ProjectUsage> {
+    return this.#request(
+      this.#path(this.routes.projectUsage(projectId), usage),
+      options,
+    );
+  }
+
+  /** What a session and its delegates used and cost, per agent and model. */
+  getSessionUsage(
+    projectId: string,
+    sessionId: string,
+    options?: RequestOptions,
+  ): Promise<SessionUsage> {
+    return this.#request(
+      this.routes.sessionUsage(projectId, sessionId),
       options,
     );
   }

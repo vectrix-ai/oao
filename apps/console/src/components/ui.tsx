@@ -52,6 +52,7 @@ export {
   formatCost,
   formatDate,
   formatDuration,
+  formatElapsed,
   formatFileSize,
   formatNumber,
   formatTime,

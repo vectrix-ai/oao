@@ -76,7 +76,9 @@ the listener reconnects.
 
 `model.invocation_completed` and `model.invocation_failed` payloads include
 `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, and
-`costMicrounits`, plus OAO's normalized `finishReason`. Cache reads represent
+`costMicrounits`, plus OAO's normalized `finishReason`. The cost uses the model
+preset's price, or OAO's built-in list price, and is zero when neither knows the
+model. Cache reads represent
 prompt tokens reused from the provider cache; cache writes represent prompt
 tokens newly stored there. A provider that does not report cache usage
 contributes zero for those fields.

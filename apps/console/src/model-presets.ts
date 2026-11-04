@@ -1,4 +1,9 @@
-import type { ModelPreset, ModelRoutingPolicy } from "./api/types";
+import type {
+  ModelPreset,
+  ModelPresetPrice,
+  ModelPriceRates,
+  ModelRoutingPolicy,
+} from "./api/types";
 
 /** Mirrors the server contract for stable, versioned model preset keys. */
 export const MODEL_PRESET_KEY_PATTERN =
@@ -61,4 +66,138 @@ export function suggestPresetKey(
     if (!existingKeys.includes(candidate)) return candidate;
   }
   return "";
+}
+
+/** The price section of a preset form: text as typed, parsed when it is sent. */
+export interface PriceForm {
+  readonly input: string;
+  readonly cachedInput: string;
+  readonly cacheWrite: string;
+  readonly output: string;
+  readonly longContext: boolean;
+  readonly longAbove: string;
+  readonly longInput: string;
+  readonly longCachedInput: string;
+  readonly longCacheWrite: string;
+  readonly longOutput: string;
+}
+
+const rateText = (value: number | undefined): string =>
+  value === undefined ? "" : String(value);
+
+export function priceFormFromRates(
+  rates?: Omit<ModelPriceRates, "longContext"> & {
+    readonly longContext?: ModelPriceRates["longContext"];
+  },
+): PriceForm {
+  const long = rates?.longContext ?? undefined;
+  return {
+    input: rateText(rates?.inputUsdPerMillion),
+    cachedInput: rateText(rates?.cachedInputUsdPerMillion),
+    cacheWrite: rateText(rates?.cacheWriteUsdPerMillion),
+    output: rateText(rates?.outputUsdPerMillion),
+    longContext: long !== undefined,
+    longAbove: rateText(long?.aboveInputTokens),
+    longInput: rateText(long?.inputUsdPerMillion),
+    longCachedInput: rateText(long?.cachedInputUsdPerMillion),
+    longCacheWrite: rateText(long?.cacheWriteUsdPerMillion),
+    longOutput: rateText(long?.outputUsdPerMillion),
+  };
+}
+
+function parseRate(value: string): number | null {
+  const parsed = Number(value);
+  return value.trim() !== "" && Number.isFinite(parsed) && parsed >= 0
+    ? parsed
+    : null;
+}
+
+/** Null rates mean "no price"; a partly filled form is an error, not a guess. */
+export function ratesFromPriceForm(form: PriceForm): {
+  readonly rates: ModelPriceRates | null;
+  readonly errors: readonly string[];
+} {
+  const texts = [form.input, form.cachedInput, form.cacheWrite, form.output];
+  if (texts.every((text) => text.trim() === "") && !form.longContext)
+    return { rates: null, errors: [] };
+  const [input, cachedInput, cacheWrite, output] = texts.map(parseRate);
+  if (
+    input == null ||
+    cachedInput == null ||
+    cacheWrite == null ||
+    output == null
+  )
+    return {
+      rates: null,
+      errors: [
+        "Enter all four prices as numbers of 0 or more, or leave them all empty.",
+      ],
+    };
+  const standard = {
+    inputUsdPerMillion: input,
+    cachedInputUsdPerMillion: cachedInput,
+    cacheWriteUsdPerMillion: cacheWrite,
+    outputUsdPerMillion: output,
+  };
+  if (!form.longContext)
+    return { rates: { ...standard, longContext: null }, errors: [] };
+  const above = Number(form.longAbove);
+  const [longInput, longCached, longWrite, longOutput] = [
+    form.longInput,
+    form.longCachedInput,
+    form.longCacheWrite,
+    form.longOutput,
+  ].map(parseRate);
+  if (
+    !Number.isInteger(above) ||
+    above < 1 ||
+    longInput == null ||
+    longCached == null ||
+    longWrite == null ||
+    longOutput == null
+  )
+    return {
+      rates: null,
+      errors: [
+        "Enter the long-input threshold and all four long-input prices, or switch them off.",
+      ],
+    };
+  return {
+    rates: {
+      ...standard,
+      longContext: {
+        aboveInputTokens: above,
+        inputUsdPerMillion: longInput,
+        cachedInputUsdPerMillion: longCached,
+        cacheWriteUsdPerMillion: longWrite,
+        outputUsdPerMillion: longOutput,
+      },
+    },
+    errors: [],
+  };
+}
+
+/** "$2.00", and as many decimals as a smaller rate needs: "$0.125". */
+export function formatUsdRate(value: number): string {
+  return `$${value.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 6,
+  })}`;
+}
+
+export function describePrice(
+  price: Pick<
+    ModelPresetPrice,
+    | "inputUsdPerMillion"
+    | "cachedInputUsdPerMillion"
+    | "cacheWriteUsdPerMillion"
+    | "outputUsdPerMillion"
+  >,
+): string {
+  return [
+    `${formatUsdRate(price.inputUsdPerMillion)} input`,
+    `${formatUsdRate(price.cachedInputUsdPerMillion)} cached`,
+    `${formatUsdRate(price.cacheWriteUsdPerMillion)} cache write`,
+    `${formatUsdRate(price.outputUsdPerMillion)} output`,
+  ].join(" · ");
 }
