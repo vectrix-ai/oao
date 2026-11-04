@@ -2431,10 +2431,18 @@ export class HttpConsoleApi implements ConsoleApi {
   listModelPresetPrices = async (
     presetId: string,
   ): Promise<readonly ModelPresetPrice[]> => {
-    const response = await this.#projectRequest<CursorPage<ModelPresetPrice>>(
-      `/model-presets/${encodeURIComponent(presetId)}/prices?limit=200`,
-    );
-    return response.data;
+    const prices: ModelPresetPrice[] = [];
+    let cursor: string | null | undefined;
+    do {
+      const page = await this.#projectRequest<CursorPage<ModelPresetPrice>>(
+        `/model-presets/${encodeURIComponent(presetId)}/prices?limit=200${
+          cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
+        }`,
+      );
+      prices.push(...page.data);
+      cursor = page.pageInfo?.nextCursor;
+    } while (cursor);
+    return prices;
   };
 
   setModelPresetPrice = async (

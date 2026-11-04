@@ -1031,6 +1031,12 @@ describe("HTTP console adapter", () => {
       .mockResolvedValueOnce(
         Response.json({
           data: [price],
+          pageInfo: { hasMore: true, nextCursor: "older/prices" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          data: [price],
           pageInfo: { hasMore: false, nextCursor: null },
         }),
       )
@@ -1040,9 +1046,13 @@ describe("HTTP console adapter", () => {
     const api = new HttpConsoleApi();
     await expect(api.listModelPresetPrices("preset/1")).resolves.toEqual([
       price,
+      price,
     ]);
-    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
+    expect(fetchMock.mock.calls.at(-2)?.[0]).toBe(
       `/v1/projects/${PROJECT_ID}/model-presets/preset%2F1/prices?limit=200`,
+    );
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
+      `/v1/projects/${PROJECT_ID}/model-presets/preset%2F1/prices?limit=200&cursor=older%2Fprices`,
     );
     const input = {
       inputUsdPerMillion: 4,
