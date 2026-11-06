@@ -9,3 +9,9 @@ overrides:
 patchedDependencies:
   # pi-ai 1.5 removed Type; remove when Flue imports TypeBox directly.
   "@flue/runtime@2.3.0": patches/@flue__runtime@2.3.0.patch
+
+# Supply the dependency used by the Flue compatibility patch in deployments.
+packageExtensions:
+  "@flue/runtime@2.3.0":
+    dependencies:
+      typebox: 1.4.4

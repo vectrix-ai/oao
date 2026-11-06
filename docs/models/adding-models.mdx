@@ -585,9 +585,10 @@ unbound presets are history only.
 ## Bundled model catalog
 
 The runtime uses pi-ai 1.5.0. Its catalog excludes realtime and image-only
-models from chat choices and includes newer chat models. OpenRouter Claude
-`~anthropic/claude-*-latest` aliases use the Anthropic Messages API to preserve
-thinking signatures across tool calls. OpenRouter billed cost totals use
+models from chat choices and includes newer chat models. Upstream routes OpenRouter Claude
+`~anthropic/claude-*-latest` aliases through Anthropic Messages. OAO keeps
+these models on Chat Completions to preserve OpenRouter routing controls;
+the upstream thinking-signature preservation does not apply to this adapter. OpenRouter billed cost totals use
 provider-reported billing; component costs remain catalog estimates.
 GPT-6.1 Terra is included, with a 500K context window on the Codex provider.
 Model context limits remain provider-specific; configure presets accordingly.

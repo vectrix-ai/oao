@@ -7,6 +7,8 @@ settings:
 overrides:
   '@modelcontextprotocol/client': 2.3.1
 
+packageExtensionsChecksum: sha256-alTGh1/QVei9jUHh2XTO1zDYcIgyvadstN+H5LxKEPs=
+
 patchedDependencies:
   '@flue/runtime@2.3.0':
     hash: 15620c25f1310408b6e2582ca5ba67b0d41c7d6f18ccddc061a2b78482977de9
@@ -4323,6 +4325,7 @@ snapshots:
       '@valibot/to-json-schema': 1.7.1(valibot@1.5.0(typescript@5.9.3))
       hono: 4.13.16
       js-yaml: 5.5.0
+      typebox: 1.4.4
       ulidx: 2.4.1
       valibot: 1.5.0(typescript@5.9.3)
     transitivePeerDependencies:
@@ -4348,6 +4351,7 @@ snapshots:
       '@valibot/to-json-schema': 1.7.1(valibot@1.5.0(typescript@5.9.3))
       hono: 4.13.16
       js-yaml: 5.5.0
+      typebox: 1.4.4
       ulidx: 2.4.1
       valibot: 1.5.0(typescript@5.9.3)
     transitivePeerDependencies:

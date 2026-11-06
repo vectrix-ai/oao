@@ -16,6 +16,7 @@ WORKDIR /app
 RUN corepack enable && corepack install --global pnpm@10.27.0
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json .npmrc ./
+COPY patches/ ./patches/
 RUN pnpm fetch --frozen-lockfile
 
 COPY . .
