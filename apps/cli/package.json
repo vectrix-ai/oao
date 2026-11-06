@@ -14,9 +14,9 @@
   },
   "dependencies": {
     "@oao/sdk-js": "workspace:*",
-    "pg": "8.23.0"
+    "pg": "8.23.1"
   },
   "devDependencies": {
-    "@types/pg": "8.20.0"
+    "@types/pg": "8.23.1"
   }
 }

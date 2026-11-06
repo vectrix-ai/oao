@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { Daytona, SandboxState } from "@daytona/sdk";
 import type { Sandbox as DaytonaSandbox } from "@daytona/sdk";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import {
   createBashTool,
   createEditTool,

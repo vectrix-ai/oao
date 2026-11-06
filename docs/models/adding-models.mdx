@@ -581,3 +581,18 @@ and that model access is enabled for that region.
 Confirm it has a non-null provider connection, the connection belongs to the
 same organization, and the runtime has the platform encryption key. Legacy
 unbound presets are history only.
+
+## Bundled model catalog
+
+The runtime uses pi-ai 1.5.0. Its catalog excludes realtime and image-only
+models from chat choices and includes newer chat models. OpenRouter Claude
+`~anthropic/claude-*-latest` aliases use the Anthropic Messages API to preserve
+thinking signatures across tool calls. OpenRouter billed cost totals use
+provider-reported billing; component costs remain catalog estimates.
+GPT-6.1 Terra is included, with a 500K context window on the Codex provider.
+Model context limits remain provider-specific; configure presets accordingly.
+
+Tool arguments use pi-schema JSON Schema validation and coercion. Validation
+messages may differ from earlier releases. Flue 2.3.0 carries a local import
+compatibility patch for pi-ai 1.5.0; its persisted format and lease timings
+are unchanged.
