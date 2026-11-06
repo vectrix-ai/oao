@@ -1,0 +1,26 @@
+diff --git a/dist/index.d.mts b/dist/index.d.mts
+index c69f79a5f2daa1b424edcf9a8314baabb730b13a..02c9a65ce4918ca797cc65c999c72b037733420e 100644
+--- a/dist/index.d.mts
++++ b/dist/index.d.mts
+@@ -7,7 +7,7 @@ import { o as dispatch, s as getAgentInstance, t as AgentInstanceInfo } from "./
+ import { h as ConversationStreamChunk, i as bash, l as isDynamicModel, n as SandboxApi, o as createSandboxSessionEnv, p as setProvider, r as SandboxDriver, s as sandboxFromDriver, t as OrphanedExecSettlement } from "./sandbox-2QL8Q4n8.mjs";
+ import { i as __flueBindAgentModule, n as AgentIdentityBinding } from "./registration-BPi7JRaO.mjs";
+ import { t as defineTool } from "./tool-DOTGgO1a.mjs";
+-import { Type } from "@earendil-works/pi-ai";
++import { Type } from "typebox";
+ import * as v from "valibot";
+ import { Env, Handler, Hono } from "hono";
+ import { AgentTool } from "@earendil-works/pi-agent-core";
+diff --git a/dist/result-e-IUH4HT.mjs b/dist/result-e-IUH4HT.mjs
+index 9572608432c4ac32d36336c492051ea3288b3408..90a82cc57a09e4dc1600b72c6a3396d378ac2286 100644
+--- a/dist/result-e-IUH4HT.mjs
++++ b/dist/result-e-IUH4HT.mjs
+@@ -1,7 +1,7 @@
+ import { c as encodeBase64, f as composeTimeoutSignal, s as decodeBase64 } from "./sandbox-CR3o1Qmd.mjs";
+ import { T as SkillDefinitionValidationError } from "./errors-BcRwz-UD.mjs";
+ import { i as valibotToJsonSchema, r as parseValibot, t as isTopLevelObjectSchema } from "./schema-DIDpvZZa.mjs";
+-import { Type } from "@earendil-works/pi-ai";
++import { Type } from "typebox";
+ import { FAILSAFE_SCHEMA, load } from "js-yaml";
+ //#region src/agent.ts
+ const MAX_READ_LINES = 2e3;

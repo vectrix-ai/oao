@@ -20,6 +20,6 @@
     "@oao/contracts": "workspace:*",
     "@oao/db-postgres": "workspace:*",
     "@oao/domain": "workspace:*",
-    "valibot": "1.4.2"
+    "valibot": "1.5.0"
   }
 }

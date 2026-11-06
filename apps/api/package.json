@@ -22,7 +22,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@hono/node-server": "2.1.5",
+    "@hono/node-server": "2.1.6",
     "@oao/artifact-s3": "workspace:*",
     "@oao/auth-core": "workspace:*",
     "@oao/auth-iap": "workspace:*",
@@ -38,12 +38,12 @@
     "@oao/provider-credentials": "workspace:*",
     "@oao/sandbox-daytona": "workspace:*",
     "@oao/sdk-js": "workspace:*",
-    "hono": "4.13.13",
-    "pg": "8.23.0"
+    "hono": "4.13.16",
+    "pg": "8.23.1"
   },
   "devDependencies": {
-    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/client": "2.4.0",
     "@oao/testkit": "workspace:*",
-    "@types/pg": "8.20.0"
+    "@types/pg": "8.23.1"
   }
 }

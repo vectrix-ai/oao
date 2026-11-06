@@ -21,15 +21,16 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@daytona/sdk": "0.226.0",
-    "@earendil-works/pi-ai": "1.4.0",
+    "@daytona/sdk": "0.230.0",
+    "@earendil-works/pi-ai": "1.5.0",
     "@flue/runtime": "2.3.0",
     "@oao/artifact-s3": "workspace:*",
     "@oao/contracts": "workspace:*",
     "@oao/db-postgres": "workspace:*",
     "@oao/domain": "workspace:*",
     "@oao/model-images": "workspace:*",
-    "@oao/provider-credentials": "workspace:*"
+    "@oao/provider-credentials": "workspace:*",
+    "typebox": "1.4.4"
   },
   "devDependencies": {
     "@oao/testkit": "workspace:*"

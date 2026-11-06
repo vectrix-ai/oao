@@ -24,6 +24,6 @@
   },
   "devDependencies": {
     "@oao/provider-credentials": "workspace:*",
-    "@types/pg": "8.20.0"
+    "@types/pg": "8.23.1"
   }
 }
