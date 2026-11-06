@@ -31,10 +31,10 @@
     "@oao/queue-postgres": "workspace:*",
     "@oao/sdk-js": "workspace:*",
     "@oao/tool-broker": "workspace:*",
-    "@opentelemetry/api": "1.10.0",
-    "@opentelemetry/exporter-trace-otlp-http": "0.301.0",
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "0.223.0",
     "@opentelemetry/resources": "2.12.0",
-    "@opentelemetry/sdk-node": "0.301.0",
+    "@opentelemetry/sdk-node": "0.223.0",
     "pg": "8.23.1",
     "valibot": "1.5.0"
   },
