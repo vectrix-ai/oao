@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.14.0](https://github.com/vectrix-ai/oao/compare/v0.13.0...v0.14.0) (2026-11-06)
+
+
+### Features
+
+* **VEC-2368:** prices per model preset and session usage statistics ([#58](https://github.com/vectrix-ai/oao/issues/58)) ([2a00875](https://github.com/vectrix-ai/oao/commit/2a00875b8a153d22d31b0d38267acb1c46fdec53))
+
+
+### Bug Fixes
+
+* **deps:** refresh weekly dependencies and patch follow-redirects ([#60](https://github.com/vectrix-ai/oao/issues/60)) ([e4cc7b4](https://github.com/vectrix-ai/oao/commit/e4cc7b4e99cd0adb586eb5525f65f2e7189e2b40))
+
 ## [0.13.0](https://github.com/vectrix-ai/oao/compare/v0.12.0...v0.13.0) (2026-11-03)
 
 
