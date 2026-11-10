@@ -17,7 +17,7 @@ import {
 } from "./tools.js";
 
 export const OAO_MCP_SERVER_NAME = "oao";
-export const OAO_MCP_SERVER_VERSION = "0.13.0"; // x-release-please-version
+export const OAO_MCP_SERVER_VERSION = "0.14.0"; // x-release-please-version
 
 /** Who is calling and how their tool calls reach the OAO API. */
 export interface OaoMcpCaller {
