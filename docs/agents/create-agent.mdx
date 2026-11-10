@@ -789,7 +789,11 @@ A run gets no suggestion when:
 - another message was already queued behind it;
 - the model did not end its reply with the line, wrote it somewhere other than
   the last line, declined, or wrote more than 500 characters;
-- the reply has no text besides the line.
+- the run ends without a reply of its own, for example right after a tool that
+  puts a question to the user. The instruction tells the model to write nothing
+  in that case. If it writes the line anyway, OAO cuts it, and a reply that is
+  empty once the line is cut is not stored: the run has no assistant message
+  and no `message.created` event for it.
 
 The suggestion costs no extra model call: it is part of the reply, typically 20
 to 40 output tokens. Only the last line of the reply is used. A line the model

@@ -11,12 +11,13 @@ const CLOSE_TAG = "</next_user_message>";
  * cuts the line out before the reply is stored or published.
  */
 export const PROMPT_SUGGESTION_INSTRUCTION = [
-  "Suggested next message: every final reply to the user (a reply in which you call no tool) must end with one last line in exactly this form:",
+  "Suggested next message: every final reply you write to the user (text in a turn in which you call no tool) must end with one last line in exactly this form:",
   `${OPEN_TAG}the message${CLOSE_TAG}`,
   "The message is your prediction of what the user will most likely send next, written in the first person exactly as the user would type it, in the language the user writes in, in under 30 words.",
   "Make it specific: continue the work in progress and name the items being discussed (their identifiers, names, or values) instead of referring to them vaguely. Use only identifiers, names, and values that appear in the conversation; never invent one.",
   "Never predict a generic line such as a thank-you, a greeting, or a request to explain more.",
-  `Always write the line, also after a short or complete answer: there is nearly always a useful next step about what was just discussed. Only when the user is clearly ending the conversation, write ${OPEN_TAG}NONE${CLOSE_TAG} instead.`,
+  `Whenever you write a final reply, always write the line, also after a short or complete answer: there is nearly always a useful next step about what was just discussed. Only when the user is clearly ending the conversation, write ${OPEN_TAG}NONE${CLOSE_TAG} instead.`,
+  "The line only ever follows a reply of your own. When you end your turn without writing anything to the user, for example because a tool has just put a question to the user or you were told to add no further message, write nothing at all: never write text, or this line on its own, just to carry a suggestion.",
   "The application removes this line before the user sees your reply and offers the message as a suggestion. Never mention it, never write the tag anywhere else, and write nothing after it.",
 ].join("\n");
 

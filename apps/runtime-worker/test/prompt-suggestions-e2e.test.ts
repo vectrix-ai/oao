@@ -134,6 +134,17 @@ const respond: FauxResponseStep = async (context) => {
       : fauxAssistantMessage(
           `The helper checked ORD-1592.\n\n${line("Release ORD-1592 now")}`,
         );
+  // A run that ends on a tool call: the tool is the whole response, and the
+  // model was told to write no message after it.
+  if (transcript.includes("run-ends-on-tool"))
+    return toolResults === 0
+      ? fauxAssistantMessage(
+          [fauxToolCall("platform.lookup", { order: "ORD-1592" })],
+          { stopReason: "toolUse" },
+        )
+      : fauxAssistantMessage(
+          transcript.includes("carries-line") ? line("Pick Monday") : "",
+        );
   if (transcript.includes("run-looks-up") && toolResults === 0)
     return fauxAssistantMessage(
       [
@@ -584,6 +595,21 @@ test(
             assert.deepEqual(
               facts.events,
               ["message.created", "state:completed"],
+              marker,
+            );
+          }
+          // A run that ends on a tool call without a message stores no
+          // assistant message, also when the model wrote the line anyway.
+          for (const marker of [
+            "run-ends-on-tool",
+            "run-ends-on-tool carries-line",
+          ]) {
+            const session = await seedSession(pool, marker, suggesting);
+            const run = await seedRun(pool, session, marker, marker);
+            const facts = await settled(running, pool, run);
+            assert.deepEqual(
+              [facts.state, facts.messages, facts.suggestion, facts.events],
+              ["completed", [], null, ["state:completed"]],
               marker,
             );
           }
