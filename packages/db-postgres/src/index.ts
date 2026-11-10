@@ -40,8 +40,30 @@ export interface MigrationResult {
   readonly alreadyApplied: readonly string[];
 }
 
-export function createPool(connectionString: string): PgPool {
-  return new Pool({ connectionString, max: 10, idleTimeoutMillis: 10_000 });
+export interface CreatePoolOptions {
+  /**
+   * Called when PostgreSQL closes a connection while it sits idle in the pool,
+   * for example on a server restart, a failover or a forced database drop.
+   * The pool has already discarded that connection and opens a new one for the
+   * next query. Defaults to ignoring the error.
+   */
+  readonly onIdleClientError?: (error: Error) => void;
+}
+
+export function createPool(
+  connectionString: string,
+  options: CreatePoolOptions = {},
+): PgPool {
+  const pool = new Pool({
+    connectionString,
+    max: 10,
+    idleTimeoutMillis: 10_000,
+  });
+  // pg-pool re-emits an idle connection's error on the pool. Without a
+  // listener Node treats that as an uncaught exception and the process exits.
+  const onIdleClientError = options.onIdleClientError ?? (() => undefined);
+  pool.on("error", (error) => onIdleClientError(error));
+  return pool;
 }
 
 export async function migrate(

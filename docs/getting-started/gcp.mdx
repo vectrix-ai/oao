@@ -101,6 +101,11 @@ transactions assume after migration. Do not grant PostgreSQL superuser or
 `BYPASSRLS` solely for OAO; verify the required ownership and role-management
 permissions with your PostgreSQL provider.
 
+Cloud SQL maintenance, a restart, or a failover can close connections that OAO
+holds idle in its pool. The API and the worker keep running: each discards the
+closed connection, writes a `warn` log line from `postgres-pool`, and opens a
+new connection for the next query.
+
 For a full explanation of local configuration and disposable PostgreSQL checks,
 see [Local development](/getting-started/local-development). The
 [Railway guide](/getting-started/railway) has the same application process

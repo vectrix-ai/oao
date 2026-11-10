@@ -26,7 +26,17 @@ import { PostgresApiStore } from "./store.js";
 import { PostgresRuntimeCommandPort } from "./runtime-commands.js";
 
 const configuration = loadServerConfiguration(process.env);
-const pool = createPool(configuration.databaseUrl);
+const pool = createPool(configuration.databaseUrl, {
+  onIdleClientError: (error) => {
+    process.stderr.write(
+      `${JSON.stringify({
+        component: "postgres-pool",
+        ...apiErrorLogFields(error),
+        level: "warn",
+      })}\n`,
+    );
+  },
+});
 await migrate(pool);
 
 const { auth, webhookAuth } = await composeAuthentication(configuration, pool);
