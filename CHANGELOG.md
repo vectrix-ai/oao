@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/vectrix-ai/oao/compare/v0.14.0...v0.14.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **db-postgres:** survive PostgreSQL closing an idle pooled connection ([#61](https://github.com/vectrix-ai/oao/issues/61)) ([27f08f4](https://github.com/vectrix-ai/oao/commit/27f08f46e9c11912ea8cfca35def515f52027dab))
+
 ## [0.14.0](https://github.com/vectrix-ai/oao/compare/v0.13.0...v0.14.0) (2026-11-06)
 
 
