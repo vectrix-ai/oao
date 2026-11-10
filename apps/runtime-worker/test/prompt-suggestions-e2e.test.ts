@@ -79,6 +79,13 @@ const calls: ModelCall[] = [];
 let releaseSlowSuggestion: (() => void) | undefined;
 let slowSuggestionStarted: (() => void) | undefined;
 
+/** Lets the held suggestion call answer. */
+function releaseSlow(): void {
+  assert.ok(releaseSlowSuggestion);
+  releaseSlowSuggestion();
+  releaseSlowSuggestion = undefined;
+}
+
 function lastUserText(messages: readonly unknown[]): string {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index] as {
@@ -721,10 +728,65 @@ test(
           await started;
           // The user sends the next message while the model is still predicting.
           await seedRun(pool, session, "slow-2", "second-message");
-          assert.ok(releaseSlowSuggestion);
-          releaseSlowSuggestion();
+          releaseSlow();
           const facts = await suggestionRecorded(pool, run);
           // The call is paid for; the stale suggestion is dropped.
+          assert.deepEqual(
+            [facts.suggestionCalls, facts.suggestion, facts.events],
+            [1, null, 0],
+          );
+        },
+      );
+
+      await t.test(
+        "a run resumed while its suggestion is being saved neither deadlocks nor publishes",
+        async () => {
+          const session = await seedSession(pool, "resumed", suggesting);
+          const run = await seedRun(pool, session, "resumed-1", "suggest-slow");
+          const started = new Promise<void>((resolve) => {
+            slowSuggestionStarted = resolve;
+          });
+          assert.equal(await settle(running, pool, run), "completed");
+          await started;
+          // What the resume route does: lock the settled run, add a run to its
+          // session, then touch the session.
+          const client = await pool.connect();
+          try {
+            await client.query("BEGIN");
+            await client.query(
+              "SELECT 1 FROM oao.runs WHERE id=$1 FOR UPDATE",
+              [run],
+            );
+            releaseSlow();
+            // The save now waits for the run.
+            await quiet();
+            await client.query(
+              `INSERT INTO oao.runs (
+                 organization_id,project_id,id,thread_id,session_id,agent_version_id,
+                 created_by_principal_id,idempotency_key,input_public
+               ) VALUES ($1,$2,$3,$4,$5,$6,$7,'prompt-suggestions-e2e:resumed-2','{}')`,
+              [
+                tenant.organizationId,
+                tenant.projectId,
+                uuid("resumed-2:run"),
+                session.threadId,
+                session.sessionId,
+                session.versionId,
+                human,
+              ],
+            );
+            await client.query(
+              "UPDATE oao.sessions SET last_activity_at=clock_timestamp() WHERE id=$1",
+              [session.sessionId],
+            );
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK").catch(() => undefined);
+            throw error;
+          } finally {
+            client.release();
+          }
+          const facts = await suggestionRecorded(pool, run);
           assert.deepEqual(
             [facts.suggestionCalls, facts.suggestion, facts.events],
             [1, null, 0],

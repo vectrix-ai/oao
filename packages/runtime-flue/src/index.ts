@@ -5513,11 +5513,17 @@ export class RuntimeProjection {
       failed,
     );
     await withTenantTransaction(this.pool, tenant, async (transaction) => {
-      // Starting a run in the session takes this lock too, so a newer run is
-      // either visible here or starts after the suggestion is published.
+      // Sending a message locks the session and resuming locks this run, so a
+      // newer run is either visible here or starts after the suggestion is
+      // published. The run comes first, the order a resume takes the two in.
+      await transaction.query(
+        `SELECT 1 FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$3
+         FOR NO KEY UPDATE`,
+        [tenant.organizationId, tenant.projectId, runtimeDispatch.run_id],
+      );
       await transaction.query(
         `SELECT 1 FROM oao.sessions WHERE organization_id=$1 AND project_id=$2 AND id=$3
-         FOR UPDATE`,
+         FOR NO KEY UPDATE`,
         [tenant.organizationId, tenant.projectId, sessionId],
       );
       const attemptResult = await transaction.query<{ attempt: string }>(

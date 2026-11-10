@@ -139,7 +139,8 @@ OTel SDK -> optional Collector -> configured OTLP backend
     it resolves no sandbox, and it reserves no model turn. Only its usage, on
     the run's model invocation ledger, and the bounded suggestion text on the
     run are durable. A suggestion is void once its session has a newer run;
-    storing it takes the session lock that starting a run takes.
+    storing it locks the run and then its session, the locks and the order
+    that starting or resuming a run takes.
 
 ## Public run states
 
