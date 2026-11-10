@@ -205,3 +205,26 @@ test("the settled reply still drops committed text after its lines were cut", ()
     "The rule was updated.",
   );
 });
+
+test("only a final turn that wrote text can end the reply with a suggestion", () => {
+  const pending = runtimeTesting.createPendingAssistantText();
+  // A submission this worker did not observe is not judged.
+  assert.equal(pending.endsWithReply("submission-1"), undefined);
+  pending.observe(
+    turn("submission-1", [
+      { type: "text", text: `Asking.\n${line("Too early")}` },
+      { type: "toolCall", id: "call-ask", name: "ask_user" },
+    ]),
+  );
+  // The run ends on the tool call: its last words predate the tool's result.
+  assert.equal(pending.endsWithReply("submission-1"), false);
+  pending.observe(turn("submission-1", [{ type: "text", text: "  " }]));
+  assert.equal(pending.endsWithReply("submission-1"), false);
+  pending.observe(
+    turn("submission-1", [{ type: "text", text: `Done.\n${line("Next")}` }]),
+  );
+  assert.equal(pending.endsWithReply("submission-1"), true);
+  // A run without any tool call ends with its only turn's text.
+  pending.observe(turn("submission-2", [{ type: "text", text: "Hello." }]));
+  assert.equal(pending.endsWithReply("submission-2"), true);
+});

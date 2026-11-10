@@ -514,6 +514,19 @@ class PendingAssistantText {
       : text;
   }
 
+  /**
+   * Whether a submission's last turn wrote text after its last tool call, so
+   * that the reply ends with words of the final turn. Undefined when this
+   * worker did not observe the submission.
+   */
+  endsWithReply(submissionId: string): boolean | undefined {
+    const submission = this.#submissions.get(submissionId);
+    if (!submission) return undefined;
+    return submission.parts
+      .slice(submission.turns.at(-1)?.end ?? 0)
+      .some((part) => part.trim().length > 0);
+  }
+
   forgetRun(runId: string): void {
     this.#publishingRuns.delete(runId);
     this.#suggestingRuns.delete(runId);
@@ -5285,7 +5298,13 @@ export class RuntimeProjection {
     // only a completed run keeps it, as its suggestion.
     let suggestion: string | undefined;
     if (run.suggests && redactedReply) {
-      if (productState === "completed")
+      // Only the final turn's own last line counts. When that turn wrote
+      // nothing, the reply ends with text from before a tool call, and a
+      // line there predates the tool's result.
+      if (
+        productState === "completed" &&
+        pendingAssistantText.endsWithReply(submissionId) !== false
+      )
         suggestion = replySuggestion(redactedReply);
       redactedReply = withoutSuggestionLines(redactedReply).trimEnd();
     }

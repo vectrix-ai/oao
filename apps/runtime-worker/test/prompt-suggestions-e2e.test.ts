@@ -139,7 +139,17 @@ const respond: FauxResponseStep = async (context) => {
   if (transcript.includes("run-ends-on-tool"))
     return toolResults === 0
       ? fauxAssistantMessage(
-          [fauxToolCall("platform.lookup", { order: "ORD-1592" })],
+          [
+            ...(transcript.includes("early-line")
+              ? [
+                  {
+                    type: "text" as const,
+                    text: `Asking about ORD-1592.\n${line("Too early")}`,
+                  },
+                ]
+              : []),
+            fauxToolCall("platform.lookup", { order: "ORD-1592" }),
+          ],
           { stopReason: "toolUse" },
         )
       : fauxAssistantMessage(
@@ -611,6 +621,23 @@ test(
               [facts.state, facts.messages, facts.suggestion, facts.events],
               ["completed", [], null, ["state:completed"]],
               marker,
+            );
+          }
+          // Text from before the tool call is the run's reply as before, but a
+          // line written there is from before the tool's result: not used.
+          {
+            const marker = "run-ends-on-tool early-line";
+            const session = await seedSession(pool, marker, suggesting);
+            const run = await seedRun(pool, session, marker, marker);
+            const facts = await settled(running, pool, run);
+            assert.deepEqual(
+              [facts.state, facts.messages, facts.suggestion, facts.events],
+              [
+                "completed",
+                ["Asking about ORD-1592."],
+                null,
+                ["message.created", "state:completed"],
+              ],
             );
           }
           // A reply that is nothing but the line is no reply to follow.
