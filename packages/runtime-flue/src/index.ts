@@ -5301,10 +5301,11 @@ export class RuntimeProjection {
     if (run.suggests && redactedReply) {
       // Only the final turn's own last line counts. When that turn wrote
       // nothing, the reply ends with text from before a tool call, and a
-      // line there predates the tool's result.
+      // line there predates the tool's result. A worker that did not observe
+      // the final turn cannot tell, so the run then has no suggestion.
       if (
         productState === "completed" &&
-        pendingAssistantText.endsWithReply(submissionId) !== false
+        pendingAssistantText.endsWithReply(submissionId) === true
       )
         suggestion = replySuggestion(redactedReply);
       redactedReply = withoutSuggestionLines(redactedReply).trimEnd();
