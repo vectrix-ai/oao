@@ -116,7 +116,10 @@ kind is in the `run.` family, a webhook subscribed to `run.*` receives it.
 
 The model call behind the suggestion emits no `model.invocation_*` events. It
 is listed with the run's other model calls in `debug.modelInvocations`, with
-`safeRequest.purpose` set to `suggestion`.
+`safeRequest.purpose` set to `suggestion`. Because the call adds to the
+session's tokens and cost, OAO appends one more `session.summary_changed` event
+for the session once the call is recorded, also when the model suggested
+nothing.
 
 ## Harness Operation events
 

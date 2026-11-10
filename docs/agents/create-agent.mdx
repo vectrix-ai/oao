@@ -787,7 +787,8 @@ are not saved as messages, the model does not see them on the next turn, and
 the call starts no sandbox. It is recorded as a model call of the run with
 `safeRequest.purpose` set to `suggestion`, priced like the run's other calls,
 and included in session and project usage. It does not count towards the run's
-maximum model turns, and it emits no `model.invocation_*` events. Its output is
+maximum model turns, and it emits no `model.invocation_*` events; a second
+`session.summary_changed` event for the run reports the changed totals. Its output is
 limited to 1,024 tokens.
 
 The setting is off when the field is omitted, so existing versions keep their

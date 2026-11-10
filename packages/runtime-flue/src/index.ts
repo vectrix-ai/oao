@@ -5593,7 +5593,17 @@ export class RuntimeProjection {
           pricing.costMicrounits,
         ],
       );
-      if (text === undefined) return;
+      // The session's totals grew, whether or not there is a suggestion.
+      const announceUsage = () =>
+        appendEventOnce(transaction, {
+          ...tenant,
+          id: eventUuid(`event:${runtimeDispatch.run_id}:suggestion-summary`),
+          aggregateType: "session",
+          aggregateId: sessionId,
+          kind: "session.summary_changed",
+          payload: { runId: runtimeDispatch.run_id, state: "completed" },
+        });
+      if (text === undefined) return announceUsage();
       // Void once the session has a newer run: store and publish nothing.
       const stored = await transaction.query(
         `UPDATE oao.runs run SET suggestion=$4
@@ -5608,7 +5618,7 @@ export class RuntimeProjection {
             )`,
         [tenant.organizationId, tenant.projectId, runtimeDispatch.run_id, text],
       );
-      if (!stored.rowCount) return;
+      if (!stored.rowCount) return announceUsage();
       // The event names the run; readers and webhooks attach the text.
       await appendEventOnce(transaction, {
         ...tenant,
@@ -5618,6 +5628,7 @@ export class RuntimeProjection {
         kind: "run.suggestion_created",
         payload: { sessionId },
       });
+      await announceUsage();
     });
   }
 

@@ -119,13 +119,11 @@ export function useProjectEvents(): {
               queryKey: ["session", sessionId],
             });
             // A delegate's calls count towards the sessions above it too, and
-            // its events don't name them. A prompt suggestion is one more
-            // model call, made after its run settled.
+            // its events don't name them.
             if (
               event.kind === "model.invocation_completed" ||
               event.kind === "model.invocation_failed" ||
-              event.kind === "run.state_changed" ||
-              event.kind === "run.suggestion_created"
+              event.kind === "run.state_changed"
             )
               void queryClient.invalidateQueries({
                 predicate: ({ queryKey }) =>

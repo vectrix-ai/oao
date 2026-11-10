@@ -362,6 +362,8 @@ interface RunFacts {
   readonly turns: number;
   readonly suggested: boolean | null;
   readonly events: number;
+  /** `session.summary_changed` events that name the run. */
+  readonly summaries: number;
   readonly reservedTurns: number;
 }
 
@@ -373,6 +375,7 @@ async function runFacts(pool: PgPool, runId: string): Promise<RunFacts> {
     turns: number;
     suggested: boolean | null;
     events: number;
+    summaries: number;
     reserved_turns: number;
   }>(
     `SELECT run.suggestion,oao.current_run_suggestion(run) AS current,
@@ -384,6 +387,9 @@ async function runFacts(pool: PgPool, runId: string): Promise<RunFacts> {
               WHERE call.run_id=run.id AND call.safe_request->>'purpose'='suggestion') AS suggested,
             (SELECT count(*)::int FROM oao.product_events event
               WHERE event.aggregate_id=run.id AND event.event_kind='run.suggestion_created') AS events,
+            (SELECT count(*)::int FROM oao.product_events event
+              WHERE event.aggregate_id=run.session_id AND event.event_kind='session.summary_changed'
+                AND event.public_payload->>'runId'=run.id::text) AS summaries,
             (SELECT count(*)::int FROM oao.run_model_turns turn WHERE turn.run_id=run.id) AS reserved_turns
        FROM oao.runs run WHERE run.id=$1`,
     [runId],
@@ -397,6 +403,7 @@ async function runFacts(pool: PgPool, runId: string): Promise<RunFacts> {
     turns: row.turns,
     suggested: row.suggested,
     events: row.events,
+    summaries: row.summaries,
     reservedTurns: row.reserved_turns,
   };
 }
@@ -490,6 +497,8 @@ test(
             [facts.suggestionCalls, facts.suggested, facts.events],
             [1, true, 1],
           );
+          // One summary event when the run settled, one for the extra call.
+          assert.equal(facts.summaries, 2);
           // Two turns of the run, and the suggestion is not a third one.
           assert.deepEqual([facts.turns, facts.reservedTurns], [2, 2]);
 
@@ -615,6 +624,8 @@ test(
               [null, false, 0],
               marker,
             );
+            // Its usage still changed the session's totals.
+            assert.equal(facts.summaries, 2, marker);
           }
         },
       );
