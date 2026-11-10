@@ -220,6 +220,11 @@ test("only a final turn that wrote text can end the reply with a suggestion", ()
   assert.equal(pending.endsWithReply("submission-1"), false);
   pending.observe(turn("submission-1", [{ type: "text", text: "  " }]));
   assert.equal(pending.endsWithReply("submission-1"), false);
+  // A final turn that writes only the line has not replied either.
+  pending.observe(
+    turn("submission-1", [{ type: "text", text: line("Pick Monday") }]),
+  );
+  assert.equal(pending.endsWithReply("submission-1"), false);
   pending.observe(
     turn("submission-1", [{ type: "text", text: `Done.\n${line("Next")}` }]),
   );

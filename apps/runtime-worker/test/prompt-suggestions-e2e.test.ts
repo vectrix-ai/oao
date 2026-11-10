@@ -623,10 +623,13 @@ test(
               marker,
             );
           }
-          // Text from before the tool call is the run's reply as before, but a
-          // line written there is from before the tool's result: not used.
-          {
-            const marker = "run-ends-on-tool early-line";
+          // Text from before the tool call is the run's reply as before. A
+          // line written there predates the tool's result, and a final turn
+          // that writes only the line has not replied: neither is used.
+          for (const marker of [
+            "run-ends-on-tool early-line",
+            "run-ends-on-tool early-line carries-line",
+          ]) {
             const session = await seedSession(pool, marker, suggesting);
             const run = await seedRun(pool, session, marker, marker);
             const facts = await settled(running, pool, run);
@@ -638,6 +641,7 @@ test(
                 null,
                 ["message.created", "state:completed"],
               ],
+              marker,
             );
           }
           // A reply that is nothing but the line is no reply to follow.

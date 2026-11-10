@@ -515,16 +515,17 @@ class PendingAssistantText {
   }
 
   /**
-   * Whether a submission's last turn wrote text after its last tool call, so
-   * that the reply ends with words of the final turn. Undefined when this
-   * worker did not observe the submission.
+   * Whether a submission's last turn wrote text of its own after its last tool
+   * call, so that the reply ends with words of the final turn. A suggestion
+   * line is not such text. Undefined when this worker did not observe the
+   * submission.
    */
   endsWithReply(submissionId: string): boolean | undefined {
     const submission = this.#submissions.get(submissionId);
     if (!submission) return undefined;
     return submission.parts
       .slice(submission.turns.at(-1)?.end ?? 0)
-      .some((part) => part.trim().length > 0);
+      .some((part) => withoutSuggestionLines(part).trim().length > 0);
   }
 
   forgetRun(runId: string): void {
