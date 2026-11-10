@@ -735,8 +735,8 @@ writes inside a Harness Operation is scratch work and is never published.
 ### Prompt suggestions
 
 A chat interface can offer the message the user is most likely to send next, as
-grey text in its empty input that one key accepts. To have OAO predict that
-message after each reply, set `promptSuggestions` to `true`:
+grey text in its empty input that one key accepts. To have the agent predict
+that message with each reply, set `promptSuggestions` to `true`:
 
 ```json
 {
@@ -748,58 +748,57 @@ In the console, open **Prompt suggestions** on the agent and select **Suggest
 the user's next message**, then publish the version. The console's own session
 composer shows the suggestion in its empty message box; press Tab to take it.
 
-With the setting on, when a run completes with a reply to the user:
+With the setting on:
 
-1. The run settles as usual. Its `run.state_changed` event and its reply do not
-   wait for the suggestion.
-2. OAO makes one extra model call: the run's last model request again, with the
-   reply and one instruction appended that asks for the user's next message.
-   The model, system prompt, tools, earlier messages, and options are exactly
-   those of the run, so a provider that caches prompts serves them from its
-   cache and the call costs little more than the new text.
-3. OAO stores the answer on the run and appends a `run.suggestion_created`
-   event, typically one to three seconds after the run settled.
+1. OAO adds an instruction to the end of the agent's system prompt. It tells
+   the model to end every final reply with one marked last line that holds its
+   prediction of the user's next message: specific to the items discussed, in
+   the user's language, under 30 words.
+2. When the run completes, OAO cuts that line out of the reply and stores its
+   text as the run's suggestion, in the same transaction that saves the final
+   assistant message and settles the run.
+3. OAO appends a `run.suggestion_created` event between the reply's
+   `message.created` event and the run's `run.state_changed` event.
 
-Read the suggestion from `GET /runs/{runId}` (`suggestion`, a string or
-`null`) or from `GET /sessions/{sessionId}` (`suggestion`, an object with
-`runId` and `text` for the session's latest run, or `null`). An
+The suggestion is therefore on the run the moment the run reads as
+`completed`: a reader never sees the reply without it. Read it from
+`GET /runs/{runId}` (`suggestion`, a string or `null`) or from
+`GET /sessions/{sessionId}` (`suggestion`, an object with `runId` and `text`
+for the session's latest run, or `null`). An
 [event webhook](/integrations/event-webhooks#include-message-content) that
 includes message content receives the text with the event.
 
+The marked line never reaches a consumer. OAO removes it from every assistant
+message of the run before the message is stored, so the transcript,
+`message.created` content, and the event stream never show it, wherever the
+model wrote it. A reply that must end with a marker of your own, such as a
+line your interface parses, ends with that marker again once the suggestion
+line is cut. The line stays in the model's own conversation history, so the
+model sees its earlier suggestions on later turns.
+
 A suggestion belongs to one run and is void once its session has a newer run:
-both reads then return `null`, and a suggestion that arrives after the next
-message was sent is not stored or published. Show a suggestion only while its
-run is the session's latest, and never send it unless the user accepts it.
+both reads then return `null`. Show a suggestion only while its run is the
+session's latest, and never send it unless the user accepts it.
 
 A run gets no suggestion when:
 
 - it failed, was cancelled, or timed out, or it is paused for an approval or a
   caller tool (it gets one when it later completes);
-- it belongs to a delegated child session, where nobody types;
+- it belongs to a delegated child session, where nobody types; such a session
+  is not given the instruction;
 - another message was already queued behind it;
-- the model answered with nothing, declined, called a tool, or wrote more than
-  500 characters;
-- the extra call failed or took longer than 30 seconds. Such a failure is logged
-  by the runtime worker and never changes the run.
+- the model did not end its reply with the line, wrote it somewhere other than
+  the last line, declined, or wrote more than 500 characters;
+- the reply has no text besides the line.
 
-The extra call is not part of the conversation. Its instruction and its answer
-are not saved as messages, the model does not see them on the next turn, and
-the call starts no sandbox. It is recorded as a model call of the run with
-`safeRequest.purpose` set to `suggestion`, priced like the run's other calls,
-and included in session and project usage. It does not count towards the run's
-maximum model turns, and it emits no `model.invocation_*` events; a second
-`session.summary_changed` event for the run reports the changed totals. Its output is
-limited to 1,024 tokens.
+The suggestion costs no extra model call: it is part of the reply, typically 20
+to 40 output tokens. Only the last line of the reply is used. A line the model
+writes earlier, for example before a tool call, is cut out and does not become
+the suggestion.
 
 The setting is off when the field is omitted, so existing versions keep their
-content hash and behavior. Like every version field it is immutable: start a new
-session to use a newly published version.
-
-The request to replay is kept in the runtime worker's memory. If the worker
-restarts before the run settles, or another worker settles it, that run has no
-suggestion. A model whose provider does not cache prompts pays for the whole
-conversation again on every suggestion; see
-[Limitations](/reference/mvp-limitations).
+content hash, their system prompt, and their behavior. Like every version
+field it is immutable: start a new session to use a newly published version.
 
 ### Model presets
 

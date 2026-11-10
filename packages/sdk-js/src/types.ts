@@ -338,10 +338,11 @@ export interface PublishAgentVersionInput {
    */
   readonly publishTextBeforeToolCalls?: boolean;
   /**
-   * Predict the message the user is most likely to send next after each
-   * completed run, with one extra model call. The prediction is stored on the
-   * run (`Run.suggestion`, `SessionDetail.suggestion`) and announced with a
-   * `run.suggestion_created` event. Off when omitted.
+   * Have the agent predict the message the user is most likely to send next
+   * with each final reply. OAO instructs the model to end its reply with a
+   * marked line, cuts that line out, stores it on the run when the run
+   * completes (`Run.suggestion`, `SessionDetail.suggestion`), and announces
+   * it with a `run.suggestion_created` event. Off when omitted.
    */
   readonly promptSuggestions?: boolean;
   readonly sandbox: SandboxPolicyInput;
@@ -758,7 +759,7 @@ export type SessionDetail = Session & {
   /**
    * The predicted next user message of the session's latest run, for agent
    * versions with `promptSuggestions`. Null when that run has none: it did
-   * not complete, the model had no suggestion, or the call is still running.
+   * not complete or the model wrote no suggestion.
    */
   readonly suggestion: SessionSuggestion | null;
 };

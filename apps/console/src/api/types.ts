@@ -316,8 +316,8 @@ export interface AgentVersionConfig {
    */
   readonly publishTextBeforeToolCalls?: boolean;
   /**
-   * Predicts the user's next message after each completed run, with one extra
-   * model call. Off when omitted.
+   * Has the agent predict the user's next message with each final reply. Off
+   * when omitted.
    */
   readonly promptSuggestions?: boolean;
   readonly sandbox: {

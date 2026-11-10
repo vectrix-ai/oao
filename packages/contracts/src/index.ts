@@ -1884,14 +1884,15 @@ export const ManagedAgentPublishTextSchema = v.pipe(
 );
 
 /**
- * When true, OAO predicts the user's next message after each completed run of
- * the agent with one extra model call, stores it on the run, and publishes a
+ * When true, the agent is instructed to end each final reply with a marked
+ * line predicting the user's next message. OAO cuts the line out of the
+ * reply, stores it on the run when the run completes, and publishes a
  * `run.suggestion_created` event.
  */
 export const ManagedAgentPromptSuggestionsSchema = v.pipe(
   v.boolean(),
   v.description(
-    "Predict the user's next message after each completed run, with one extra model call, and publish it as a run.suggestion_created event. Off when omitted.",
+    "Instruct the agent to predict the user's next message with each final reply; OAO stores it on the completed run and publishes a run.suggestion_created event. Off when omitted.",
   ),
 );
 

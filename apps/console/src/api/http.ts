@@ -1214,18 +1214,12 @@ function sessionDetail(
             : {}),
         };
         const state = text(detail.status, "completed");
-        // The extra call after a completed run that predicts the next message.
-        const suggestionCall = text(request.purpose) === "suggestion";
         debugEvents.push({
           id: `debug:${collection}:${text(detail.id, String(index))}`,
           kind: "reasoning",
           source: "activity",
-          title: suggestionCall ? "Prompt suggestion" : "Reasoning",
-          summary: suggestionCall
-            ? response.suggested === true
-              ? "Predicted the user's next message"
-              : "No next message was suggested"
-            : harnessActionSummary || thinking || "Model reasoning",
+          title: "Reasoning",
+          summary: harnessActionSummary || thinking || "Model reasoning",
           createdAt: timing.createdAt,
           durationMs: timing.durationMs,
           status: state.includes("fail")

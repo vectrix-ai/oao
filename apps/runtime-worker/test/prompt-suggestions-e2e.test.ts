@@ -20,7 +20,6 @@ import {
 } from "@oao/models-openrouter";
 import {
   PROMPT_SUGGESTION_INSTRUCTION,
-  PROMPT_SUGGESTION_MAX_OUTPUT_TOKENS,
   type PlatformToolHandler,
 } from "@oao/runtime-flue";
 import { startRuntimeWorker, type RuntimeWorkerHandle } from "../src/main.js";
@@ -29,8 +28,13 @@ const databaseUrl = process.env.DATABASE_URL;
 const testAdminDatabaseUrl =
   process.env.OAO_TEST_ADMIN_DATABASE_URL ?? databaseUrl;
 
+// Every id is derived within this file's own namespace: the suites share one
+// database, and other files derive ids from the same short labels.
 function uuid(label: string): string {
-  const bytes = createHash("sha256").update(label).digest().subarray(0, 16);
+  const bytes = createHash("sha256")
+    .update(`prompt-suggestions-e2e/${label}`)
+    .digest()
+    .subarray(0, 16);
   bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
   bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
   const hex = bytes.toString("hex");
@@ -66,78 +70,36 @@ const guardedTool = {
   approval: "always",
 };
 
+/** The line the model is told to end its final reply with. */
+const line = (message: string) =>
+  `<next_user_message>${message}</next_user_message>`;
+
 interface ModelCall {
-  readonly suggestion: boolean;
-  readonly messages: readonly unknown[];
-  readonly maxTokens: number | undefined;
-  readonly sessionId: string | undefined;
+  /** Whether the request's system prompt asks for the suggestion line. */
+  readonly instructed: boolean;
+  readonly transcript: string;
 }
 
 /** Every request the fake model received, in order. */
 const calls: ModelCall[] = [];
-/** Held open by the test that starts a newer run while a suggestion is in flight. */
-let releaseSlowSuggestion: (() => void) | undefined;
-let slowSuggestionStarted: (() => void) | undefined;
-
-/** Lets the held suggestion call answer. */
-function releaseSlow(): void {
-  assert.ok(releaseSlowSuggestion);
-  releaseSlowSuggestion();
-  releaseSlowSuggestion = undefined;
-}
-
-function lastUserText(messages: readonly unknown[]): string {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index] as {
-      readonly role?: string;
-      readonly content?: unknown;
-    };
-    if (message.role !== "user") continue;
-    return typeof message.content === "string"
-      ? message.content
-      : JSON.stringify(message.content);
-  }
-  return "";
-}
+/** Held open by the test that queues a newer run before the reply arrives. */
+let releaseSlowReply: (() => void) | undefined;
+let slowReplyStarted: (() => void) | undefined;
 
 /**
- * The fake model. A request that ends with the suggestion instruction is the
- * extra call; its answer depends on a marker in the conversation. Every other
- * request is a turn of the run.
+ * The fake model. What it writes depends on a marker in the conversation; it
+ * ends a final reply with the suggestion line only where a test says so, as a
+ * model that follows the instruction would.
  */
-const respond: FauxResponseStep = async (context, options) => {
+const respond: FauxResponseStep = async (context) => {
   const transcript = JSON.stringify(context.messages);
-  const suggestion =
-    lastUserText(context.messages) === PROMPT_SUGGESTION_INSTRUCTION;
   calls.push({
-    suggestion,
-    messages: structuredClone(context.messages),
-    maxTokens: options?.maxTokens,
-    sessionId: options?.sessionId,
+    instructed: transcript.includes(line("the message")),
+    transcript,
   });
   const toolResults = context.messages.filter(
     (message) => message.role === "toolResult",
   ).length;
-  if (suggestion) {
-    if (transcript.includes("suggest-empty")) return fauxAssistantMessage("");
-    if (transcript.includes("suggest-none"))
-      return fauxAssistantMessage("NONE");
-    if (transcript.includes("suggest-tool"))
-      return fauxAssistantMessage(
-        [fauxToolCall("platform.lookup", { order: "ORD-1" })],
-        { stopReason: "toolUse" },
-      );
-    if (transcript.includes("suggest-broken"))
-      throw new Error("The provider is unavailable");
-    if (transcript.includes("suggest-slow")) {
-      slowSuggestionStarted?.();
-      await new Promise<void>((resolve) => {
-        releaseSlowSuggestion = resolve;
-      });
-      return fauxAssistantMessage("Too late to matter");
-    }
-    return fauxAssistantMessage('"Release ORD-1592 to the carrier now"');
-  }
   if (transcript.includes("run-fails"))
     return fauxAssistantMessage("", {
       stopReason: "error",
@@ -146,10 +108,18 @@ const respond: FauxResponseStep = async (context, options) => {
   if (transcript.includes("run-gated"))
     return toolResults === 0
       ? fauxAssistantMessage(
-          [fauxToolCall("platform.release", { order: "ORD-1592" })],
+          [
+            {
+              type: "text" as const,
+              text: `I will release ORD-1592.\n${line("Approve it")}`,
+            },
+            fauxToolCall("platform.release", { order: "ORD-1592" }),
+          ],
           { stopReason: "toolUse" },
         )
-      : fauxAssistantMessage("The release was not approved.");
+      : fauxAssistantMessage(
+          `The release was not approved.\n\n${line("Release ORD-1592 anyway")}`,
+        );
   if (transcript.includes("run-delegates"))
     return toolResults === 0
       ? fauxAssistantMessage(
@@ -161,13 +131,49 @@ const respond: FauxResponseStep = async (context, options) => {
           ],
           { stopReason: "toolUse" },
         )
-      : fauxAssistantMessage("The helper checked ORD-1592.");
+      : fauxAssistantMessage(
+          `The helper checked ORD-1592.\n\n${line("Release ORD-1592 now")}`,
+        );
   if (transcript.includes("run-looks-up") && toolResults === 0)
     return fauxAssistantMessage(
-      [fauxToolCall("platform.lookup", { order: "ORD-1592" })],
+      [
+        // A line written before the final reply is never the suggestion.
+        {
+          type: "text" as const,
+          text: `Checking ORD-1592.\n${line("Too early")}`,
+        },
+        fauxToolCall("platform.lookup", { order: "ORD-1592" }),
+      ],
       { stopReason: "toolUse" },
     );
-  return fauxAssistantMessage("ORD-1592 is ready to release.");
+  // Only the first reply is held; the run queued behind it answers at once.
+  if (
+    transcript.includes("reply-slow") &&
+    !transcript.includes("queued-behind")
+  ) {
+    slowReplyStarted?.();
+    await new Promise<void>((resolve) => {
+      releaseSlowReply = resolve;
+    });
+  }
+  if (transcript.includes("reply-without-line"))
+    return fauxAssistantMessage("You're welcome!");
+  if (transcript.includes("reply-declines"))
+    return fauxAssistantMessage(`You're welcome!\n${line("NONE")}`);
+  if (transcript.includes("reply-line-before-choices"))
+    return fauxAssistantMessage(
+      `Apply the rule?\n${line("Accept")}\n[[choices: Accept | Deny]]`,
+    );
+  if (transcript.includes("reply-choices-before-line"))
+    return fauxAssistantMessage(
+      `Apply the rule?\n\n[[choices: Accept | Deny]]\n${line("Accept the rule")}`,
+    );
+  if (transcript.includes("reply-only-line"))
+    return fauxAssistantMessage(line("Nothing came before"));
+  // Wrapping quotes are not part of what the user would type.
+  return fauxAssistantMessage(
+    `ORD-1592 is ready to release.\n\n${line('"Release ORD-1592 to the carrier now"')}`,
+  );
 };
 
 const disabledSandbox = {
@@ -199,6 +205,7 @@ async function seedAgent(
   label: string,
   options: {
     readonly suggest: boolean;
+    readonly publishText?: boolean;
     readonly delegateVersionId?: string;
   },
 ): Promise<string> {
@@ -219,6 +226,7 @@ async function seedAgent(
         ]
       : [],
     ...(options.suggest ? { promptSuggestions: true } : {}),
+    ...(options.publishText ? { publishTextBeforeToolCalls: true } : {}),
     sandbox: disabledSandbox,
     limits: { maxTurns: 16, timeoutMs: 30_000 },
   };
@@ -356,79 +364,81 @@ async function settle(
 }
 
 interface RunFacts {
+  readonly state: string;
   readonly suggestion: string | null;
   readonly current: string | null;
-  readonly suggestionCalls: number;
-  readonly turns: number;
-  readonly suggested: boolean | null;
-  readonly events: number;
-  /** `session.summary_changed` events that name the run. */
-  readonly summaries: number;
+  readonly modelCalls: number;
   readonly reservedTurns: number;
+  /** The run's assistant messages, as stored. */
+  readonly messages: readonly string[];
+  /** The run's reply, suggestion and settlement events, in project order. */
+  readonly events: readonly string[];
 }
 
 async function runFacts(pool: PgPool, runId: string): Promise<RunFacts> {
   const result = await pool.query<{
+    state: string;
     suggestion: string | null;
     current: string | null;
-    suggestion_calls: number;
-    turns: number;
-    suggested: boolean | null;
-    events: number;
-    summaries: number;
+    model_calls: number;
     reserved_turns: number;
+    messages: string[] | null;
+    events: string[] | null;
   }>(
-    `SELECT run.suggestion,oao.current_run_suggestion(run) AS current,
-            (SELECT count(*)::int FROM oao.model_invocations call
-              WHERE call.run_id=run.id AND call.safe_request->>'purpose'='suggestion') AS suggestion_calls,
-            (SELECT count(*)::int FROM oao.model_invocations call
-              WHERE call.run_id=run.id AND call.safe_request->>'purpose'<>'suggestion') AS turns,
-            (SELECT (call.safe_response->>'suggested')::boolean FROM oao.model_invocations call
-              WHERE call.run_id=run.id AND call.safe_request->>'purpose'='suggestion') AS suggested,
-            (SELECT count(*)::int FROM oao.product_events event
-              WHERE event.aggregate_id=run.id AND event.event_kind='run.suggestion_created') AS events,
-            (SELECT count(*)::int FROM oao.product_events event
-              WHERE event.aggregate_id=run.session_id AND event.event_kind='session.summary_changed'
-                AND event.public_payload->>'runId'=run.id::text) AS summaries,
-            (SELECT count(*)::int FROM oao.run_model_turns turn WHERE turn.run_id=run.id) AS reserved_turns
+    `SELECT run.state::text,run.suggestion,oao.current_run_suggestion(run) AS current,
+            (SELECT count(*)::int FROM oao.model_invocations call WHERE call.run_id=run.id) AS model_calls,
+            (SELECT count(*)::int FROM oao.run_model_turns turn WHERE turn.run_id=run.id) AS reserved_turns,
+            (SELECT array_agg(message.redacted_content ORDER BY message.created_at,message.id)
+               FROM oao.messages message
+              WHERE message.run_id=run.id AND message.role='assistant') AS messages,
+            (SELECT array_agg(
+                      CASE event.event_kind
+                        WHEN 'run.state_changed' THEN 'state:' || (event.public_payload->>'state')
+                        ELSE event.event_kind END
+                      ORDER BY event.project_position)
+               FROM oao.product_events event
+              WHERE event.aggregate_id=run.id
+                AND (event.event_kind IN ('message.created','run.suggestion_created')
+                  OR (event.event_kind='run.state_changed'
+                    AND event.public_payload->>'state' IN ('completed','failed')))
+                AND event.public_payload->>'role' IS DISTINCT FROM 'user') AS events
        FROM oao.runs run WHERE run.id=$1`,
     [runId],
   );
   const row = result.rows[0];
   assert.ok(row);
   return {
+    state: row.state,
     suggestion: row.suggestion,
     current: row.current,
-    suggestionCalls: row.suggestion_calls,
-    turns: row.turns,
-    suggested: row.suggested,
-    events: row.events,
-    summaries: row.summaries,
+    modelCalls: row.model_calls,
     reservedTurns: row.reserved_turns,
+    messages: row.messages ?? [],
+    events: row.events ?? [],
   };
 }
 
-/** Waits until the extra call of a run has been recorded. */
-function suggestionRecorded(pool: PgPool, runId: string): Promise<RunFacts> {
-  return waitFor(`the suggestion call of run ${runId}`, async () => {
-    const facts = await runFacts(pool, runId);
-    return facts.suggestionCalls > 0 ? facts : undefined;
-  });
+/**
+ * Runs to settlement and reads the run at once: whatever the run holds the
+ * first time it reads as settled is what a reader sees with the reply.
+ */
+async function settled(
+  worker: RuntimeWorkerHandle,
+  pool: PgPool,
+  runId: RunId,
+): Promise<RunFacts> {
+  await settle(worker, pool, runId);
+  return runFacts(pool, runId);
 }
 
-/** Lets a suggestion that should not happen have its chance to happen. */
-async function quiet(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 400));
+function callsFor(marker: string): ModelCall[] {
+  return calls.filter((call) => call.transcript.includes(marker));
 }
 
-function suggestionCallsFor(marker: string): ModelCall[] {
-  return calls.filter(
-    (call) => call.suggestion && JSON.stringify(call.messages).includes(marker),
-  );
-}
+const SUGGESTED = "Release ORD-1592 to the carrier now";
 
 test(
-  "prompt suggestions predict the next message after a completed run, off by default",
+  "prompt suggestions arrive with the reply of a completed run, off by default",
   { skip: databaseUrl ? false : "DATABASE_URL is required", timeout: 240_000 },
   async (t) => {
     assert.ok(databaseUrl);
@@ -451,6 +461,10 @@ test(
       await seedBase(pool);
       const silent = await seedAgent(pool, "silent", { suggest: false });
       const suggesting = await seedAgent(pool, "suggesting", { suggest: true });
+      const narrating = await seedAgent(pool, "narrating", {
+        suggest: true,
+        publishText: true,
+      });
       const helper = await seedAgent(pool, "helper", { suggest: true });
       const coordinator = await seedAgent(pool, "coordinator", {
         suggest: true,
@@ -458,28 +472,30 @@ test(
       });
 
       await t.test(
-        "an agent without the setting makes no extra call",
+        "an agent without the setting is not instructed and keeps its reply as written",
         async () => {
           const session = await seedSession(pool, "off", silent);
           const run = await seedRun(pool, session, "off", "off-by-default");
-          assert.equal(await settle(running, pool, run), "completed");
-          await quiet();
-          const facts = await runFacts(pool, run);
+          const facts = await settled(running, pool, run);
+          assert.equal(facts.state, "completed");
           assert.deepEqual(
-            [
-              facts.suggestionCalls,
-              facts.suggestion,
-              facts.events,
-              facts.turns,
-            ],
-            [0, null, 0, 1],
+            callsFor("off-by-default").map((call) => call.instructed),
+            [false],
           );
-          assert.equal(suggestionCallsFor("off-by-default").length, 0);
+          // The line is the model's own text here: nothing reads or cuts it.
+          assert.deepEqual(facts.messages, [
+            `ORD-1592 is ready to release.\n\n${line(`"${SUGGESTED}"`)}`,
+          ]);
+          assert.equal(facts.suggestion, null);
+          assert.deepEqual(facts.events, [
+            "message.created",
+            "state:completed",
+          ]);
         },
       );
 
       await t.test(
-        "a completed run gets one priced call, a stored suggestion, and an event",
+        "a completed run holds its suggestion the moment it reads as completed",
         async () => {
           const session = await seedSession(pool, "on", suggesting);
           const first = await seedRun(
@@ -488,43 +504,33 @@ test(
             "on-1",
             "run-looks-up first-question",
           );
-          assert.equal(await settle(running, pool, first), "completed");
-          const facts = await suggestionRecorded(pool, first);
-          // Wrapping quotes are not part of what the user would type.
-          assert.equal(facts.suggestion, "Release ORD-1592 to the carrier now");
-          assert.equal(facts.current, facts.suggestion);
+          const facts = await settled(running, pool, first);
+          assert.equal(facts.state, "completed");
+          assert.equal(facts.suggestion, SUGGESTED);
+          assert.equal(facts.current, SUGGESTED);
+          // The reply, then its suggestion, then the settlement: one
+          // transaction, so no reader sees the reply without the suggestion.
+          assert.deepEqual(facts.events, [
+            "message.created",
+            "run.suggestion_created",
+            "state:completed",
+          ]);
+          // No line reaches the transcript, also not the one written early.
+          assert.deepEqual(facts.messages, [
+            "Checking ORD-1592.\n\nORD-1592 is ready to release.",
+          ]);
+          // The model was asked for the line, and there is no extra call.
+          const forRun = callsFor("first-question");
           assert.deepEqual(
-            [facts.suggestionCalls, facts.suggested, facts.events],
-            [1, true, 1],
+            forRun.map((call) => call.instructed),
+            [true, true],
           );
-          // One summary event when the run settled, one for the extra call.
-          assert.equal(facts.summaries, 2);
-          // Two turns of the run, and the suggestion is not a third one.
-          assert.deepEqual([facts.turns, facts.reservedTurns], [2, 2]);
-
-          // The extra request is the run's last request, then its reply, then
-          // the instruction: an exact prefix, so the provider cache applies.
-          const forRun = calls.filter((call) =>
-            JSON.stringify(call.messages).includes("first-question"),
+          assert.ok(
+            forRun[0]?.transcript.includes(
+              JSON.stringify(PROMPT_SUGGESTION_INSTRUCTION).slice(1, -1),
+            ),
           );
-          assert.deepEqual(
-            forRun.map((call) => call.suggestion),
-            [false, false, true],
-          );
-          const [, lastTurn, extra] = forRun;
-          assert.ok(lastTurn && extra);
-          assert.deepEqual(
-            extra.messages.slice(0, lastTurn.messages.length),
-            lastTurn.messages,
-          );
-          assert.equal(extra.messages.length, lastTurn.messages.length + 2);
-          assert.equal(
-            (extra.messages.at(-2) as { role: string }).role,
-            "assistant",
-          );
-          assert.equal(extra.maxTokens, PROMPT_SUGGESTION_MAX_OUTPUT_TOKENS);
-          assert.ok(extra.sessionId);
-          assert.equal(extra.sessionId, lastTurn.sessionId);
+          assert.deepEqual([facts.modelCalls, facts.reservedTurns], [2, 2]);
 
           // The event names the run and carries no text.
           const event = await pool.query<{
@@ -540,130 +546,92 @@ test(
             sessionId: session.sessionId,
           });
 
-          // The call is priced and counted with the session's other calls.
-          const usage = await pool.query<{
-            attempt: number;
-            status: string;
-            model_key: string;
-            pricing_snapshot: Record<string, unknown>;
-          }>(
-            `SELECT attempt,status,model_key,pricing_snapshot FROM oao.model_invocations
-              WHERE run_id=$1 ORDER BY attempt`,
-            [first],
-          );
-          assert.deepEqual(
-            usage.rows.map((row) => row.attempt),
-            [1, 2, 3],
-          );
-          assert.equal(usage.rows[2]?.status, "completed");
-          assert.equal(usage.rows[2]?.model_key, "deterministic");
-          assert.ok(usage.rows[2]?.pricing_snapshot.source);
-
-          // Nothing of the extra call is in the transcript.
-          const transcript = await pool.query<{
-            role: string;
-            content: string;
-          }>(
-            `SELECT role,redacted_content AS content FROM oao.messages
-              WHERE run_id=$1 ORDER BY created_at,id`,
-            [first],
-          );
-          assert.deepEqual(
-            transcript.rows.map((row) => [row.role, row.content]),
-            [
-              ["user", "run-looks-up first-question"],
-              ["assistant", "ORD-1592 is ready to release."],
-            ],
-          );
-
-          // The next real turn sees the conversation without the instruction
-          // or the suggestion, and voids the first run's suggestion.
+          // The next message voids the first run's suggestion.
           const second = await seedRun(
             pool,
             session,
             "on-2",
             "second-question",
           );
-          assert.equal(await settle(running, pool, second), "completed");
-          const nextTurn = calls.find(
-            (call) =>
-              !call.suggestion &&
-              JSON.stringify(call.messages).includes("second-question"),
-          );
-          assert.ok(nextTurn);
-          const seen = JSON.stringify(nextTurn.messages);
-          assert.ok(seen.includes("first-question"));
-          assert.ok(!seen.includes(PROMPT_SUGGESTION_INSTRUCTION));
-          assert.ok(!seen.includes("Release ORD-1592 to the carrier now"));
+          const next = await settled(running, pool, second);
+          assert.equal(next.current, SUGGESTED);
           const voided = await runFacts(pool, first);
-          assert.equal(
-            voided.suggestion,
-            "Release ORD-1592 to the carrier now",
-          );
+          assert.equal(voided.suggestion, SUGGESTED);
           assert.equal(voided.current, null);
-          const latest = await suggestionRecorded(pool, second);
-          assert.equal(latest.current, "Release ORD-1592 to the carrier now");
         },
       );
 
       await t.test(
-        "an empty, declined, or tool-calling answer is no suggestion",
+        "a reply without a usable last line has no suggestion and shows no line",
         async () => {
-          for (const marker of [
-            "suggest-empty",
-            "suggest-none",
-            "suggest-tool",
-          ]) {
+          const cases: readonly (readonly [string, string])[] = [
+            ["reply-without-line", "You're welcome!"],
+            ["reply-declines", "You're welcome!"],
+            // A line the model did not put last is cut and not used, and the
+            // marker the reply must end with is its last line again.
+            [
+              "reply-line-before-choices",
+              "Apply the rule?\n[[choices: Accept | Deny]]",
+            ],
+          ];
+          for (const [marker, message] of cases) {
             const session = await seedSession(pool, marker, suggesting);
             const run = await seedRun(pool, session, marker, marker);
-            assert.equal(await settle(running, pool, run), "completed");
-            const facts = await suggestionRecorded(pool, run);
-            // The call happened and is accounted for; nothing is published.
+            const facts = await settled(running, pool, run);
+            assert.equal(facts.state, "completed", marker);
+            assert.deepEqual(facts.messages, [message], marker);
+            assert.equal(facts.suggestion, null, marker);
             assert.deepEqual(
-              [facts.suggestion, facts.suggested, facts.events],
-              [null, false, 0],
+              facts.events,
+              ["message.created", "state:completed"],
               marker,
             );
-            // Its usage still changed the session's totals.
-            assert.equal(facts.summaries, 2, marker);
           }
+          // A reply that is nothing but the line is no reply to follow.
+          const session = await seedSession(pool, "only-line", suggesting);
+          const run = await seedRun(
+            pool,
+            session,
+            "only-line",
+            "reply-only-line",
+          );
+          const facts = await settled(running, pool, run);
+          assert.deepEqual(
+            [facts.state, facts.messages, facts.suggestion, facts.events],
+            ["completed", [], null, ["state:completed"]],
+          );
         },
       );
 
       await t.test(
-        "a failing extra call leaves the run untouched",
+        "a line after a closing marker is cut, leaving the marker last",
         async () => {
-          const session = await seedSession(pool, "broken", suggesting);
-          const run = await seedRun(pool, session, "broken", "suggest-broken");
-          assert.equal(await settle(running, pool, run), "completed");
-          await waitFor("the failing suggestion call", async () =>
-            suggestionCallsFor("suggest-broken").length > 0 ? true : undefined,
+          const session = await seedSession(pool, "choices", suggesting);
+          const run = await seedRun(
+            pool,
+            session,
+            "choices",
+            "reply-choices-before-line",
           );
-          await quiet();
-          const facts = await runFacts(pool, run);
-          assert.deepEqual(
-            [facts.suggestionCalls, facts.suggestion, facts.events],
-            [0, null, 0],
-          );
-          const state = await pool.query<{ state: string }>(
-            "SELECT state FROM oao.runs WHERE id=$1",
-            [run],
-          );
-          assert.equal(state.rows[0]?.state, "completed");
+          const facts = await settled(running, pool, run);
+          assert.deepEqual(facts.messages, [
+            "Apply the rule?\n\n[[choices: Accept | Deny]]",
+          ]);
+          assert.equal(facts.suggestion, "Accept the rule");
         },
       );
 
       await t.test("a failed run gets no suggestion", async () => {
         const session = await seedSession(pool, "failed", suggesting);
         const run = await seedRun(pool, session, "failed", "run-fails");
-        assert.equal(await settle(running, pool, run), "failed");
-        await quiet();
-        assert.equal((await runFacts(pool, run)).suggestionCalls, 0);
-        assert.equal(suggestionCallsFor("run-fails").length, 0);
+        const facts = await settled(running, pool, run);
+        assert.equal(facts.state, "failed");
+        assert.equal(facts.suggestion, null);
+        assert.ok(!facts.events.includes("run.suggestion_created"));
       });
 
       await t.test(
-        "a run paused for approval gets no suggestion until it completes",
+        "a run paused for approval shows no line and gets its suggestion when it completes",
         async () => {
           const session = await seedSession(pool, "gated", suggesting);
           const run = await seedRun(pool, session, "gated", "run-gated");
@@ -675,21 +643,55 @@ test(
             );
             return result.rows[0]?.id;
           });
-          await quiet();
-          assert.equal(suggestionCallsFor("run-gated").length, 0);
+          // The explanation committed with the gate has no line.
+          const paused = await runFacts(pool, run);
+          assert.deepEqual(paused.messages, ["I will release ORD-1592."]);
+          assert.equal(paused.suggestion, null);
           await withTenantTransaction(pool, tenant, (transaction) =>
             transaction.query(
               "SELECT oao.resolve_approval($1,$2,$3,'denied',$4,'not today')",
               [tenant.organizationId, tenant.projectId, approvalId, human],
             ),
           );
-          const facts = await suggestionRecorded(pool, run);
-          assert.equal(facts.suggestion, "Release ORD-1592 to the carrier now");
+          const facts = await waitFor("the gated run to complete", async () => {
+            const current = await runFacts(pool, run);
+            return current.state === "completed" ? current : undefined;
+          });
+          assert.deepEqual(facts.messages, [
+            "I will release ORD-1592.",
+            "The release was not approved.",
+          ]);
+          assert.equal(facts.suggestion, "Release ORD-1592 anyway");
         },
       );
 
       await t.test(
-        "a delegated child session gets no suggestion; its parent does",
+        "text published before tool calls never shows or supplies the line",
+        async () => {
+          const session = await seedSession(pool, "narrated", narrating);
+          const run = await seedRun(
+            pool,
+            session,
+            "narrated",
+            "run-looks-up narrated-question",
+          );
+          const facts = await settled(running, pool, run);
+          assert.deepEqual(facts.messages, [
+            "Checking ORD-1592.",
+            "ORD-1592 is ready to release.",
+          ]);
+          assert.equal(facts.suggestion, SUGGESTED);
+          assert.deepEqual(facts.events, [
+            "message.created",
+            "message.created",
+            "run.suggestion_created",
+            "state:completed",
+          ]);
+        },
+      );
+
+      await t.test(
+        "a delegated child session is not instructed and gets no suggestion; its parent does",
         async () => {
           const session = await seedSession(pool, "delegating", coordinator);
           const run = await seedRun(
@@ -698,9 +700,9 @@ test(
             "delegating",
             "run-delegates",
           );
-          assert.equal(await settle(running, pool, run), "completed");
-          const facts = await suggestionRecorded(pool, run);
-          assert.equal(facts.events, 1);
+          const facts = await settled(running, pool, run);
+          assert.equal(facts.suggestion, "Release ORD-1592 now");
+          assert.deepEqual(facts.messages, ["The helper checked ORD-1592."]);
           const child = await pool.query<{ child_run_id: string }>(
             `SELECT child_run_id FROM oao.delegation_runs
               WHERE organization_id=$1 AND project_id=$2 AND requested_by_run_id=$3`,
@@ -708,104 +710,65 @@ test(
           );
           const childRunId = child.rows[0]?.child_run_id;
           assert.ok(childRunId);
-          await quiet();
           const childFacts = await runFacts(pool, childRunId);
-          assert.deepEqual(
-            [childFacts.suggestionCalls, childFacts.suggestion],
-            [0, null],
+          assert.equal(childFacts.state, "completed");
+          assert.equal(childFacts.suggestion, null);
+          assert.ok(!childFacts.events.includes("run.suggestion_created"));
+          // The child's version has the setting on too, yet nobody types there.
+          const childCalls = calls.filter(
+            (call) =>
+              call.transcript.includes("child-work") &&
+              !call.transcript.includes("run-delegates"),
           );
-          // The child's own last request ends with its prompt, not the parent's.
-          assert.equal(
-            calls.filter(
-              (call) =>
-                call.suggestion &&
-                JSON.stringify(call.messages).includes("child-work") &&
-                !JSON.stringify(call.messages).includes("run-delegates"),
-            ).length,
-            0,
+          assert.deepEqual(
+            childCalls.map((call) => call.instructed),
+            [false],
           );
         },
       );
 
       await t.test(
-        "a suggestion that arrives after a newer run started is not published",
+        "a reply that settles behind a newer run stores no suggestion",
         async () => {
           const session = await seedSession(pool, "slow", suggesting);
-          const run = await seedRun(pool, session, "slow-1", "suggest-slow");
+          const run = await seedRun(pool, session, "slow-1", "reply-slow");
           const started = new Promise<void>((resolve) => {
-            slowSuggestionStarted = resolve;
+            slowReplyStarted = resolve;
           });
-          assert.equal(await settle(running, pool, run), "completed");
+          await admit(running, run);
           await started;
-          // The user sends the next message while the model is still predicting.
-          await seedRun(pool, session, "slow-2", "second-message");
-          releaseSlow();
-          const facts = await suggestionRecorded(pool, run);
-          // The call is paid for; the stale suggestion is dropped.
-          assert.deepEqual(
-            [facts.suggestionCalls, facts.suggestion, facts.events],
-            [1, null, 0],
+          // Another message is queued while the model is still replying.
+          const queued = await seedRun(
+            pool,
+            session,
+            "slow-2",
+            "queued-behind",
           );
-        },
-      );
-
-      await t.test(
-        "a run resumed while its suggestion is being saved neither deadlocks nor publishes",
-        async () => {
-          const session = await seedSession(pool, "resumed", suggesting);
-          const run = await seedRun(pool, session, "resumed-1", "suggest-slow");
-          const started = new Promise<void>((resolve) => {
-            slowSuggestionStarted = resolve;
+          assert.ok(releaseSlowReply);
+          releaseSlowReply();
+          const facts = await waitFor("the slow run to complete", async () => {
+            const current = await runFacts(pool, run);
+            return current.state === "completed" ? current : undefined;
           });
-          assert.equal(await settle(running, pool, run), "completed");
-          await started;
-          // What the resume route does: lock the settled run, add a run to its
-          // session, then touch the session.
-          const client = await pool.connect();
-          try {
-            await client.query("BEGIN");
-            await client.query(
-              "SELECT 1 FROM oao.runs WHERE id=$1 FOR UPDATE",
-              [run],
-            );
-            releaseSlow();
-            // The save now waits for the run.
-            await quiet();
-            await client.query(
-              `INSERT INTO oao.runs (
-                 organization_id,project_id,id,thread_id,session_id,agent_version_id,
-                 created_by_principal_id,idempotency_key,input_public
-               ) VALUES ($1,$2,$3,$4,$5,$6,$7,'prompt-suggestions-e2e:resumed-2','{}')`,
-              [
-                tenant.organizationId,
-                tenant.projectId,
-                uuid("resumed-2:run"),
-                session.threadId,
-                session.sessionId,
-                session.versionId,
-                human,
-              ],
-            );
-            await client.query(
-              "UPDATE oao.sessions SET last_activity_at=clock_timestamp() WHERE id=$1",
-              [session.sessionId],
-            );
-            await client.query("COMMIT");
-          } catch (error) {
-            await client.query("ROLLBACK").catch(() => undefined);
-            throw error;
-          } finally {
-            client.release();
-          }
-          const facts = await suggestionRecorded(pool, run);
-          assert.deepEqual(
-            [facts.suggestionCalls, facts.suggestion, facts.events],
-            [1, null, 0],
+          assert.deepEqual(facts.messages, ["ORD-1592 is ready to release."]);
+          assert.equal(facts.suggestion, null);
+          assert.deepEqual(facts.events, [
+            "message.created",
+            "state:completed",
+          ]);
+          // The queued run is admitted behind it and holds the suggestion.
+          const latest = await waitFor(
+            "the queued run to complete",
+            async () => {
+              const current = await runFacts(pool, queued);
+              return current.state === "completed" ? current : undefined;
+            },
           );
+          assert.equal(latest.current, SUGGESTED);
         },
       );
     } finally {
-      releaseSlowSuggestion?.();
+      releaseSlowReply?.();
       await worker?.stop();
       await pool.end();
     }

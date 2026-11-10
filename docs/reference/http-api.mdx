@@ -1314,17 +1314,17 @@ calls](/agents/create-agent#publish-text-before-tool-calls).
 ### Prompt suggestions
 
 Agent creation and version publication accept the optional boolean
-`config.promptSuggestions`. When `true`, each run of that agent version that
-completes with a reply is followed by one extra model call that predicts the
-user's next message. OAO stores the prediction on the run, returns it as
-`suggestion` from `GET /runs/{runId}` and `GET /sessions/{sessionId}`, and
-appends a `run.suggestion_created` event whose `aggregateId` is the run and
-whose payload holds the `sessionId`. The text is at most 500 characters. Omit
-the field, the default, to make no extra call. A value other than a boolean
-returns `400`.
+`config.promptSuggestions`. When `true`, OAO instructs the agent to end each
+final reply with one marked line that predicts the user's next message. When
+the run completes, OAO cuts the line out of the reply, stores its text on the
+run in the transaction that settles it, returns it as `suggestion` from
+`GET /runs/{runId}` and `GET /sessions/{sessionId}`, and appends a
+`run.suggestion_created` event whose `aggregateId` is the run and whose payload
+holds the `sessionId`. The text is at most 500 characters, and it is already
+present when the run first reads as `completed`. Omit the field, the default,
+to leave the agent's instructions and replies as they are. A value other than
+a boolean returns `400`.
 
-The extra call is recorded under `debug.modelInvocations` with
-`safeRequest.purpose: "suggestion"` and `safeResponse.suggested` telling whether
-it produced a suggestion. Its tokens and cost are part of the session totals,
-`GET /sessions/{sessionId}/usage`, and `GET /usage`. It does not reserve a model
-turn. See [Prompt suggestions](/agents/create-agent#prompt-suggestions).
+No assistant message returned by the API contains the marked line, and there is
+no extra model call. See
+[Prompt suggestions](/agents/create-agent#prompt-suggestions).

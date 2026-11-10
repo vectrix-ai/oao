@@ -148,19 +148,15 @@ and should shape integrations:
   download regular files from the latest verified archive, but each download
   currently reads that compressed archive and does not support ranges or
   historical generations.
-- **Prompt suggestions are best effort and cost one model call per completed
-  run.** The call replays the run's last request, so it is cheap only where the
-  provider caches prompts. A model that gets no caching is charged for the whole
-  conversation again on each suggestion; this includes a Claude model behind an
-  OpenRouter `@preset/` name, because OAO adds Anthropic cache markers only for
-  OpenRouter model IDs that start with `anthropic/`. The call is bounded to one
-  per completed run, 1,024 output tokens, and 30 seconds, and it is outside the
-  run's turn limit; there is no separate budget for it. The request is held in
-  the runtime worker's memory, so a run settled after a worker restart, or by
-  another worker, gets no suggestion. Suggestions are on or off per agent
-  version; the instruction given to the model cannot be changed. Cache reuse
-  was measured on OpenRouter and OpenAI presets; Anthropic, xAI, and Amazon
-  Bedrock presets use the same path but were not measured.
+- **Prompt suggestions depend on the model following an instruction.** The
+  agent's system prompt gains an instruction to end each final reply with a
+  marked line, which OAO cuts out and stores as the suggestion. A run whose
+  model leaves the line out, or does not put it last, has no suggestion; there
+  is no second attempt. The line costs output tokens on every final reply and
+  stays in the model's own conversation history. Suggestions are on or off per
+  agent version; the instruction given to the model cannot be changed. The
+  behavior was measured on one OpenRouter preset; other models may follow the
+  instruction less reliably.
 - **Routing price caps are not budgets.** There is no project budget,
   reservation ledger, quota, or spend alerting, and no autonomous per-run model
   routing.

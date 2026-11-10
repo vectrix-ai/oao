@@ -5,7 +5,7 @@ import {
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { AssistantMessage, Provider } from "@earendil-works/pi-ai";
+import type { Provider } from "@earendil-works/pi-ai";
 import { createOpenTelemetryInstrumentation } from "@flue/opentelemetry";
 import { postgres } from "@flue/postgres";
 import {
@@ -135,16 +135,12 @@ import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import * as v from "valibot";
 import {
-  PromptSuggestionCapture,
-  requestPromptSuggestion,
-  type CapturedModelRequest,
+  PROMPT_SUGGESTION_INSTRUCTION,
+  replySuggestion,
+  withoutSuggestionLines,
 } from "./prompt-suggestions.js";
 
-export {
-  PROMPT_SUGGESTION_INSTRUCTION,
-  PROMPT_SUGGESTION_MAX_OUTPUT_TOKENS,
-  PROMPT_SUGGESTION_TIMEOUT_MS,
-} from "./prompt-suggestions.js";
+export { PROMPT_SUGGESTION_INSTRUCTION } from "./prompt-suggestions.js";
 
 export const FLUE_PACKAGE_VERSIONS = Object.freeze({
   runtime: "2.3.0",
@@ -275,12 +271,7 @@ export interface McpToolExecutionPort {
  */
 export function registerRuntimeModelProvider(provider: Provider): void {
   recordRuntimeModels(provider);
-  setProvider(runtimeProvider(provider));
-}
-
-/** A provider as the runtime calls it: bounded, and observed for suggestions. */
-function runtimeProvider(provider: Provider): Provider {
-  return promptSuggestionCapture.wrap(withModelCallTimeout(provider));
+  setProvider(withModelCallTimeout(provider));
 }
 
 // Input modalities of every registered runtime model, keyed like Flue's
@@ -330,25 +321,12 @@ export function configureManagedAgentRuntime(
   stopObservingAssistantText ??= observe((event) =>
     pendingAssistantText.observe(event),
   );
-  stopCapturingModelRequests ??= instrument({
-    observe: (event) => promptSuggestionCapture.observe(event),
-    interceptor: (operation, context, next) =>
-      operation.type === "model"
-        ? promptSuggestionCapture.withModelCall(
-            { instanceId: context.instanceId, turnId: operation.turnId },
-            next,
-          )
-        : next(),
-    dispose: () => undefined,
-  });
 }
 
 export function resetManagedAgentRuntime(): void {
   managedRuntime = undefined;
   stopObservingAssistantText?.();
   stopObservingAssistantText = undefined;
-  void stopCapturingModelRequests?.();
-  stopCapturingModelRequests = undefined;
 }
 
 function runtimeConfig(): ManagedAgentRuntimeConfig {
@@ -376,13 +354,6 @@ interface HarnessObservationCorrelation {
 
 const activeHarnessOperation =
   new AsyncLocalStorage<ActiveHarnessOperationContext>();
-
-// The last model request of each run whose agent version has prompt
-// suggestions on. Scratch turns inside a Harness Operation are not the reply.
-const promptSuggestionCapture = new PromptSuggestionCapture(
-  () => activeHarnessOperation.getStore() !== undefined,
-);
-let stopCapturingModelRequests: (() => Promise<void>) | undefined;
 
 function harnessObservationCorrelation(
   event: FlueObservation,
@@ -455,6 +426,8 @@ class PendingAssistantText {
   readonly #waiters = new Map<string, Set<() => void>>();
   /** Runs whose agent version publishes text before every tool call. */
   readonly #publishingRuns = new Set<string>();
+  /** Runs whose agent version has prompt suggestions on. */
+  readonly #suggestingRuns = new Set<string>();
 
   observe(event: FlueObservation): void {
     if (
@@ -520,8 +493,30 @@ class PendingAssistantText {
     return this.#publishingRuns.has(runId);
   }
 
+  /** Marks a run whose model ends its final reply with a suggestion line. */
+  cutSuggestionLines(runId: string): void {
+    this.#suggestingRuns.delete(runId);
+    this.#suggestingRuns.add(runId);
+    for (const oldest of this.#suggestingRuns) {
+      if (this.#suggestingRuns.size <= PENDING_ASSISTANT_TEXT_MAX_SUBMISSIONS)
+        break;
+      this.#suggestingRuns.delete(oldest);
+    }
+  }
+
+  /**
+   * Text of a run as it may be stored before the run settles: without a
+   * suggestion line, which belongs only at the end of the final reply.
+   */
+  publishable(runId: string, text: string): string {
+    return this.#suggestingRuns.has(runId)
+      ? withoutSuggestionLines(text).trim()
+      : text;
+  }
+
   forgetRun(runId: string): void {
     this.#publishingRuns.delete(runId);
+    this.#suggestingRuns.delete(runId);
   }
 
   /**
@@ -534,16 +529,18 @@ class PendingAssistantText {
   async take(
     toolCallId: string,
     signal?: AbortSignal,
+    runId?: string,
   ): Promise<PendingAssistantTextClaim | undefined> {
     if (!this.#calls.has(toolCallId)) await this.#waitFor(toolCallId, signal);
     const call = this.#calls.get(toolCallId);
     const submission = call && this.#submissions.get(call.submissionId);
     if (!call || !submission) return undefined;
     const start = Math.max(submission.committed, submission.reserved);
-    const text = submission.parts
+    const written = submission.parts
       .slice(start, call.end)
       .join(REPLY_TEXT_SEPARATOR)
       .trim();
+    const text = runId ? this.publishable(runId, written) : written;
     if (!text) return undefined;
     submission.reserved = call.end;
     return {
@@ -572,6 +569,8 @@ class PendingAssistantText {
       readonly signal?: AbortSignal | undefined;
       /** False when the turn has certainly been observed already. */
       readonly wait?: boolean;
+      /** The run the text belongs to, when it may hold a suggestion line. */
+      readonly runId?: string;
     } = {},
   ): Promise<void> {
     if (options.wait !== false && !this.#calls.has(toolCallId))
@@ -589,10 +588,13 @@ class PendingAssistantText {
     for (const turn of submission.turns) {
       if (turn.end <= submission.committed) continue;
       if (turn.end > call.end) break;
-      const text = submission.parts
+      const written = submission.parts
         .slice(from, turn.end)
         .join(REPLY_TEXT_SEPARATOR)
         .trim();
+      const text = options.runId
+        ? this.publishable(options.runId, written)
+        : written;
       if (text) segments.push({ toolCallId: turn.toolCallId, text });
       from = turn.end;
     }
@@ -711,7 +713,7 @@ async function publishAssistantTextBefore(
         runId: run.runId,
         segments,
       }),
-    { signal },
+    { signal, runId: run.runId },
   );
 }
 
@@ -742,7 +744,11 @@ async function withPendingAssistantText<T>(
     return publish(obligation);
   }
   if (obligation.approval !== "always") return publish(obligation);
-  const claim = await pending.take(obligation.flueToolCallId, signal);
+  const claim = await pending.take(
+    obligation.flueToolCallId,
+    signal,
+    obligation.runId,
+  );
   if (!claim) return publish(obligation);
   // When the check itself fails the outcome is unknown, so the text stays
   // reserved: no later gate commits it twice, and if the publication rolled
@@ -1355,7 +1361,10 @@ function managedSystemPrompt(snapshot: ManagedAgentSnapshot): string {
   const oaoInstructions = snapshot.oaoTools
     ? `\n\nThe ${OAO_AGENT_TOOL_PREFIX} tools read and manage this OAO project on behalf of the person or key that started this run. To ask another agent about its work, find its session with ${OAO_AGENT_TOOL_PREFIX}list_sessions, read it with ${OAO_AGENT_TOOL_PREFIX}get_session, and ask with ${OAO_AGENT_TOOL_PREFIX}send_message. Never send a message to your own session.`
     : "";
-  return `${snapshot.systemPrompt}${retryInstructions}${delegationInstructions}${harnessOperationInstructions}${oaoInstructions}`;
+  const suggestionInstructions = snapshot.promptSuggestions
+    ? `\n\n${PROMPT_SUGGESTION_INSTRUCTION}`
+    : "";
+  return `${snapshot.systemPrompt}${retryInstructions}${delegationInstructions}${harnessOperationInstructions}${oaoInstructions}${suggestionInstructions}`;
 }
 
 /**
@@ -1797,12 +1806,10 @@ export function ManagedAgent(): string {
   const publishTextBefore = (toolCallId: string, signal?: AbortSignal) =>
     publishAssistantTextBefore(config.broker, run, toolCallId, signal);
   if (publishText) pendingAssistantText.publishBeforeToolCalls(run.runId);
-  // Each render names the run the instance works on, so the provider wrapper
-  // knows whose request it sees and whether to keep it.
-  promptSuggestionCapture.track(
-    threadInstanceId({ ...run, threadId: initial.threadId as ThreadId }),
-    initial.snapshot.promptSuggestions === true ? run.runId : undefined,
-  );
+  // The model ends its final reply with a suggestion line; text published
+  // before then must not show one the model wrote too early.
+  if (initial.snapshot.promptSuggestions === true)
+    pendingAssistantText.cutSuggestionLines(run.runId);
   const withTextBefore = <T>(
     obligation: ToolObligationInput,
     signal: AbortSignal | undefined,
@@ -4139,6 +4146,9 @@ export class ManagedRuntimeOrchestrator {
           EXISTS (SELECT 1 FROM oao.runtime_dispatches dispatch
             WHERE dispatch.organization_id=r.organization_id AND dispatch.project_id=r.project_id
               AND dispatch.run_id=r.id AND dispatch.flue_submission_id IS NOT NULL) AS has_admission_receipt,
+          EXISTS (SELECT 1 FROM oao.agent_delegations delegation
+            WHERE delegation.organization_id=r.organization_id AND delegation.project_id=r.project_id
+              AND delegation.child_session_id=r.session_id) AS delegated,
           v.id AS agent_version_id,v.config,encode(v.content_hash,'hex') AS content_hash,
           workspace.id AS workspace_id,workspace.owner_thread_id,
           COALESCE(workspace.owner_session_id,r.session_id) AS owner_session_id,
@@ -4397,7 +4407,11 @@ export class ManagedRuntimeOrchestrator {
         ...(publication.publishTextBeforeToolCalls
           ? { publishTextBeforeToolCalls: true }
           : {}),
-        ...(publication.promptSuggestions ? { promptSuggestions: true } : {}),
+        // Nobody types in a delegated child session, so it is not asked for
+        // a suggestion and its reply to the parent carries no suggestion line.
+        ...(publication.promptSuggestions && row.delegated !== true
+          ? { promptSuggestions: true }
+          : {}),
         sandbox: publication.sandbox,
         limits: publication.limits,
       };
@@ -4575,8 +4589,6 @@ export class RuntimeProjection {
     }
   >();
   readonly #abort = new AbortController();
-  /** Prompt suggestion calls in flight, which outlive their run's settlement. */
-  readonly #suggesting = new Set<Promise<void>>();
 
   constructor(
     private readonly pool: PgPool,
@@ -4605,7 +4617,6 @@ export class RuntimeProjection {
     this.#abort.abort(new Error("Runtime projection stopped"));
     await this.#pending;
     await Promise.all(this.#watching.values());
-    await Promise.all(this.#suggesting);
   }
 
   trackAdmission(input: TenantContext & { readonly runId: RunId }): void {
@@ -4856,7 +4867,7 @@ export class RuntimeProjection {
           runId: runtimeDispatch.run_id,
           segments,
         }),
-      { wait: false },
+      { wait: false, runId: runtimeDispatch.run_id },
     );
   }
 
@@ -5215,16 +5226,24 @@ export class RuntimeProjection {
           session_id: string;
           thread_id: ThreadId;
           thread_instance_state: "ready" | "corrupt";
-          delegated: boolean;
+          suggests: boolean;
         }>(
           `SELECT r.cancellation_requested_at,r.session_id,r.thread_id,d.timeout_requested_at,
              i.state AS thread_instance_state,
-             EXISTS (
+             -- The agent version asks for a suggestion line, and the session
+             -- is one somebody types in rather than a delegated child.
+             COALESCE((
+               SELECT version.config->'promptSuggestions'='true'::jsonb
+                 FROM oao.agent_versions version
+                WHERE version.organization_id=r.organization_id
+                  AND version.project_id=r.project_id
+                  AND version.id=r.agent_version_id
+             ),false) AND NOT EXISTS (
                SELECT 1 FROM oao.agent_delegations delegation
                 WHERE delegation.organization_id=r.organization_id
                   AND delegation.project_id=r.project_id
                   AND delegation.child_session_id=r.session_id
-             ) AS delegated
+             ) AS suggests
            FROM oao.runs r JOIN oao.runtime_dispatches d
              ON d.organization_id=r.organization_id AND d.project_id=r.project_id AND d.run_id=r.id
            JOIN oao.runtime_thread_instances i
@@ -5261,16 +5280,18 @@ export class RuntimeProjection {
       }).read(receipt);
       redactedReply = reply.text;
     }
+    // The model ends a reply with its suggestion for the user's next message.
+    // The line is cut out of everything stored, whatever the run's outcome;
+    // only a completed run keeps it, as its suggestion.
+    let suggestion: string | undefined;
+    if (run.suggests && redactedReply) {
+      if (productState === "completed")
+        suggestion = replySuggestion(redactedReply);
+      redactedReply = withoutSuggestionLines(redactedReply).trimEnd();
+    }
     // PostgreSQL text rejects NUL, which a model reply can contain.
     redactedReply = jsonbSafeText(redactedReply);
-    // Whether this call is the one that settled the run, and whether it left
-    // the run completed with nothing queued behind it: the only case in which
-    // a prompt suggestion is worth asking for.
-    let settledHere = false;
-    let awaitsUser = false;
     await withTenantTransaction(this.pool, tenant, async (transaction) => {
-      settledHere = false;
-      awaitsUser = false;
       const fence = await transaction.query(
         `UPDATE oao.runtime_dispatches SET state='settled',updated_at=clock_timestamp()
          WHERE organization_id=$1 AND project_id=$2 AND run_id=$3 AND state <> 'settled'
@@ -5278,7 +5299,6 @@ export class RuntimeProjection {
         [tenant.organizationId, tenant.projectId, runtimeDispatch.run_id],
       );
       if (!fence.rowCount) return;
-      settledHere = true;
       await transaction.query(
         "UPDATE oao.runs SET state=$4 WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND state NOT IN ('completed','failed','cancelled','timed_out')",
         [
@@ -5345,6 +5365,39 @@ export class RuntimeProjection {
           kind: "message.created",
           payload: { role: "assistant", messageId: finalMessageId },
         });
+        // The suggestion is on the run before the run reads as completed
+        // anywhere, and is announced beside the reply it follows. A reply
+        // without text of its own has nothing to follow.
+        if (suggestion) {
+          const stored = await transaction.query(
+            `UPDATE oao.runs run SET suggestion=$4
+              WHERE run.organization_id=$1 AND run.project_id=$2 AND run.id=$3
+                AND run.state='completed' AND run.suggestion IS NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM oao.runs newer
+                   WHERE newer.organization_id=run.organization_id
+                     AND newer.project_id=run.project_id
+                     AND newer.thread_id=run.thread_id
+                     AND (newer.created_at,newer.id)>(run.created_at,run.id)
+                )`,
+            [
+              tenant.organizationId,
+              tenant.projectId,
+              runtimeDispatch.run_id,
+              suggestion,
+            ],
+          );
+          // The event names the run; readers and webhooks attach the text.
+          if (stored.rowCount)
+            await appendEventOnce(transaction, {
+              ...tenant,
+              id: eventUuid(`event:${runtimeDispatch.run_id}:suggestion`),
+              aggregateType: "run",
+              aggregateId: runtimeDispatch.run_id,
+              kind: "run.suggestion_created",
+              payload: { sessionId: run.session_id },
+            });
+        }
       }
       await transaction.query(
         `INSERT INTO oao.session_summaries (
@@ -5409,226 +5462,6 @@ export class RuntimeProjection {
           payload: { reason: "predecessor_settled" },
         });
       }
-      awaitsUser = productState === "completed" && !next;
-    });
-    if (!settledHere) return;
-    // The settled run's last model request is released here whatever follows.
-    const captured = promptSuggestionCapture.take(
-      runtimeDispatch.flue_conversation_id,
-      runtimeDispatch.run_id,
-    );
-    // Nobody types in a delegated child session, so it gets no suggestion.
-    if (captured && awaitsUser && !run.delegated)
-      this.suggestNextMessage(runtimeDispatch, run.session_id, captured);
-  }
-
-  /**
-   * Predicts the user's next message for a run that just completed, without
-   * holding up the projection queue: the run is settled, and the suggestion
-   * follows when the model answers. Any failure only loses the suggestion.
-   */
-  private suggestNextMessage(
-    runtimeDispatch: DispatchRow,
-    sessionId: string,
-    captured: CapturedModelRequest,
-  ): void {
-    const suggesting = (async () => {
-      const call = await requestPromptSuggestion(captured, this.#abort.signal);
-      // A call cut short because the worker is stopping is not a failure.
-      if (!call || this.#abort.signal.aborted) return;
-      // The run's turns are projected in order; let them take their attempt
-      // numbers before this call takes the next one.
-      await this.#pending;
-      await this.recordPromptSuggestion(runtimeDispatch, sessionId, {
-        provider: captured.model.provider,
-        model: captured.model.id,
-        ...call,
-      });
-    })()
-      .catch((error: unknown) => {
-        if (this.#abort.signal.aborted) return;
-        console.warn(
-          JSON.stringify({
-            level: "warn",
-            source: "prompt-suggestions",
-            runId: runtimeDispatch.run_id,
-            errorType: error instanceof Error ? error.name : typeof error,
-            errorMessage:
-              error instanceof Error ? error.message : "Suggestion failed",
-          }),
-        );
-      })
-      .finally(() => {
-        this.#suggesting.delete(suggesting);
-      });
-    this.#suggesting.add(suggesting);
-  }
-
-  /**
-   * Records what the suggestion call used against the run it follows, and
-   * publishes the suggestion when there is one and the run is still the
-   * session's latest. The call is priced like any other model call of the run
-   * but is not one of its turns: it reserves nothing from the turn limit.
-   */
-  private async recordPromptSuggestion(
-    runtimeDispatch: DispatchRow,
-    sessionId: string,
-    call: {
-      readonly provider: string;
-      readonly model: string;
-      readonly message: AssistantMessage;
-      readonly startedAt: Date;
-      readonly completedAt: Date;
-      readonly text: string | undefined;
-    },
-  ): Promise<void> {
-    const tenant = {
-      organizationId: runtimeDispatch.organization_id,
-      projectId: runtimeDispatch.project_id,
-    };
-    const { message } = call;
-    const failed =
-      message.stopReason === "error" || message.stopReason === "aborted";
-    const usage = message.usage;
-    if (failed)
-      console.warn(
-        JSON.stringify({
-          level: "warn",
-          source: "prompt-suggestions",
-          runId: runtimeDispatch.run_id,
-          errorType: message.stopReason,
-          errorMessage: message.errorMessage ?? "Suggestion call failed",
-        }),
-      );
-    // A failed call that used nothing leaves no trace on the run.
-    if (failed && usage.totalTokens === 0) return;
-    const text = failed ? undefined : call.text;
-    const diagnostics = modelInvocationDiagnostics(
-      {
-        finishReason: message.stopReason,
-        ...(message.errorMessage
-          ? { error: { message: message.errorMessage } }
-          : {}),
-      },
-      failed,
-    );
-    await withTenantTransaction(this.pool, tenant, async (transaction) => {
-      // Sending a message locks the session and resuming locks this run, so a
-      // newer run is either visible here or starts after the suggestion is
-      // published. The run comes first, the order a resume takes the two in.
-      await transaction.query(
-        `SELECT 1 FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$3
-         FOR NO KEY UPDATE`,
-        [tenant.organizationId, tenant.projectId, runtimeDispatch.run_id],
-      );
-      await transaction.query(
-        `SELECT 1 FROM oao.sessions WHERE organization_id=$1 AND project_id=$2 AND id=$3
-         FOR NO KEY UPDATE`,
-        [tenant.organizationId, tenant.projectId, sessionId],
-      );
-      const attemptResult = await transaction.query<{ attempt: string }>(
-        "SELECT COALESCE(MAX(attempt),0)+1 AS attempt FROM oao.model_invocations WHERE organization_id=$1 AND project_id=$2 AND run_id=$3",
-        [tenant.organizationId, tenant.projectId, runtimeDispatch.run_id],
-      );
-      const attempt = Number(attemptResult.rows[0]?.attempt);
-      const pricing = await modelCallPricing(
-        transaction,
-        runtimeDispatch,
-        usage,
-        call.startedAt,
-        call.model,
-      );
-      const inserted = await transaction.query(
-        `INSERT INTO oao.model_invocations (
-          organization_id,project_id,id,run_id,attempt,provider_key,model_key,status,
-          input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,
-          cost_microunits,safe_request,safe_response,
-          started_at,completed_at,usage_source,pricing_snapshot,provider_route
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'estimated',$18,$19)
-        ON CONFLICT (organization_id,project_id,id) DO NOTHING`,
-        [
-          tenant.organizationId,
-          tenant.projectId,
-          eventUuid(`suggestion:${runtimeDispatch.run_id}`),
-          runtimeDispatch.run_id,
-          attempt,
-          call.provider,
-          call.model,
-          failed ? "failed" : "completed",
-          usage.input,
-          usage.output,
-          usage.cacheRead,
-          usage.cacheWrite,
-          pricing.costMicrounits,
-          { purpose: "suggestion" },
-          { ...diagnostics, suggested: text !== undefined },
-          call.startedAt,
-          call.completedAt,
-          pricing.snapshot,
-          { provider: call.provider },
-        ],
-      );
-      if (!inserted.rowCount) return;
-      await transaction.query(
-        `INSERT INTO oao.session_summaries (
-          organization_id,project_id,session_id,input_tokens,output_tokens,
-          cache_read_tokens,cache_write_tokens,cost_microunits
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        ON CONFLICT (organization_id,project_id,session_id) DO UPDATE SET
-          summary_version=oao.session_summaries.summary_version+1,
-          input_tokens=oao.session_summaries.input_tokens+EXCLUDED.input_tokens,
-          output_tokens=oao.session_summaries.output_tokens+EXCLUDED.output_tokens,
-          cache_read_tokens=oao.session_summaries.cache_read_tokens+EXCLUDED.cache_read_tokens,
-          cache_write_tokens=oao.session_summaries.cache_write_tokens+EXCLUDED.cache_write_tokens,
-          cost_microunits=oao.session_summaries.cost_microunits+EXCLUDED.cost_microunits,
-          updated_at=clock_timestamp()`,
-        [
-          tenant.organizationId,
-          tenant.projectId,
-          sessionId,
-          usage.input,
-          usage.output,
-          usage.cacheRead,
-          usage.cacheWrite,
-          pricing.costMicrounits,
-        ],
-      );
-      // The session's totals grew, whether or not there is a suggestion.
-      const announceUsage = () =>
-        appendEventOnce(transaction, {
-          ...tenant,
-          id: eventUuid(`event:${runtimeDispatch.run_id}:suggestion-summary`),
-          aggregateType: "session",
-          aggregateId: sessionId,
-          kind: "session.summary_changed",
-          payload: { runId: runtimeDispatch.run_id, state: "completed" },
-        });
-      if (text === undefined) return announceUsage();
-      // Void once the session has a newer run: store and publish nothing.
-      const stored = await transaction.query(
-        `UPDATE oao.runs run SET suggestion=$4
-          WHERE run.organization_id=$1 AND run.project_id=$2 AND run.id=$3
-            AND run.state='completed' AND run.suggestion IS NULL
-            AND NOT EXISTS (
-              SELECT 1 FROM oao.runs newer
-               WHERE newer.organization_id=run.organization_id
-                 AND newer.project_id=run.project_id
-                 AND newer.thread_id=run.thread_id
-                 AND (newer.created_at,newer.id)>(run.created_at,run.id)
-            )`,
-        [tenant.organizationId, tenant.projectId, runtimeDispatch.run_id, text],
-      );
-      if (!stored.rowCount) return announceUsage();
-      // The event names the run; readers and webhooks attach the text.
-      await appendEventOnce(transaction, {
-        ...tenant,
-        id: eventUuid(`event:${runtimeDispatch.run_id}:suggestion`),
-        aggregateType: "run",
-        aggregateId: runtimeDispatch.run_id,
-        kind: "run.suggestion_created",
-        payload: { sessionId },
-      });
-      await announceUsage();
     });
   }
 
@@ -5747,7 +5580,6 @@ export async function reserveRunModelTurn(
          SELECT organization_id,project_id,run_id,id::text FROM oao.model_invocations
          WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
            AND safe_response->>'errorCode' IS DISTINCT FROM 'model_turn_limit_exceeded'
-           AND safe_request->>'purpose' IS DISTINCT FROM 'suggestion'
          ON CONFLICT DO NOTHING`,
         [input.organizationId, input.projectId, input.runId],
       );
@@ -6710,7 +6542,9 @@ export async function startManagedFlueRuntime(input: {
   return start({
     agents: [ManagedAgent],
     db: createFluePostgresAdapter(input.pool),
-    providers: input.providers.map((provider) => runtimeProvider(provider)),
+    providers: input.providers.map((provider) =>
+      withModelCallTimeout(provider),
+    ),
   });
 }
 

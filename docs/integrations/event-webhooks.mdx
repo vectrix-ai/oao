@@ -383,9 +383,10 @@ The same setting adds the text of a
 }
 ```
 
-`suggestion` is present only while the run is still its session's latest when
-OAO builds the delivery. If the user already sent another message, the event is
-delivered without it; a receiver that sees a newer run for the session should
+The event is committed with the reply, so it normally arrives in the same
+batch as the run's final `message.created` event. `suggestion` is present only
+while the run is still its session's latest when OAO builds the delivery. If
+the user already sent another message, the event is delivered without it; a receiver that sees a newer run for the session should
 drop any suggestion it holds. Without `includeMessageContent` the event carries
 only `publicPayload`. A webhook subscribed to `run.*` receives the event without
 being reconfigured.

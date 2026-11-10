@@ -19,7 +19,6 @@ import {
   type CreateProjectProviderInput,
   type Fetcher,
 } from "./shared.js";
-import { boundedOutputTokens } from "../output-token-limit.js";
 
 export const ANTHROPIC_PREFIX = "anthropic/";
 const ANTHROPIC_CATALOG_URL = "https://api.anthropic.com/v1";
@@ -179,11 +178,9 @@ function withAnthropicModelGenerationSettings<T extends Provider>(
     const existing = options?.onPayload as
       | ((payload: unknown, model: Model<Api>) => unknown | Promise<unknown>)
       | undefined;
-    // The preset's limit, unless this call carries a lower cap of its own.
-    const maxTokens = boundedOutputTokens(options, settings.maxTokens);
     return {
       ...options,
-      maxTokens,
+      maxTokens: settings.maxTokens,
       onPayload: async (payload: unknown, model: Model<Api>) => {
         const transformed = (await existing?.(payload, model)) ?? payload;
         if (
@@ -195,7 +192,7 @@ function withAnthropicModelGenerationSettings<T extends Provider>(
         const payloadRecord = transformed as Record<string, unknown>;
         return {
           ...payloadRecord,
-          max_tokens: maxTokens,
+          max_tokens: settings.maxTokens,
           thinking: { type: settings.thinking },
           output_config: {
             ...(record(payloadRecord.output_config) ?? {}),

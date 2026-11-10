@@ -2466,13 +2466,13 @@ function AgentEditor({
           defaultCollapsed
           description={
             promptSuggestions
-              ? "After each completed run, the model predicts the user's next message."
+              ? "With each final reply, the model predicts the user's next message."
               : "Runs end with the agent's reply and no suggested next message."
           }
         >
           <CheckboxRow
             label="Suggest the user's next message"
-            description="After a run completes with a reply, makes one extra model call that predicts the message the user is most likely to send next, stores it on the run, and publishes a run.suggestion_created event, so a chat interface can offer it in its empty input. The call reuses the run's prompt cache where the provider caches, is not part of the conversation, and counts towards the session's usage and cost."
+            description="Adds an instruction to the agent's system prompt: end each final reply with one marked line that predicts the message the user is most likely to send next. OAO cuts that line out of the reply, stores it on the run when the run completes, and publishes a run.suggestion_created event with the reply, so a chat interface can offer it in its empty input. It costs a few output tokens per reply and no extra model call."
             checked={promptSuggestions}
             disabled={!isLatest}
             onChange={(event) =>

@@ -131,16 +131,15 @@ OTel SDK -> optional Collector -> configured OTLP backend
     holds, and only while the run is unsettled. A run an agent started, and
     any run it delegates to, keeps only read scopes: it cannot change OAO or
     start or message further runs.
-20. A prompt suggestion is produced after a run has settled, by one model
-    call that the runtime worker sends straight to the provider: the run's
-    last model request, held in worker memory, with the reply and one
-    instruction appended. The call is not a Flue submission or turn, so its
-    instruction and answer never enter Flue's conversation or `oao.messages`,
-    it resolves no sandbox, and it reserves no model turn. Only its usage, on
-    the run's model invocation ledger, and the bounded suggestion text on the
-    run are durable. A suggestion is void once its session has a newer run;
-    storing it locks the run and then its session, the locks and the order
-    that starting or resuming a run takes.
+20. A prompt suggestion is part of the final reply: an agent version that
+    asks for one instructs the model to end its reply with a marked line.
+    Settlement cuts that line out of the reply, and stores its text on the
+    run and appends `run.suggestion_created` in the same transaction that
+    writes the final assistant message and settles the run, so no reader sees
+    a completed run without its suggestion. The line is removed from every
+    assistant message before it is stored and stays only in Flue's
+    conversation. Delegated child sessions are not instructed. A suggestion
+    is void once its session has a newer run.
 
 ## Public run states
 
