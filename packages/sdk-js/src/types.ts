@@ -582,8 +582,19 @@ export interface EventWebhookMessage {
   readonly content: string;
 }
 
+/**
+ * Prompt suggestion text attached to `run.suggestion_created` when the
+ * webhook opts in to message content and the run is still its session's
+ * latest.
+ */
+export interface EventWebhookSuggestion {
+  readonly runId: string;
+  readonly text: string;
+}
+
 export interface EventWebhookEvent extends ProductEvent {
   readonly message?: EventWebhookMessage;
+  readonly suggestion?: EventWebhookSuggestion;
 }
 
 /** The JSON body of every event webhook delivery. */

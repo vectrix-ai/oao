@@ -22,6 +22,8 @@ import {
   loadModelPresetConfiguration,
   parseApprovedModelPresets,
   toOpenRouterRouting,
+  withModelCallTimeout,
+  withOutputTokenLimit,
   withPlatformTurnLimit,
 } from "../src/index.js";
 
@@ -1311,6 +1313,46 @@ test("Anthropic project preset settings reach the Messages API payload", async (
   assert.equal(payload?.max_tokens, 20_000);
   assert.deepEqual(payload?.thinking, { type: "adaptive" });
   assert.deepEqual(payload?.output_config, { effort: "high" });
+
+  // As the runtime calls it: through the call timeout wrapper.
+  const bounded = withModelCallTimeout(provider);
+  const send = async (options: Record<string, unknown>) => {
+    let sent: Record<string, unknown> | undefined;
+    await bounded
+      .streamSimple(
+        model,
+        normalizeContext({
+          messages: [{ role: "user", content: "Say hello.", timestamp: 1 }],
+        }),
+        {
+          apiKey: "sk-ant-settings-test",
+          maxRetries: 0,
+          ...options,
+          fetch: async (_input, init) => {
+            sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
+            return new Response(
+              JSON.stringify({ error: { message: "expected test stop" } }),
+              { status: 503, headers: { "content-type": "application/json" } },
+            );
+          },
+        },
+      )
+      .result();
+    return sent;
+  };
+  // A plain option does not lower the preset's limit.
+  assert.equal((await send({ maxTokens: 512 }))?.max_tokens, 20_000);
+  // An explicit cap does, and leaves the preset's other settings in place.
+  const capped = await send(withOutputTokenLimit({ reasoning: "high" }, 1_024));
+  assert.equal(capped?.max_tokens, 1_024);
+  assert.deepEqual(capped?.thinking, { type: "adaptive" });
+  assert.deepEqual(capped?.output_config, { effort: "high" });
+  // The cap never raises a lower preset limit.
+  assert.equal(
+    (await send(withOutputTokenLimit({}, 50_000)))?.max_tokens,
+    20_000,
+  );
+  assert.throws(() => withOutputTokenLimit({}, 0), RangeError);
 });
 
 test("Anthropic rejects disabled thinking at unsupported Opus 5 effort levels", () => {

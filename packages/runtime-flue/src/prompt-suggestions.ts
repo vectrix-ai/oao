@@ -9,6 +9,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import { RUN_SUGGESTION_MAX_CHARACTERS } from "@oao/contracts";
 import { jsonbSafeText } from "@oao/domain";
+import { withOutputTokenLimit } from "@oao/models-openrouter";
 
 /**
  * The user message appended to a run's last model request to ask for the
@@ -293,8 +294,11 @@ export async function requestPromptSuggestion(
         ],
       },
       {
-        ...captured.options,
-        maxTokens: PROMPT_SUGGESTION_MAX_OUTPUT_TOKENS,
+        // A preset with its own output limit would otherwise keep that limit.
+        ...withOutputTokenLimit(
+          captured.options,
+          PROMPT_SUGGESTION_MAX_OUTPUT_TOKENS,
+        ),
         signal: AbortSignal.any([
           signal,
           AbortSignal.timeout(PROMPT_SUGGESTION_TIMEOUT_MS),
