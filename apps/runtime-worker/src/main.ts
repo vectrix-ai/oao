@@ -101,7 +101,18 @@ export async function startRuntimeWorker(input: {
   readonly runFileDownloadTimeoutMs?: number;
 }): Promise<RuntimeWorkerHandle> {
   const env = input.env ?? process.env;
-  const pool = createPool(input.databaseUrl);
+  const pool = createPool(input.databaseUrl, {
+    onIdleClientError: (error) => {
+      console.error(
+        JSON.stringify({
+          level: "warn",
+          source: "postgres-pool",
+          errorType: error.name,
+          errorMessage: error.message,
+        }),
+      );
+    },
+  });
   await migrate(pool);
   const telemetryStop = await configureVendorNeutralTelemetry({
     pool,
