@@ -61,6 +61,11 @@ interface RunFileInput {
 }
 ```
 
+`dataBase64` is standard padded base64 (RFC 4648) on a single line, exactly as
+`Buffer.toString("base64")` or `btoa` produces it. The API rejects line breaks,
+spaces, missing or extra `=` padding, non-zero padding bits, and the URL-safe
+`-`/`_` alphabet with `400 bad_request`.
+
 `name` is a plain filename, not a path, and must be unique within the message.
 The API normalizes the media type, verifies that known document extensions and
 declared types agree, computes the digest itself, and never accepts a

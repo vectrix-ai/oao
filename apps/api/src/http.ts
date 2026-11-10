@@ -73,6 +73,21 @@ export function requiredString(
   return value;
 }
 
+/**
+ * Decodes padded RFC 4648 base64 and rejects any input that is not the
+ * canonical encoding of its bytes: whitespace, missing or extra padding,
+ * non-zero padding bits, and URL-safe characters, all of which `Buffer`
+ * would otherwise silently accept. The check re-encodes the decoded bytes
+ * instead of matching a regular expression, so its cost is linear and it does
+ * not overflow the regular-expression stack on multi-megabyte input.
+ */
+export function decodeCanonicalBase64(value: string, message: string): Buffer {
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value)
+    throw new HttpApiError("bad_request", message);
+  return bytes;
+}
+
 export function optionalString(
   value: unknown,
   name: string,
