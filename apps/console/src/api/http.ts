@@ -863,6 +863,14 @@ function workspaceFiles(
  * started before OAO recorded them, or a record this console cannot read,
  * map to null so the page hides the section instead of failing.
  */
+/** The latest run's prompt suggestion, when the session read carries one. */
+function sessionSuggestion(value: unknown): SessionDetail["suggestion"] {
+  const suggestion = record(value);
+  const runId = text(suggestion.runId);
+  const suggested = text(suggestion.text);
+  return runId && suggested ? { runId, text: suggested } : null;
+}
+
 function resolvedVersions(value: unknown): SessionVersionResolution | null {
   if (value === null || value === undefined) return null;
   try {
@@ -1206,12 +1214,18 @@ function sessionDetail(
             : {}),
         };
         const state = text(detail.status, "completed");
+        // The extra call after a completed run that predicts the next message.
+        const suggestionCall = text(request.purpose) === "suggestion";
         debugEvents.push({
           id: `debug:${collection}:${text(detail.id, String(index))}`,
           kind: "reasoning",
           source: "activity",
-          title: "Reasoning",
-          summary: harnessActionSummary || thinking || "Model reasoning",
+          title: suggestionCall ? "Prompt suggestion" : "Reasoning",
+          summary: suggestionCall
+            ? response.suggested === true
+              ? "Predicted the user's next message"
+              : "No next message was suggested"
+            : harnessActionSummary || thinking || "Model reasoning",
           createdAt: timing.createdAt,
           durationMs: timing.durationMs,
           status: state.includes("fail")
@@ -1443,6 +1457,7 @@ function sessionDetail(
       };
     }),
     resolvedVersions: resolvedVersions(value.resolvedVersions),
+    suggestion: sessionSuggestion(value.suggestion),
     runs,
     transcript: transcriptRecords,
     pendingWork: Array.isArray(value.pendingWork)

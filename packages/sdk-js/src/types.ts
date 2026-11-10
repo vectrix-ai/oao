@@ -337,6 +337,13 @@ export interface PublishAgentVersionInput {
    * when the run settles.
    */
   readonly publishTextBeforeToolCalls?: boolean;
+  /**
+   * Predict the message the user is most likely to send next after each
+   * completed run, with one extra model call. The prediction is stored on the
+   * run (`Run.suggestion`, `SessionDetail.suggestion`) and announced with a
+   * `run.suggestion_created` event. Off when omitted.
+   */
+  readonly promptSuggestions?: boolean;
   readonly sandbox: SandboxPolicyInput;
   readonly limits: {
     /** Maximum model turns per run, an integer from 1 through 256. Default: 32. */
@@ -737,7 +744,19 @@ export type SessionDetail = Session & {
    * started; null for sessions that started before OAO recorded them.
    */
   readonly resolvedVersions: SessionVersionResolution | null;
+  /**
+   * The predicted next user message of the session's latest run, for agent
+   * versions with `promptSuggestions`. Null when that run has none: it did
+   * not complete, the model had no suggestion, or the call is still running.
+   */
+  readonly suggestion: SessionSuggestion | null;
 };
+
+/** A prompt suggestion and the run it follows. */
+export interface SessionSuggestion {
+  readonly runId: string;
+  readonly text: string;
+}
 
 export interface DelegationMessageResult {
   readonly delegationId: string;

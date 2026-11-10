@@ -960,6 +960,9 @@ function SessionDetailView({
                   status={session.status}
                   pending={messagePending}
                   error={messageError}
+                  {...(session.suggestion
+                    ? { suggestion: session.suggestion.text }
+                    : {})}
                   onSubmit={onSubmitMessage}
                 />
               </section>
@@ -3175,12 +3178,15 @@ function Composer({
   status,
   pending,
   error,
+  suggestion,
   onSubmit,
 }: {
   readonly settled: boolean;
   readonly status: string;
   readonly pending: boolean;
   readonly error: Error | null;
+  /** The predicted next message, offered while the message box is empty. */
+  readonly suggestion?: string;
   readonly onSubmit: (input: {
     readonly message: string;
     readonly files?: readonly RunFileUpload[];
@@ -3256,8 +3262,20 @@ function Composer({
           <Textarea
             name="message"
             rows={3}
-            placeholder="Send a message to the agent"
+            placeholder={suggestion ?? "Send a message to the agent"}
             onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
+              // Tab takes the suggestion into the empty box, where it can
+              // still be edited; it is never sent on its own.
+              if (
+                event.key === "Tab" &&
+                !event.shiftKey &&
+                suggestion &&
+                event.currentTarget.value === ""
+              ) {
+                event.preventDefault();
+                event.currentTarget.value = suggestion;
+                return;
+              }
               if (
                 event.key !== "Enter" ||
                 !event.metaKey ||
@@ -3287,7 +3305,9 @@ function Composer({
         <div className="composer-actions">
           <span className="composer-hint">
             <InfoHint text="A new message starts another durable run on this same thread." />
-            Press ⌘+Enter to send.
+            {suggestion
+              ? "Press Tab to use the suggestion, ⌘+Enter to send."
+              : "Press ⌘+Enter to send."}
           </span>
           <span className="composer-buttons">
             <IconButton

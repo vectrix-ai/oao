@@ -737,6 +737,7 @@ test("client publishes the exact managed-agent configuration contract", async ()
       },
     ],
     publishTextBeforeToolCalls: true,
+    promptSuggestions: true,
     sandbox: {
       enabled: false,
       provider: "daytona-primary",

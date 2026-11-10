@@ -14,6 +14,17 @@ export interface WebhookProductEvent {
   readonly occurredAt: string;
   /** Present only on `message.created` when the webhook opted into message content. */
   readonly message?: WebhookMessage;
+  /**
+   * Present only on `run.suggestion_created` when the webhook opted into
+   * message content and the run is still its session's latest.
+   */
+  readonly suggestion?: WebhookSuggestion;
+}
+
+/** The message a run's agent predicts the user will send next. */
+export interface WebhookSuggestion {
+  readonly runId: string;
+  readonly text: string;
 }
 
 export interface WebhookMessage {

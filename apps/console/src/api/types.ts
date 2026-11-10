@@ -315,6 +315,11 @@ export interface AgentVersionConfig {
    * turn's tool calls run. Off when omitted.
    */
   readonly publishTextBeforeToolCalls?: boolean;
+  /**
+   * Predicts the user's next message after each completed run, with one extra
+   * model call. Off when omitted.
+   */
+  readonly promptSuggestions?: boolean;
   readonly sandbox: {
     readonly enabled: boolean;
     readonly provider: string;
@@ -584,6 +589,11 @@ export interface SessionDetail extends SessionSummary {
    * started; null for sessions that started before OAO recorded them.
    */
   readonly resolvedVersions: SessionVersionResolution | null;
+  /**
+   * The message the agent predicts the user will send next, for the session's
+   * latest run; null when that run has no suggestion.
+   */
+  readonly suggestion: { readonly runId: string; readonly text: string } | null;
   readonly runs?: readonly Readonly<Record<string, unknown>>[];
   readonly transcript?: readonly Readonly<Record<string, unknown>>[];
   readonly pendingWork?: readonly Readonly<Record<string, unknown>>[];

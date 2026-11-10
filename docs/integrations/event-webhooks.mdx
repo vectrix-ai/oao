@@ -362,6 +362,34 @@ before tool calls](/agents/create-agent#publish-text-before-tool-calls) and
 Each event commit wakes the runtime worker, so a published message normally
 leaves OAO within tens of milliseconds; see **Latency** above.
 
+The same setting adds the text of a
+[prompt suggestion](/agents/create-agent#prompt-suggestions) to
+`run.suggestion_created`, as a `suggestion` object beside `publicPayload`:
+
+```json
+{
+  "id": "a41c…",
+  "aggregateType": "run",
+  "aggregateId": "0d6f…",
+  "aggregateSequence": 12,
+  "projectPosition": "151",
+  "kind": "run.suggestion_created",
+  "publicPayload": { "sessionId": "5b0e…" },
+  "occurredAt": "2026-09-29T12:00:04.912Z",
+  "suggestion": {
+    "runId": "0d6f…",
+    "text": "Book the 10:00 delivery slot for ORD-1592"
+  }
+}
+```
+
+`suggestion` is present only while the run is still its session's latest when
+OAO builds the delivery. If the user already sent another message, the event is
+delivered without it; a receiver that sees a newer run for the session should
+drop any suggestion it holds. Without `includeMessageContent` the event carries
+only `publicPayload`. A webhook subscribed to `run.*` receives the event without
+being reconfigured.
+
 <Warning>
   Message content leaves OAO in every delivery. Enable it only for receivers you
   control. Tool arguments, tool results, provider reasoning, and file bytes are

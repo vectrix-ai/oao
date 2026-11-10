@@ -1073,3 +1073,30 @@ test("model preset prices are append-only, tenant-scoped rows that leave only wi
   );
   assert.doesNotMatch(sql, /GRANT[^;]*UPDATE[^;]*model_preset_prices/su);
 });
+
+test("prompt suggestions are an optional boolean on agent versions and bounded text on completed runs", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0064_prompt_suggestions.sql", import.meta.url),
+    "utf8",
+  );
+  // The new validator wraps the previous one, which never sees the new key.
+  assert.match(
+    sql,
+    /RENAME TO is_valid_agent_publication_config_without_prompt_suggestions/u,
+  );
+  assert.match(
+    sql,
+    /jsonb_typeof\(p_config->'promptSuggestions'\) IS DISTINCT FROM 'boolean'/u,
+  );
+  assert.match(sql, /p_config - 'promptSuggestions'/u);
+  assert.match(sql, /ALTER TABLE oao\.runs ADD COLUMN suggestion text/u);
+  assert.match(sql, /char_length\(suggestion\) BETWEEN 1 AND 500/u);
+  assert.match(sql, /suggestion IS NULL OR state = 'completed'/u);
+  // A newer run in the same thread voids the suggestion on every read.
+  assert.match(sql, /CREATE FUNCTION oao\.current_run_suggestion/u);
+  assert.match(
+    sql,
+    /\(newer\.created_at, newer\.id\) > \(p_run\.created_at, p_run\.id\)/u,
+  );
+  assert.doesNotMatch(sql, /DROP TABLE|DROP FUNCTION|UPDATE oao\./u);
+});

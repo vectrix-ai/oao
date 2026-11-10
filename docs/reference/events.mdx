@@ -91,6 +91,33 @@ explains that the provider's content filter stopped the response and OAO could
 not treat the partial output as a completed reply. These payloads never include
 prompt or response content, raw provider error messages, or credentials.
 
+## Prompt suggestion events
+
+An agent version with
+[prompt suggestions](/agents/create-agent#prompt-suggestions) appends
+`run.suggestion_created` shortly after a run of that agent completes, once the
+model has predicted the user's next message:
+
+```json
+{
+  "aggregateType": "run",
+  "aggregateId": "0d6f1c0e-5a35-4c53-9d0b-6a5f1f0f3a11",
+  "kind": "run.suggestion_created",
+  "publicPayload": { "sessionId": "5b0e3f6a-2f39-4d0e-8a57-7a2a4b1c9d02" }
+}
+```
+
+`aggregateId` is the run. The event carries no text: read `suggestion` from
+`GET /runs/{runId}` or `GET /sessions/{sessionId}`. It always follows the run's
+`run.state_changed` event with `state: "completed"`, and it is absent when the
+run has no suggestion. A suggestion is void once its session has a newer run,
+so ignore the event unless its run is still the session's latest. Because the
+kind is in the `run.` family, a webhook subscribed to `run.*` receives it.
+
+The model call behind the suggestion emits no `model.invocation_*` events. It
+is listed with the run's other model calls in `debug.modelInvocations`, with
+`safeRequest.purpose` set to `suggestion`.
+
 ## Harness Operation events
 
 The runtime emits `harness.operation_started`,

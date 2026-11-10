@@ -7988,7 +7988,8 @@ function registerRunRoutes(
       ];
       const runs = await tx.query(
         `SELECT id,thread_id,session_id,agent_version_id,state,cancellation_requested_at,
-                    admitted_at,settled_at,created_at,updated_at
+                    admitted_at,settled_at,oao.current_run_suggestion(runs) AS suggestion,
+                    created_at,updated_at
              FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND session_id=$3
              ORDER BY created_at,id`,
         values,
@@ -8166,8 +8167,14 @@ function registerRunRoutes(
           WHERE organization_id=$1 AND project_id=$2 AND session_id=$3`,
         values,
       );
+      // Only the session's latest run can hold a suggestion that still applies.
+      const latestRun = runs.rows.at(-1) as
+        { readonly id: string; readonly suggestion: string | null } | undefined;
       return c.json({
         ...session,
+        suggestion: latestRun?.suggestion
+          ? { runId: latestRun.id, text: latestRun.suggestion }
+          : null,
         skills: rows(skills),
         // The exact versions this session tree runs; null for sessions that
         // started before versions were recorded.
@@ -8769,7 +8776,8 @@ function registerRunRoutes(
         3,
       );
       const result = await tx.query(
-        `SELECT id,organization_id,project_id,thread_id,session_id,agent_version_id,created_by_principal_id,state,cancellation_requested_at,admitted_at,settled_at,created_at,updated_at
+        `SELECT id,organization_id,project_id,thread_id,session_id,agent_version_id,created_by_principal_id,state,cancellation_requested_at,admitted_at,settled_at,
+                oao.current_run_suggestion(runs) AS suggestion,created_at,updated_at
          FROM oao.runs WHERE organization_id=$1 AND project_id=$2${condition.sql}
          ORDER BY created_at DESC,id DESC LIMIT $${3 + condition.values.length}`,
         [actor.organizationId, actor.projectId, ...condition.values, limit + 1],
@@ -8782,7 +8790,8 @@ function registerRunRoutes(
     const actor = assertProject(c);
     return dependencies.store.transaction(actor, "run:read", async (tx) => {
       const result = await tx.query(
-        `SELECT id,organization_id,project_id,thread_id,session_id,agent_version_id,created_by_principal_id,state,cancellation_requested_at,admitted_at,settled_at,created_at,updated_at
+        `SELECT id,organization_id,project_id,thread_id,session_id,agent_version_id,created_by_principal_id,state,cancellation_requested_at,admitted_at,settled_at,
+                oao.current_run_suggestion(runs) AS suggestion,created_at,updated_at
          FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
         [actor.organizationId, actor.projectId, c.req.param("runId")],
       );

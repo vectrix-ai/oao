@@ -273,6 +273,8 @@ const agentsSeed: AgentDetail[] = [
             "Extract verifiable facts from provided documents. Cite the source page. Do not infer missing values.",
           modelPreset: "claude-sonnet-4-6-zdr-v1",
           tools: [],
+          // Its completed session shows the suggested next message.
+          promptSuggestions: true,
         },
       },
     ],
@@ -425,6 +427,7 @@ const sessionsSeed: SessionDetail[] = [
     ],
     delegations: [],
     resolvedVersions: null,
+    suggestion: null,
     capabilities: { canCancel: true, canResume: false, canBranchReplay: false },
     events: [
       {
@@ -772,6 +775,11 @@ const sessionsSeed: SessionDetail[] = [
     skills: [],
     delegations: [],
     resolvedVersions: null,
+    // Its agent version has prompt suggestions on; the composer offers this.
+    suggestion: {
+      runId: "run_01J5PDS4BR20P60BMSAT00W8PV",
+      text: "Show me the two agreements with ambiguous renewal dates",
+    },
     capabilities: { canCancel: false, canResume: false, canBranchReplay: true },
     events: [
       {
@@ -841,6 +849,7 @@ const sessionsSeed: SessionDetail[] = [
     skills: [],
     delegations: [],
     resolvedVersions: null,
+    suggestion: null,
     capabilities: { canCancel: false, canResume: true, canBranchReplay: true },
     events: [
       {
@@ -2890,6 +2899,7 @@ export class DemoConsoleApi implements ConsoleApi {
       tools: sessionTools(rootVersion.config),
       delegations: [],
       resolvedVersions,
+      suggestion: null,
       events: [
         {
           id: messageId,
@@ -2951,6 +2961,8 @@ export class DemoConsoleApi implements ConsoleApi {
       startedAt: now,
       completedAt: null,
       lastActivityAt: now,
+      // A newer run voids the previous run's suggestion.
+      suggestion: null,
       events: [
         ...session.events,
         {

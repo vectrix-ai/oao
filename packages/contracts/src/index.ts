@@ -1024,6 +1024,16 @@ export const RunStateSchema = v.picklist([
   "timed_out",
 ]);
 
+/** The longest prompt suggestion OAO stores, in characters. */
+export const RUN_SUGGESTION_MAX_CHARACTERS = 500;
+
+/** The message a run's agent predicts the user will send next. */
+export const RunSuggestionTextSchema = v.pipe(
+  v.string(),
+  v.minLength(1),
+  v.maxLength(RUN_SUGGESTION_MAX_CHARACTERS),
+);
+
 export const RunSchema = v.object({
   id: IdSchema,
   organizationId: IdSchema,
@@ -1035,6 +1045,13 @@ export const RunSchema = v.object({
   state: RunStateSchema,
   cancellationRequestedAt: v.nullable(TimestampSchema),
   admittedAt: v.nullable(TimestampSchema),
+  /**
+   * The predicted next user message, for agent versions with
+   * `promptSuggestions`. Null when the run has none and once the session has
+   * a newer run. Absent only from responses stored before OAO had the field,
+   * which an idempotent retry can replay.
+   */
+  suggestion: v.optional(v.nullable(RunSuggestionTextSchema)),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
 });
@@ -1237,6 +1254,7 @@ export const ProductEventKindSchema = v.picklist([
   "run.created",
   "run.state_changed",
   "run.cancellation_requested",
+  "run.suggestion_created",
   "message.created",
   "tool_call.requested",
   "tool_call.claimed",
@@ -1865,6 +1883,18 @@ export const ManagedAgentPublishTextSchema = v.pipe(
   ),
 );
 
+/**
+ * When true, OAO predicts the user's next message after each completed run of
+ * the agent with one extra model call, stores it on the run, and publishes a
+ * `run.suggestion_created` event.
+ */
+export const ManagedAgentPromptSuggestionsSchema = v.pipe(
+  v.boolean(),
+  v.description(
+    "Predict the user's next message after each completed run, with one extra model call, and publish it as a run.suggestion_created event. Off when omitted.",
+  ),
+);
+
 function delegateTarget(
   delegate: v.InferOutput<typeof ManagedAgentDelegateSchema>,
 ): string {
@@ -1954,6 +1984,7 @@ export const ManagedAgentPublicationConfigSchema = v.pipe(
     oaoTools: v.optional(ManagedAgentOaoToolsSchema),
     // Optional without a default, so existing configs keep their shape.
     publishTextBeforeToolCalls: v.optional(ManagedAgentPublishTextSchema),
+    promptSuggestions: v.optional(ManagedAgentPromptSuggestionsSchema),
     sandbox: v.strictObject({
       enabled: v.boolean(),
       provider: ProjectSandboxProviderKeySchema,
@@ -2014,6 +2045,7 @@ export const ManagedAgentSnapshotSchema = v.strictObject({
   delegates: v.optional(ManagedAgentResolvedDelegatesSchema, []),
   oaoTools: v.optional(ManagedAgentOaoToolsSchema),
   publishTextBeforeToolCalls: v.optional(ManagedAgentPublishTextSchema),
+  promptSuggestions: v.optional(ManagedAgentPromptSuggestionsSchema),
   sandbox: v.strictObject({
     enabled: v.boolean(),
     provider: v.optional(LegacySandboxProviderKeySchema, "local-fake"),

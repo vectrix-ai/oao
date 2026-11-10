@@ -4224,6 +4224,84 @@ describe("management console", () => {
     ).toBeUndefined();
   });
 
+  it("publishes an agent version that suggests the user's next message", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const agentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    renderConsole(`/agents/${agentId}`, api);
+    await user.click(
+      await screen.findByRole("button", { name: "Prompt suggestions" }),
+    );
+    expect(screen.getByText(/no suggested next message/u)).toBeInTheDocument();
+    const setting = screen.getByRole("checkbox", {
+      name: /^Suggest the user's next message/u,
+    });
+    // Off unless an agent version turns it on.
+    expect(setting).not.toBeChecked();
+    await user.click(setting);
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 4")).toBeInTheDocument();
+    const published = await api.getAgent(agentId);
+    expect(published.versions[0]?.config.promptSuggestions).toBe(true);
+    // The previous version keeps its config without the setting.
+    expect(published.versions[1]?.config.promptSuggestions).toBeUndefined();
+
+    // Turning it off leaves the setting out of the next version.
+    await user.click(
+      screen.getByRole("button", { name: "Prompt suggestions" }),
+    );
+    expect(
+      screen.getByText(/the model predicts the user's next message/u),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: /^Suggest the user's next message/u,
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Publish new version" }),
+    );
+    expect(await screen.findByText("Version 5")).toBeInTheDocument();
+    expect(
+      (await api.getAgent(agentId)).versions[0]?.config.promptSuggestions,
+    ).toBeUndefined();
+  });
+
+  it("offers a run's prompt suggestion in the empty composer and takes it with Tab", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const suggestion =
+      "Show me the two agreements with ambiguous renewal dates";
+    renderConsole("/sessions/session_01J5PDRS7WZTP4H3F6M2A9B8CX", api);
+    const message = await screen.findByLabelText("Message");
+    // The suggestion stands in the empty box; it is not its value.
+    expect(message).toHaveAttribute("placeholder", suggestion);
+    expect(message).toHaveValue("");
+    expect(
+      screen.getByText(/Press Tab to use the suggestion/u),
+    ).toBeInTheDocument();
+    await user.click(message);
+    await user.keyboard("{Tab}");
+    expect(message).toHaveValue(suggestion);
+    expect(message).toHaveFocus();
+    // The accepted text can still be edited, and Tab now moves on as usual.
+    await user.type(message, ", please");
+    expect(message).toHaveValue(`${suggestion}, please`);
+    await user.keyboard("{Tab}");
+    expect(message).not.toHaveFocus();
+    // A session whose latest run has no suggestion keeps the plain box.
+    expect(
+      (await api.getSession("session_01J5NZ9MZW5F2XVZ6QAYXG1C7E")).suggestion,
+    ).toBeNull();
+    // Sending the next message starts a newer run, which voids the suggestion.
+    const sent = await api.submitMessage("session_01J5PDRS7WZTP4H3F6M2A9B8CX", {
+      message: "Something else",
+    });
+    expect(sent.suggestion).toBeNull();
+  });
+
   it("adds, edits, and removes one tool through the modal editor", async () => {
     const user = userEvent.setup();
     renderConsole(

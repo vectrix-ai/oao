@@ -1682,6 +1682,76 @@ describe("HTTP console adapter", () => {
     ).toBeNull();
   });
 
+  it("maps the latest run's prompt suggestion and labels the call that made it", async () => {
+    const runId = "88888888-8888-4888-8888-888888888881";
+    const base = {
+      title: "Suggested",
+      status: "completed",
+      agentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentName: "Support operator",
+      agentVersion: 4,
+      createdAt: "2026-08-20T10:00:00.000Z",
+      lastActivityAt: "2026-08-20T10:00:05.000Z",
+      runs: [],
+      transcript: [],
+      timeline: [],
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          id: "77777777-7777-4777-8777-77777777777c",
+          suggestion: { runId, text: "Release ORD-1592 to the carrier" },
+          debug: {
+            modelInvocations: [
+              {
+                id: "99999999-9999-4999-8999-999999999991",
+                runId,
+                attempt: 2,
+                modelKey: "openai/gpt-5.5",
+                status: "completed",
+                inputTokens: 40,
+                outputTokens: 12,
+                cacheReadTokens: 9_000,
+                cacheWriteTokens: 0,
+                costMicrounits: 900,
+                safeRequest: { purpose: "suggestion" },
+                safeResponse: { finishReason: "stop", suggested: true },
+                startedAt: "2026-08-20T10:00:05.000Z",
+                completedAt: "2026-08-20T10:00:06.000Z",
+              },
+            ],
+          },
+        }),
+      )
+      // A session read from before the field existed, or without a suggestion.
+      .mockResolvedValueOnce(
+        jsonResponse({ ...base, id: "77777777-7777-4777-8777-77777777777d" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+
+    const suggested = await api.getSession(
+      "77777777-7777-4777-8777-77777777777c",
+    );
+    expect(suggested.suggestion).toEqual({
+      runId,
+      text: "Release ORD-1592 to the carrier",
+    });
+    expect(suggested.events).toContainEqual(
+      expect.objectContaining({
+        title: "Prompt suggestion",
+        summary: "Predicted the user's next message",
+        tokens: expect.objectContaining({ cacheRead: 9_000 }),
+      }),
+    );
+    expect(
+      (await api.getSession("77777777-7777-4777-8777-77777777777d")).suggestion,
+    ).toBeNull();
+  });
+
   it("orders ordinary session activity chronologically and treats a running sandbox as ready", async () => {
     const runId = "88888888-8888-4888-8888-888888888880";
     const session = {
