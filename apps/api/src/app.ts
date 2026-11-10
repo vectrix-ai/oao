@@ -100,6 +100,7 @@ import {
   resolveSessionVersions,
 } from "./version-resolution.js";
 import {
+  decodeCanonicalBase64,
   decodeListCursor,
   encodeListCursor,
   idempotencyKey,
@@ -552,16 +553,10 @@ function parseRunFiles(value: unknown): ParsedRunFile[] {
       "files[].dataBase64",
       Math.ceil((MAX_RUN_FILE_BYTES * 4) / 3) + 8,
     );
-    if (
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(
-        dataBase64,
-      )
-    )
-      throw new HttpApiError(
-        "bad_request",
-        "File data must be canonical base64",
-      );
-    const bytes = Buffer.from(dataBase64, "base64");
+    const bytes = decodeCanonicalBase64(
+      dataBase64,
+      "File data must be canonical base64",
+    );
     if (bytes.byteLength < 1 || bytes.byteLength > MAX_RUN_FILE_BYTES)
       throw new HttpApiError(
         "bad_request",
@@ -1036,16 +1031,10 @@ function parseSkillVersionInput(
       "files[].dataBase64",
       Math.ceil((MAX_SKILL_FILE_BYTES * 4) / 3) + 8,
     );
-    if (
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(
-        dataBase64,
-      )
-    )
-      throw new HttpApiError(
-        "bad_request",
-        "Skill file data must be canonical base64",
-      );
-    const bytes = Buffer.from(dataBase64, "base64");
+    const bytes = decodeCanonicalBase64(
+      dataBase64,
+      "Skill file data must be canonical base64",
+    );
     if (bytes.byteLength < 1 || bytes.byteLength > MAX_SKILL_FILE_BYTES)
       throw new HttpApiError(
         "bad_request",
@@ -1202,13 +1191,10 @@ function parseMarkdownSkillDraftFile(
     "dataBase64",
     Math.ceil((MAX_SKILL_FILE_BYTES * 4) / 3) + 8,
   );
-  if (
-    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(
-      dataBase64,
-    )
-  )
-    throw new HttpApiError("bad_request", "File data must be canonical base64");
-  const bytes = Buffer.from(dataBase64, "base64");
+  const bytes = decodeCanonicalBase64(
+    dataBase64,
+    "File data must be canonical base64",
+  );
   if (bytes.byteLength < 1 || bytes.byteLength > MAX_SKILL_FILE_BYTES)
     throw new HttpApiError(
       "bad_request",
