@@ -130,6 +130,50 @@ test("run and event public contracts accept safe wire representations", () => {
     }).state,
     "queued",
   );
+  const completedRun = {
+    id,
+    organizationId: id,
+    projectId: id,
+    threadId: id,
+    sessionId: id,
+    agentVersionId: id,
+    createdByPrincipalId: id,
+    state: "completed",
+    cancellationRequestedAt: null,
+    admittedAt: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  // A run without a prompt suggestion reads as null; a response stored by an
+  // older release has no field at all.
+  assert.equal(v.parse(RunSchema, completedRun).suggestion, undefined);
+  assert.equal(
+    v.parse(RunSchema, { ...completedRun, suggestion: null }).suggestion,
+    null,
+  );
+  assert.equal(
+    v.parse(RunSchema, { ...completedRun, suggestion: "Release ORD-1592" })
+      .suggestion,
+    "Release ORD-1592",
+  );
+  assert.throws(() =>
+    v.parse(RunSchema, { ...completedRun, suggestion: "x".repeat(501) }),
+  );
+  assert.equal(
+    v.parse(ProductEventSchema, {
+      id,
+      organizationId: id,
+      projectId: id,
+      aggregateType: "run",
+      aggregateId: id,
+      aggregateSequence: 9,
+      projectPosition: "12",
+      kind: "run.suggestion_created",
+      publicPayload: { sessionId: id },
+      occurredAt: timestamp,
+    }).kind,
+    "run.suggestion_created",
+  );
   assert.equal(
     v.parse(ProductEventSchema, {
       id,
@@ -225,6 +269,22 @@ test("sandbox publication and Daytona connections expose only safe policy", () =
     "browser",
   ]);
   assert.equal(config.sandbox.snapshotId, id);
+  // Prompt suggestions are off unless a version turns them on, and a config
+  // without the setting keeps its shape.
+  assert.ok(!("promptSuggestions" in config));
+  assert.equal(
+    parseManagedAgentSnapshotForPublication({
+      ...config,
+      promptSuggestions: true,
+    }).promptSuggestions,
+    true,
+  );
+  assert.throws(() =>
+    parseManagedAgentSnapshotForPublication({
+      ...config,
+      promptSuggestions: "yes",
+    }),
+  );
   assert.throws(() =>
     parseManagedAgentSnapshotForPublication({
       ...config,

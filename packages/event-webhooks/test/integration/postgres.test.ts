@@ -575,6 +575,105 @@ test(
           );
         },
       );
+
+      await t.test(
+        "suggestion events attach the text only with message content, while the run is the latest",
+        async () => {
+          const suggestedThread = randomUUID();
+          const suggestedSession = randomUUID();
+          const suggestedRun = randomUUID();
+          await admin.query(
+            "INSERT INTO oao.threads (organization_id,project_id,id,title) VALUES ($1,$2,$3,'Suggested')",
+            [organization, projectA, suggestedThread],
+          );
+          await admin.query(
+            "INSERT INTO oao.sessions (organization_id,project_id,id,thread_id,agent_version_id) VALUES ($1,$2,$3,$4,$5)",
+            [
+              organization,
+              projectA,
+              suggestedSession,
+              suggestedThread,
+              version,
+            ],
+          );
+          const insertRun = (id: string, key: string) =>
+            admin.query(
+              `INSERT INTO oao.runs (organization_id,project_id,id,thread_id,session_id,agent_version_id,created_by_principal_id,idempotency_key)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+              [
+                organization,
+                projectA,
+                id,
+                suggestedThread,
+                suggestedSession,
+                version,
+                principal,
+                key,
+              ],
+            );
+          await insertRun(suggestedRun, "hooks-suggested-run");
+          // A suggestion belongs to a completed run.
+          await assert.rejects(
+            admin.query(
+              "UPDATE oao.runs SET suggestion='Too early' WHERE id=$1",
+              [suggestedRun],
+            ),
+            /runs_suggestion_completed/u,
+          );
+          for (const state of ["running", "completed"])
+            await admin.query("UPDATE oao.runs SET state=$2 WHERE id=$1", [
+              suggestedRun,
+              state,
+            ]);
+          await admin.query(
+            "UPDATE oao.runs SET suggestion='Book the 10:00 slot for ORD-1592' WHERE id=$1",
+            [suggestedRun],
+          );
+          const latest = await admin.query<{ position: string }>(
+            "SELECT COALESCE(MAX(project_position),0)::text AS position FROM oao.product_events WHERE organization_id=$1 AND project_id=$2",
+            [organization, projectA],
+          );
+          const deliveredPosition = BigInt(latest.rows[0]?.position ?? "0");
+          await append(tenantA, "run.suggestion_created", "run", suggestedRun, {
+            sessionId: suggestedSession,
+          });
+          const loadSuggestion = async (includeMessageContent: boolean) => {
+            const webhook = await insertWebhook(tenantA, {
+              includeMessageContent,
+              // The family wildcard existing receivers already subscribe to.
+              eventKinds: ["run.*"],
+              deliveredPosition,
+            });
+            const work = await store.load(
+              await claimFor(webhook),
+              "worker-a",
+              100,
+            );
+            assert.ok(work);
+            assert.deepEqual(
+              work.events.map((event: WebhookProductEvent) => event.kind),
+              ["run.suggestion_created"],
+            );
+            await admin.query("DELETE FROM oao.event_webhooks WHERE id=$1", [
+              webhook,
+            ]);
+            return work.events[0];
+          };
+          assert.deepEqual((await loadSuggestion(true))?.suggestion, {
+            runId: suggestedRun,
+            text: "Book the 10:00 slot for ORD-1592",
+          });
+          // Without the opt-in the event names the run and carries no text.
+          const plain = await loadSuggestion(false);
+          assert.equal(plain?.suggestion, undefined);
+          assert.deepEqual(plain?.publicPayload, {
+            sessionId: suggestedSession,
+          });
+          // A newer run in the session voids the suggestion.
+          await insertRun(randomUUID(), "hooks-suggested-next-run");
+          assert.equal((await loadSuggestion(true))?.suggestion, undefined);
+        },
+      );
     } finally {
       await admin
         .query("DELETE FROM oao.organizations WHERE id=$1", [organization])

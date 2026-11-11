@@ -118,7 +118,7 @@ const SkillVersion = {
 const AgentConfig = v.pipe(
   ManagedAgentPublicationConfigSchema,
   v.description(
-    "The immutable agent version: system prompt, model preset key, tools, Skills, MCP bindings, delegates, sandbox, limits, and whether to publish each turn's text before its tool calls (publishTextBeforeToolCalls). A delegate pins agentVersionId or follows agentId; skillVersionIds pins Skill versions and skillIds follows Skills. Followed links resolve to the latest published version when a session starts.",
+    "The immutable agent version: system prompt, model preset key, tools, Skills, MCP bindings, delegates, sandbox, limits, whether to publish each turn's text before its tool calls (publishTextBeforeToolCalls), and whether to predict the user's next message after each completed run (promptSuggestions). A delegate pins agentVersionId or follows agentId; skillVersionIds pins Skill versions and skillIds follows Skills. Followed links resolve to the latest published version when a session starts.",
   ),
 );
 

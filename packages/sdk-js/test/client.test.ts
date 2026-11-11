@@ -8,7 +8,7 @@ import {
   parseEventStream,
   verifyEventWebhookSignature,
 } from "../src/index.ts";
-import type { ConfigurationBackup } from "../src/index.ts";
+import type { ConfigurationBackup, EventWebhookEvent } from "../src/index.ts";
 
 test("route builders scope resources to a project and allow a custom prefix", () => {
   const routes = createRoutes("/platform/v2/");
@@ -737,6 +737,7 @@ test("client publishes the exact managed-agent configuration contract", async ()
       },
     ],
     publishTextBeforeToolCalls: true,
+    promptSuggestions: true,
     sandbox: {
       enabled: false,
       provider: "daytona-primary",
@@ -1362,4 +1363,25 @@ test("price writes require an idempotency key", async () => {
       { idempotencyKey: "" },
     ),
   );
+});
+
+test("an event webhook event types its attached message and prompt suggestion", () => {
+  const event: EventWebhookEvent = {
+    id: "11111111-1111-4111-8111-111111111111",
+    organizationId: "22222222-2222-4222-8222-222222222222",
+    projectId: "33333333-3333-4333-8333-333333333333",
+    aggregateType: "run",
+    aggregateId: "44444444-4444-4444-8444-444444444444",
+    aggregateSequence: 12,
+    projectPosition: "151",
+    kind: "run.suggestion_created",
+    publicPayload: { sessionId: "55555555-5555-4555-8555-555555555555" },
+    occurredAt: "2026-09-29T12:00:04.912Z",
+    suggestion: {
+      runId: "44444444-4444-4444-8444-444444444444",
+      text: "Book the 10:00 delivery slot for ORD-1592",
+    },
+  };
+  assert.equal(event.suggestion?.runId, event.aggregateId);
+  assert.equal(event.message, undefined);
 });

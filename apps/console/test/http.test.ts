@@ -1682,6 +1682,49 @@ describe("HTTP console adapter", () => {
     ).toBeNull();
   });
 
+  it("maps the latest run's prompt suggestion, and null without one", async () => {
+    const runId = "88888888-8888-4888-8888-888888888881";
+    const base = {
+      title: "Suggested",
+      status: "completed",
+      agentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      agentName: "Support operator",
+      agentVersion: 4,
+      createdAt: "2026-08-20T10:00:00.000Z",
+      lastActivityAt: "2026-08-20T10:00:05.000Z",
+      runs: [],
+      transcript: [],
+      timeline: [],
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          id: "77777777-7777-4777-8777-77777777777c",
+          suggestion: { runId, text: "Release ORD-1592 to the carrier" },
+        }),
+      )
+      // A session read from before the field existed, or without a suggestion.
+      .mockResolvedValueOnce(
+        jsonResponse({ ...base, id: "77777777-7777-4777-8777-77777777777d" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+
+    const suggested = await api.getSession(
+      "77777777-7777-4777-8777-77777777777c",
+    );
+    expect(suggested.suggestion).toEqual({
+      runId,
+      text: "Release ORD-1592 to the carrier",
+    });
+    expect(
+      (await api.getSession("77777777-7777-4777-8777-77777777777d")).suggestion,
+    ).toBeNull();
+  });
+
   it("orders ordinary session activity chronologically and treats a running sandbox as ready", async () => {
     const runId = "88888888-8888-4888-8888-888888888880";
     const session = {

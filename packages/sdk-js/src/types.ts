@@ -337,6 +337,14 @@ export interface PublishAgentVersionInput {
    * when the run settles.
    */
   readonly publishTextBeforeToolCalls?: boolean;
+  /**
+   * Have the agent predict the message the user is most likely to send next
+   * with each final reply. OAO instructs the model to end its reply with a
+   * marked line, cuts that line out, stores it on the run when the run
+   * completes (`Run.suggestion`, `SessionDetail.suggestion`), and announces
+   * it with a `run.suggestion_created` event. Off when omitted.
+   */
+  readonly promptSuggestions?: boolean;
   readonly sandbox: SandboxPolicyInput;
   readonly limits: {
     /** Maximum model turns per run, an integer from 1 through 256. Default: 32. */
@@ -575,8 +583,19 @@ export interface EventWebhookMessage {
   readonly content: string;
 }
 
+/**
+ * Prompt suggestion text attached to `run.suggestion_created` when the
+ * webhook opts in to message content and the run is still its session's
+ * latest.
+ */
+export interface EventWebhookSuggestion {
+  readonly runId: string;
+  readonly text: string;
+}
+
 export interface EventWebhookEvent extends ProductEvent {
   readonly message?: EventWebhookMessage;
+  readonly suggestion?: EventWebhookSuggestion;
 }
 
 /** The JSON body of every event webhook delivery. */
@@ -737,7 +756,19 @@ export type SessionDetail = Session & {
    * started; null for sessions that started before OAO recorded them.
    */
   readonly resolvedVersions: SessionVersionResolution | null;
+  /**
+   * The predicted next user message of the session's latest run, for agent
+   * versions with `promptSuggestions`. Null when that run has none: it did
+   * not complete or the model wrote no suggestion.
+   */
+  readonly suggestion: SessionSuggestion | null;
 };
+
+/** A prompt suggestion and the run it follows. */
+export interface SessionSuggestion {
+  readonly runId: string;
+  readonly text: string;
+}
 
 export interface DelegationMessageResult {
   readonly delegationId: string;

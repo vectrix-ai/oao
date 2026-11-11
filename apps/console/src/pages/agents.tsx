@@ -284,8 +284,8 @@ function isLinkedDelegate(
 }
 
 /**
- * A config without followed Skills or the text publication setting, so the
- * editor's own values replace them.
+ * A config without followed Skills, the text publication setting, or the
+ * prompt suggestion setting, so the editor's own values replace them.
  */
 function withoutFollowedSkills(config: AgentVersionConfig): AgentVersionConfig {
   const copy: { -readonly [Key in keyof AgentVersionConfig]?: unknown } = {
@@ -293,6 +293,7 @@ function withoutFollowedSkills(config: AgentVersionConfig): AgentVersionConfig {
   };
   delete copy.skillIds;
   delete copy.publishTextBeforeToolCalls;
+  delete copy.promptSuggestions;
   return copy as AgentVersionConfig;
 }
 
@@ -1282,6 +1283,9 @@ function AgentEditor({
   const [publishText, setPublishText] = useState(
     baseConfig.publishTextBeforeToolCalls === true,
   );
+  const [promptSuggestions, setPromptSuggestions] = useState(
+    baseConfig.promptSuggestions === true,
+  );
   const [tools, setTools] = useState<readonly ToolDefinition[]>(
     baseConfig.tools,
   );
@@ -1324,6 +1328,7 @@ function AgentEditor({
     setDelegates(next.config.delegates ?? []);
     setOaoTools(next.config.oaoTools);
     setPublishText(next.config.publishTextBeforeToolCalls === true);
+    setPromptSuggestions(next.config.promptSuggestions === true);
     setTools(next.config.tools);
     setHarnessOperations(next.config.harnessOperations ?? []);
   };
@@ -1341,6 +1346,7 @@ function AgentEditor({
     ...(oaoTools ? { oaoTools } : {}),
     // Omitted when off, so existing configs keep their shape.
     ...(publishText ? { publishTextBeforeToolCalls: true } : {}),
+    ...(promptSuggestions ? { promptSuggestions: true } : {}),
     sandbox: {
       enabled: sandboxEnabled,
       provider: sandboxProvider,
@@ -2452,6 +2458,26 @@ function AgentEditor({
             checked={publishText}
             disabled={!isLatest}
             onChange={(event) => setPublishText(event.currentTarget.checked)}
+          />
+        </Panel>
+        <Panel
+          title="Prompt suggestions"
+          collapsible
+          defaultCollapsed
+          description={
+            promptSuggestions
+              ? "With each final reply, the model predicts the user's next message."
+              : "Runs end with the agent's reply and no suggested next message."
+          }
+        >
+          <CheckboxRow
+            label="Suggest the user's next message"
+            description="Adds an instruction to the agent's system prompt: end each final reply with one marked line that predicts the message the user is most likely to send next. OAO cuts that line out of the reply, stores it on the run when the run completes, and publishes a run.suggestion_created event with the reply, so a chat interface can offer it in its empty input. It costs a few output tokens per reply and no extra model call."
+            checked={promptSuggestions}
+            disabled={!isLatest}
+            onChange={(event) =>
+              setPromptSuggestions(event.currentTarget.checked)
+            }
           />
         </Panel>
         <Panel

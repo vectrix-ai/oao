@@ -149,6 +149,45 @@ async function attachMessages(
   });
 }
 
+/**
+ * Attaches the suggestion text to `run.suggestion_created` events, under the
+ * same opt-in as message text. A suggestion is void once its session has a
+ * newer run, so such an event is delivered without text.
+ */
+async function attachSuggestions(
+  transaction: PgClient,
+  claim: ClaimedEventWebhook,
+  events: WebhookProductEvent[],
+): Promise<WebhookProductEvent[]> {
+  const runIds = new Set<string>();
+  for (const event of events)
+    if (
+      event.kind === "run.suggestion_created" &&
+      event.aggregateType === "run" &&
+      UUID.test(event.aggregateId)
+    )
+      runIds.add(event.aggregateId);
+  if (runIds.size === 0) return events;
+  const result = await transaction.query(
+    `SELECT run.id,oao.current_run_suggestion(run) AS suggestion FROM oao.runs run
+      WHERE run.organization_id=$1 AND run.project_id=$2 AND run.id=ANY($3::uuid[])`,
+    [claim.organizationId, claim.projectId, [...runIds]],
+  );
+  const byRun = new Map<string, string>();
+  for (const row of result.rows as {
+    id: string;
+    suggestion: string | null;
+  }[])
+    if (row.suggestion) byRun.set(row.id, row.suggestion);
+  return events.map((event) => {
+    if (event.kind !== "run.suggestion_created") return event;
+    const text = byRun.get(event.aggregateId);
+    return text === undefined
+      ? event
+      : { ...event, suggestion: { runId: event.aggregateId, text } };
+  });
+}
+
 export class PostgresEventWebhookStore implements EventWebhookStore {
   constructor(private readonly pool: PgPool) {}
 
@@ -217,8 +256,10 @@ export class PostgresEventWebhookStore implements EventWebhookStore {
         ],
       );
       let loaded = (events.rows as EventRow[]).map(toEvent);
-      if (row.include_message_content)
+      if (row.include_message_content) {
         loaded = await attachMessages(transaction, claim, loaded);
+        loaded = await attachSuggestions(transaction, claim, loaded);
+      }
       const signingKeys: EncryptedSigningKey[] = [
         {
           ciphertext: row.encrypted_signing_key,

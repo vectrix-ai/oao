@@ -863,6 +863,14 @@ function workspaceFiles(
  * started before OAO recorded them, or a record this console cannot read,
  * map to null so the page hides the section instead of failing.
  */
+/** The latest run's prompt suggestion, when the session read carries one. */
+function sessionSuggestion(value: unknown): SessionDetail["suggestion"] {
+  const suggestion = record(value);
+  const runId = text(suggestion.runId);
+  const suggested = text(suggestion.text);
+  return runId && suggested ? { runId, text: suggested } : null;
+}
+
 function resolvedVersions(value: unknown): SessionVersionResolution | null {
   if (value === null || value === undefined) return null;
   try {
@@ -1443,6 +1451,7 @@ function sessionDetail(
       };
     }),
     resolvedVersions: resolvedVersions(value.resolvedVersions),
+    suggestion: sessionSuggestion(value.suggestion),
     runs,
     transcript: transcriptRecords,
     pendingWork: Array.isArray(value.pendingWork)

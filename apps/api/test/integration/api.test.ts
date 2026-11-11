@@ -4355,6 +4355,158 @@ test(
     );
 
     await t.test(
+      "an agent version may suggest the next message, read from the run and the session",
+      async () => {
+        const agentConfig = (extra: Record<string, unknown> = {}) => ({
+          systemPrompt: "Help with orders.",
+          modelPreset: baseModelPresetKey,
+          tools: [],
+          sandbox: disabledSandbox,
+          limits: { maxTurns: 32, timeoutMs: 60_000 },
+          ...extra,
+        });
+        const invalid = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "prompt-suggestions-invalid",
+              name: "Invalid setting",
+              config: agentConfig({ promptSuggestions: "yes" }),
+            },
+            "prompt-suggestions-agent-invalid-1",
+          ),
+        );
+        assert.equal(invalid.status, 400);
+        const created = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "prompt-suggestions-agent",
+              name: "Suggesting agent",
+              config: agentConfig(),
+            },
+            "prompt-suggestions-agent-1",
+          ),
+        );
+        assert.equal(created.status, 201, await created.clone().text());
+        const agent = (await created.json()) as { id: string };
+        const published = await app.request(
+          `${projectPath}/agents/${agent.id}/versions`,
+          jsonRequest(
+            { config: agentConfig({ promptSuggestions: true }) },
+            "prompt-suggestions-version-2",
+          ),
+        );
+        assert.equal(published.status, 201, await published.clone().text());
+        const versions = (await (
+          await app.request(`${projectPath}/agents/${agent.id}/versions`)
+        ).json()) as {
+          data: {
+            id: string;
+            version: number;
+            config: Record<string, unknown>;
+          }[];
+        };
+        const byVersion = new Map(
+          versions.data.map((entry) => [entry.version, entry]),
+        );
+        assert.equal(byVersion.get(2)?.config.promptSuggestions, true);
+        // Omitted, the setting is off and the config keeps its shape.
+        assert.ok(!("promptSuggestions" in (byVersion.get(1)?.config ?? {})));
+        // The database refuses anything but a boolean, whatever the caller.
+        const shape = await pool.query<{ valid: boolean }>(
+          "SELECT oao.is_valid_agent_publication_config_with_mcp($1) AS valid",
+          [{ ...agentConfig(), promptSuggestions: "yes" }],
+        );
+        assert.equal(shape.rows[0]?.valid, false);
+
+        const sessionResponse = await app.request(
+          `${projectPath}/sessions`,
+          jsonRequest(
+            {
+              agentId: agent.id,
+              agentVersionId: byVersion.get(2)?.id,
+              title: "Suggestions",
+              initialMessage: "Where is ORD-1592?",
+            },
+            "prompt-suggestions-session-1",
+          ),
+        );
+        assert.equal(
+          sessionResponse.status,
+          201,
+          await sessionResponse.clone().text(),
+        );
+        const session = (await sessionResponse.json()) as {
+          id: string;
+          run: { id: string; suggestion: string | null };
+        };
+        assert.equal(session.run.suggestion, null);
+        const readRun = async (runId: string) =>
+          (await (
+            await app.request(`${projectPath}/runs/${runId}`)
+          ).json()) as { suggestion: string | null };
+        const readSession = async () =>
+          (await (
+            await app.request(`${projectPath}/sessions/${session.id}`)
+          ).json()) as {
+            suggestion: { runId: string; text: string } | null;
+            runs: { id: string; suggestion: string | null }[];
+          };
+        assert.equal((await readRun(session.run.id)).suggestion, null);
+        assert.equal((await readSession()).suggestion, null);
+
+        // The runtime worker stores the suggestion once the run completed.
+        for (const state of ["running", "completed"])
+          await pool.query("UPDATE oao.runs SET state=$2 WHERE id=$1", [
+            session.run.id,
+            state,
+          ]);
+        await pool.query(
+          "UPDATE oao.runs SET suggestion='Book a carrier for ORD-1592' WHERE id=$1",
+          [session.run.id],
+        );
+        assert.equal(
+          (await readRun(session.run.id)).suggestion,
+          "Book a carrier for ORD-1592",
+        );
+        const suggested = await readSession();
+        assert.deepEqual(suggested.suggestion, {
+          runId: session.run.id,
+          text: "Book a carrier for ORD-1592",
+        });
+        assert.deepEqual(
+          suggested.runs.map((run) => run.suggestion),
+          ["Book a carrier for ORD-1592"],
+        );
+        const listed = (await (
+          await app.request(`${projectPath}/runs?limit=100`)
+        ).json()) as { data: { id: string; suggestion: string | null }[] };
+        assert.equal(
+          listed.data.find((run) => run.id === session.run.id)?.suggestion,
+          "Book a carrier for ORD-1592",
+        );
+
+        // The next message starts a newer run, which voids the suggestion.
+        const next = await app.request(
+          `${projectPath}/sessions/${session.id}/runs`,
+          jsonRequest(
+            { message: "Something else" },
+            "prompt-suggestions-run-2",
+          ),
+        );
+        assert.equal(next.status, 202, await next.clone().text());
+        assert.equal((await readRun(session.run.id)).suggestion, null);
+        const voided = await readSession();
+        assert.equal(voided.suggestion, null);
+        assert.deepEqual(
+          voided.runs.map((run) => run.suggestion),
+          [null, null],
+        );
+      },
+    );
+
+    await t.test(
       "an agent's run token acts as the run's creator, narrowed, while the run is unsettled",
       async () => {
         const agentConfig = (oaoTools: unknown) => ({

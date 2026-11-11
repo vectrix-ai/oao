@@ -134,6 +134,13 @@ import { resourceFromAttributes } from "@opentelemetry/resources";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import * as v from "valibot";
+import {
+  PROMPT_SUGGESTION_INSTRUCTION,
+  replySuggestion,
+  withoutSuggestionLines,
+} from "./prompt-suggestions.js";
+
+export { PROMPT_SUGGESTION_INSTRUCTION } from "./prompt-suggestions.js";
 
 export const FLUE_PACKAGE_VERSIONS = Object.freeze({
   runtime: "2.3.0",
@@ -419,6 +426,8 @@ class PendingAssistantText {
   readonly #waiters = new Map<string, Set<() => void>>();
   /** Runs whose agent version publishes text before every tool call. */
   readonly #publishingRuns = new Set<string>();
+  /** Runs whose agent version has prompt suggestions on. */
+  readonly #suggestingRuns = new Set<string>();
 
   observe(event: FlueObservation): void {
     if (
@@ -484,8 +493,44 @@ class PendingAssistantText {
     return this.#publishingRuns.has(runId);
   }
 
+  /** Marks a run whose model ends its final reply with a suggestion line. */
+  cutSuggestionLines(runId: string): void {
+    this.#suggestingRuns.delete(runId);
+    this.#suggestingRuns.add(runId);
+    for (const oldest of this.#suggestingRuns) {
+      if (this.#suggestingRuns.size <= PENDING_ASSISTANT_TEXT_MAX_SUBMISSIONS)
+        break;
+      this.#suggestingRuns.delete(oldest);
+    }
+  }
+
+  /**
+   * Text of a run as it may be stored before the run settles: without a
+   * suggestion line, which belongs only at the end of the final reply.
+   */
+  publishable(runId: string, text: string): string {
+    return this.#suggestingRuns.has(runId)
+      ? withoutSuggestionLines(text).trim()
+      : text;
+  }
+
+  /**
+   * Whether a submission's last turn wrote text of its own after its last tool
+   * call, so that the reply ends with words of the final turn. A suggestion
+   * line is not such text. Undefined when this worker did not observe the
+   * submission.
+   */
+  endsWithReply(submissionId: string): boolean | undefined {
+    const submission = this.#submissions.get(submissionId);
+    if (!submission) return undefined;
+    return submission.parts
+      .slice(submission.turns.at(-1)?.end ?? 0)
+      .some((part) => withoutSuggestionLines(part).trim().length > 0);
+  }
+
   forgetRun(runId: string): void {
     this.#publishingRuns.delete(runId);
+    this.#suggestingRuns.delete(runId);
   }
 
   /**
@@ -498,16 +543,18 @@ class PendingAssistantText {
   async take(
     toolCallId: string,
     signal?: AbortSignal,
+    runId?: string,
   ): Promise<PendingAssistantTextClaim | undefined> {
     if (!this.#calls.has(toolCallId)) await this.#waitFor(toolCallId, signal);
     const call = this.#calls.get(toolCallId);
     const submission = call && this.#submissions.get(call.submissionId);
     if (!call || !submission) return undefined;
     const start = Math.max(submission.committed, submission.reserved);
-    const text = submission.parts
+    const written = submission.parts
       .slice(start, call.end)
       .join(REPLY_TEXT_SEPARATOR)
       .trim();
+    const text = runId ? this.publishable(runId, written) : written;
     if (!text) return undefined;
     submission.reserved = call.end;
     return {
@@ -536,6 +583,8 @@ class PendingAssistantText {
       readonly signal?: AbortSignal | undefined;
       /** False when the turn has certainly been observed already. */
       readonly wait?: boolean;
+      /** The run the text belongs to, when it may hold a suggestion line. */
+      readonly runId?: string;
     } = {},
   ): Promise<void> {
     if (options.wait !== false && !this.#calls.has(toolCallId))
@@ -553,10 +602,13 @@ class PendingAssistantText {
     for (const turn of submission.turns) {
       if (turn.end <= submission.committed) continue;
       if (turn.end > call.end) break;
-      const text = submission.parts
+      const written = submission.parts
         .slice(from, turn.end)
         .join(REPLY_TEXT_SEPARATOR)
         .trim();
+      const text = options.runId
+        ? this.publishable(options.runId, written)
+        : written;
       if (text) segments.push({ toolCallId: turn.toolCallId, text });
       from = turn.end;
     }
@@ -675,7 +727,7 @@ async function publishAssistantTextBefore(
         runId: run.runId,
         segments,
       }),
-    { signal },
+    { signal, runId: run.runId },
   );
 }
 
@@ -706,7 +758,11 @@ async function withPendingAssistantText<T>(
     return publish(obligation);
   }
   if (obligation.approval !== "always") return publish(obligation);
-  const claim = await pending.take(obligation.flueToolCallId, signal);
+  const claim = await pending.take(
+    obligation.flueToolCallId,
+    signal,
+    obligation.runId,
+  );
   if (!claim) return publish(obligation);
   // When the check itself fails the outcome is unknown, so the text stays
   // reserved: no later gate commits it twice, and if the publication rolled
@@ -1319,7 +1375,10 @@ function managedSystemPrompt(snapshot: ManagedAgentSnapshot): string {
   const oaoInstructions = snapshot.oaoTools
     ? `\n\nThe ${OAO_AGENT_TOOL_PREFIX} tools read and manage this OAO project on behalf of the person or key that started this run. To ask another agent about its work, find its session with ${OAO_AGENT_TOOL_PREFIX}list_sessions, read it with ${OAO_AGENT_TOOL_PREFIX}get_session, and ask with ${OAO_AGENT_TOOL_PREFIX}send_message. Never send a message to your own session.`
     : "";
-  return `${snapshot.systemPrompt}${retryInstructions}${delegationInstructions}${harnessOperationInstructions}${oaoInstructions}`;
+  const suggestionInstructions = snapshot.promptSuggestions
+    ? `\n\n${PROMPT_SUGGESTION_INSTRUCTION}`
+    : "";
+  return `${snapshot.systemPrompt}${retryInstructions}${delegationInstructions}${harnessOperationInstructions}${oaoInstructions}${suggestionInstructions}`;
 }
 
 /**
@@ -1761,6 +1820,10 @@ export function ManagedAgent(): string {
   const publishTextBefore = (toolCallId: string, signal?: AbortSignal) =>
     publishAssistantTextBefore(config.broker, run, toolCallId, signal);
   if (publishText) pendingAssistantText.publishBeforeToolCalls(run.runId);
+  // The model ends its final reply with a suggestion line; text published
+  // before then must not show one the model wrote too early.
+  if (initial.snapshot.promptSuggestions === true)
+    pendingAssistantText.cutSuggestionLines(run.runId);
   const withTextBefore = <T>(
     obligation: ToolObligationInput,
     signal: AbortSignal | undefined,
@@ -4097,6 +4160,9 @@ export class ManagedRuntimeOrchestrator {
           EXISTS (SELECT 1 FROM oao.runtime_dispatches dispatch
             WHERE dispatch.organization_id=r.organization_id AND dispatch.project_id=r.project_id
               AND dispatch.run_id=r.id AND dispatch.flue_submission_id IS NOT NULL) AS has_admission_receipt,
+          EXISTS (SELECT 1 FROM oao.agent_delegations delegation
+            WHERE delegation.organization_id=r.organization_id AND delegation.project_id=r.project_id
+              AND delegation.child_session_id=r.session_id) AS delegated,
           v.id AS agent_version_id,v.config,encode(v.content_hash,'hex') AS content_hash,
           workspace.id AS workspace_id,workspace.owner_thread_id,
           COALESCE(workspace.owner_session_id,r.session_id) AS owner_session_id,
@@ -4354,6 +4420,11 @@ export class ManagedRuntimeOrchestrator {
         // Only when on, so existing snapshots keep their exact shape.
         ...(publication.publishTextBeforeToolCalls
           ? { publishTextBeforeToolCalls: true }
+          : {}),
+        // Nobody types in a delegated child session, so it is not asked for
+        // a suggestion and its reply to the parent carries no suggestion line.
+        ...(publication.promptSuggestions && row.delegated !== true
+          ? { promptSuggestions: true }
           : {}),
         sandbox: publication.sandbox,
         limits: publication.limits,
@@ -4810,7 +4881,7 @@ export class RuntimeProjection {
           runId: runtimeDispatch.run_id,
           segments,
         }),
-      { wait: false },
+      { wait: false, runId: runtimeDispatch.run_id },
     );
   }
 
@@ -5169,9 +5240,24 @@ export class RuntimeProjection {
           session_id: string;
           thread_id: ThreadId;
           thread_instance_state: "ready" | "corrupt";
+          suggests: boolean;
         }>(
           `SELECT r.cancellation_requested_at,r.session_id,r.thread_id,d.timeout_requested_at,
-             i.state AS thread_instance_state
+             i.state AS thread_instance_state,
+             -- The agent version asks for a suggestion line, and the session
+             -- is one somebody types in rather than a delegated child.
+             COALESCE((
+               SELECT version.config->'promptSuggestions'='true'::jsonb
+                 FROM oao.agent_versions version
+                WHERE version.organization_id=r.organization_id
+                  AND version.project_id=r.project_id
+                  AND version.id=r.agent_version_id
+             ),false) AND NOT EXISTS (
+               SELECT 1 FROM oao.agent_delegations delegation
+                WHERE delegation.organization_id=r.organization_id
+                  AND delegation.project_id=r.project_id
+                  AND delegation.child_session_id=r.session_id
+             ) AS suggests
            FROM oao.runs r JOIN oao.runtime_dispatches d
              ON d.organization_id=r.organization_id AND d.project_id=r.project_id AND d.run_id=r.id
            JOIN oao.runtime_thread_instances i
@@ -5207,6 +5293,22 @@ export class RuntimeProjection {
         uid: receipt.uid,
       }).read(receipt);
       redactedReply = reply.text;
+    }
+    // The model ends a reply with its suggestion for the user's next message.
+    // The line is cut out of everything stored, whatever the run's outcome;
+    // only a completed run keeps it, as its suggestion.
+    let suggestion: string | undefined;
+    if (run.suggests && redactedReply) {
+      // Only the final turn's own last line counts. When that turn wrote
+      // nothing, the reply ends with text from before a tool call, and a
+      // line there predates the tool's result. A worker that did not observe
+      // the final turn cannot tell, so the run then has no suggestion.
+      if (
+        productState === "completed" &&
+        pendingAssistantText.endsWithReply(submissionId) === true
+      )
+        suggestion = replySuggestion(redactedReply);
+      redactedReply = withoutSuggestionLines(redactedReply).trimEnd();
     }
     // PostgreSQL text rejects NUL, which a model reply can contain.
     redactedReply = jsonbSafeText(redactedReply);
@@ -5284,6 +5386,39 @@ export class RuntimeProjection {
           kind: "message.created",
           payload: { role: "assistant", messageId: finalMessageId },
         });
+        // The suggestion is on the run before the run reads as completed
+        // anywhere, and is announced beside the reply it follows. A reply
+        // without text of its own has nothing to follow.
+        if (suggestion) {
+          const stored = await transaction.query(
+            `UPDATE oao.runs run SET suggestion=$4
+              WHERE run.organization_id=$1 AND run.project_id=$2 AND run.id=$3
+                AND run.state='completed' AND run.suggestion IS NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM oao.runs newer
+                   WHERE newer.organization_id=run.organization_id
+                     AND newer.project_id=run.project_id
+                     AND newer.thread_id=run.thread_id
+                     AND (newer.created_at,newer.id)>(run.created_at,run.id)
+                )`,
+            [
+              tenant.organizationId,
+              tenant.projectId,
+              runtimeDispatch.run_id,
+              suggestion,
+            ],
+          );
+          // The event names the run; readers and webhooks attach the text.
+          if (stored.rowCount)
+            await appendEventOnce(transaction, {
+              ...tenant,
+              id: eventUuid(`event:${runtimeDispatch.run_id}:suggestion`),
+              aggregateType: "run",
+              aggregateId: runtimeDispatch.run_id,
+              kind: "run.suggestion_created",
+              payload: { sessionId: run.session_id },
+            });
+        }
       }
       await transaction.query(
         `INSERT INTO oao.session_summaries (
