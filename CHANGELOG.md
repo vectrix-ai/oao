@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.0](https://github.com/vectrix-ai/oao/compare/v0.14.1...v0.15.0) (2026-11-11)
+
+
+### Features
+
+* **VEC-2390:** prompt suggestions with the agent's reply ([#65](https://github.com/vectrix-ai/oao/issues/65)) ([103469c](https://github.com/vectrix-ai/oao/commit/103469ccfd40eee764860bb59f1c19f04876565f))
+
+
+### Bug Fixes
+
+* **VEC-2369:** accept run and Skill files above 3.5 MB ([#63](https://github.com/vectrix-ai/oao/issues/63)) ([d0ffd17](https://github.com/vectrix-ai/oao/commit/d0ffd179ebc85ea2ac7c6157469deefc5c04f8dd))
+
 ## [0.14.1](https://github.com/vectrix-ai/oao/compare/v0.14.0...v0.14.1) (2026-11-10)
 
 
