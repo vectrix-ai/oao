@@ -23,6 +23,7 @@ import {
   parseDiscoverMcpServerInput,
   parseCreateModelPresetInput,
   parseSetModelPresetPriceInput,
+  parseSessionPromptCache,
   parseManagedAgentSnapshotForPublication,
   parseRotateProjectModelProviderCredentialInput,
   parseRotateProjectSandboxProviderCredentialInput,
@@ -50,6 +51,7 @@ import {
   type McpCredentialTestResult,
   type ModelProviderType,
   type SandboxSnapshotEntry,
+  type SessionPromptCache,
   type ToolResultEnvelope,
   type UpdateEventWebhookInput,
   type UpdateProjectSandboxProviderConfigurationInput,
@@ -594,6 +596,35 @@ function parseRunMessage(
     return `Review the attached ${files.length === 1 ? "file" : "files"}.`;
   }
   return requiredString(value, field, 100_000);
+}
+
+/**
+ * The optional prompt cache of a new session. `prefixChars` is a JavaScript
+ * string length: the number of UTF-16 code units at the start of the
+ * submitted `initialMessage` that every session with the same key shares.
+ */
+function parsePromptCache(
+  value: unknown,
+  initialMessage: string | undefined,
+): Required<SessionPromptCache> | undefined {
+  if (value === undefined) return undefined;
+  let promptCache: SessionPromptCache;
+  try {
+    promptCache = parseSessionPromptCache(value);
+  } catch {
+    throw new HttpApiError(
+      "bad_request",
+      "promptCache must be an object whose key is 1 to 64 printable ASCII characters without spaces and whose optional prefixChars is a non-negative integer",
+    );
+  }
+  const prefixChars = promptCache.prefixChars ?? 0;
+  const maximum = initialMessage?.length ?? 0;
+  if (prefixChars > maximum)
+    throw new HttpApiError(
+      "bad_request",
+      `promptCache.prefixChars must be at most the length of initialMessage (${maximum})`,
+    );
+  return { key: promptCache.key, prefixChars };
 }
 
 function publicRunFiles(files: readonly StoredRunFileManifest[]) {
@@ -7649,6 +7680,12 @@ function registerRunRoutes(
       files,
     );
     const title = optionalString(body.title, "title", 500);
+    const promptCache = parsePromptCache(
+      body.promptCache,
+      body.initialMessage === undefined || body.initialMessage === ""
+        ? undefined
+        : initialMessage,
+    );
     let cleanupUploadedFiles: (() => Promise<void>) | undefined;
     try {
       return await dependencies.store.transaction(
@@ -7774,6 +7811,21 @@ function registerRunRoutes(
               const run = publicValue(result.rows[0]?.run) as Readonly<
                 Record<string, unknown>
               >;
+              if (promptCache)
+                await tx.query(
+                  `INSERT INTO oao.session_prompt_caches (
+                     organization_id,project_id,session_id,cache_key,
+                     initial_run_id,initial_prefix_chars
+                   ) VALUES ($1,$2,$3,$4,$5,$6)`,
+                  [
+                    actor.organizationId,
+                    actor.projectId,
+                    sessionId,
+                    promptCache.key,
+                    runId,
+                    promptCache.prefixChars,
+                  ],
+                );
               await bindSessionVersions(
                 tx,
                 actor,

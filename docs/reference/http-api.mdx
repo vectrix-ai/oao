@@ -791,6 +791,36 @@ transaction. The response contains the session, `latestRunId`, first queued
 `run`, and `resolvedVersions`. Session create and follow-up bodies do not
 accept a Skill list.
 
+### Share the prompt cache across sessions
+
+Sessions that start the same way can read that start from the model provider's
+prompt cache instead of paying for it as new input in every session. Add an
+optional `promptCache` object to the create body:
+
+```json
+{
+  "agentId": "d1111111-1111-4111-8111-111111111111",
+  "initialMessage": "# Project rules\n...\n# Email\n...",
+  "promptCache": {
+    "key": "extraction:project-42",
+    "prefixChars": 41234
+  }
+}
+```
+
+| Field         | Rules                                                                                                                                                                                                                                           |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `key`         | Required. 1 to 64 printable ASCII characters without spaces. Every model call of the session, its follow-up runs included, sends it to the provider as cache and routing key.                                                                   |
+| `prefixChars` | Optional integer from 0 to the length of `initialMessage`, counted as JavaScript string length. That many characters at the start of `initialMessage` must be identical for every session that sends the same key. Absent or 0 marks no prefix. |
+
+OAO stores the setting with the session; session reads do not return it. It
+applies only to models OAO calls through OpenRouter. A value that breaks these
+rules returns `400`, and so does a `prefixChars` above 0 on a session created
+from files alone. Without `promptCache`, a session uses a key shared by every
+session of its agent version, so sessions of one agent version still share
+their instructions and tool definitions. See [Prompt
+caching](/models/adding-models#prompt-caching) for what the provider caches.
+
 In that transaction OAO also resolves every Skill and delegate the agent
 version follows, for the version itself and for every delegate it can reach,
 from one database snapshot. It binds the resulting exact Skill versions to the

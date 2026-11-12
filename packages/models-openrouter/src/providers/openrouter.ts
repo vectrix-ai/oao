@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { createProvider } from "@earendil-works/pi-ai";
 import type {
   Api,
   Model,
+  OpenAIResponsesCompat,
   OpenRouterRouting,
   Provider,
 } from "@earendil-works/pi-ai";
@@ -14,6 +15,10 @@ import type {
   ModelRoutingPolicy,
 } from "@oao/contracts";
 import * as v from "valibot";
+import {
+  currentModelPromptCacheScope,
+  withPromptCacheBreakpoints,
+} from "../prompt-cache.js";
 import {
   catalogMatches,
   credentialAuth,
@@ -30,36 +35,63 @@ import {
 
 export const OPENROUTER_PREFIX = "openrouter/";
 const OPENROUTER_PRESET_PREFIX = "openrouter/@preset/";
-const OPENROUTER_CATALOG_URL = "https://openrouter.ai/api/v1";
+const OPENROUTER_API_URL = "https://openrouter.ai/api/v1";
 const OPENROUTER_PAGE_SIZE = 1_000;
 
-// Pi serves OpenRouter's Claude models over OpenRouter's Anthropic Messages
-// endpoint, which does not carry OpenRouter provider routing. OAO keeps every
-// OpenRouter model on Chat Completions so data collection, ZDR, provider order,
-// and price limits still apply to Claude presets.
-function chatCompletionsModel(model: Model<Api>): Model<"openai-completions"> {
-  if (model.api === "openai-completions")
-    return model as Model<"openai-completions">;
+type OpenRouterModel = Model<"openai-responses">;
+
+/**
+ * Responses API settings for a model from Pi's OpenRouter catalog. Pi lists
+ * OpenRouter models for Chat Completions or, for Claude, OpenRouter's
+ * Anthropic Messages endpoint. OAO sends every OpenRouter model through
+ * OpenRouter's Responses API instead: one request shape for OpenAI, Claude,
+ * and preset models, which carries OpenRouter provider routing and prompt
+ * cache breakpoints for all of them. The request is stateless (`store: false`
+ * and the full history on every call).
+ */
+function openRouterResponsesCompat(model: Model<Api>): OpenAIResponsesCompat {
+  const compat =
+    model.api === "openai-completions"
+      ? ((model.compat ?? {}) as Readonly<Record<string, unknown>>)
+      : {};
   return {
-    ...model,
-    api: "openai-completions",
-    baseUrl: OPENROUTER_CATALOG_URL,
-    compat: { thinkingFormat: "openrouter", cacheControlFormat: "anthropic" },
+    ...(typeof compat.supportsDeveloperRole === "boolean"
+      ? { supportsDeveloperRole: compat.supportsDeveloperRole }
+      : {}),
+    ...(typeof compat.supportsStrictMode === "boolean"
+      ? { supportsStrictMode: compat.supportsStrictMode }
+      : {}),
+    ...(compat.supportsMidConvoSystemMessages === true
+      ? { supportsMidConvoSystemMessages: true }
+      : {}),
+    sessionAffinityFormat: "openrouter",
+    // OAO places every cache breakpoint itself and keeps the default lifetime.
+    supportsLongCacheRetention: false,
+    supportsExplicitPromptCacheMode: false,
   };
 }
 
-function openRouterChatModels(): Model<"openai-completions">[] {
+function responsesModel(model: Model<Api>): OpenRouterModel {
+  return {
+    ...model,
+    api: "openai-responses",
+    baseUrl: OPENROUTER_API_URL,
+    compat: openRouterResponsesCompat(model),
+  } as OpenRouterModel;
+}
+
+function openRouterModels(): OpenRouterModel[] {
   return openrouterProvider()
     .getModels()
     .flatMap((model) =>
       model.api === "openai-completions" || model.api === "anthropic-messages"
-        ? [chatCompletionsModel(model)]
+        ? [responsesModel(model)]
         : [],
     );
 }
 
 const OPENROUTER_MODEL_IDS = new Set(
-  openRouterChatModels().map((model) => model.id),
+  openRouterModels().map((model) => model.id),
 );
 
 const StringListSchema = v.array(v.pipe(v.string(), v.minLength(1)));
@@ -124,45 +156,78 @@ export function presetProviderId(key: string): string {
   return `openrouter-preset-${createHash("sha256").update(key).digest("hex").slice(0, 16)}`;
 }
 
-function openRouterModelCompat(
-  model: Model<"openai-completions">,
-  routing?: Readonly<OpenRouterRouting>,
-) {
+/**
+ * An OpenRouter provider whose requests carry the provider routing policy,
+ * the prompt cache scope's key as cache and routing key, and prompt cache
+ * breakpoints.
+ */
+function withOpenRouterRequests(
+  provider: Provider<"openai-responses">,
+  routing: Readonly<OpenRouterRouting> | undefined,
+): Provider<"openai-responses"> {
+  const requestRouting = routing
+    ? deepFreeze(structuredClone(routing))
+    : undefined;
+  const withRequest = (options: Record<string, unknown> | undefined) => {
+    // Read when the stream starts: the scope belongs to this model call.
+    const scope = currentModelPromptCacheScope();
+    const existing = options?.onPayload as
+      | ((payload: unknown, model: Model<Api>) => unknown | Promise<unknown>)
+      | undefined;
+    return {
+      ...options,
+      // Pi sends the session ID as `prompt_cache_key` and as OpenRouter's
+      // `x-session-id` sticky-routing header.
+      ...(scope?.key ? { sessionId: scope.key } : {}),
+      onPayload: async (payload: unknown, model: Model<Api>) => {
+        const transformed = (await existing?.(payload, model)) ?? payload;
+        const marked = withPromptCacheBreakpoints(transformed, scope);
+        const body = record(marked);
+        if (!body || !requestRouting) return marked;
+        return { ...body, provider: structuredClone(requestRouting) };
+      },
+    };
+  };
   return {
-    ...model.compat,
-    ...(model.id.startsWith("anthropic/")
-      ? { cacheControlFormat: "anthropic" as const }
-      : {}),
-    sendSessionAffinityHeaders: true,
-    sessionAffinityFormat: "openrouter" as const,
-    ...(routing ? { openRouterRouting: structuredClone(routing) } : {}),
+    ...provider,
+    stream(model, context, options) {
+      return provider.stream(
+        model,
+        context,
+        withRequest(options as Record<string, unknown> | undefined) as never,
+      );
+    },
+    streamSimple(model, context, options) {
+      return provider.streamSimple(
+        model,
+        context,
+        withRequest(options as Record<string, unknown> | undefined) as never,
+      );
+    },
   };
 }
 
 export function createOpenRouterProvider(
   routing?: Readonly<OpenRouterRouting>,
-): Provider<"openai-completions"> {
+): Provider<"openai-responses"> {
   const native = openrouterProvider();
-  const models = openRouterChatModels().map((model) =>
-    deepFreeze({
-      ...model,
-      compat: openRouterModelCompat(model, routing),
+  return withOpenRouterRequests(
+    createProvider({
+      id: native.id,
+      name: native.name,
+      baseUrl: OPENROUTER_API_URL,
+      ...(native.headers ? { headers: native.headers } : {}),
+      auth: native.auth,
+      models: openRouterModels().map((model) => deepFreeze(model)),
+      api: openAIResponsesApi(),
     }),
+    routing,
   );
-  return createProvider({
-    id: native.id,
-    name: native.name,
-    ...(native.baseUrl ? { baseUrl: native.baseUrl } : {}),
-    ...(native.headers ? { headers: native.headers } : {}),
-    auth: native.auth,
-    models,
-    api: openAICompletionsApi(),
-  });
 }
 
 export function createOpenRouterPresetProviders(
   presets: readonly ApprovedModelPreset[],
-): readonly Provider<"openai-completions">[] {
+): readonly Provider<"openai-responses">[] {
   const native = openrouterProvider();
   return presets.map((input) => {
     const preset = v.parse(ApprovedModelPresetSchema, input);
@@ -171,7 +236,7 @@ export function createOpenRouterPresetProviders(
         "OpenRouter provider presets require an OpenRouter model",
       );
     const modelId = preset.model.slice(OPENROUTER_PREFIX.length);
-    const nativeModel = openRouterChatModels().find(
+    const nativeModel = openRouterModels().find(
       (model) => model.id === modelId,
     );
     if (!nativeModel)
@@ -179,21 +244,18 @@ export function createOpenRouterPresetProviders(
         `Model is not present in the pinned OpenRouter catalog: ${preset.model}`,
       );
     const id = presetProviderId(preset.key);
-    const routing = preset.routing as OpenRouterRouting | undefined;
-    const model = deepFreeze({
-      ...nativeModel,
-      provider: id,
-      compat: openRouterModelCompat(nativeModel, routing),
-    });
-    return createProvider({
-      id,
-      name: `${native.name} (${preset.key})`,
-      ...(native.baseUrl ? { baseUrl: native.baseUrl } : {}),
-      ...(native.headers ? { headers: native.headers } : {}),
-      auth: native.auth,
-      models: [model],
-      api: openAICompletionsApi(),
-    });
+    return withOpenRouterRequests(
+      createProvider({
+        id,
+        name: `${native.name} (${preset.key})`,
+        baseUrl: OPENROUTER_API_URL,
+        ...(native.headers ? { headers: native.headers } : {}),
+        auth: native.auth,
+        models: [deepFreeze({ ...nativeModel, provider: id })],
+        api: openAIResponsesApi(),
+      }),
+      preset.routing as OpenRouterRouting | undefined,
+    );
   });
 }
 
@@ -208,7 +270,7 @@ async function openRouterJson(
   apiKey: string,
   fetcher: Fetcher,
 ): Promise<OpenRouterModelResponse> {
-  const response = await fetcher(`${OPENROUTER_CATALOG_URL}${path}`, {
+  const response = await fetcher(`${OPENROUTER_API_URL}${path}`, {
     headers: {
       accept: "application/json",
       authorization: `Bearer ${apiKey}`,
@@ -359,7 +421,7 @@ export async function listOpenRouterModelCatalog(input: {
 }
 
 export function listOpenRouterStaticCatalog(): readonly ModelCatalogEntry[] {
-  return openRouterChatModels().map((model) =>
+  return openRouterModels().map((model) =>
     staticCatalogEntry({
       providerType: "openrouter",
       prefix: OPENROUTER_PREFIX,
@@ -424,52 +486,53 @@ export function toOpenRouterRouting(
 function dynamicOpenRouterModel(input: {
   readonly providerId: string;
   readonly catalogId: string;
-  readonly routing: OpenRouterRouting | undefined;
-}): Model<"openai-completions"> {
-  const native = openrouterProvider();
-  const staticModel = openRouterChatModels().find(
+}): OpenRouterModel {
+  const staticModel = openRouterModels().find(
     (model) => model.id === input.catalogId,
   );
-  const model: Model<"openai-completions"> = staticModel
-    ? { ...staticModel, provider: input.providerId }
-    : {
-        id: input.catalogId,
-        name: input.catalogId.startsWith("@preset/")
-          ? `OpenRouter ${input.catalogId}`
-          : input.catalogId,
-        api: "openai-completions",
-        provider: input.providerId,
-        baseUrl: native.baseUrl ?? OPENROUTER_CATALOG_URL,
-        reasoning: false,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 128_000,
-        maxTokens: 4_096,
-        compat: {
-          supportsDeveloperRole: false,
-          thinkingFormat: "openrouter",
+  return deepFreeze(
+    staticModel
+      ? { ...staticModel, provider: input.providerId }
+      : {
+          id: input.catalogId,
+          name: input.catalogId.startsWith("@preset/")
+            ? `OpenRouter ${input.catalogId}`
+            : input.catalogId,
+          api: "openai-responses",
+          provider: input.providerId,
+          baseUrl: OPENROUTER_API_URL,
+          // A preset or unpinned model decides its reasoning on OpenRouter.
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 128_000,
+          maxTokens: 4_096,
+          compat: {
+            supportsDeveloperRole: false,
+            sessionAffinityFormat: "openrouter",
+            supportsLongCacheRetention: false,
+            supportsExplicitPromptCacheMode: false,
+          },
         },
-      };
-  return deepFreeze({
-    ...model,
-    compat: openRouterModelCompat(model, input.routing),
-  });
+  );
 }
 
 export function createOpenRouterProjectProvider(
   input: CreateProjectProviderInput & {
     readonly routing: OpenRouterRouting | undefined;
   },
-): Provider<"openai-completions"> {
+): Provider<"openai-responses"> {
   const native = openrouterProvider();
-  const model = dynamicOpenRouterModel(input);
-  return createProvider({
-    id: input.providerId,
-    name: `${native.name} (${input.label})`,
-    ...(native.baseUrl ? { baseUrl: native.baseUrl } : {}),
-    ...(native.headers ? { headers: native.headers } : {}),
-    auth: credentialAuth("openrouter", input.apiKey),
-    models: [model],
-    api: openAICompletionsApi(),
-  });
+  return withOpenRouterRequests(
+    createProvider({
+      id: input.providerId,
+      name: `${native.name} (${input.label})`,
+      baseUrl: OPENROUTER_API_URL,
+      ...(native.headers ? { headers: native.headers } : {}),
+      auth: credentialAuth("openrouter", input.apiKey),
+      models: [dynamicOpenRouterModel(input)],
+      api: openAIResponsesApi(),
+    }),
+    input.routing,
+  );
 }

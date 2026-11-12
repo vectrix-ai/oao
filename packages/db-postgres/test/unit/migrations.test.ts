@@ -1100,3 +1100,30 @@ test("prompt suggestions are an optional boolean on agent versions and bounded t
   );
   assert.doesNotMatch(sql, /DROP TABLE|DROP FUNCTION|UPDATE oao\./u);
 });
+
+test("a session's prompt cache key is a tenant-scoped, insert-only row that leaves with its session", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0065_session_prompt_caches.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE oao\.session_prompt_caches/u);
+  assert.match(sql, /CHECK \(cache_key ~ '\^\[!-~\]\{1,64\}\$'\)/u);
+  assert.match(sql, /CHECK \(initial_prefix_chars BETWEEN 0 AND 100000\)/u);
+  assert.match(
+    sql,
+    /REFERENCES oao\.sessions \(organization_id, project_id, id\) ON DELETE CASCADE/u,
+  );
+  assert.match(
+    sql,
+    /REFERENCES oao\.runs \(organization_id, project_id, id\) ON DELETE CASCADE/u,
+  );
+  assert.match(
+    sql,
+    /ALTER TABLE oao\.session_prompt_caches FORCE ROW LEVEL SECURITY/u,
+  );
+  assert.match(
+    sql,
+    /GRANT SELECT, INSERT ON oao\.session_prompt_caches TO oao_app;/u,
+  );
+  assert.doesNotMatch(sql, /DROP |UPDATE oao\.|GRANT .*(?:UPDATE|DELETE)/u);
+});

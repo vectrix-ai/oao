@@ -113,6 +113,8 @@ import type {
 import {
   MODEL_CALL_TIMEOUT_MS,
   withModelCallTimeout,
+  withModelPromptCacheScope,
+  type ModelPromptCacheScope,
 } from "@oao/models-openrouter";
 import {
   MODEL_IMAGE_MAX_TOTAL_BYTES,
@@ -1267,11 +1269,71 @@ function managedRunEnvelope(
   return `<${MANAGED_RUN_TAG} type="${MANAGED_RUN_SIGNAL_TYPE}" version="${delivery.version}" runId="${delivery.runId}" sessionId="${delivery.sessionId}" snapshotHash="${delivery.snapshotHash}">\n${escapeXmlText(body)}\n</${MANAGED_RUN_TAG}>`;
 }
 
+/** Opens a run message whose stable prefix comes before its delivery IDs. */
+const CACHED_RUN_OPENING = `<${MANAGED_RUN_TAG} type="${MANAGED_RUN_SIGNAL_TYPE}">\n`;
+const CACHED_RUN_DELIVERY_TAG = "oao-run-delivery";
+const CACHED_RUN_DELIVERY =
+  /\n<oao-run-delivery version="([^"<>]*)" runId="([^"<>]*)" sessionId="([^"<>]*)" snapshotHash="([^"<>]*)" cachePrefixLength="([1-9][0-9]{0,6})"\/>\n<\/oao-run>$/u;
+
+/**
+ * A run message whose start other sessions share, for the prompt cache. The
+ * first `cachePrefixLength` characters are the opening tag and the escaped
+ * stable prefix of the message, with nothing run-specific in them. The rest of
+ * the body follows, then the delivery IDs in an element the escaped body
+ * cannot contain. The model reads the same body and IDs as in the other
+ * envelopes, and the agent recovers the delivery from the last line.
+ */
+function cachedRunEnvelope(
+  delivery: ManagedRunDelivery,
+  prefix: string,
+  rest: string,
+): string {
+  const head = `${CACHED_RUN_OPENING}${escapeXmlText(prefix)}`;
+  return `${head}${escapeXmlText(rest)}\n<${CACHED_RUN_DELIVERY_TAG} version="${delivery.version}" runId="${delivery.runId}" sessionId="${delivery.sessionId}" snapshotHash="${delivery.snapshotHash}" cachePrefixLength="${head.length}"/>\n</${MANAGED_RUN_TAG}>`;
+}
+
+/**
+ * The length of the stable start of a run message with a cached prefix, or
+ * undefined for any other text. The model provider ends that start in a
+ * prompt cache breakpoint, on the first run and on every follow-up run that
+ * replays it.
+ */
+export function managedRunCachePrefixLength(text: string): number | undefined {
+  if (!text.startsWith(CACHED_RUN_OPENING)) return undefined;
+  const delivery = CACHED_RUN_DELIVERY.exec(text);
+  if (!delivery) return undefined;
+  const length = Number(delivery[5]);
+  return length > CACHED_RUN_OPENING.length && length <= delivery.index
+    ? length
+    : undefined;
+}
+
+/**
+ * How many characters at the start of `message` go before the delivery IDs.
+ * A split never separates the two halves of a UTF-16 surrogate pair.
+ */
+function stablePrefixChars(message: string, requested = 0): number {
+  const chars = Math.min(Math.max(0, Math.trunc(requested)), message.length);
+  if (chars <= 0 || chars >= message.length) return chars;
+  const before = message.charCodeAt(chars - 1);
+  const after = message.charCodeAt(chars);
+  return before >= 0xd800 &&
+    before <= 0xdbff &&
+    after >= 0xdc00 &&
+    after <= 0xdfff
+    ? chars - 1
+    : chars;
+}
+
 function deliveryContext(delivered: DeliveredMessage): ManagedRunDelivery {
   if (delivered.kind === "signal" && delivered.type === MANAGED_RUN_SIGNAL_TYPE)
     return v.parse(ManagedRunDeliverySchema, delivered.attributes);
   if (delivered.kind === "user") {
-    const envelope = MANAGED_RUN_ENVELOPE.exec(delivered.body);
+    const envelope =
+      MANAGED_RUN_ENVELOPE.exec(delivered.body) ??
+      (managedRunCachePrefixLength(delivered.body) === undefined
+        ? undefined
+        : CACHED_RUN_DELIVERY.exec(delivered.body));
     const parsed =
       envelope &&
       v.safeParse(ManagedRunDeliverySchema, {
@@ -1693,7 +1755,9 @@ export async function prepareManagedRunImages(
 /**
  * Renders a run as a Flue delivery. Without image input it is the
  * `oao.run.v1` signal. When at least one image is attached it becomes a `user`
- * message whose attachments are the prepared images, in file order.
+ * message whose attachments are the prepared images, in file order. When the
+ * start of the message is shared with other sessions, it is a `user` message
+ * that opens with that start and names the delivery after it.
  */
 export function createManagedRunDeliveredMessage(input: {
   readonly delivery: ManagedRunDelivery;
@@ -1701,6 +1765,8 @@ export function createManagedRunDeliveredMessage(input: {
   readonly files: readonly ManagedRunFileManifest[];
   /** How each image run file reaches the model; absent for text-only delivery. */
   readonly images?: ReadonlyMap<string, ManagedRunImage>;
+  /** Characters at the start of the message that other sessions share. */
+  readonly cachePrefixChars?: number;
 }): DeliveredMessage {
   const body = inputBody(
     input.message,
@@ -1708,6 +1774,7 @@ export function createManagedRunDeliveredMessage(input: {
     input.files,
     input.images,
   );
+  const prefixChars = stablePrefixChars(input.message, input.cachePrefixChars);
   const attachments = input.files.flatMap((file) => {
     const image = input.images?.get(file.id);
     return image?.status === "attached"
@@ -1721,6 +1788,17 @@ export function createManagedRunDeliveredMessage(input: {
         ]
       : [];
   });
+  // The body starts with the message, so the split is a position in both.
+  if (prefixChars > 0)
+    return {
+      kind: "user",
+      body: cachedRunEnvelope(
+        input.delivery,
+        body.slice(0, prefixChars),
+        body.slice(prefixChars),
+      ),
+      ...(attachments.length > 0 ? { attachments } : {}),
+    };
   if (attachments.length > 0)
     return {
       kind: "user",
@@ -1768,14 +1846,18 @@ export function managedRunRequestIdentity(input: {
   readonly delivery: ManagedRunDelivery;
   readonly message: string;
   readonly files: readonly ManagedRunFileManifest[];
+  readonly cachePrefixChars?: number;
 }): unknown {
   if (!input.files.some(isImageRunFile))
     return createManagedRunDeliveredMessage(input);
+  const prefixChars = stablePrefixChars(input.message, input.cachePrefixChars);
   return {
     type: MANAGED_RUN_IMAGE_REQUEST,
     imagePolicyVersion: MODEL_IMAGE_POLICY_VERSION,
     delivery: input.delivery,
     message: input.message,
+    // Only when set, so other image runs keep their identity.
+    ...(prefixChars > 0 ? { cachePrefixChars: prefixChars } : {}),
     files: input.files.map((file) => ({
       id: file.id,
       name: file.name,
@@ -1783,6 +1865,43 @@ export function managedRunRequestIdentity(input: {
       sizeBytes: file.sizeBytes,
       sha256: file.sha256,
     })),
+  };
+}
+
+/**
+ * The prompt cache key of a session without one of its own. Every session of
+ * an agent version shares it, so they read the cached instructions and tools.
+ */
+function agentVersionPromptCacheKey(agentVersionId: string): string {
+  return `oao-agent-version:${agentVersionId}`;
+}
+
+// Prompt cache keys of the thread instances this process renders, by Flue
+// instance ID. Flue runs a model call in the process that renders its
+// instance, and every render records the key again.
+const PROMPT_CACHE_KEY_ENTRIES = 10_000;
+const promptCacheKeys = new Map<string, string>();
+
+function rememberPromptCacheKey(instanceId: string, key: string): void {
+  promptCacheKeys.delete(instanceId);
+  promptCacheKeys.set(instanceId, key);
+  if (promptCacheKeys.size > PROMPT_CACHE_KEY_ENTRIES) {
+    const oldest = promptCacheKeys.keys().next().value;
+    if (oldest !== undefined) promptCacheKeys.delete(oldest);
+  }
+}
+
+/**
+ * The prompt cache scope of a model call of a thread instance: the session's
+ * key, and the stable start of a run message with a cached prefix.
+ */
+function managedPromptCacheScope(
+  instanceId: string | undefined,
+): ModelPromptCacheScope {
+  const key = instanceId ? promptCacheKeys.get(instanceId) : undefined;
+  return {
+    ...(key ? { key } : {}),
+    stablePrefixLength: managedRunCachePrefixLength,
   };
 }
 
@@ -1794,6 +1913,15 @@ export function ManagedAgent(): string {
     throw new Error(
       "ManagedAgent delivery snapshot does not match its instance",
     );
+  rememberPromptCacheKey(
+    threadInstanceId({
+      organizationId: initial.organizationId as OrganizationId,
+      projectId: initial.projectId as ProjectId,
+      threadId: initial.threadId as ThreadId,
+    }),
+    initial.promptCacheKey ??
+      agentVersionPromptCacheKey(initial.snapshot.agentVersionId),
+  );
   const config = runtimeConfig();
   const preset = config.presets.resolve(initial.snapshot.modelPreset, {
     organizationId: initial.organizationId,
@@ -2258,6 +2386,10 @@ interface RunContext extends TenantContext {
   readonly files: readonly ManagedRunFileManifest[];
   readonly snapshot: ManagedAgentSnapshot;
   readonly workspace: NonNullable<ManagedAgentInstanceData["workspace"]>;
+  /** The session's prompt cache key, when its creator gave one. */
+  readonly promptCacheKey?: string;
+  /** Characters at the start of this run's message that other sessions share. */
+  readonly cachePrefixChars: number;
 }
 
 export type ManagedRunFileManifest = NonNullable<
@@ -2523,7 +2655,8 @@ function publicProviderFinishReason(value: unknown): string | undefined {
  * Project provider failure diagnostics without persisting raw provider errors.
  *
  * pi-ai exposes standardized finish errors as messages such as
- * `Provider finish_reason: content_filter`; newer Flue providers can supply the
+ * `Provider finish_reason: content_filter` (Chat Completions) or
+ * `Response incomplete: content_filter` (Responses); newer Flue providers can supply the
  * exact value directly as `providerFinishReason`. Both paths are restricted to
  * the same token grammar before they enter a public payload.
  */
@@ -2554,7 +2687,7 @@ function modelInvocationDiagnostics(
     publicProviderFinishReason(response.finishReason) ?? "unknown";
   const standardizedReason =
     typeof response.error?.message === "string"
-      ? /^Provider (?:finish_reason|stopped with):\s*([a-z0-9][a-z0-9._:/-]{0,119})$/iu.exec(
+      ? /^(?:Provider (?:finish_reason|stopped with)|Response incomplete):\s*([a-z0-9][a-z0-9._:/-]{0,119})$/iu.exec(
           response.error.message.trim(),
         )?.[1]
       : undefined;
@@ -3406,6 +3539,7 @@ export class ManagedRuntimeOrchestrator {
       delivery: this.delivery(run),
       message: run.inputPublic.message,
       files: run.files,
+      cachePrefixChars: run.cachePrefixChars,
     };
     const admissionRequestHash = (deliveredMessage: unknown) =>
       digestJson({
@@ -3649,6 +3783,9 @@ export class ManagedRuntimeOrchestrator {
             sessionId: run.sessionId,
             workspace: run.workspace,
             snapshot: run.snapshot,
+            ...(run.promptCacheKey
+              ? { promptCacheKey: run.promptCacheKey }
+              : {}),
           } satisfies ManagedAgentInstanceData,
         });
         await this.bindThreadUid(run, receipt.uid);
@@ -4166,7 +4303,10 @@ export class ManagedRuntimeOrchestrator {
           v.id AS agent_version_id,v.config,encode(v.content_hash,'hex') AS content_hash,
           workspace.id AS workspace_id,workspace.owner_thread_id,
           COALESCE(workspace.owner_session_id,r.session_id) AS owner_session_id,
-          COALESCE(workspace.owner_run_id,r.id) AS owner_run_id
+          COALESCE(workspace.owner_run_id,r.id) AS owner_run_id,
+          prompt_cache.cache_key AS prompt_cache_key,
+          CASE WHEN prompt_cache.initial_run_id=r.id
+            THEN prompt_cache.initial_prefix_chars ELSE 0 END AS prompt_cache_prefix_chars
          FROM oao.runs r JOIN oao.agent_versions v
            ON v.organization_id=r.organization_id AND v.project_id=r.project_id AND v.id=r.agent_version_id
          JOIN oao.thread_workspace_bindings binding
@@ -4175,6 +4315,9 @@ export class ManagedRuntimeOrchestrator {
          JOIN oao.agent_workspaces workspace
            ON workspace.organization_id=binding.organization_id AND workspace.project_id=binding.project_id
           AND workspace.id=binding.workspace_id
+         LEFT JOIN oao.session_prompt_caches prompt_cache
+           ON prompt_cache.organization_id=r.organization_id AND prompt_cache.project_id=r.project_id
+          AND prompt_cache.session_id=r.session_id
          WHERE r.organization_id=$1 AND r.project_id=$2 AND r.id=$3`,
         [tenant.organizationId, tenant.projectId, tenant.runId],
       );
@@ -4454,6 +4597,10 @@ export class ManagedRuntimeOrchestrator {
           ownerSessionId: row.owner_session_id as string,
           ownerRunId: row.owner_run_id as string,
         },
+        ...(typeof row.prompt_cache_key === "string"
+          ? { promptCacheKey: row.prompt_cache_key }
+          : {}),
+        cachePrefixChars: Number(row.prompt_cache_prefix_chars ?? 0),
       };
     });
   }
@@ -5662,6 +5809,23 @@ function createModelTurnAdmission(pool: PgPool) {
   };
 }
 
+/**
+ * Runs a model operation with the prompt cache scope of its thread instance,
+ * so the provider sends the session's cache key and breakpoints. Flue starts
+ * the provider stream inside the interceptor chain.
+ */
+function withManagedPromptCacheScope<T>(
+  operation: FlueExecutionOperation,
+  context: FlueExecutionContext,
+  next: () => Promise<T>,
+): Promise<T> {
+  if (operation.type !== "model") return next();
+  return withModelPromptCacheScope(
+    managedPromptCacheScope(context.instanceId),
+    next,
+  );
+}
+
 export async function configureVendorNeutralTelemetry(
   input: {
     readonly pool?: PgPool;
@@ -5687,7 +5851,9 @@ export async function configureVendorNeutralTelemetry(
     ...telemetry,
     async interceptor(operation, context, next) {
       await admitModelTurn?.(operation, context);
-      return telemetry.interceptor(operation, context, next);
+      return withManagedPromptCacheScope(operation, context, () =>
+        telemetry.interceptor(operation, context, next),
+      );
     },
   });
   return async () => {
@@ -6571,6 +6737,10 @@ export async function startManagedFlueRuntime(input: {
 
 export const runtimeTesting = {
   createModelTurnAdmission,
+  rememberPromptCacheKey,
+  managedPromptCacheScope,
+  withManagedPromptCacheScope,
+  agentVersionPromptCacheKey,
   createPendingAssistantText: () => new PendingAssistantText(),
   replyAfterCommittedText,
   withPendingAssistantText,

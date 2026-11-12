@@ -114,9 +114,11 @@ them, create a new preset key and publish a new agent version.
 OpenRouter presets may use live OpenRouter models or saved OpenRouter presets
 (`@preset/<slug>`), plus routing controls including fallbacks, zero-data
 retention, data collection, upstream allow/deny lists, preference order, sort,
-and price caps. OAO sends every OpenRouter model, Claude models included,
-through OpenRouter's Chat Completions API, which is where these routing controls
-apply. OpenAI, Anthropic, xAI, and Amazon Bedrock are direct provider connections, so
+and price caps. OAO sends every OpenRouter model, Claude models and saved
+presets included, through OpenRouter's Responses API, which carries these
+routing controls for every model family. The requests are stateless: OAO sends
+the full conversation, reasoning items included, on every call and asks
+OpenRouter to store nothing. OpenAI, Anthropic, xAI, and Amazon Bedrock are direct provider connections, so
 OpenRouter routing controls must be empty.
 
 For direct OpenAI presets, OAO maps the stored controls to the Responses API as
@@ -293,21 +295,42 @@ usage, OAO cannot report their complete token usage or cost.
 
 ## Prompt caching
 
-OAO passes each Flue conversation's stable session identity to OpenRouter as
-`x-session-id`, allowing OpenRouter to keep later turns on the same cache-aware
-provider endpoint. For direct `openrouter/anthropic/*` models, OAO also adds
-Anthropic-compatible ephemeral cache markers to the stable system prompt, the
-last tool definition, and the latest conversation content. A qualifying first
-request can therefore report `cacheWriteTokens`; later requests with the same
-prefix can report `cacheReadTokens` in the session usage panel and API.
+For OpenRouter models, OAO marks prompt cache breakpoints on every model call,
+at most three per call:
 
-Some providers use implicit prompt caching and do not report writes because
-creating the cache is free. In that case `cacheWriteTokens` remains zero even
-when later calls report cache reads. OpenRouter saved presets
-(`openrouter/@preset/<slug>`) can resolve to different model families, so their
-explicit cache behavior must be configured in the saved preset; OAO still
-sends session affinity. Provider minimum prompt sizes and cache TTLs continue
-to apply.
+- after the agent's instructions, which come after its tool definitions, so
+  every session of the agent can read both from the cache;
+- after the stable start of a session's first message, when the session was
+  created with `promptCache.prefixChars` (see [Share the prompt cache across
+  sessions](/reference/http-api#share-the-prompt-cache-across-sessions));
+- at the end of the latest message or tool result, so each call of a run reads
+  what the previous call wrote.
+
+OpenAI GPT-5.6 and later models read cache only at such breakpoints, and
+OpenRouter turns each breakpoint into an Anthropic or Google cache marker. OAO
+keeps the provider's default cache lifetime.
+
+Every call also carries a cache key, which OpenRouter receives as
+`prompt_cache_key` and as the `x-session-id` sticky-routing header, so calls
+with the same key reach the same provider endpoint and its cache. The key is
+the session's `promptCache.key` when its creator gave one. Otherwise it is
+shared by every session of the same agent version, delegated child sessions
+included, each under its own agent version.
+
+Run IDs, the session ID, and the snapshot hash come after a session's stable
+start: OAO opens such a first message with `<oao-run type="oao.run.v1">` and
+the stable text, and names the delivery IDs in an `<oao-run-delivery>` element
+at its end. A message without a stable start keeps the delivery IDs in the
+opening `<oao-run>` tag.
+
+A first request that writes a prefix reports `cacheWriteTokens`; a later
+request that reads it reports `cacheReadTokens`. OAO records both separately
+for each model call and prices them with the preset's cache write and cached
+input rates. The provider decides what it caches: a prefix shorter than its
+minimum (1,024 tokens for OpenAI models) is not cached, an entry expires after
+the provider's cache lifetime, and some providers report no writes because
+writing is free. Changing an agent's instructions or tools, or the stable start
+of the message, starts a new cache entry.
 
 ## Link a model to an agent
 
@@ -585,10 +608,10 @@ unbound presets are history only.
 ## Bundled model catalog
 
 The runtime uses pi-ai 1.5.0. Its catalog excludes realtime and image-only
-models from chat choices and includes newer chat models. Upstream routes OpenRouter Claude
-`~anthropic/claude-*-latest` aliases through Anthropic Messages. OAO keeps
-these models on Chat Completions to preserve OpenRouter routing controls;
-the upstream thinking-signature preservation does not apply to this adapter. OpenRouter billed cost totals use
+models from chat choices and includes newer chat models. Upstream lists OpenRouter models for Chat Completions or, for Claude,
+Anthropic Messages. OAO sends all of them through OpenRouter's Responses API
+instead, so routing controls and prompt cache breakpoints apply to every
+family; reasoning is replayed as encrypted reasoning items. OpenRouter billed cost totals use
 provider-reported billing; component costs remain catalog estimates.
 GPT-6.1 Terra is included, with a 500K context window on the Codex provider.
 Model context limits remain provider-specific; configure presets accordingly.

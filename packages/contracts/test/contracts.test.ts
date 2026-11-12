@@ -22,6 +22,8 @@ import {
   parseCreateProjectStorageProviderInput,
   parseManagedAgentSnapshotForPublication,
   parseSessionVersionResolution,
+  parseSessionPromptCache,
+  ManagedAgentInstanceDataSchema,
   parseModelRoutingPolicy,
   validateToolJsonSchema,
   validateToolJsonValue,
@@ -1384,4 +1386,40 @@ test("a model preset may be created with its first price", () => {
     }).price?.outputUsdPerMillion,
     10,
   );
+});
+
+test("a session prompt cache key is printable ASCII and its prefix a bounded integer", () => {
+  assert.deepEqual(
+    parseSessionPromptCache({
+      key: "vectrix-extraction:00000000-0000-4000-8000-000000000001",
+      prefixChars: 41_234,
+    }),
+    {
+      key: "vectrix-extraction:00000000-0000-4000-8000-000000000001",
+      prefixChars: 41_234,
+    },
+  );
+  assert.deepEqual(parseSessionPromptCache({ key: "k" }), { key: "k" });
+  for (const input of [
+    undefined,
+    null,
+    "k",
+    {},
+    { key: "" },
+    { key: "a b" },
+    { key: "x".repeat(65) },
+    { key: "caf\u00e9" },
+    { key: "line\nbreak" },
+    { key: "k", prefixChars: -1 },
+    { key: "k", prefixChars: 0.5 },
+    { key: "k", prefixChars: "1" },
+    { key: "k", prefixChars: 100_001 },
+  ])
+    assert.throws(() => parseSessionPromptCache(input), JSON.stringify(input));
+  // Instance data from before prompt cache keys still parses.
+  const instance = v.safeParse(
+    ManagedAgentInstanceDataSchema.entries.promptCacheKey,
+    undefined,
+  );
+  assert.equal(instance.success, true);
 });

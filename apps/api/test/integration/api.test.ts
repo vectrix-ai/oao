@@ -1848,6 +1848,136 @@ test(
     });
 
     await t.test(
+      "a session keeps its prompt cache key and stable prefix",
+      async () => {
+        const created = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "prompt-cache-agent",
+              name: "Prompt cache agent",
+              config: {
+                systemPrompt: "Extract the order.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "prompt-cache-agent-1",
+          ),
+        );
+        assert.equal(created.status, 201, await created.clone().text());
+        const agentId = ((await created.json()) as { id: string }).id;
+        const stable = "Project rules and fields. ";
+        const initialMessage = `${stable}Email of this run.`;
+        const createSession = (promptCache: unknown, key: string) =>
+          app.request(
+            `${projectPath}/sessions`,
+            jsonRequest({ agentId, initialMessage, promptCache }, key),
+          );
+
+        for (const [index, promptCache] of [
+          null,
+          "vectrix-extraction:p1",
+          { prefixChars: 3 },
+          { key: "" },
+          { key: "has space" },
+          { key: "x".repeat(65) },
+          { key: "caf\u00e9" },
+          { key: "k", prefixChars: -1 },
+          { key: "k", prefixChars: 1.5 },
+          { key: "k", prefixChars: "3" },
+          { key: "k", prefixChars: initialMessage.length + 1 },
+        ].entries()) {
+          const rejected = await createSession(
+            promptCache,
+            `prompt-cache-bad-${index}`,
+          );
+          assert.equal(
+            rejected.status,
+            400,
+            `${JSON.stringify(promptCache)}: ${await rejected.clone().text()}`,
+          );
+        }
+        // Without an initial message there is no prefix to share.
+        const filesOnly = await app.request(
+          `${projectPath}/sessions`,
+          jsonRequest(
+            {
+              agentId,
+              files: [
+                {
+                  name: "order.txt",
+                  contentType: "text/plain",
+                  dataBase64: Buffer.from("order").toString("base64"),
+                },
+              ],
+              promptCache: { key: "k", prefixChars: 1 },
+            },
+            "prompt-cache-bad-files",
+          ),
+        );
+        assert.equal(filesOnly.status, 400, await filesOnly.clone().text());
+
+        const accepted = await createSession(
+          { key: "vectrix-extraction:p1", prefixChars: stable.length },
+          "prompt-cache-session-1",
+        );
+        assert.equal(accepted.status, 201, await accepted.clone().text());
+        const session = (await accepted.json()) as {
+          id: string;
+          latestRunId: string;
+        };
+        const keyOnly = await createSession(
+          { key: "vectrix-extraction:p1" },
+          "prompt-cache-session-2",
+        );
+        assert.equal(keyOnly.status, 201, await keyOnly.clone().text());
+        const keyOnlySession = (await keyOnly.json()) as { id: string };
+        const plain = await createSession(undefined, "prompt-cache-session-3");
+        assert.equal(plain.status, 201, await plain.clone().text());
+        const plainSession = (await plain.json()) as { id: string };
+
+        const stored = await pool.query<{
+          session_id: string;
+          cache_key: string;
+          initial_run_id: string;
+          initial_prefix_chars: number;
+        }>(
+          `SELECT session_id,cache_key,initial_run_id,initial_prefix_chars
+             FROM oao.session_prompt_caches
+            WHERE session_id = ANY($1::uuid[]) ORDER BY initial_prefix_chars DESC`,
+          [[session.id, keyOnlySession.id, plainSession.id]],
+        );
+        assert.deepEqual(stored.rows, [
+          {
+            session_id: session.id,
+            cache_key: "vectrix-extraction:p1",
+            initial_run_id: session.latestRunId,
+            initial_prefix_chars: stable.length,
+          },
+          {
+            session_id: keyOnlySession.id,
+            cache_key: "vectrix-extraction:p1",
+            initial_run_id: (
+              await pool.query<{ id: string }>(
+                "SELECT id FROM oao.runs WHERE session_id=$1",
+                [keyOnlySession.id],
+              )
+            ).rows[0]?.id,
+            initial_prefix_chars: 0,
+          },
+        ]);
+        // The session read model does not change.
+        const read = (await (
+          await app.request(`${projectPath}/sessions/${session.id}`)
+        ).json()) as Record<string, unknown>;
+        assert.equal("promptCache" in read, false);
+        assert.equal("cacheKey" in read, false);
+      },
+    );
+    await t.test(
       "deleting an agent archives it and frees its key",
       async () => {
         const config = {

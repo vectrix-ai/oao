@@ -698,6 +698,20 @@ type InitialSessionContent =
     }
   | { readonly initialMessage?: never; readonly files: NonEmptyRunFiles };
 
+/**
+ * Lets the model calls of a session share the provider's prompt cache with
+ * other sessions that send the same key.
+ */
+export interface SessionPromptCacheInput {
+  /** Cache and routing key: 1 to 64 printable ASCII characters without spaces. */
+  readonly key: string;
+  /**
+   * How many characters (JavaScript string length) at the start of
+   * `initialMessage` are the same for every session with this key.
+   */
+  readonly prefixChars?: number;
+}
+
 export type CreateSessionInput = (
   | {
       readonly agentId: string;
@@ -710,7 +724,9 @@ export type CreateSessionInput = (
       readonly title?: string;
     }
 ) &
-  InitialSessionContent;
+  InitialSessionContent & {
+    readonly promptCache?: SessionPromptCacheInput;
+  };
 
 export type RunInput =
   | {

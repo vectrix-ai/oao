@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   normalizeContext,
-  type OpenAICompletionsCompat,
+  type Api,
+  type TranscriptContext,
+  type Model,
+  type OpenAIResponsesCompat,
   type Provider,
 } from "@earendil-works/pi-ai";
 import {
@@ -22,8 +25,48 @@ import {
   loadModelPresetConfiguration,
   parseApprovedModelPresets,
   toOpenRouterRouting,
+  withModelPromptCacheScope,
   withPlatformTurnLimit,
 } from "../src/index.js";
+
+/** The request an OpenRouter provider sends, stopped before any model runs. */
+async function openRouterRequest(
+  provider: Provider,
+  model: Model<Api>,
+  context: TranscriptContext = normalizeContext({
+    systemPrompt: "Stable extraction instructions.",
+    messages: [{ role: "user", content: "Extract it.", timestamp: 1 }],
+  }),
+  options: Record<string, unknown> = {},
+) {
+  let payload: Record<string, unknown> | undefined;
+  let request: Request | undefined;
+  const response = await provider
+    .stream(model, context, {
+      apiKey: "sk-openrouter-test",
+      maxRetries: 0,
+      ...options,
+      onPayload: (value: unknown) => {
+        payload = value as Record<string, unknown>;
+      },
+      fetch: async (input: string | URL | Request, init?: RequestInit) => {
+        request = new Request(input, init);
+        return new Response(
+          JSON.stringify({ error: { message: "expected test stop" } }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        );
+      },
+    } as never)
+    .result();
+  assert.equal(response.stopReason, "error");
+  assert.ok(request);
+  // The payload as sent, after OAO's request changes.
+  const sent = JSON.parse(await request.clone().text()) as Record<
+    string,
+    unknown
+  >;
+  return { payload, sent, request };
+}
 
 test("test-only deterministic preset remains available to isolated tests", () => {
   const registry = new ImmutableModelPresetRegistry(DEFAULT_LOCAL_PRESETS, {
@@ -55,7 +98,7 @@ test("runnable deployment configuration exposes no fake presets", () => {
   );
 });
 
-test("fake and OpenRouter adapters use Pi providers", () => {
+test("fake and OpenRouter adapters use Pi providers", async () => {
   assert.equal(createDeterministicModelProvider().provider.id, "fake");
   const openrouter = createOpenRouterProvider({
     data_collection: "deny",
@@ -63,10 +106,14 @@ test("fake and OpenRouter adapters use Pi providers", () => {
   });
   assert.equal(openrouter.id, "openrouter");
   assert.ok(openrouter.getModels().length > 0);
-  assert.equal(
-    openrouter.getModels()[0]?.compat?.openRouterRouting?.data_collection,
-    "deny",
+  const { sent } = await openRouterRequest(
+    openrouter,
+    openrouter.getModels()[0]!,
   );
+  assert.deepEqual(sent.provider, {
+    data_collection: "deny",
+    allow_fallbacks: false,
+  });
 });
 
 test("default deterministic provider remains available across turns", async () => {
@@ -94,7 +141,7 @@ test("hosted presets must exist in the pinned Pi OpenRouter catalog", () => {
   );
 });
 
-test("each immutable preset owns its routing variant even for the same model", () => {
+test("each immutable preset owns its routing variant even for the same model", async () => {
   const presets = parseApprovedModelPresets([
     {
       key: "zdr",
@@ -110,14 +157,13 @@ test("each immutable preset owns its routing variant even for the same model", (
   const providers = createOpenRouterPresetProviders(presets);
   assert.equal(providers.length, 2);
   assert.notEqual(providers[0]?.id, providers[1]?.id);
-  assert.equal(
-    providers[0]?.getModels()[0]?.compat?.openRouterRouting?.zdr,
-    true,
+  const [zdr, fallback] = await Promise.all(
+    providers.map((provider) =>
+      openRouterRequest(provider, provider.getModels()[0]!),
+    ),
   );
-  assert.equal(
-    providers[1]?.getModels()[0]?.compat?.openRouterRouting?.allow_fallbacks,
-    true,
-  );
+  assert.deepEqual(zdr?.sent.provider, { zdr: true, only: ["anthropic"] });
+  assert.deepEqual(fallback?.sent.provider, { allow_fallbacks: true });
   const registry = new ImmutableModelPresetRegistry(presets, {
     hostedEnabled: true,
   });
@@ -138,65 +184,119 @@ test("OpenRouter Anthropic presets keep routing, cache markers, and session affi
   const model = provider?.getModels()[0];
   assert.ok(provider);
   assert.ok(model);
-  // Routing only applies on OpenRouter Chat Completions, not its Messages API.
-  assert.equal(model.api, "openai-completions");
-  assert.equal(model.compat?.cacheControlFormat, "anthropic");
-  assert.equal(model.compat?.sendSessionAffinityHeaders, true);
-  assert.equal(model.compat?.sessionAffinityFormat, "openrouter");
-
-  let payload: unknown;
-  let request: Request | undefined;
-  const response = await provider
-    .stream(
-      model,
-      normalizeContext({
-        systemPrompt: "Stable extraction instructions and source document.",
-        messages: [
-          {
-            role: "user",
-            content: "Extract the shipment references.",
-            timestamp: 1,
-          },
-        ],
-      }),
-      {
-        apiKey: "sk-openrouter-test",
-        sessionId: "session-cache-affinity",
-        maxRetries: 0,
-        onPayload: (value) => {
-          payload = value;
-        },
-        fetch: async (input, init) => {
-          request = new Request(input, init);
-          return new Response(
-            JSON.stringify({ error: { message: "expected test stop" } }),
-            {
-              status: 503,
-              headers: { "content-type": "application/json" },
-            },
-          );
-        },
-      },
-    )
-    .result();
-
-  assert.equal(response.stopReason, "error");
-  assert.equal(request?.url, "https://openrouter.ai/api/v1/chat/completions");
-  assert.equal(request?.headers.get("x-session-id"), "session-cache-affinity");
-  assert.match(
-    JSON.stringify(payload),
-    /"cache_control":\{"type":"ephemeral"\}/u,
+  // OpenRouter's Responses API carries provider routing for Claude too.
+  assert.equal(model.api, "openai-responses");
+  assert.equal(
+    (model.compat as OpenAIResponsesCompat | undefined)?.sessionAffinityFormat,
+    "openrouter",
   );
-  assert.deepEqual((payload as { provider?: unknown }).provider, {
-    zdr: true,
-  });
+
+  const { sent, request } = await openRouterRequest(
+    provider,
+    model,
+    normalizeContext({
+      systemPrompt: "Stable extraction instructions and source document.",
+      messages: [
+        {
+          role: "user",
+          content: "Extract the shipment references.",
+          timestamp: 1,
+        },
+      ],
+    }),
+    { sessionId: "session-cache-affinity" },
+  );
+
+  assert.equal(request.url, "https://openrouter.ai/api/v1/responses");
+  assert.equal(request.headers.get("x-session-id"), "session-cache-affinity");
+  assert.equal(sent.prompt_cache_key, "session-cache-affinity");
+  assert.equal(sent.store, false);
+  assert.equal(sent.prompt_cache_options, undefined);
+  assert.deepEqual(sent.provider, { zdr: true });
+  // Breakpoints after the instructions and at the end of the latest message.
+  assert.deepEqual(sent.input, [
+    {
+      role: "developer",
+      content: [
+        {
+          type: "input_text",
+          text: "Stable extraction instructions and source document.",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "input_text",
+          text: "Extract the shipment references.",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        },
+      ],
+    },
+  ]);
 });
 
-test("every pinned OpenRouter model streams through Chat Completions", () => {
+test("a prompt cache scope sets the cache key and splits the stable prefix", async () => {
+  const provider = createOpenRouterPresetProviders([
+    { key: "sol", model: "openrouter/openai/gpt-6.1-sol" },
+  ])[0]!;
+  const model = provider.getModels()[0]!;
+  const stable = "Project rules that every session shares.";
+  const { sent, request } = await withModelPromptCacheScope(
+    {
+      key: "vectrix-extraction:project-1",
+      stablePrefixLength: (text) =>
+        text.startsWith(stable) ? stable.length : undefined,
+    },
+    () =>
+      openRouterRequest(
+        provider,
+        model,
+        normalizeContext({
+          systemPrompt: "Agent instructions.",
+          messages: [
+            {
+              role: "user",
+              content: `${stable} The email of this run.`,
+              timestamp: 1,
+            },
+          ],
+        }),
+        { sessionId: "aff_random_conversation_key" },
+      ),
+  );
+  assert.equal(
+    request.headers.get("x-session-id"),
+    "vectrix-extraction:project-1",
+  );
+  assert.equal(sent.prompt_cache_key, "vectrix-extraction:project-1");
+  assert.deepEqual((sent.input as { content: unknown }[])[1]?.content, [
+    {
+      type: "input_text",
+      text: stable,
+      prompt_cache_breakpoint: { mode: "explicit" },
+    },
+    {
+      type: "input_text",
+      text: " The email of this run.",
+      prompt_cache_breakpoint: { mode: "explicit" },
+    },
+  ]);
+
+  // Outside a scope the call keeps the session ID it was given.
+  const unscoped = await openRouterRequest(provider, model, undefined, {
+    sessionId: "aff_random_conversation_key",
+  });
+  assert.equal(unscoped.sent.prompt_cache_key, "aff_random_conversation_key");
+});
+
+test("every pinned OpenRouter model streams through the Responses API", () => {
   const models = createOpenRouterProvider().getModels();
   assert.ok(models.some((model) => model.id.startsWith("anthropic/claude-")));
   for (const model of models) {
-    assert.equal(model.api, "openai-completions", model.id);
+    assert.equal(model.api, "openai-responses", model.id);
     assert.equal(model.baseUrl, "https://openrouter.ai/api/v1", model.id);
   }
 });
@@ -849,11 +949,9 @@ test("project presets resolve only inside their own project", () => {
   assert.equal(registered.length, 1);
   const projectModel = providers[0]?.getModels()[0];
   assert.ok(projectModel);
-  if (projectModel.api !== "openai-completions")
-    throw new Error("Expected an OpenRouter completions model");
-  const compat = projectModel.compat as OpenAICompletionsCompat | undefined;
-  assert.equal(compat?.cacheControlFormat, "anthropic");
-  assert.equal(compat?.sendSessionAffinityHeaders, true);
+  assert.equal(projectModel.api, "openai-responses");
+  const compat = projectModel.compat as OpenAIResponsesCompat | undefined;
+  assert.equal(compat?.sessionAffinityFormat, "openrouter");
   assert.throws(
     () => registry.resolve("claude-sonnet-4-6-zdr-v1", tenantB),
     /not approved/u,

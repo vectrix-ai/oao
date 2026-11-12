@@ -2059,6 +2059,30 @@ export const ManagedAgentSnapshotSchema = v.strictObject({
   limits: ManagedAgentPublicationConfigSchema.entries.limits,
 });
 
+/** The longest prompt cache key: OpenAI's `prompt_cache_key` limit. */
+export const PROMPT_CACHE_KEY_MAX_LENGTH = 64;
+
+/**
+ * A caller's prompt cache key: 1 to 64 printable ASCII characters without
+ * spaces. Model calls send it to the provider as cache and routing key.
+ */
+export const PromptCacheKeySchema = v.pipe(
+  v.string(),
+  v.regex(/^[!-~]{1,64}$/u),
+);
+
+/**
+ * How the model calls of a session share the provider's prompt cache with
+ * other sessions. The first `prefixChars` characters of the initial message
+ * are the same for every session that sends the same key.
+ */
+export const SessionPromptCacheSchema = v.object({
+  key: PromptCacheKeySchema,
+  prefixChars: v.optional(
+    v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(100_000)),
+  ),
+});
+
 export const ManagedAgentInstanceDataSchema = v.object({
   organizationId: IdSchema,
   projectId: IdSchema,
@@ -2073,6 +2097,8 @@ export const ManagedAgentInstanceDataSchema = v.object({
     }),
   ),
   snapshot: ManagedAgentSnapshotSchema,
+  /** The session's prompt cache key, when its creator gave one. */
+  promptCacheKey: v.optional(PromptCacheKeySchema),
 });
 
 /** One Skill binding of an agent version as a session tree resolved it. */
@@ -2352,6 +2378,7 @@ export type AgentDelegationState = v.InferOutput<
   typeof AgentDelegationStateSchema
 >;
 export type ManagedRunDelivery = v.InferOutput<typeof ManagedRunDeliverySchema>;
+export type SessionPromptCache = v.InferOutput<typeof SessionPromptCacheSchema>;
 export type ManagedRunInputV1 = v.InferOutput<typeof ManagedRunInputV1Schema>;
 export type ToolResultEnvelope = v.InferOutput<typeof ToolResultEnvelopeSchema>;
 export type ApiError = v.InferOutput<typeof ApiErrorSchema>;
@@ -3562,6 +3589,10 @@ export function parseCreateProjectMemberInput(
   input: unknown,
 ): CreateProjectMemberInput {
   return v.parse(CreateProjectMemberInputSchema, input);
+}
+
+export function parseSessionPromptCache(input: unknown): SessionPromptCache {
+  return v.parse(SessionPromptCacheSchema, input);
 }
 
 export function parseSetModelPresetPriceInput(
