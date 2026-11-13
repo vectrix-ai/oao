@@ -73,7 +73,7 @@ You need:
 | Requirement        | Version                                               | Notes                                                       |
 | ------------------ | ----------------------------------------------------- | ----------------------------------------------------------- |
 | Git                | Current release                                       | Used to clone this repository                               |
-| Node.js            | 22.19.0 or newer                                      | Runs the workspace and setup CLI                            |
+| Node.js            | 22.22.0 or newer                                      | Runs the workspace and setup CLI                            |
 | pnpm               | Exactly 10.27.0                                       | The version pinned by this repository                       |
 | Docker             | Current release                                       | The CLI and a running Docker-compatible daemon are required |
 | Model provider key | OpenRouter, OpenAI, Anthropic, xAI, or Amazon Bedrock | Entered securely during setup; it is not stored in `.env`   |
