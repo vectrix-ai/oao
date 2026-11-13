@@ -198,6 +198,16 @@ export function ModelsPage() {
     return map;
   }, [agents.data]);
   const term = search.trim().toLowerCase();
+  // The open preset as the list has it now: a price or limits change saved in
+  // its dialog refreshes the list, so Duplicate copies what was just saved.
+  const shownPreset = openPreset
+    ? ((presets.data?.data ?? []).find((preset) =>
+        openPreset.id
+          ? preset.id === openPreset.id
+          : preset.origin === openPreset.origin &&
+            preset.key === openPreset.key,
+      ) ?? openPreset)
+    : null;
   const visible = (presets.data?.data ?? []).filter(
     (preset) =>
       !term ||
@@ -465,24 +475,24 @@ export function ModelsPage() {
           onSubmit={(input) => create.mutate(input)}
         />
       ) : null}
-      {openPreset ? (
+      {shownPreset ? (
         <PresetDetailDialog
-          preset={openPreset}
+          preset={shownPreset}
           provider={
             (providers.data ?? []).find(
-              (entry) => entry.id === openPreset.providerId,
+              (entry) => entry.id === shownPreset.providerId,
             ) ?? null
           }
-          usedBy={usageByPreset.get(openPreset.key) ?? []}
+          usedBy={usageByPreset.get(shownPreset.key) ?? []}
           usageLoading={agents.isPending}
           onClose={() => setOpenPreset(null)}
           onDuplicate={() => {
-            setDuplicateFrom(openPreset);
+            setDuplicateFrom(shownPreset);
             setOpenPreset(null);
           }}
           onArchive={() => {
             archivePreset.reset();
-            setArchivingPreset(openPreset);
+            setArchivingPreset(shownPreset);
           }}
         />
       ) : null}

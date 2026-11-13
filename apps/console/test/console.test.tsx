@@ -2908,6 +2908,45 @@ describe("management console", () => {
     expect(await api.listModelPresetLimits(preset?.id ?? "")).toHaveLength(2);
   });
 
+  it("duplicates a preset with the limits just saved on it", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/models", api);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Claude Sonnet 4\.6 \(zero retention\)/u,
+      }),
+    );
+    const detail = within(
+      screen.getByRole("dialog", {
+        name: "Claude Sonnet 4.6 (zero retention)",
+      }),
+    );
+    await user.click(await detail.findByRole("button", { name: "Set limits" }));
+    await user.type(
+      detail.getByRole("textbox", { name: "Context window" }),
+      "150000",
+    );
+    await user.click(detail.getByRole("button", { name: "Save limits" }));
+    await detail.findByText(
+      "150,000 context window · model's output limit, in tokens.",
+    );
+    await user.click(
+      detail.getByRole("button", { name: "Duplicate as new preset" }),
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", {
+        name: "Duplicate “Claude Sonnet 4.6 (zero retention)”",
+      }),
+    );
+    expect(dialog.getByRole("textbox", { name: "Context window" })).toHaveValue(
+      "150000",
+    );
+    expect(dialog.getByRole("textbox", { name: "Output limit" })).toHaveValue(
+      "",
+    );
+  });
+
   it("says a preset's price failed to load rather than that it has none", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
