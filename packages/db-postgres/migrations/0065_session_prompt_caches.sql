@@ -17,7 +17,7 @@ CREATE TABLE oao.session_prompt_caches (
   initial_run_id uuid NOT NULL,
   initial_prefix_chars integer NOT NULL DEFAULT 0
     CONSTRAINT session_prompt_caches_prefix_bounded
-      CHECK (initial_prefix_chars BETWEEN 0 AND 100000),
+      CHECK (initial_prefix_chars BETWEEN 0 AND 400000),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (organization_id, project_id, session_id),
   FOREIGN KEY (organization_id, project_id, session_id)

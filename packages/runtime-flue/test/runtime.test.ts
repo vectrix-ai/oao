@@ -962,6 +962,28 @@ test("a shared message start keeps surrogate pairs and needs a real envelope", (
   );
 });
 
+test("the longest shared start and rest make one run message", () => {
+  // 400,000 characters of `&` escape to 2,000,000, the longest start a run
+  // message can carry; the rest is the longest a run message may add.
+  for (const character of ["r", "&"]) {
+    const prefix = character.repeat(400_000);
+    const rest = "e".repeat(100_000);
+    const message = createManagedRunDeliveredMessage({
+      delivery,
+      message: `${prefix}${rest}`,
+      files: [],
+      cachePrefixChars: prefix.length,
+    });
+    assert.equal(message.kind, "user");
+    if (message.kind !== "user") return;
+    const head = `<oao-run type="oao.run.v1">\n${character === "&" ? "&amp;".repeat(400_000) : prefix}`;
+    assert.equal(managedRunCachePrefixLength(message.body), head.length);
+    assert.ok(message.body.startsWith(head));
+    assert.ok(message.body.slice(head.length).startsWith(rest));
+    assert.deepEqual(runtimeTesting.deliveryContext(message), delivery);
+  }
+});
+
 test("an image run with a shared message start keeps its attachments", async () => {
   const images = await prepareManagedRunImages([diagram]);
   const message = createManagedRunDeliveredMessage({

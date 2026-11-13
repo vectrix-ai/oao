@@ -1108,7 +1108,7 @@ test("a session's prompt cache key is a tenant-scoped, insert-only row that leav
   );
   assert.match(sql, /CREATE TABLE oao\.session_prompt_caches/u);
   assert.match(sql, /CHECK \(cache_key ~ '\^\[!-~\]\{1,64\}\$'\)/u);
-  assert.match(sql, /CHECK \(initial_prefix_chars BETWEEN 0 AND 100000\)/u);
+  assert.match(sql, /CHECK \(initial_prefix_chars BETWEEN 0 AND 400000\)/u);
   assert.match(
     sql,
     /REFERENCES oao\.sessions \(organization_id, project_id, id\) ON DELETE CASCADE/u,

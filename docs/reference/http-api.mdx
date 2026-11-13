@@ -808,10 +808,10 @@ optional `promptCache` object to the create body:
 }
 ```
 
-| Field         | Rules                                                                                                                                                                                                                                           |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `key`         | Required. 1 to 64 printable ASCII characters without spaces. Every model call of the session, its follow-up runs included, sends it to the provider as cache and routing key.                                                                   |
-| `prefixChars` | Optional integer from 0 to the length of `initialMessage`, counted as JavaScript string length. That many characters at the start of `initialMessage` must be identical for every session that sends the same key. Absent or 0 marks no prefix. |
+| Field         | Rules                                                                                                                                                                                                                                                               |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `key`         | Required. 1 to 64 printable ASCII characters without spaces. Every model call of the session, its follow-up runs included, sends it to the provider as cache and routing key.                                                                                       |
+| `prefixChars` | Optional integer from 0 to the length of `initialMessage` and at most 400,000, counted as JavaScript string length. That many characters at the start of `initialMessage` must be identical for every session that sends the same key. Absent or 0 marks no prefix. |
 
 OAO stores the setting with the session; session reads do not return it. It
 applies only to models OAO calls through OpenRouter. A value that breaks these
@@ -820,6 +820,38 @@ from files alone. Without `promptCache`, a session uses a key shared by every
 session of its agent version, so sessions of one agent version still share
 their instructions and tool definitions. See [Prompt
 caching](/models/adding-models#prompt-caching) for what the provider caches.
+
+A stable start lets the first message be longer, because the model reads that
+start from the cache. Lengths are JavaScript string lengths (UTF-16 code units):
+
+| Session                | `initialMessage` limit                                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------------------------------- |
+| `prefixChars` above 0  | The first `prefixChars` characters at most 400,000, and the rest at most 100,000: up to 500,000 in all. |
+| No `prefixChars`, or 0 | 100,000, as for every run message.                                                                      |
+
+A part over its limit returns `400` with code `bad_request` and one of these
+messages:
+
+| Part over its limit              | `error.message`                                                                                  |
+| -------------------------------- | ------------------------------------------------------------------------------------------------ |
+| The stable start                 | `The cached start of initialMessage (promptCache.prefixChars) must be at most 400000 characters` |
+| The rest, after the stable start | `The rest of initialMessage after promptCache.prefixChars must be at most 100000 characters`     |
+| A message without a stable start | `initialMessage must be a non-empty string of at most 100000 characters`                         |
+
+The last message is the one every OAO version returns, so a client can tell an
+OAO without the longer limit by it and send a shorter message. Follow-up runs
+of the session keep the 100,000-character limit. Webhooks with
+`includeMessageContent` deliver the whole first message.
+
+<Warning>
+  The model still needs room for the whole message. For an OpenRouter preset, or
+  a model outside OAO's catalog, OAO assumes a 128,000-token context window.
+  Once a call uses more than that window minus the output reserve, about 124,000
+  tokens for a preset, the run compacts its conversation and a summary replaces
+  the first message, stable start included. 500,000 characters are often 115,000
+  to 130,000 tokens, so a message near both limits can pass that on its first
+  call.
+</Warning>
 
 In that transaction OAO also resolves every Skill and delegate the agent
 version follows, for the version itself and for every delegate it can reach,
@@ -1013,7 +1045,9 @@ rows count once in `totals`.
 
 A later turn accepts either `{ "message": "..." }` or the SDK-compatible
 `{ "redactedInput": "..." }`, plus the same optional `files` array used during
-session creation. Message text is limited to 100,000 characters and raw file
+session creation. Message text is limited to 100,000 characters (a session's
+first message may be longer; see [Share the prompt cache across
+sessions](#share-the-prompt-cache-across-sessions)) and raw file
 bytes to 10 MiB per file and 20 MiB per turn. A text field may be
 omitted only when `files` is non-empty. File submissions require a
 sandbox-enabled agent with read tooling, plus a default project storage

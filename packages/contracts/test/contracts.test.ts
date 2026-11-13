@@ -24,6 +24,10 @@ import {
   parseSessionVersionResolution,
   parseSessionPromptCache,
   ManagedAgentInstanceDataSchema,
+  ManagedRunInputV1Schema,
+  PROMPT_CACHE_PREFIX_MAX_LENGTH,
+  RUN_INPUT_MESSAGE_MAX_LENGTH,
+  RUN_MESSAGE_MAX_LENGTH,
   parseModelRoutingPolicy,
   validateToolJsonSchema,
   validateToolJsonValue,
@@ -1388,7 +1392,7 @@ test("a model preset may be created with its first price", () => {
   );
 });
 
-test("a session prompt cache key is printable ASCII and its prefix a bounded integer", () => {
+test("a session prompt cache key is printable ASCII and its prefix a non-negative integer", () => {
   assert.deepEqual(
     parseSessionPromptCache({
       key: "extraction:00000000-0000-4000-8000-000000000001",
@@ -1413,9 +1417,32 @@ test("a session prompt cache key is printable ASCII and its prefix a bounded int
     { key: "k", prefixChars: -1 },
     { key: "k", prefixChars: 0.5 },
     { key: "k", prefixChars: "1" },
-    { key: "k", prefixChars: 100_001 },
+    { key: "k", prefixChars: Number.MAX_SAFE_INTEGER + 1 },
   ])
     assert.throws(() => parseSessionPromptCache(input), JSON.stringify(input));
+  // The API compares the prefix with the message and with its own limit, so
+  // it can name the part that is too long.
+  assert.deepEqual(
+    parseSessionPromptCache({ key: "k", prefixChars: 400_001 }),
+    {
+      key: "k",
+      prefixChars: 400_001,
+    },
+  );
+  assert.equal(PROMPT_CACHE_PREFIX_MAX_LENGTH, 400_000);
+  assert.equal(RUN_MESSAGE_MAX_LENGTH, 100_000);
+  // A stored run keeps a first message with the longest start and rest.
+  assert.equal(RUN_INPUT_MESSAGE_MAX_LENGTH, 500_000);
+  assert.equal(
+    v.safeParse(ManagedRunInputV1Schema, { message: "m".repeat(500_000) })
+      .success,
+    true,
+  );
+  assert.equal(
+    v.safeParse(ManagedRunInputV1Schema, { message: "m".repeat(500_001) })
+      .success,
+    false,
+  );
   // Instance data from before prompt cache keys still parses.
   const instance = v.safeParse(
     ManagedAgentInstanceDataSchema.entries.promptCacheKey,

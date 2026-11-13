@@ -707,7 +707,9 @@ export interface SessionPromptCacheInput {
   readonly key: string;
   /**
    * How many characters (JavaScript string length) at the start of
-   * `initialMessage` are the same for every session with this key.
+   * `initialMessage` are the same for every session with this key: at most
+   * 400,000. Above 0, `initialMessage` may hold this many characters plus up
+   * to 100,000 after them; without it the limit is 100,000 in all.
    */
   readonly prefixChars?: number;
 }

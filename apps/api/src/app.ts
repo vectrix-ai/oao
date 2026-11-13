@@ -35,7 +35,9 @@ import {
   parseToolResultEnvelope,
   parseUpdateEventWebhookInput,
   MANAGED_AGENT_RESERVED_TOOL_NAMES,
+  PROMPT_CACHE_PREFIX_MAX_LENGTH,
   RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION,
+  RUN_MESSAGE_MAX_LENGTH,
   validateToolJsonValue,
   validateToolJsonSchema,
   type CreateEventWebhookInput,
@@ -595,7 +597,7 @@ function parseRunMessage(
       );
     return `Review the attached ${files.length === 1 ? "file" : "files"}.`;
   }
-  return requiredString(value, field, 100_000);
+  return requiredString(value, field, RUN_MESSAGE_MAX_LENGTH);
 }
 
 /**
@@ -605,7 +607,6 @@ function parseRunMessage(
  */
 function parsePromptCache(
   value: unknown,
-  initialMessage: string | undefined,
 ): Required<SessionPromptCache> | undefined {
   if (value === undefined) return undefined;
   let promptCache: SessionPromptCache;
@@ -618,13 +619,48 @@ function parsePromptCache(
     );
   }
   const prefixChars = promptCache.prefixChars ?? 0;
-  const maximum = initialMessage?.length ?? 0;
-  if (prefixChars > maximum)
+  if (prefixChars > PROMPT_CACHE_PREFIX_MAX_LENGTH)
     throw new HttpApiError(
       "bad_request",
-      `promptCache.prefixChars must be at most the length of initialMessage (${maximum})`,
+      `The cached start of initialMessage (promptCache.prefixChars) must be at most ${PROMPT_CACHE_PREFIX_MAX_LENGTH} characters`,
     );
   return { key: promptCache.key, prefixChars };
+}
+
+/**
+ * The first message of a new session. With a cached start (`prefixChars`
+ * above 0) the start may hold up to PROMPT_CACHE_PREFIX_MAX_LENGTH
+ * characters and the rest up to RUN_MESSAGE_MAX_LENGTH, because the start is
+ * read from the provider's prompt cache. Without one, the message has the
+ * limit and the error text of every other run message; callers recognize an
+ * OAO without the longer limit by that text.
+ */
+function parseInitialMessage(
+  value: unknown,
+  files: readonly ParsedRunFile[],
+  prefixChars: number,
+): string {
+  if (prefixChars === 0 || typeof value !== "string" || value === "") {
+    const message = parseRunMessage(value, "initialMessage", files);
+    // A session made from files alone has no submitted text to share.
+    if (prefixChars > 0)
+      throw new HttpApiError(
+        "bad_request",
+        "promptCache.prefixChars must be at most the length of initialMessage (0)",
+      );
+    return message;
+  }
+  if (prefixChars > value.length)
+    throw new HttpApiError(
+      "bad_request",
+      `promptCache.prefixChars must be at most the length of initialMessage (${value.length})`,
+    );
+  if (value.length - prefixChars > RUN_MESSAGE_MAX_LENGTH)
+    throw new HttpApiError(
+      "bad_request",
+      `The rest of initialMessage after promptCache.prefixChars must be at most ${RUN_MESSAGE_MAX_LENGTH} characters`,
+    );
+  return value;
 }
 
 function publicRunFiles(files: readonly StoredRunFileManifest[]) {
@@ -7674,18 +7710,13 @@ function registerRunRoutes(
         "agentVersionId or agentId is required",
       );
     const files = parseRunFiles(body.files);
-    const initialMessage = parseRunMessage(
+    const promptCache = parsePromptCache(body.promptCache);
+    const initialMessage = parseInitialMessage(
       body.initialMessage,
-      "initialMessage",
       files,
+      promptCache?.prefixChars ?? 0,
     );
     const title = optionalString(body.title, "title", 500);
-    const promptCache = parsePromptCache(
-      body.promptCache,
-      body.initialMessage === undefined || body.initialMessage === ""
-        ? undefined
-        : initialMessage,
-    );
     let cleanupUploadedFiles: (() => Promise<void>) | undefined;
     try {
       return await dependencies.store.transaction(

@@ -2072,15 +2072,35 @@ export const PromptCacheKeySchema = v.pipe(
 );
 
 /**
+ * The longest message of a run, in JavaScript string length (UTF-16 code
+ * units). A session's first message with a cached start may be longer: this
+ * limit then applies to the part after that start.
+ */
+export const RUN_MESSAGE_MAX_LENGTH = 100_000;
+
+/**
+ * The longest cached start of a session's first message
+ * (`promptCache.prefixChars`).
+ */
+export const PROMPT_CACHE_PREFIX_MAX_LENGTH = 400_000;
+
+/**
+ * The longest message a run can store: a session's first message with a
+ * cached start of the longest length and the longest part after it.
+ */
+export const RUN_INPUT_MESSAGE_MAX_LENGTH =
+  PROMPT_CACHE_PREFIX_MAX_LENGTH + RUN_MESSAGE_MAX_LENGTH;
+
+/**
  * How the model calls of a session share the provider's prompt cache with
  * other sessions. The first `prefixChars` characters of the initial message
- * are the same for every session that sends the same key.
+ * are the same for every session that sends the same key. The API also
+ * checks `prefixChars` against the message and against
+ * {@link PROMPT_CACHE_PREFIX_MAX_LENGTH}.
  */
 export const SessionPromptCacheSchema = v.object({
   key: PromptCacheKeySchema,
-  prefixChars: v.optional(
-    v.pipe(v.number(), v.safeInteger(), v.minValue(0), v.maxValue(100_000)),
-  ),
+  prefixChars: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0))),
 });
 
 export const ManagedAgentInstanceDataSchema = v.object({
@@ -2189,7 +2209,11 @@ export const ManagedRunDeliverySchema = v.object({
 });
 
 export const ManagedRunInputV1Schema = v.object({
-  message: v.pipe(v.string(), v.minLength(1), v.maxLength(100_000)),
+  message: v.pipe(
+    v.string(),
+    v.minLength(1),
+    v.maxLength(RUN_INPUT_MESSAGE_MAX_LENGTH),
+  ),
   files: v.optional(
     v.pipe(
       v.array(
