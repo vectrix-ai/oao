@@ -1848,6 +1848,272 @@ test(
     });
 
     await t.test(
+      "a session keeps its prompt cache key and stable prefix",
+      async () => {
+        const created = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "prompt-cache-agent",
+              name: "Prompt cache agent",
+              config: {
+                systemPrompt: "Extract the order.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "prompt-cache-agent-1",
+          ),
+        );
+        assert.equal(created.status, 201, await created.clone().text());
+        const agentId = ((await created.json()) as { id: string }).id;
+        const stable = "Project rules and fields. ";
+        const initialMessage = `${stable}Email of this run.`;
+        const createSession = (promptCache: unknown, key: string) =>
+          app.request(
+            `${projectPath}/sessions`,
+            jsonRequest({ agentId, initialMessage, promptCache }, key),
+          );
+
+        for (const [index, promptCache] of [
+          null,
+          "extraction:p1",
+          { prefixChars: 3 },
+          { key: "" },
+          { key: "has space" },
+          { key: "x".repeat(65) },
+          { key: "caf\u00e9" },
+          { key: "k", prefixChars: -1 },
+          { key: "k", prefixChars: 1.5 },
+          { key: "k", prefixChars: "3" },
+          { key: "k", prefixChars: initialMessage.length + 1 },
+        ].entries()) {
+          const rejected = await createSession(
+            promptCache,
+            `prompt-cache-bad-${index}`,
+          );
+          assert.equal(
+            rejected.status,
+            400,
+            `${JSON.stringify(promptCache)}: ${await rejected.clone().text()}`,
+          );
+        }
+        // Without an initial message there is no prefix to share.
+        const filesOnly = await app.request(
+          `${projectPath}/sessions`,
+          jsonRequest(
+            {
+              agentId,
+              files: [
+                {
+                  name: "order.txt",
+                  contentType: "text/plain",
+                  dataBase64: Buffer.from("order").toString("base64"),
+                },
+              ],
+              promptCache: { key: "k", prefixChars: 1 },
+            },
+            "prompt-cache-bad-files",
+          ),
+        );
+        assert.equal(filesOnly.status, 400, await filesOnly.clone().text());
+
+        const accepted = await createSession(
+          { key: "extraction:p1", prefixChars: stable.length },
+          "prompt-cache-session-1",
+        );
+        assert.equal(accepted.status, 201, await accepted.clone().text());
+        const session = (await accepted.json()) as {
+          id: string;
+          latestRunId: string;
+        };
+        const keyOnly = await createSession(
+          { key: "extraction:p1" },
+          "prompt-cache-session-2",
+        );
+        assert.equal(keyOnly.status, 201, await keyOnly.clone().text());
+        const keyOnlySession = (await keyOnly.json()) as { id: string };
+        const plain = await createSession(undefined, "prompt-cache-session-3");
+        assert.equal(plain.status, 201, await plain.clone().text());
+        const plainSession = (await plain.json()) as { id: string };
+
+        const stored = await pool.query<{
+          session_id: string;
+          cache_key: string;
+          initial_run_id: string;
+          initial_prefix_chars: number;
+        }>(
+          `SELECT session_id,cache_key,initial_run_id,initial_prefix_chars
+             FROM oao.session_prompt_caches
+            WHERE session_id = ANY($1::uuid[]) ORDER BY initial_prefix_chars DESC`,
+          [[session.id, keyOnlySession.id, plainSession.id]],
+        );
+        assert.deepEqual(stored.rows, [
+          {
+            session_id: session.id,
+            cache_key: "extraction:p1",
+            initial_run_id: session.latestRunId,
+            initial_prefix_chars: stable.length,
+          },
+          {
+            session_id: keyOnlySession.id,
+            cache_key: "extraction:p1",
+            initial_run_id: (
+              await pool.query<{ id: string }>(
+                "SELECT id FROM oao.runs WHERE session_id=$1",
+                [keyOnlySession.id],
+              )
+            ).rows[0]?.id,
+            initial_prefix_chars: 0,
+          },
+        ]);
+        // The session read model does not change.
+        const read = (await (
+          await app.request(`${projectPath}/sessions/${session.id}`)
+        ).json()) as Record<string, unknown>;
+        assert.equal("promptCache" in read, false);
+        assert.equal("cacheKey" in read, false);
+      },
+    );
+    await t.test(
+      "a cached start lets the first message pass 100,000 characters",
+      async () => {
+        const created = await app.request(
+          `${projectPath}/agents`,
+          jsonRequest(
+            {
+              key: "long-start-agent",
+              name: "Long start agent",
+              config: {
+                systemPrompt: "Extract the order.",
+                modelPreset: baseModelPresetKey,
+                tools: [],
+                sandbox: disabledSandbox,
+                limits: { maxTurns: 32, timeoutMs: 60_000 },
+              },
+            },
+            "long-start-agent-1",
+          ),
+        );
+        assert.equal(created.status, 201, await created.clone().text());
+        const agentId = ((await created.json()) as { id: string }).id;
+        const createSession = (
+          body: Readonly<Record<string, unknown>>,
+          key: string,
+        ) =>
+          app.request(
+            `${projectPath}/sessions`,
+            jsonRequest({ agentId, ...body }, key),
+          );
+        const refusal = async (response: Response) => {
+          const body = (await response.json()) as {
+            error: { code: string; message: string };
+          };
+          assert.equal(response.status, 400, JSON.stringify(body));
+          assert.equal(body.error.code, "bad_request");
+          return body.error.message;
+        };
+        const prefix = "p".repeat(400_000);
+        const rest = "r".repeat(100_000);
+
+        const accepted = await createSession(
+          {
+            initialMessage: `${prefix}${rest}`,
+            promptCache: { key: "long:p1", prefixChars: prefix.length },
+          },
+          "long-start-session-1",
+        );
+        assert.equal(accepted.status, 201, await accepted.clone().text());
+        const session = (await accepted.json()) as {
+          id: string;
+          latestRunId: string;
+        };
+        const stored = await pool.query<{
+          run_message: number;
+          transcript_message: number;
+          prefix_chars: number;
+        }>(
+          `SELECT length(r.input_public->>'message') AS run_message,
+                  length(m.redacted_content) AS transcript_message,
+                  c.initial_prefix_chars AS prefix_chars
+             FROM oao.runs r
+             JOIN oao.messages m ON m.run_id=r.id AND m.role='user'
+             JOIN oao.session_prompt_caches c ON c.initial_run_id=r.id
+            WHERE r.id=$1`,
+          [session.latestRunId],
+        );
+        assert.deepEqual(stored.rows, [
+          {
+            run_message: 500_000,
+            transcript_message: 500_000,
+            prefix_chars: 400_000,
+          },
+        ]);
+
+        // Each part over its limit is refused by name.
+        assert.equal(
+          await refusal(
+            await createSession(
+              {
+                initialMessage: `${prefix}p${rest}`,
+                promptCache: { key: "long:p1", prefixChars: 400_001 },
+              },
+              "long-start-bad-prefix",
+            ),
+          ),
+          "The cached start of initialMessage (promptCache.prefixChars) must be at most 400000 characters",
+        );
+        assert.equal(
+          await refusal(
+            await createSession(
+              {
+                initialMessage: `${prefix}${rest}r`,
+                promptCache: { key: "long:p1", prefixChars: prefix.length },
+              },
+              "long-start-bad-rest",
+            ),
+          ),
+          "The rest of initialMessage after promptCache.prefixChars must be at most 100000 characters",
+        );
+
+        // Without a cached start the limit and its text stay as they were:
+        // callers recognize an OAO without the longer limit by this text.
+        const unchanged =
+          "initialMessage must be a non-empty string of at most 100000 characters";
+        for (const [index, promptCache] of [
+          undefined,
+          { key: "long:p1" },
+          { key: "long:p1", prefixChars: 0 },
+        ].entries())
+          assert.equal(
+            await refusal(
+              await createSession(
+                { initialMessage: "m".repeat(100_001), promptCache },
+                `long-start-unchanged-${index}`,
+              ),
+            ),
+            unchanged,
+          );
+        const longest = await createSession(
+          { initialMessage: "m".repeat(100_000) },
+          "long-start-plain",
+        );
+        assert.equal(longest.status, 201, await longest.clone().text());
+
+        // A follow-up run of the session keeps the run message limit.
+        const followUp = await app.request(
+          `${projectPath}/sessions/${session.id}/runs`,
+          jsonRequest({ message: "f".repeat(100_001) }, "long-start-follow-up"),
+        );
+        assert.equal(
+          await refusal(followUp),
+          "message must be a non-empty string of at most 100000 characters",
+        );
+      },
+    );
+    await t.test(
       "deleting an agent archives it and frees its key",
       async () => {
         const config = {

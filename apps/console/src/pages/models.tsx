@@ -21,17 +21,24 @@ import type {
   ModelPreset,
   ModelRoutingPolicy,
   ProjectModelProvider,
+  SetModelPresetLimitsInput,
   SetModelPresetPriceInput,
 } from "../api/types";
 import {
+  DEFAULT_MODEL_CONTEXT_WINDOW,
+  DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   MODEL_PRESET_KEY_PATTERN,
+  describeLimits,
   describePresetRouting,
   describePrice,
   describeRouting,
   formatUsdRate,
+  limitsFormFromValues,
+  limitsFromForm,
   priceFormFromRates,
   ratesFromPriceForm,
   suggestPresetKey,
+  type LimitsForm,
   type PriceForm,
 } from "../model-presets";
 import type { ComboboxOption } from "../components/ui";
@@ -191,6 +198,16 @@ export function ModelsPage() {
     return map;
   }, [agents.data]);
   const term = search.trim().toLowerCase();
+  // The open preset as the list has it now: a price or limits change saved in
+  // its dialog refreshes the list, so Duplicate copies what was just saved.
+  const shownPreset = openPreset
+    ? ((presets.data?.data ?? []).find((preset) =>
+        openPreset.id
+          ? preset.id === openPreset.id
+          : preset.origin === openPreset.origin &&
+            preset.key === openPreset.key,
+      ) ?? openPreset)
+    : null;
   const visible = (presets.data?.data ?? []).filter(
     (preset) =>
       !term ||
@@ -458,24 +475,24 @@ export function ModelsPage() {
           onSubmit={(input) => create.mutate(input)}
         />
       ) : null}
-      {openPreset ? (
+      {shownPreset ? (
         <PresetDetailDialog
-          preset={openPreset}
+          preset={shownPreset}
           provider={
             (providers.data ?? []).find(
-              (entry) => entry.id === openPreset.providerId,
+              (entry) => entry.id === shownPreset.providerId,
             ) ?? null
           }
-          usedBy={usageByPreset.get(openPreset.key) ?? []}
+          usedBy={usageByPreset.get(shownPreset.key) ?? []}
           usageLoading={agents.isPending}
           onClose={() => setOpenPreset(null)}
           onDuplicate={() => {
-            setDuplicateFrom(openPreset);
+            setDuplicateFrom(shownPreset);
             setOpenPreset(null);
           }}
           onArchive={() => {
             archivePreset.reset();
-            setArchivingPreset(openPreset);
+            setArchivingPreset(shownPreset);
           }}
         />
       ) : null}
@@ -584,6 +601,14 @@ function CreateModelPresetDialog({
     priceFormFromRates(initial?.price ?? undefined),
   );
   const [priceEdited, setPriceEdited] = useState(Boolean(initial?.price));
+  // Limits follow the same rule: a duplicate keeps them, and picking a model
+  // prefills them from the catalog until someone types one.
+  const [limitsForm, setLimitsForm] = useState<LimitsForm>(
+    limitsFormFromValues(initial?.limits ?? undefined),
+  );
+  const [limitsEdited, setLimitsEdited] = useState(
+    initial?.limits !== undefined && initial?.limits !== null,
+  );
   const initialRouting = initial?.routing ?? {};
   const tristateOf = (value: boolean | undefined): Tristate =>
     value === undefined ? "" : value ? "yes" : "no";
@@ -735,6 +760,13 @@ function CreateModelPresetDialog({
     if (!keyEdited) setKey(suggestPresetKey(entry.name, existingKeys));
     if (!displayNameEdited) setDisplayName(entry.name);
     if (!priceEdited) setPriceForm(priceFormFromRates(entry.listPrice));
+    if (!limitsEdited)
+      setLimitsForm(
+        limitsFormFromValues({
+          contextWindow: entry.contextWindow || null,
+          maxOutputTokens: entry.maxOutputTokens || null,
+        }),
+      );
   };
 
   const routing: ModelRoutingPolicy = useMemo(() => {
@@ -803,6 +835,7 @@ function CreateModelPresetDialog({
     )
       errors.push("Price caps must be numbers.");
     errors.push(...ratesFromPriceForm(priceForm).errors);
+    errors.push(...limitsFromForm(limitsForm).errors);
     if (
       provider?.providerType === "anthropic" &&
       (!Number.isInteger(anthropicMaxTokens) || anthropicMaxTokens < 1)
@@ -822,6 +855,7 @@ function CreateModelPresetDialog({
     displayName,
     existingKeys,
     key,
+    limitsForm,
     model,
     priceForm,
     provider,
@@ -851,6 +885,7 @@ function CreateModelPresetDialog({
           routing,
           settings,
           price: ratesFromPriceForm(priceForm).rates,
+          limits: limitsFromForm(limitsForm).limits,
         });
       }}
       footer={
@@ -878,6 +913,7 @@ function CreateModelPresetDialog({
             setModel(null);
             setCatalogSearch("");
             if (!priceEdited) setPriceForm(priceFormFromRates());
+            if (!limitsEdited) setLimitsForm(limitsFormFromValues());
           }}
         >
           {providers.map((entry) => (
@@ -1148,6 +1184,18 @@ function CreateModelPresetDialog({
         onChange={(next) => {
           setPriceEdited(true);
           setPriceForm(next);
+        }}
+      />
+      <PresetLimitsFields
+        form={limitsForm}
+        hint={
+          model && (model.contextWindow || model.maxOutputTokens)
+            ? "Tokens, prefilled with what OAO knows about the model. Change them later on the preset without a new agent version."
+            : `OAO does not know this model's limits. An empty one uses OAO's default of ${DEFAULT_MODEL_CONTEXT_WINDOW.toLocaleString("en-US")} context and ${DEFAULT_MODEL_MAX_OUTPUT_TOKENS.toLocaleString("en-US")} output tokens. Change them later on the preset.`
+        }
+        onChange={(next) => {
+          setLimitsEdited(true);
+          setLimitsForm(next);
         }}
       />
       <FieldRow>
@@ -1536,7 +1584,172 @@ function PresetPriceSection({ preset }: { readonly preset: ModelPreset }) {
   );
 }
 
-/** Read-only view of one preset, apart from its price; changing anything else means duplicating into a new key. */
+function PresetLimitsFields({
+  form,
+  hint,
+  onChange,
+}: {
+  readonly form: LimitsForm;
+  readonly hint: string;
+  readonly onChange: (form: LimitsForm) => void;
+}) {
+  return (
+    <details className="policy-details" open>
+      <summary>
+        Limits
+        <span className="policy-summary">
+          {form.contextWindow.trim() || form.maxOutputTokens.trim()
+            ? describeLimits(limitsFromForm(form).limits)
+            : "Model defaults"}
+        </span>
+      </summary>
+      <div className="policy-body">
+        <small>{hint}</small>
+        <FieldRow>
+          <Field
+            label="Context window"
+            hint="Tokens one model call may hold. A run compacts its conversation once a call passes this minus an output reserve of up to 20,000."
+          >
+            <Input
+              aria-label="Context window"
+              inputMode="numeric"
+              className="input--mono"
+              value={form.contextWindow}
+              onChange={(event) =>
+                onChange({ ...form, contextWindow: event.target.value })
+              }
+              placeholder={DEFAULT_MODEL_CONTEXT_WINDOW.toLocaleString("en-US")}
+            />
+          </Field>
+          <Field
+            label="Output limit"
+            hint="The most tokens, reasoning included, one model call may write."
+          >
+            <Input
+              aria-label="Output limit"
+              inputMode="numeric"
+              className="input--mono"
+              value={form.maxOutputTokens}
+              onChange={(event) =>
+                onChange({ ...form, maxOutputTokens: event.target.value })
+              }
+              placeholder={DEFAULT_MODEL_MAX_OUTPUT_TOKENS.toLocaleString(
+                "en-US",
+              )}
+            />
+          </Field>
+        </FieldRow>
+      </div>
+    </details>
+  );
+}
+
+/**
+ * A preset's context window and output limit can change too: new limits are
+ * added to its history and apply from the preset's next run, without a new
+ * agent version. A run already under way keeps the limits it started with.
+ */
+function PresetLimitsSection({ preset }: { readonly preset: ModelPreset }) {
+  const presetId = preset.id ?? "";
+  const api = useApi();
+  const notify = useToast();
+  const queryClient = useQueryClient();
+  const history = useQuery({
+    queryKey: ["model-preset-limits", presetId],
+    queryFn: () => api.listModelPresetLimits(presetId),
+  });
+  const entries = history.data ?? [];
+  const current = entries[0];
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState<LimitsForm>(limitsFormFromValues());
+  const parsed = limitsFromForm(form);
+  const save = useMutation({
+    mutationFn: (input: SetModelPresetLimitsInput) =>
+      api.setModelPresetLimits(presetId, input),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["model-preset-limits", presetId],
+      });
+      await queryClient.invalidateQueries({ queryKey: ["model-presets"] });
+      setEditing(false);
+      notify("Limits saved. They apply from the next run of this preset.");
+    },
+  });
+  if (history.isLoadingError)
+    return (
+      <section className="stack">
+        <h3>Limits</h3>
+        <ErrorState
+          error={history.error}
+          retry={() => void history.refetch()}
+        />
+      </section>
+    );
+  const hasLimits =
+    current !== undefined &&
+    (current.contextWindow !== null || current.maxOutputTokens !== null);
+  return (
+    <section className="stack">
+      <h3>Limits</h3>
+      <p className="muted">
+        {history.isPending
+          ? "Loading limits…"
+          : hasLimits
+            ? `${describeLimits(current)}, in tokens.`
+            : "No limits. Model calls use the model's context window and output limit, or OAO's default when it does not know the model."}
+      </p>
+      {editing ? (
+        <>
+          <PresetLimitsFields
+            form={form}
+            hint="Tokens. Leave one empty to use the model's value. New limits apply from the next run; a run under way keeps the limits it started with."
+            onChange={setForm}
+          />
+          {parsed.errors[0] ? <FormError>{parsed.errors[0]}</FormError> : null}
+          {save.error ? <FormError>{save.error.message}</FormError> : null}
+          <ButtonGroup>
+            <Button onClick={() => setEditing(false)}>Cancel</Button>
+            <Button
+              variant="primary"
+              loading={save.isPending}
+              disabled={parsed.limits === null}
+              onClick={() => {
+                if (!parsed.limits) return;
+                save.mutate(parsed.limits);
+              }}
+            >
+              Save limits
+            </Button>
+          </ButtonGroup>
+        </>
+      ) : (
+        <div>
+          <Button
+            onClick={() => {
+              save.reset();
+              setForm(limitsFormFromValues(current));
+              setEditing(true);
+            }}
+          >
+            {hasLimits ? "Change limits" : "Set limits"}
+          </Button>
+        </div>
+      )}
+      {entries.length > 0 ? (
+        <ul className="preset-usage">
+          {entries.map((entry) => (
+            <li key={entry.id}>
+              {formatDate(entry.createdAt)}
+              <span className="muted"> · {describeLimits(entry)}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  );
+}
+
+/** Read-only view of one preset, apart from its price and limits; changing anything else means duplicating into a new key. */
 function PresetDetailDialog({
   preset,
   provider,
@@ -1618,6 +1831,7 @@ function PresetDetailDialog({
         ]}
       />
       {isProject ? <PresetPriceSection preset={preset} /> : null}
+      {isProject ? <PresetLimitsSection preset={preset} /> : null}
       <section className="stack">
         <h3>{preset.settings ? "Generation settings" : "Routing policy"}</h3>
         <p className="muted">{describePresetRouting(preset)}</p>

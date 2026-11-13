@@ -11,8 +11,10 @@ import type {
   CreateEventWebhookInput,
   CreateModelProviderInput,
   CreateModelPresetInput,
+  ModelPresetLimits,
   ModelPresetPrice,
   SessionUsage,
+  SetModelPresetLimitsInput,
   SetModelPresetPriceInput,
   CreateSandboxProviderInput,
   CreateSkillInput,
@@ -2460,6 +2462,32 @@ export class HttpConsoleApi implements ConsoleApi {
   ): Promise<ModelPresetPrice> =>
     this.#projectRequest<ModelPresetPrice>(
       `/model-presets/${encodeURIComponent(presetId)}/prices`,
+      { method: "POST", body: JSON.stringify(input) },
+    );
+
+  listModelPresetLimits = async (
+    presetId: string,
+  ): Promise<readonly ModelPresetLimits[]> => {
+    const limits: ModelPresetLimits[] = [];
+    let cursor: string | null | undefined;
+    do {
+      const page = await this.#projectRequest<CursorPage<ModelPresetLimits>>(
+        `/model-presets/${encodeURIComponent(presetId)}/limits?limit=200${
+          cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""
+        }`,
+      );
+      limits.push(...page.data);
+      cursor = page.pageInfo?.nextCursor;
+    } while (cursor);
+    return limits;
+  };
+
+  setModelPresetLimits = async (
+    presetId: string,
+    input: SetModelPresetLimitsInput,
+  ): Promise<ModelPresetLimits> =>
+    this.#projectRequest<ModelPresetLimits>(
+      `/model-presets/${encodeURIComponent(presetId)}/limits`,
       { method: "POST", body: JSON.stringify(input) },
     );
 

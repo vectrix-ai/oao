@@ -8,6 +8,7 @@ import type {
   ModelCatalogEntry,
   ModelGenerationSettings,
   ModelPreset,
+  ModelPresetLimits,
   ModelPresetPrice,
   ModelPriceRates,
   ProjectModelProvider,
@@ -75,6 +76,7 @@ export type {
   ModelCatalogEntry,
   ModelGenerationSettings,
   ModelPreset,
+  ModelPresetLimits,
   ModelPresetPrice,
   ModelPriceRates,
   ProjectModelProvider,
@@ -479,6 +481,19 @@ export interface CreateModelPresetInput {
   readonly settings?: ModelGenerationSettings | null;
   /** The preset's first price, per one million tokens in USD. */
   readonly price?: ModelPriceRates | null;
+  /** The preset's first limits, in tokens. */
+  readonly limits?: SetModelPresetLimitsInput | null;
+}
+
+/**
+ * A preset's context window and output limit, in tokens. A null or missing
+ * one leaves the model's catalog value, or OAO's default, in place.
+ */
+export interface SetModelPresetLimitsInput {
+  /** 1,024 to 10,000,000. Flue compacts past it minus an output reserve. */
+  readonly contextWindow?: number | null;
+  /** 1 to 1,000,000, and not above `contextWindow`. */
+  readonly maxOutputTokens?: number | null;
 }
 
 export interface SetModelPresetPriceInput extends ModelPriceRates {
@@ -698,6 +713,22 @@ type InitialSessionContent =
     }
   | { readonly initialMessage?: never; readonly files: NonEmptyRunFiles };
 
+/**
+ * Lets the model calls of a session share the provider's prompt cache with
+ * other sessions that send the same key.
+ */
+export interface SessionPromptCacheInput {
+  /** Cache and routing key: 1 to 64 printable ASCII characters without spaces. */
+  readonly key: string;
+  /**
+   * How many characters (JavaScript string length) at the start of
+   * `initialMessage` are the same for every session with this key: at most
+   * 400,000. Above 0, `initialMessage` may hold this many characters plus up
+   * to 100,000 after them; without it the limit is 100,000 in all.
+   */
+  readonly prefixChars?: number;
+}
+
 export type CreateSessionInput = (
   | {
       readonly agentId: string;
@@ -710,7 +741,9 @@ export type CreateSessionInput = (
       readonly title?: string;
     }
 ) &
-  InitialSessionContent;
+  InitialSessionContent & {
+    readonly promptCache?: SessionPromptCacheInput;
+  };
 
 export type RunInput =
   | {

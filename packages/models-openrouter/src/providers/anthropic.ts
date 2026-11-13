@@ -1,6 +1,7 @@
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { createProvider } from "@earendil-works/pi-ai";
 import type { Api, Model, Provider } from "@earendil-works/pi-ai";
+import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import type {
   ModelCatalogEntry,
@@ -174,13 +175,24 @@ function withAnthropicModelGenerationSettings<T extends Provider>(
   provider: T,
   settings: AnthropicModelSettings,
 ): T {
-  const withSettings = (options: Record<string, unknown> | undefined) => {
+  const withSettings = (
+    model: Model<Api>,
+    context: Parameters<typeof clampMaxTokensToContext>[1],
+    options: Record<string, unknown> | undefined,
+  ) => {
     const existing = options?.onPayload as
       | ((payload: unknown, model: Model<Api>) => unknown | Promise<unknown>)
       | undefined;
+    // The setting is the most a call asks for; like any other call, it asks
+    // for less when the conversation leaves less room in the context window.
+    const maxTokens = clampMaxTokensToContext(
+      model,
+      context,
+      settings.maxTokens,
+    );
     return {
       ...options,
-      maxTokens: settings.maxTokens,
+      maxTokens,
       onPayload: async (payload: unknown, model: Model<Api>) => {
         const transformed = (await existing?.(payload, model)) ?? payload;
         if (
@@ -192,7 +204,7 @@ function withAnthropicModelGenerationSettings<T extends Provider>(
         const payloadRecord = transformed as Record<string, unknown>;
         return {
           ...payloadRecord,
-          max_tokens: settings.maxTokens,
+          max_tokens: maxTokens,
           thinking: { type: settings.thinking },
           output_config: {
             ...(record(payloadRecord.output_config) ?? {}),
@@ -208,14 +220,22 @@ function withAnthropicModelGenerationSettings<T extends Provider>(
       return provider.stream(
         model,
         context,
-        withSettings(options as Record<string, unknown>) as never,
+        withSettings(
+          model as Model<Api>,
+          context as never,
+          options as Record<string, unknown>,
+        ) as never,
       );
     },
     streamSimple(model, context, options) {
       return provider.streamSimple(
         model,
         context,
-        withSettings(options as Record<string, unknown>) as never,
+        withSettings(
+          model as Model<Api>,
+          context as never,
+          options as Record<string, unknown>,
+        ) as never,
       );
     },
   } as T;
@@ -242,5 +262,25 @@ export function createAnthropicProjectProvider(
   });
   if (!input.settings || !("thinking" in input.settings))
     throw new TypeError("Anthropic model presets require Anthropic settings");
-  return withAnthropicModelGenerationSettings(provider, input.settings);
+  return withAnthropicModelGenerationSettings(provider, {
+    ...input.settings,
+    maxTokens: anthropicCallMaxTokens(
+      input.settings.maxTokens,
+      input.maxOutputTokens,
+    ),
+  });
+}
+
+/**
+ * What an Anthropic call asks for as `max_tokens`: the preset's `maxTokens`
+ * setting, or its output limit when that is smaller. A preset without an
+ * output limit asks for its setting, as before limits existed.
+ */
+export function anthropicCallMaxTokens(
+  settingsMaxTokens: number,
+  maxOutputTokens: number | null | undefined,
+): number {
+  return maxOutputTokens == null
+    ? settingsMaxTokens
+    : Math.min(settingsMaxTokens, maxOutputTokens);
 }

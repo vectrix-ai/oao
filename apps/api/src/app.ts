@@ -22,7 +22,9 @@ import {
   parseCreateMcpToolsetInput,
   parseDiscoverMcpServerInput,
   parseCreateModelPresetInput,
+  parseSetModelPresetLimitsInput,
   parseSetModelPresetPriceInput,
+  parseSessionPromptCache,
   parseManagedAgentSnapshotForPublication,
   parseRotateProjectModelProviderCredentialInput,
   parseRotateProjectSandboxProviderCredentialInput,
@@ -34,7 +36,9 @@ import {
   parseToolResultEnvelope,
   parseUpdateEventWebhookInput,
   MANAGED_AGENT_RESERVED_TOOL_NAMES,
+  PROMPT_CACHE_PREFIX_MAX_LENGTH,
   RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION,
+  RUN_MESSAGE_MAX_LENGTH,
   validateToolJsonValue,
   validateToolJsonSchema,
   type CreateEventWebhookInput,
@@ -43,6 +47,7 @@ import {
   type CreateModelPresetInput,
   type ProjectUsageGroup,
   type SetModelPresetPriceInput,
+  type SetModelPresetLimitsInput,
   type CreateProjectModelProviderInput,
   type ManagedAgentPublicationConfig,
   type ModelCatalogEntry,
@@ -50,6 +55,7 @@ import {
   type McpCredentialTestResult,
   type ModelProviderType,
   type SandboxSnapshotEntry,
+  type SessionPromptCache,
   type ToolResultEnvelope,
   type UpdateEventWebhookInput,
   type UpdateProjectSandboxProviderConfigurationInput,
@@ -90,6 +96,13 @@ import {
   modelPresetPriceView,
   type ModelPresetPriceRow,
 } from "./model-preset-prices.js";
+import {
+  currentModelPresetLimits,
+  insertModelPresetLimits,
+  MODEL_PRESET_LIMITS_COLUMNS,
+  modelPresetLimitsView,
+  type ModelPresetLimitsRow,
+} from "./model-preset-limits.js";
 import {
   readProjectUsage,
   readSessionUsage,
@@ -593,7 +606,70 @@ function parseRunMessage(
       );
     return `Review the attached ${files.length === 1 ? "file" : "files"}.`;
   }
-  return requiredString(value, field, 100_000);
+  return requiredString(value, field, RUN_MESSAGE_MAX_LENGTH);
+}
+
+/**
+ * The optional prompt cache of a new session. `prefixChars` is a JavaScript
+ * string length: the number of UTF-16 code units at the start of the
+ * submitted `initialMessage` that every session with the same key shares.
+ */
+function parsePromptCache(
+  value: unknown,
+): Required<SessionPromptCache> | undefined {
+  if (value === undefined) return undefined;
+  let promptCache: SessionPromptCache;
+  try {
+    promptCache = parseSessionPromptCache(value);
+  } catch {
+    throw new HttpApiError(
+      "bad_request",
+      "promptCache must be an object whose key is 1 to 64 printable ASCII characters without spaces and whose optional prefixChars is a non-negative integer",
+    );
+  }
+  const prefixChars = promptCache.prefixChars ?? 0;
+  if (prefixChars > PROMPT_CACHE_PREFIX_MAX_LENGTH)
+    throw new HttpApiError(
+      "bad_request",
+      `The cached start of initialMessage (promptCache.prefixChars) must be at most ${PROMPT_CACHE_PREFIX_MAX_LENGTH} characters`,
+    );
+  return { key: promptCache.key, prefixChars };
+}
+
+/**
+ * The first message of a new session. With a cached start (`prefixChars`
+ * above 0) the start may hold up to PROMPT_CACHE_PREFIX_MAX_LENGTH
+ * characters and the rest up to RUN_MESSAGE_MAX_LENGTH, because the start is
+ * read from the provider's prompt cache. Without one, the message has the
+ * limit and the error text of every other run message; callers recognize an
+ * OAO without the longer limit by that text.
+ */
+function parseInitialMessage(
+  value: unknown,
+  files: readonly ParsedRunFile[],
+  prefixChars: number,
+): string {
+  if (prefixChars === 0 || typeof value !== "string" || value === "") {
+    const message = parseRunMessage(value, "initialMessage", files);
+    // A session made from files alone has no submitted text to share.
+    if (prefixChars > 0)
+      throw new HttpApiError(
+        "bad_request",
+        "promptCache.prefixChars must be at most the length of initialMessage (0)",
+      );
+    return message;
+  }
+  if (prefixChars > value.length)
+    throw new HttpApiError(
+      "bad_request",
+      `promptCache.prefixChars must be at most the length of initialMessage (${value.length})`,
+    );
+  if (value.length - prefixChars > RUN_MESSAGE_MAX_LENGTH)
+    throw new HttpApiError(
+      "bad_request",
+      `The rest of initialMessage after promptCache.prefixChars must be at most ${RUN_MESSAGE_MAX_LENGTH} characters`,
+    );
+  return value;
 }
 
 function publicRunFiles(files: readonly StoredRunFileManifest[]) {
@@ -5563,15 +5639,16 @@ function registerModelPresetRoutes(
           limit + 1,
         ],
       );
-      const prices = await currentModelPresetPrices(
-        tx,
-        actor,
-        result.rows.map((row) => (row as { readonly id: string }).id),
+      const presetIds = result.rows.map(
+        (row) => (row as { readonly id: string }).id,
       );
+      const prices = await currentModelPresetPrices(tx, actor, presetIds);
+      const limits = await currentModelPresetLimits(tx, actor, presetIds);
       const project = (rows(result) as Readonly<Record<string, unknown>>[]).map(
         (preset) => ({
           ...preset,
           price: prices.get(String(preset.id)) ?? null,
+          limits: limits.get(String(preset.id)) ?? null,
         }),
       );
       const page = pagination(project, limit, "createdAt");
@@ -5602,7 +5679,7 @@ function registerModelPresetRoutes(
     } catch {
       throw new HttpApiError(
         "bad_request",
-        "Request must contain a versioned key, display name, approved model, supported model settings, and a complete price if one is given",
+        "Request must contain a versioned key, display name, approved model, supported model settings, a complete price if one is given, and limits within range if given",
       );
     }
     if (activeModelPresetKeys.has(input.key))
@@ -5843,13 +5920,25 @@ function registerModelPresetRoutes(
                   createdByPrincipalId: actor.id,
                 })
               : null;
+            // A preset without limits keeps no row, so it behaves as before.
+            const limits =
+              input.limits &&
+              (input.limits.contextWindow !== null ||
+                input.limits.maxOutputTokens !== null)
+                ? await insertModelPresetLimits(tx, {
+                    tenant: actor,
+                    presetId,
+                    limits: input.limits,
+                    createdByPrincipalId: actor.id,
+                  })
+                : null;
             await dependencies.store.appendAudit(tx, actor, {
               action: "model_preset.created",
               resourceType: "model_preset",
               resourceId: presetId,
               detail: { key: input.key, model: input.model },
             });
-            return { ...preset, price };
+            return { ...preset, price, limits };
           },
         });
         c.header("idempotency-replayed", String(response.replayed));
@@ -5961,6 +6050,110 @@ function registerModelPresetRoutes(
                 detail: { key, validFrom: price.validFrom },
               });
               return price;
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body, 201);
+        },
+      );
+    },
+  );
+
+  app.get(
+    "/v1/projects/:projectId/model-presets/:presetId/limits",
+    async (c) => {
+      const actor = assertProject(c);
+      const presetId = c.req.param("presetId");
+      const limit = parseLimit(c.req.query("limit"));
+      const cursor = decodeListCursor(c.req.query("cursor"));
+      return dependencies.store.transaction(actor, "agent:read", async (tx) => {
+        const preset = await tx.query(
+          `SELECT 1 FROM oao.project_model_presets
+          WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+          [actor.organizationId, actor.projectId, presetId],
+        );
+        if (!preset.rowCount)
+          throw new HttpApiError("not_found", "Model preset not found");
+        const condition = dependencies.store.cursorCondition(
+          cursor,
+          "created_at",
+          4,
+        );
+        const result = await tx.query<ModelPresetLimitsRow>(
+          `SELECT ${MODEL_PRESET_LIMITS_COLUMNS} FROM oao.model_preset_limits
+          WHERE organization_id=$1 AND project_id=$2 AND preset_id=$3${condition.sql}
+          ORDER BY created_at DESC,id DESC LIMIT $${4 + condition.values.length}`,
+          [
+            actor.organizationId,
+            actor.projectId,
+            presetId,
+            ...condition.values,
+            limit + 1,
+          ],
+        );
+        return c.json(
+          pagination(
+            result.rows.map(modelPresetLimitsView),
+            limit,
+            "createdAt",
+          ),
+        );
+      });
+    },
+  );
+
+  app.post(
+    "/v1/projects/:projectId/model-presets/:presetId/limits",
+    async (c) => {
+      const actor = assertProject(c);
+      const presetId = c.req.param("presetId");
+      const body = await readJsonObject(c.req.raw);
+      const idem = idempotencyKey(c.req.raw);
+      let input: SetModelPresetLimitsInput;
+      try {
+        input = parseSetModelPresetLimitsInput(body);
+      } catch {
+        throw new HttpApiError(
+          "bad_request",
+          "contextWindow must be null or an integer from 1024 to 10000000, maxOutputTokens null or an integer from 1 to 1000000, and maxOutputTokens not larger than contextWindow",
+        );
+      }
+      return dependencies.store.transaction(
+        actor,
+        "project:admin",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `POST:/model-presets/${presetId}/limits`,
+            key: idem,
+            hash: requestHash(body),
+            status: 201,
+            execute: async () => {
+              const preset = await tx.query<{ preset_key: string }>(
+                `SELECT preset_key FROM oao.project_model_presets
+                  WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                    AND archived_at IS NULL`,
+                [actor.organizationId, actor.projectId, presetId],
+              );
+              const key = preset.rows[0]?.preset_key;
+              if (key === undefined)
+                throw new HttpApiError("not_found", "Model preset not found");
+              const limits = await insertModelPresetLimits(tx, {
+                tenant: actor,
+                presetId,
+                limits: input,
+                createdByPrincipalId: actor.id,
+              });
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "model_preset.limits_set",
+                resourceType: "model_preset",
+                resourceId: presetId,
+                detail: {
+                  key,
+                  contextWindow: limits.contextWindow,
+                  maxOutputTokens: limits.maxOutputTokens,
+                },
+              });
+              return limits;
             },
           });
           c.header("idempotency-replayed", String(response.replayed));
@@ -7643,10 +7836,11 @@ function registerRunRoutes(
         "agentVersionId or agentId is required",
       );
     const files = parseRunFiles(body.files);
-    const initialMessage = parseRunMessage(
+    const promptCache = parsePromptCache(body.promptCache);
+    const initialMessage = parseInitialMessage(
       body.initialMessage,
-      "initialMessage",
       files,
+      promptCache?.prefixChars ?? 0,
     );
     const title = optionalString(body.title, "title", 500);
     let cleanupUploadedFiles: (() => Promise<void>) | undefined;
@@ -7774,6 +7968,21 @@ function registerRunRoutes(
               const run = publicValue(result.rows[0]?.run) as Readonly<
                 Record<string, unknown>
               >;
+              if (promptCache)
+                await tx.query(
+                  `INSERT INTO oao.session_prompt_caches (
+                     organization_id,project_id,session_id,cache_key,
+                     initial_run_id,initial_prefix_chars
+                   ) VALUES ($1,$2,$3,$4,$5,$6)`,
+                  [
+                    actor.organizationId,
+                    actor.projectId,
+                    sessionId,
+                    promptCache.key,
+                    runId,
+                    promptCache.prefixChars,
+                  ],
+                );
               await bindSessionVersions(
                 tx,
                 actor,

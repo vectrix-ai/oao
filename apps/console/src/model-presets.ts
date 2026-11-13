@@ -201,3 +201,97 @@ export function describePrice(
     `${formatUsdRate(price.outputUsdPerMillion)} output`,
   ].join(" · ");
 }
+
+/** OAO's placeholder limits for a model its catalog does not know. */
+export const DEFAULT_MODEL_CONTEXT_WINDOW = 128_000;
+export const DEFAULT_MODEL_MAX_OUTPUT_TOKENS = 4_096;
+
+/** The context window and output limit as typed, in tokens. Empty means none. */
+export interface LimitsForm {
+  readonly contextWindow: string;
+  readonly maxOutputTokens: string;
+}
+
+export function limitsFormFromValues(
+  values?: {
+    readonly contextWindow: number | null;
+    readonly maxOutputTokens: number | null;
+  } | null,
+): LimitsForm {
+  return {
+    contextWindow:
+      values?.contextWindow == null ? "" : String(values.contextWindow),
+    maxOutputTokens:
+      values?.maxOutputTokens == null ? "" : String(values.maxOutputTokens),
+  };
+}
+
+function tokenCount(value: string): number | null {
+  const trimmed = value.replace(/[\s,_]/gu, "");
+  if (!trimmed) return null;
+  return /^\d+$/u.test(trimmed) ? Number(trimmed) : Number.NaN;
+}
+
+/**
+ * The limits a form holds, or what is wrong with them. Both empty is no
+ * limits, so the model's catalog value, or OAO's default, applies.
+ */
+export function limitsFromForm(form: LimitsForm): {
+  readonly limits: {
+    readonly contextWindow: number | null;
+    readonly maxOutputTokens: number | null;
+  } | null;
+  readonly errors: readonly string[];
+} {
+  const contextWindow = tokenCount(form.contextWindow);
+  const maxOutputTokens = tokenCount(form.maxOutputTokens);
+  const errors: string[] = [];
+  if (
+    contextWindow !== null &&
+    (Number.isNaN(contextWindow) ||
+      contextWindow < 1_024 ||
+      contextWindow > 10_000_000)
+  )
+    errors.push(
+      "The context window must be a whole number from 1,024 to 10,000,000 tokens.",
+    );
+  if (
+    maxOutputTokens !== null &&
+    (Number.isNaN(maxOutputTokens) ||
+      maxOutputTokens < 1 ||
+      maxOutputTokens > 1_000_000)
+  )
+    errors.push(
+      "The output limit must be a whole number from 1 to 1,000,000 tokens.",
+    );
+  if (
+    errors.length === 0 &&
+    contextWindow !== null &&
+    maxOutputTokens !== null &&
+    maxOutputTokens > contextWindow
+  )
+    errors.push("The output limit cannot be larger than the context window.");
+  if (errors.length > 0) return { limits: null, errors };
+  return { limits: { contextWindow, maxOutputTokens }, errors };
+}
+
+/** One line for a preset's limits, naming what applies when one is not set. */
+export function describeLimits(
+  limits:
+    | {
+        readonly contextWindow: number | null;
+        readonly maxOutputTokens: number | null;
+      }
+    | null
+    | undefined,
+): string {
+  const window =
+    limits?.contextWindow == null
+      ? "model's context window"
+      : `${limits.contextWindow.toLocaleString("en-US")} context window`;
+  const output =
+    limits?.maxOutputTokens == null
+      ? "model's output limit"
+      : `${limits.maxOutputTokens.toLocaleString("en-US")} output limit`;
+  return `${window} · ${output}`;
+}

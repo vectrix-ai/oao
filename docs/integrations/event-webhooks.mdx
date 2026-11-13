@@ -345,7 +345,11 @@ batch stays far below Convex's per-mutation write limits.
 By default, `message.created` carries only metadata such as the role. With
 `includeMessageContent: true`, OAO adds a `message` object with the text of
 the user or assistant message named by the event's `messageId`. That is the same
-transcript text an authorized reader gets from `GET /sessions/{sessionId}`.
+transcript text an authorized reader gets from `GET /sessions/{sessionId}`. A
+session's first message with a [stable
+start](/reference/http-api#share-the-prompt-cache-across-sessions) can hold up
+to 500,000 characters; an event larger than a batch's 256 KB goes in a batch of
+its own.
 
 When an assistant `message.created` event fires depends on the agent version:
 

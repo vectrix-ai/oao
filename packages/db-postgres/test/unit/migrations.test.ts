@@ -1074,6 +1074,44 @@ test("model preset prices are append-only, tenant-scoped rows that leave only wi
   assert.doesNotMatch(sql, /GRANT[^;]*UPDATE[^;]*model_preset_prices/su);
 });
 
+test("a preset's limits are append-only, tenant-scoped rows that leave with their preset", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0066_model_preset_limits.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE oao\.model_preset_limits/u);
+  assert.match(sql, /CHECK \(context_window BETWEEN 1024 AND 10000000\)/u);
+  assert.match(sql, /CHECK \(max_output_tokens BETWEEN 1 AND 1000000\)/u);
+  assert.match(sql, /OR max_output_tokens <= context_window/u);
+  // The newest row applies, so a preset's rows never share a time.
+  assert.match(
+    sql,
+    /UNIQUE \(organization_id, project_id, preset_id, created_at\)/u,
+  );
+  assert.match(
+    sql,
+    /REFERENCES oao\.project_model_presets[^;]*ON DELETE CASCADE/su,
+  );
+  assert.match(
+    sql,
+    /BEFORE UPDATE ON oao\.model_preset_limits\nFOR EACH ROW EXECUTE FUNCTION oao\.reject_mutation/u,
+  );
+  assert.match(
+    sql,
+    /BEFORE DELETE ON oao\.model_preset_limits\nFOR EACH ROW EXECUTE FUNCTION oao\.reject_direct_model_preset_price_delete/u,
+  );
+  assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
+  assert.match(
+    sql,
+    /CREATE POLICY tenant_isolation ON oao\.model_preset_limits/u,
+  );
+  assert.match(
+    sql,
+    /GRANT SELECT, INSERT ON oao\.model_preset_limits TO oao_app/u,
+  );
+  assert.doesNotMatch(sql, /GRANT[^;]*UPDATE[^;]*model_preset_limits/su);
+});
+
 test("prompt suggestions are an optional boolean on agent versions and bounded text on completed runs", async () => {
   const sql = await readFile(
     new URL("../../migrations/0064_prompt_suggestions.sql", import.meta.url),
@@ -1099,4 +1137,31 @@ test("prompt suggestions are an optional boolean on agent versions and bounded t
     /\(newer\.created_at, newer\.id\) > \(p_run\.created_at, p_run\.id\)/u,
   );
   assert.doesNotMatch(sql, /DROP TABLE|DROP FUNCTION|UPDATE oao\./u);
+});
+
+test("a session's prompt cache key is a tenant-scoped, insert-only row that leaves with its session", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0065_session_prompt_caches.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE oao\.session_prompt_caches/u);
+  assert.match(sql, /CHECK \(cache_key ~ '\^\[!-~\]\{1,64\}\$'\)/u);
+  assert.match(sql, /CHECK \(initial_prefix_chars BETWEEN 0 AND 400000\)/u);
+  assert.match(
+    sql,
+    /REFERENCES oao\.sessions \(organization_id, project_id, id\) ON DELETE CASCADE/u,
+  );
+  assert.match(
+    sql,
+    /REFERENCES oao\.runs \(organization_id, project_id, id\) ON DELETE CASCADE/u,
+  );
+  assert.match(
+    sql,
+    /ALTER TABLE oao\.session_prompt_caches FORCE ROW LEVEL SECURITY/u,
+  );
+  assert.match(
+    sql,
+    /GRANT SELECT, INSERT ON oao\.session_prompt_caches TO oao_app;/u,
+  );
+  assert.doesNotMatch(sql, /DROP |UPDATE oao\.|GRANT .*(?:UPDATE|DELETE)/u);
 });

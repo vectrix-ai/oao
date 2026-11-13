@@ -121,6 +121,7 @@ function fixture(): ConfigurationBackup {
             settings: null,
             archived: false,
             prices: [],
+            limits: [],
           },
         ],
         skills: [
