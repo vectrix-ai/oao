@@ -1106,9 +1106,20 @@ test("each model call records the limits its run started with", () => {
   assert.deepEqual(runtimeTesting.modelLimitsDetail(runId), {
     modelLimits: limits,
   });
+  // A later wake of the same run sees newer limits, but the run keeps the
+  // model it started with, so its record stays.
+  runtimeTesting.rememberRunModelLimits(runId, {
+    ...limits,
+    contextWindow: 200_000,
+    presetLimitsId: "00000000-0000-4000-8000-000000000073",
+  });
+  assert.deepEqual(runtimeTesting.modelLimitsDetail(runId), {
+    modelLimits: limits,
+  });
   // A deployment preset has no project limits to record.
-  runtimeTesting.rememberRunModelLimits(runId, undefined);
-  assert.deepEqual(runtimeTesting.modelLimitsDetail(runId), {});
+  const deploymentRun = "00000000-0000-4000-8000-000000000074";
+  runtimeTesting.rememberRunModelLimits(deploymentRun, undefined);
+  assert.deepEqual(runtimeTesting.modelLimitsDetail(deploymentRun), {});
 });
 
 test("an unknown or malformed preset never reaches the provider", async () => {

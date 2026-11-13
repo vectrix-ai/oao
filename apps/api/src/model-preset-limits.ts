@@ -55,8 +55,10 @@ export async function currentModelPresetLimits(
 /**
  * Adds limits to a preset's history. They apply from the next run that
  * activates the preset; a run already under way keeps the limits it started
- * with. Times leave the API and backups in milliseconds, so they are stored
- * that way too: two that differ by less could not be restored.
+ * with. The newest row applies, so each row gets a later time than the
+ * preset's previous one, in milliseconds because times leave the API and
+ * backups that way. A restore passes the backed-up time, which keeps the
+ * order. Edits of one preset take turns, so two never get the same time.
  */
 export async function insertModelPresetLimits(
   transaction: PgClient,
@@ -69,12 +71,28 @@ export async function insertModelPresetLimits(
     readonly id?: string | undefined;
   },
 ): Promise<ModelPresetLimits> {
+  await transaction.query(
+    "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 2419))",
+    [
+      `${input.tenant.organizationId}/${input.tenant.projectId}/${input.presetId}`,
+    ],
+  );
   const result = await transaction.query<ModelPresetLimitsRow>(
     `INSERT INTO oao.model_preset_limits (
        organization_id,project_id,id,preset_id,context_window,
        max_output_tokens,created_by_principal_id,created_at
      ) VALUES ($1,$2,$3,$4,$5,$6,$7,
-               date_trunc('milliseconds',COALESCE($8::timestamptz,clock_timestamp())))
+               COALESCE(
+                 date_trunc('milliseconds',$8::timestamptz),
+                 GREATEST(
+                   date_trunc('milliseconds',clock_timestamp()),
+                   (SELECT max(previous.created_at) + interval '1 millisecond'
+                      FROM oao.model_preset_limits previous
+                     WHERE previous.organization_id=$1
+                       AND previous.project_id=$2
+                       AND previous.preset_id=$4)
+                 )
+               ))
      RETURNING ${MODEL_PRESET_LIMITS_COLUMNS}`,
     [
       input.tenant.organizationId,

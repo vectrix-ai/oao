@@ -23,11 +23,11 @@ import { PostgresApiStore } from "../../src/store.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 const principal: Principal = {
-  id: brandedId<PrincipalId>("00000000-0000-4000-8000-00000000f003"),
+  id: brandedId<PrincipalId>("00000000-0000-4000-8000-000002419003"),
   organizationId: brandedId<OrganizationId>(
-    "00000000-0000-4000-8000-00000000f001",
+    "00000000-0000-4000-8000-000002419001",
   ),
-  projectId: brandedId<ProjectId>("00000000-0000-4000-8000-00000000f002"),
+  projectId: brandedId<ProjectId>("00000000-0000-4000-8000-000002419002"),
   kind: "human",
   subject: "preset-limits-user",
   scopes: new Set<AuthorizationScope>(["*"]),
@@ -197,6 +197,18 @@ test(
     );
     assert.equal(cleared.contextWindow, null);
     assert.equal(cleared.maxOutputTokens, null);
+    // Edits right after each other still get their own, later times, so the
+    // last one is the newest and the order survives a restore.
+    const ordered = await get<{ data: ModelPresetLimits[] }>(
+      `/model-presets/${limited.id}/limits`,
+    );
+    assert.equal(ordered.data[0]?.id, cleared.id);
+    const times = ordered.data.map((entry) => Date.parse(entry.createdAt));
+    assert.deepEqual(
+      times,
+      [...times].sort((left, right) => right - left),
+    );
+    assert.equal(new Set(times).size, times.length);
     // A plain preset gets its first limits the same way.
     await created<ModelPresetLimits>(`/model-presets/${plain.id}/limits`, {
       contextWindow: 250_000,

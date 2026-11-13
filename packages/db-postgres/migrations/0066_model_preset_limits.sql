@@ -20,6 +20,10 @@ CREATE TABLE oao.model_preset_limits (
   created_by_principal_id uuid NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (organization_id, project_id, id),
+  -- The newest row applies, so two rows of a preset never share a time; a
+  -- restore keeps the times, and with them which row is newest.
+  CONSTRAINT model_preset_limits_one_per_instant
+    UNIQUE (organization_id, project_id, preset_id, created_at),
   -- Project deletion removes presets; their limits go with them.
   FOREIGN KEY (organization_id, project_id, preset_id)
     REFERENCES oao.project_model_presets (organization_id, project_id, id)
@@ -32,10 +36,6 @@ CREATE TABLE oao.model_preset_limits (
     OR max_output_tokens <= context_window
   )
 );
-
--- The runtime and the API read a preset's latest row.
-CREATE INDEX model_preset_limits_latest_idx
-  ON oao.model_preset_limits (organization_id, project_id, preset_id, created_at DESC, id DESC);
 
 CREATE TRIGGER model_preset_limits_immutable
 BEFORE UPDATE ON oao.model_preset_limits

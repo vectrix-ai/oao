@@ -201,12 +201,18 @@ const RUN_MODEL_LIMITS_MAX_ENTRIES = 10_000;
 // limits does not reach it. Oldest entries leave first.
 const runModelLimits = new Map<string, EffectiveModelLimits>();
 
+/**
+ * Keeps the limits a run started with in this process. A later wake of the
+ * same run, such as a reconciliation, activates the preset again and may see
+ * newer limits, but the run's live execution keeps the model it resolved, so
+ * the first record stands. After a restart the map is empty, and the run's
+ * next render records the limits it then resolves.
+ */
 function rememberRunModelLimits(
   runId: string,
   limits: EffectiveModelLimits | undefined,
 ): void {
-  runModelLimits.delete(runId);
-  if (!limits) return;
+  if (!limits || runModelLimits.has(runId)) return;
   runModelLimits.set(runId, limits);
   while (runModelLimits.size > RUN_MODEL_LIMITS_MAX_ENTRIES) {
     const oldest = runModelLimits.keys().next().value;

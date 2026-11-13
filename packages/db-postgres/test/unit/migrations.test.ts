@@ -1110,6 +1110,11 @@ test("a preset's limits are append-only, tenant-scoped rows that leave with thei
   assert.match(sql, /CHECK \(context_window BETWEEN 1024 AND 10000000\)/u);
   assert.match(sql, /CHECK \(max_output_tokens BETWEEN 1 AND 1000000\)/u);
   assert.match(sql, /OR max_output_tokens <= context_window/u);
+  // The newest row applies, so a preset's rows never share a time.
+  assert.match(
+    sql,
+    /UNIQUE \(organization_id, project_id, preset_id, created_at\)/u,
+  );
   assert.match(
     sql,
     /REFERENCES oao\.project_model_presets[^;]*ON DELETE CASCADE/su,
