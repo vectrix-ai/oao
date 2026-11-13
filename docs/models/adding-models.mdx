@@ -584,7 +584,11 @@ unbound presets are history only.
 
 ## Bundled model catalog
 
-The runtime uses pi-ai 1.5.0. Its catalog excludes realtime and image-only
+The runtime uses pi-ai 1.5.2. This adds Claude Fable 5.2 catalog support
+(including its OpenRouter entry) and provider compatibility options. OpenAI-compatible
+requests without tools now omit the empty tools array even with tool history;
+older proxies that require it need `compat.requiresToolsWithToolHistory`. Native
+Anthropic sessions can use message threads; OpenRouter routing stays explicit. Its catalog excludes realtime and image-only
 models from chat choices and includes newer chat models. Upstream routes OpenRouter Claude
 `~anthropic/claude-*-latest` aliases through Anthropic Messages. OAO keeps
 these models on Chat Completions to preserve OpenRouter routing controls;
@@ -595,5 +599,5 @@ Model context limits remain provider-specific; configure presets accordingly.
 
 Tool arguments use pi-schema JSON Schema validation and coercion. Validation
 messages may differ from earlier releases. Flue 2.3.0 carries a local import
-compatibility patch for pi-ai 1.5.0; its persisted format and lease timings
+compatibility patch for pi-ai 1.5.2; its persisted format and lease timings
 are unchanged.

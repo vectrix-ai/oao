@@ -84,7 +84,7 @@ body:
       description: Include OS and architecture, Node and pnpm versions, browser if relevant, and Docker-compatible runtime. Redact private hostnames and identifiers.
       placeholder: |
         OS: macOS 15.6 (arm64)
-        Node: 22.19.0
+        Node: 22.22.0
         pnpm: 10.27.0
         Docker runtime: Docker Desktop 4.x
         Browser: Chrome 140 (if relevant)

@@ -205,7 +205,7 @@ export async function collectPreflight({
     ? JSON.parse(readFileSync(packagePath, "utf8"))
     : undefined;
   const requiredNode = String(
-    packageJson?.engines?.node ?? ">=22.19.0",
+    packageJson?.engines?.node ?? ">=22.22.0",
   ).replace(/^>=/u, "");
   const requiredPnpm =
     String(packageJson?.packageManager ?? "pnpm@10.27.0").split("@")[1] ??
