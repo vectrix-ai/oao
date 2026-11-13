@@ -113,8 +113,9 @@ test("a preset with limits asks each call for its output limit, fitted into its 
   const short = await sentPayload(providers[0]!, model, "Write a long answer.");
   assert.equal(requestedOutput(short), 128_000);
 
-  // A long one asks for what the window leaves, as pi fits it.
-  const longText = "word ".repeat(600_000);
+  // A long one, about 150,000 tokens, asks for what the window leaves, as pi
+  // fits it.
+  const longText = "word ".repeat(120_000);
   const long = await sentPayload(providers[0]!, model, longText);
   const fitted = clampMaxTokensToContext(
     model,
@@ -123,7 +124,7 @@ test("a preset with limits asks each call for its output limit, fitted into its 
     }),
     128_000,
   );
-  assert.ok(fitted > 0 && fitted < 128_000, String(fitted));
+  assert.ok(fitted > 50_000 && fitted < 128_000, String(fitted));
   assert.equal(requestedOutput(long), fitted);
 
   // Flue compacts once a call passes the window minus an output reserve of
