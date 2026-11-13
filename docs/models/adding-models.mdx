@@ -250,6 +250,44 @@ These rates cover standard processing. If you use a data residency endpoint,
 Fast mode, or long cache retention, enter the rates the provider charges for
 those.
 
+## Set a model preset's limits
+
+A preset can carry two limits, in tokens:
+
+| Limit          | What it decides                                                                                                                                                                   |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Context window | How many tokens one model call may hold, input and output together. A run compacts its conversation once a call passes it minus an output reserve of `min(20,000, output limit)`. |
+| Output limit   | The most tokens, reasoning included, one model call may write. Each call asks the provider for it, or for what the context window leaves when that is less.                       |
+
+A limit you leave empty uses the model's own value from OAO's model catalog.
+OAO does not know which model sits behind an OpenRouter saved preset, or an
+OpenRouter model outside its catalog, so for those it uses a context window of
+128,000 and an output limit of 4,096 tokens. Such a preset's calls stop at 4,096
+output tokens and compact past 123,904 tokens until you set its limits.
+
+The context window is also how you choose when long conversations compact. A
+model that accepts 1,050,000 tokens can still get a context window of 250,000:
+its runs then compact past 230,000 tokens instead of sending their whole history
+on every call. With an output limit of 128,000, each call may write up to that.
+
+In **Add model preset**, the **Limits** section is prefilled with the context
+window and output limit the catalog lists for the chosen model; overwrite them
+as you need. For an OpenRouter saved preset the catalog knows neither, so the
+fields start empty. Use the limits of the model the preset runs.
+
+To change limits later, open the preset and select **Change limits** (or
+**Set limits**). Like a price, the new limits are added to the preset's history
+without a new agent version or a new preset key. They apply from the preset's
+next run: a run already under way keeps the limits it started with, because a
+run resolves its model once. Clear both fields to go back to the model's own
+values. Each model call records the limits it ran with, and where each came
+from, in `debug.modelInvocations[].safeRequest.modelLimits`.
+
+An Anthropic preset also has a **Max tokens** generation setting. Each of its
+calls asks for that setting, or for the output limit when that is smaller. An
+Anthropic preset without an output limit keeps asking for its setting, as
+before.
+
 ## Model timeouts and retries
 
 Each model attempt has a **five-minute deadline**, including connection setup
@@ -512,6 +550,35 @@ curl -sS -X POST "$API/v1/projects/$PROJECT_ID/model-presets/$PRESET_ID/prices" 
 Leave out `validFrom` to start now. `GET` on the same path lists the history,
 newest first. Each preset in `GET /model-presets` carries the price in effect
 now as `price`, or `null`.
+
+### Set a preset's limits
+
+Create the preset with its first limits by adding `limits`:
+
+```json
+{
+  "key": "azure-sol-61-v1",
+  "displayName": "Sol on Azure",
+  "providerId": "55555555-5555-4555-8555-555555555555",
+  "model": "openrouter/@preset/azure-sol-61",
+  "limits": { "contextWindow": 250000, "maxOutputTokens": 128000 }
+}
+```
+
+Change them later on the preset itself:
+
+```bash
+curl -sS -X POST "$API/v1/projects/$PROJECT_ID/model-presets/$PRESET_ID/limits" \
+  -H 'content-type: application/json' \
+  -H 'idempotency-key: model-preset-limits-1' \
+  -b "$COOKIE_JAR" \
+  --data '{ "contextWindow": 250000, "maxOutputTokens": 128000 }'
+```
+
+Each request replaces both limits: a field left out or `null` uses the model's
+own value. `GET` on the same path lists the history, newest first, and each
+preset in `GET /model-presets` carries the limits in effect now as `limits`, or
+`null` when it never had any.
 
 ## Tenant and lifecycle guarantees
 

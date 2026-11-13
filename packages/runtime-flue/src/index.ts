@@ -107,6 +107,8 @@ import {
   serializeLegacySkillPackageForHash,
 } from "@oao/domain";
 import type {
+  EffectiveModelLimits,
+  ModelPresetLimitsInput,
   ModelPresetTenant,
   ResolvedModelPreset,
 } from "@oao/models-openrouter";
@@ -191,6 +193,38 @@ export interface ManagedRunImageInputOptions {
    * storage error; {@link RUN_FILE_DOWNLOAD_TIMEOUT_MS} by default.
    */
   readonly downloadTimeoutMs?: number;
+}
+
+const RUN_MODEL_LIMITS_MAX_ENTRIES = 10_000;
+// The limits each run started with, by run ID, so its model calls can record
+// them. A run resolves its model once, so a later change to its preset's
+// limits does not reach it. Oldest entries leave first.
+const runModelLimits = new Map<string, EffectiveModelLimits>();
+
+function rememberRunModelLimits(
+  runId: string,
+  limits: EffectiveModelLimits | undefined,
+): void {
+  runModelLimits.delete(runId);
+  if (!limits) return;
+  runModelLimits.set(runId, limits);
+  while (runModelLimits.size > RUN_MODEL_LIMITS_MAX_ENTRIES) {
+    const oldest = runModelLimits.keys().next().value;
+    if (oldest === undefined) break;
+    runModelLimits.delete(oldest);
+  }
+}
+
+/**
+ * The limits a run's model calls run with, for each call's recorded details,
+ * so the run's output size and compaction can be explained later. Empty when
+ * the run's preset has no project definition, or another worker admitted it.
+ */
+function modelLimitsDetail(runId: string): {
+  readonly modelLimits?: EffectiveModelLimits;
+} {
+  const limits = runModelLimits.get(runId);
+  return limits ? { modelLimits: { ...limits } } : {};
 }
 
 /** Loads and activates a durable project preset before a run is dispatched. */
@@ -3386,7 +3420,11 @@ export class ManagedRuntimeOrchestrator {
       // Flue resolves `useModel` synchronously during the agent render, so a
       // durable project preset must be loaded and registered before dispatch.
       try {
-        await this.modelPresets?.activate(run, run.snapshot.modelPreset);
+        const preset = await this.modelPresets?.activate(
+          run,
+          run.snapshot.modelPreset,
+        );
+        rememberRunModelLimits(run.runId, preset?.limits);
       } catch (error) {
         if (!(error instanceof ModelPresetUnavailableError)) throw error;
         await this.failBeforeDispatch(run, error);
@@ -5123,6 +5161,7 @@ export class RuntimeProjection {
             costMicrounits,
             {
               purpose: event.purpose,
+              ...modelLimitsDetail(runtimeDispatch.run_id),
               ...(harnessCorrelation
                 ? {
                     harnessOperationKey: harnessCorrelation.operationKey,
@@ -6236,6 +6275,9 @@ interface ProjectModelPresetRow {
   encryption_tag: Buffer;
   encryption_key_version: number;
   provider_removed: boolean;
+  limits_id: string | null;
+  context_window: number | null;
+  max_output_tokens: number | null;
 }
 
 /**
@@ -6261,6 +6303,7 @@ export function createProjectModelPresetActivator(input: {
         readonly model: string;
         readonly routing: ModelRoutingPolicy;
         readonly settings?: ModelGenerationSettings | null;
+        readonly limits?: ModelPresetLimitsInput | null;
       },
     ): ResolvedModelPreset;
   };
@@ -6276,11 +6319,20 @@ export function createProjectModelPresetActivator(input: {
             `SELECT p.preset_key,p.model,p.routing,p.settings,p.provider_id,
                     c.provider_type,c.encrypted_api_key,c.encryption_nonce,
                     c.encryption_tag,c.encryption_key_version,
-                    (c.archived_at IS NOT NULL) AS provider_removed
+                    (c.archived_at IS NOT NULL) AS provider_removed,
+                    l.id AS limits_id,l.context_window,l.max_output_tokens
              FROM oao.project_model_presets p
              JOIN oao.project_model_providers c
                ON c.organization_id=p.organization_id
               AND c.id=p.provider_id
+             LEFT JOIN LATERAL (
+               SELECT latest.id,latest.context_window,latest.max_output_tokens
+                 FROM oao.model_preset_limits latest
+                WHERE latest.organization_id=p.organization_id
+                  AND latest.project_id=p.project_id
+                  AND latest.preset_id=p.id
+                ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
+             ) l ON true
              WHERE p.organization_id=$1 AND p.project_id=$2 AND p.preset_key=$3`,
             [tenant.organizationId, tenant.projectId, presetKey],
           ),
@@ -6326,6 +6378,15 @@ export function createProjectModelPresetActivator(input: {
           row.settings == null
             ? null
             : v.parse(ModelGenerationSettingsSchema, row.settings),
+        // The latest limits apply from this run on; null leaves the model's.
+        limits:
+          row.limits_id == null
+            ? null
+            : {
+                id: row.limits_id,
+                contextWindow: row.context_window,
+                maxOutputTokens: row.max_output_tokens,
+              },
       });
     },
   };
@@ -6570,6 +6631,8 @@ export async function startManagedFlueRuntime(input: {
 }
 
 export const runtimeTesting = {
+  rememberRunModelLimits,
+  modelLimitsDetail,
   createModelTurnAdmission,
   createPendingAssistantText: () => new PendingAssistantText(),
   replyAfterCommittedText,

@@ -242,5 +242,25 @@ export function createAnthropicProjectProvider(
   });
   if (!input.settings || !("thinking" in input.settings))
     throw new TypeError("Anthropic model presets require Anthropic settings");
-  return withAnthropicModelGenerationSettings(provider, input.settings);
+  return withAnthropicModelGenerationSettings(provider, {
+    ...input.settings,
+    maxTokens: anthropicCallMaxTokens(
+      input.settings.maxTokens,
+      input.maxOutputTokens,
+    ),
+  });
+}
+
+/**
+ * What an Anthropic call asks for as `max_tokens`: the preset's `maxTokens`
+ * setting, or its output limit when that is smaller. A preset without an
+ * output limit asks for its setting, as before limits existed.
+ */
+export function anthropicCallMaxTokens(
+  settingsMaxTokens: number,
+  maxOutputTokens: number | null | undefined,
+): number {
+  return maxOutputTokens == null
+    ? settingsMaxTokens
+    : Math.min(settingsMaxTokens, maxOutputTokens);
 }

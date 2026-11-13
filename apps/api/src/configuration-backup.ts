@@ -33,6 +33,12 @@ import {
   modelPresetPriceView,
   type ModelPresetPriceRow,
 } from "./model-preset-prices.js";
+import {
+  insertModelPresetLimits,
+  MODEL_PRESET_LIMITS_COLUMNS,
+  modelPresetLimitsView,
+  type ModelPresetLimitsRow,
+} from "./model-preset-limits.js";
 
 /** What the backup routes need from the API that owns them. */
 export interface ConfigurationBackupContext {
@@ -170,6 +176,12 @@ async function exportProject(
       ORDER BY valid_from,id`,
     scope,
   );
+  const presetLimits = await transaction.query<ModelPresetLimitsRow>(
+    `SELECT ${MODEL_PRESET_LIMITS_COLUMNS} FROM oao.model_preset_limits
+      WHERE organization_id=$1 AND project_id=$2
+      ORDER BY created_at,id`,
+    scope,
+  );
   const skills = await transaction.query<Row>(
     `SELECT id,skill_key,display_name,disabled_at IS NOT NULL AS disabled,
             archived_at IS NOT NULL AS archived
@@ -271,6 +283,17 @@ async function exportProject(
             outputUsdPerMillion: view.outputUsdPerMillion,
             longContext: view.longContext,
             validFrom: view.validFrom,
+          };
+        }),
+      limits: presetLimits.rows
+        .filter((limits) => limits.preset_id === row.id)
+        .map((limits) => {
+          const view = modelPresetLimitsView(limits);
+          return {
+            id: view.id,
+            contextWindow: view.contextWindow,
+            maxOutputTokens: view.maxOutputTokens,
+            createdAt: view.createdAt,
           };
         }),
     })),
@@ -1471,6 +1494,15 @@ async function restoreProject(
           presetId,
           rates,
           validFrom,
+          createdByPrincipalId: projectActor.id,
+        });
+      for (const { id, createdAt, ...limits } of preset.limits)
+        await insertModelPresetLimits(transaction, {
+          tenant: projectActor,
+          id: ids.add(id),
+          presetId,
+          limits,
+          createdAt,
           createdByPrincipalId: projectActor.id,
         });
     });

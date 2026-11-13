@@ -33,7 +33,9 @@ import {
   createDeterministicModelProvider,
   loadModelPresetConfiguration,
   withModelCallTimeout,
+  withModelLimits,
   type FauxResponseStep,
+  type ModelPresetLimitsInput,
 } from "@oao/models-openrouter";
 import {
   McpRemoteClient,
@@ -87,6 +89,8 @@ export async function startRuntimeWorker(input: {
   readonly fakeResponses?: readonly FauxResponseStep[];
   /** Short deadlines for deterministic timeout tests; never applied to hosted providers. */
   readonly fakeModelCallTimeoutMs?: number;
+  /** Preset limits on the deterministic test model, as a project preset puts them on its model. */
+  readonly fakeModelLimits?: ModelPresetLimitsInput;
   readonly platformTools?: ReadonlyMap<string, PlatformToolHandler>;
   readonly mcpRemote?: McpRemotePort;
   /** Tests may route agents' OAO tool calls to an in-process API. */
@@ -153,7 +157,12 @@ export async function startRuntimeWorker(input: {
       })
     : modelConfiguration.registry;
   const providers = fake
-    ? [withModelCallTimeout(fake.provider, input.fakeModelCallTimeoutMs)]
+    ? [
+        withModelCallTimeout(
+          withModelLimits(fake.provider, input.fakeModelLimits),
+          input.fakeModelCallTimeoutMs,
+        ),
+      ]
     : [];
   // Durable project presets are registered lazily, one provider identity per
   // (organization, project, preset key), so routing policy stays isolated.

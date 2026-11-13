@@ -1100,3 +1100,36 @@ test("prompt suggestions are an optional boolean on agent versions and bounded t
   );
   assert.doesNotMatch(sql, /DROP TABLE|DROP FUNCTION|UPDATE oao\./u);
 });
+
+test("a preset's limits are append-only, tenant-scoped rows that leave with their preset", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0066_model_preset_limits.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /CREATE TABLE oao\.model_preset_limits/u);
+  assert.match(sql, /CHECK \(context_window BETWEEN 1024 AND 10000000\)/u);
+  assert.match(sql, /CHECK \(max_output_tokens BETWEEN 1 AND 1000000\)/u);
+  assert.match(sql, /OR max_output_tokens <= context_window/u);
+  assert.match(
+    sql,
+    /REFERENCES oao\.project_model_presets[^;]*ON DELETE CASCADE/su,
+  );
+  assert.match(
+    sql,
+    /BEFORE UPDATE ON oao\.model_preset_limits\nFOR EACH ROW EXECUTE FUNCTION oao\.reject_mutation/u,
+  );
+  assert.match(
+    sql,
+    /BEFORE DELETE ON oao\.model_preset_limits\nFOR EACH ROW EXECUTE FUNCTION oao\.reject_direct_model_preset_price_delete/u,
+  );
+  assert.match(sql, /FORCE ROW LEVEL SECURITY/u);
+  assert.match(
+    sql,
+    /CREATE POLICY tenant_isolation ON oao\.model_preset_limits/u,
+  );
+  assert.match(
+    sql,
+    /GRANT SELECT, INSERT ON oao\.model_preset_limits TO oao_app/u,
+  );
+  assert.doesNotMatch(sql, /GRANT[^;]*UPDATE[^;]*model_preset_limits/su);
+});

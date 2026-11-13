@@ -18,6 +18,7 @@ import {
   ToolCallSchema,
   parseCreateModelPresetInput,
   parseSetModelPresetPriceInput,
+  parseSetModelPresetLimitsInput,
   parseCreateProjectSandboxProviderInput,
   parseCreateProjectStorageProviderInput,
   parseManagedAgentSnapshotForPublication,
@@ -1383,5 +1384,57 @@ test("a model preset may be created with its first price", () => {
       },
     }).price?.outputUsdPerMillion,
     10,
+  );
+});
+
+test("preset limits are optional token counts, with the output not above the window", () => {
+  assert.deepEqual(parseSetModelPresetLimitsInput({}), {
+    contextWindow: null,
+    maxOutputTokens: null,
+  });
+  assert.deepEqual(
+    parseSetModelPresetLimitsInput({
+      contextWindow: 250_000,
+      maxOutputTokens: 128_000,
+    }),
+    { contextWindow: 250_000, maxOutputTokens: 128_000 },
+  );
+  assert.deepEqual(
+    parseSetModelPresetLimitsInput({ maxOutputTokens: 64_000 }),
+    {
+      contextWindow: null,
+      maxOutputTokens: 64_000,
+    },
+  );
+  for (const input of [
+    { contextWindow: 1_023 },
+    { contextWindow: 10_000_001 },
+    { contextWindow: 250_000.5 },
+    { maxOutputTokens: 0 },
+    { maxOutputTokens: 1_000_001 },
+    { contextWindow: 100_000, maxOutputTokens: 100_001 },
+    { contextWindow: "250000" },
+    { contextWindow: 250_000, other: true },
+  ])
+    assert.throws(
+      () => parseSetModelPresetLimitsInput(input),
+      JSON.stringify(input),
+    );
+  // A preset created without limits reads as none.
+  const created = parseCreateModelPresetInput({
+    key: "sol-v1",
+    displayName: "Sol",
+    providerId: "00000000-0000-4000-8000-000000000001",
+    model: "openrouter/@preset/azure-sol-61",
+  });
+  assert.equal(created.limits, null);
+  assert.throws(() =>
+    parseCreateModelPresetInput({
+      key: "sol-v1",
+      displayName: "Sol",
+      providerId: "00000000-0000-4000-8000-000000000001",
+      model: "openrouter/@preset/azure-sol-61",
+      limits: { contextWindow: 1_000 },
+    }),
   );
 });

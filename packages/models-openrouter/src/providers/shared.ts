@@ -14,6 +14,12 @@ export interface CreateProjectProviderInput {
   readonly label: string;
   readonly apiKey: string;
   readonly settings: ModelGenerationSettings | null;
+  /**
+   * The preset's own output limit, when it has one. The registry puts the
+   * limits on the provider's models; a provider whose settings ask for an
+   * output size of their own caps that size by it.
+   */
+  readonly maxOutputTokens?: number | null;
 }
 
 export function deepFreeze<T>(value: T): Readonly<T> {

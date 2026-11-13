@@ -23,6 +23,7 @@ import {
   parseDiscoverMcpServerInput,
   parseCreateModelPresetInput,
   parseSetModelPresetPriceInput,
+  parseSetModelPresetLimitsInput,
   parseManagedAgentSnapshotForPublication,
   parseRotateProjectModelProviderCredentialInput,
   parseRotateProjectSandboxProviderCredentialInput,
@@ -43,6 +44,7 @@ import {
   type CreateModelPresetInput,
   type ProjectUsageGroup,
   type SetModelPresetPriceInput,
+  type SetModelPresetLimitsInput,
   type CreateProjectModelProviderInput,
   type ManagedAgentPublicationConfig,
   type ModelCatalogEntry,
@@ -90,6 +92,13 @@ import {
   modelPresetPriceView,
   type ModelPresetPriceRow,
 } from "./model-preset-prices.js";
+import {
+  currentModelPresetLimits,
+  insertModelPresetLimits,
+  MODEL_PRESET_LIMITS_COLUMNS,
+  modelPresetLimitsView,
+  type ModelPresetLimitsRow,
+} from "./model-preset-limits.js";
 import {
   readProjectUsage,
   readSessionUsage,
@@ -5563,15 +5572,16 @@ function registerModelPresetRoutes(
           limit + 1,
         ],
       );
-      const prices = await currentModelPresetPrices(
-        tx,
-        actor,
-        result.rows.map((row) => (row as { readonly id: string }).id),
+      const presetIds = result.rows.map(
+        (row) => (row as { readonly id: string }).id,
       );
+      const prices = await currentModelPresetPrices(tx, actor, presetIds);
+      const limits = await currentModelPresetLimits(tx, actor, presetIds);
       const project = (rows(result) as Readonly<Record<string, unknown>>[]).map(
         (preset) => ({
           ...preset,
           price: prices.get(String(preset.id)) ?? null,
+          limits: limits.get(String(preset.id)) ?? null,
         }),
       );
       const page = pagination(project, limit, "createdAt");
@@ -5602,7 +5612,7 @@ function registerModelPresetRoutes(
     } catch {
       throw new HttpApiError(
         "bad_request",
-        "Request must contain a versioned key, display name, approved model, supported model settings, and a complete price if one is given",
+        "Request must contain a versioned key, display name, approved model, supported model settings, a complete price if one is given, and limits within range if given",
       );
     }
     if (activeModelPresetKeys.has(input.key))
@@ -5843,13 +5853,25 @@ function registerModelPresetRoutes(
                   createdByPrincipalId: actor.id,
                 })
               : null;
+            // A preset without limits keeps no row, so it behaves as before.
+            const limits =
+              input.limits &&
+              (input.limits.contextWindow !== null ||
+                input.limits.maxOutputTokens !== null)
+                ? await insertModelPresetLimits(tx, {
+                    tenant: actor,
+                    presetId,
+                    limits: input.limits,
+                    createdByPrincipalId: actor.id,
+                  })
+                : null;
             await dependencies.store.appendAudit(tx, actor, {
               action: "model_preset.created",
               resourceType: "model_preset",
               resourceId: presetId,
               detail: { key: input.key, model: input.model },
             });
-            return { ...preset, price };
+            return { ...preset, price, limits };
           },
         });
         c.header("idempotency-replayed", String(response.replayed));
@@ -5961,6 +5983,110 @@ function registerModelPresetRoutes(
                 detail: { key, validFrom: price.validFrom },
               });
               return price;
+            },
+          });
+          c.header("idempotency-replayed", String(response.replayed));
+          return c.json(response.body, 201);
+        },
+      );
+    },
+  );
+
+  app.get(
+    "/v1/projects/:projectId/model-presets/:presetId/limits",
+    async (c) => {
+      const actor = assertProject(c);
+      const presetId = c.req.param("presetId");
+      const limit = parseLimit(c.req.query("limit"));
+      const cursor = decodeListCursor(c.req.query("cursor"));
+      return dependencies.store.transaction(actor, "agent:read", async (tx) => {
+        const preset = await tx.query(
+          `SELECT 1 FROM oao.project_model_presets
+          WHERE organization_id=$1 AND project_id=$2 AND id=$3`,
+          [actor.organizationId, actor.projectId, presetId],
+        );
+        if (!preset.rowCount)
+          throw new HttpApiError("not_found", "Model preset not found");
+        const condition = dependencies.store.cursorCondition(
+          cursor,
+          "created_at",
+          4,
+        );
+        const result = await tx.query<ModelPresetLimitsRow>(
+          `SELECT ${MODEL_PRESET_LIMITS_COLUMNS} FROM oao.model_preset_limits
+          WHERE organization_id=$1 AND project_id=$2 AND preset_id=$3${condition.sql}
+          ORDER BY created_at DESC,id DESC LIMIT $${4 + condition.values.length}`,
+          [
+            actor.organizationId,
+            actor.projectId,
+            presetId,
+            ...condition.values,
+            limit + 1,
+          ],
+        );
+        return c.json(
+          pagination(
+            result.rows.map(modelPresetLimitsView),
+            limit,
+            "createdAt",
+          ),
+        );
+      });
+    },
+  );
+
+  app.post(
+    "/v1/projects/:projectId/model-presets/:presetId/limits",
+    async (c) => {
+      const actor = assertProject(c);
+      const presetId = c.req.param("presetId");
+      const body = await readJsonObject(c.req.raw);
+      const idem = idempotencyKey(c.req.raw);
+      let input: SetModelPresetLimitsInput;
+      try {
+        input = parseSetModelPresetLimitsInput(body);
+      } catch {
+        throw new HttpApiError(
+          "bad_request",
+          "contextWindow must be null or an integer from 1024 to 10000000, maxOutputTokens null or an integer from 1 to 1000000, and maxOutputTokens not larger than contextWindow",
+        );
+      }
+      return dependencies.store.transaction(
+        actor,
+        "project:admin",
+        async (tx) => {
+          const response = await dependencies.store.idempotent(tx, actor, {
+            scope: `POST:/model-presets/${presetId}/limits`,
+            key: idem,
+            hash: requestHash(body),
+            status: 201,
+            execute: async () => {
+              const preset = await tx.query<{ preset_key: string }>(
+                `SELECT preset_key FROM oao.project_model_presets
+                  WHERE organization_id=$1 AND project_id=$2 AND id=$3
+                    AND archived_at IS NULL`,
+                [actor.organizationId, actor.projectId, presetId],
+              );
+              const key = preset.rows[0]?.preset_key;
+              if (key === undefined)
+                throw new HttpApiError("not_found", "Model preset not found");
+              const limits = await insertModelPresetLimits(tx, {
+                tenant: actor,
+                presetId,
+                limits: input,
+                createdByPrincipalId: actor.id,
+              });
+              await dependencies.store.appendAudit(tx, actor, {
+                action: "model_preset.limits_set",
+                resourceType: "model_preset",
+                resourceId: presetId,
+                detail: {
+                  key,
+                  contextWindow: limits.contextWindow,
+                  maxOutputTokens: limits.maxOutputTokens,
+                },
+              });
+              return limits;
             },
           });
           c.header("idempotency-replayed", String(response.replayed));

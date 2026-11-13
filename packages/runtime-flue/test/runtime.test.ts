@@ -1030,6 +1030,8 @@ test("a durable project preset is loaded, tenant scoped, and activated", async (
       model: "openrouter/anthropic/claude-sonnet-4.6",
       routing: { zeroDataRetention: true, providerAllowlist: ["anthropic"] },
       settings: null,
+      // A preset without limits keeps the model's own.
+      limits: null,
     },
   ]);
   const lookup = queries.find((query) =>
@@ -1040,6 +1042,73 @@ test("a durable project preset is loaded, tenant scoped, and activated", async (
     tenant.projectId,
     "claude-sonnet-4-6-zdr-v1",
   ]);
+});
+
+test("a run activates its preset with the preset's latest limits", async () => {
+  const { pool, queries } = presetPool([
+    {
+      ...presetRow({
+        preset_key: "azure-sol-61-v1",
+        model: "openrouter/@preset/azure-sol-61",
+        routing: {},
+      }),
+      limits_id: "00000000-0000-4000-8000-000000000071",
+      context_window: 250_000,
+      max_output_tokens: 128_000,
+    },
+  ]);
+  const activated: unknown[] = [];
+  const activator = createProjectModelPresetActivator({
+    pool,
+    credentialCipher,
+    registry: {
+      activate: (preset) => {
+        activated.push(preset.limits);
+        return {
+          key: preset.key,
+          model: `project/${preset.model}`,
+          approvedModel: preset.model,
+          origin: "project" as const,
+        };
+      },
+    },
+    deploymentPresetKeys: new Set(["local-default"]),
+  });
+  await activator.activate(tenant, "azure-sol-61-v1");
+  assert.deepEqual(activated, [
+    {
+      id: "00000000-0000-4000-8000-000000000071",
+      contextWindow: 250_000,
+      maxOutputTokens: 128_000,
+    },
+  ]);
+  // The lookup reads the newest limits row of the preset.
+  const lookup = queries.find((query) =>
+    query.text.includes("project_model_presets"),
+  );
+  assert.match(lookup?.text ?? "", /oao\.model_preset_limits/u);
+  assert.match(
+    lookup?.text ?? "",
+    /ORDER BY latest\.created_at DESC,latest\.id DESC LIMIT 1/u,
+  );
+});
+
+test("each model call records the limits its run started with", () => {
+  const runId = "00000000-0000-4000-8000-000000000072";
+  const limits = {
+    contextWindow: 250_000,
+    contextWindowSource: "preset" as const,
+    maxOutputTokens: 128_000,
+    maxOutputTokensSource: "preset" as const,
+    presetLimitsId: "00000000-0000-4000-8000-000000000071",
+  };
+  runtimeTesting.rememberRunModelLimits(runId, limits);
+  assert.deepEqual(runtimeTesting.modelLimitsDetail(runId), {
+    modelLimits: limits,
+  });
+  // A deployment preset has no project limits to record.
+  runtimeTesting.rememberRunModelLimits(runId, undefined);
+  assert.deepEqual(runtimeTesting.modelLimitsDetail(runId), {});
 });
 
 test("an unknown or malformed preset never reaches the provider", async () => {
