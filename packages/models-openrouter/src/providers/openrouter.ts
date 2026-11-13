@@ -41,6 +41,26 @@ const OPENROUTER_PAGE_SIZE = 1_000;
 type OpenRouterModel = Model<"openai-responses">;
 
 /**
+ * Responses API settings every OpenRouter model shares.
+ *
+ * `supportsStrictMode` makes Pi write `strict: false` on every function tool.
+ * Without it Pi leaves `strict` out, and the Responses API reads a function
+ * tool without `strict` as a strict one: the provider then makes every
+ * property required and closes every object, so the model fills optional
+ * keys with empty values and can only write `{}` for a free-form object such
+ * as `fields`, or whitespace inside it until the output limit. OAO's tool
+ * schemas keep optional properties and open objects, so they must not be
+ * strict.
+ */
+const OPENROUTER_RESPONSES_COMPAT = {
+  supportsStrictMode: true,
+  sessionAffinityFormat: "openrouter",
+  // OAO places every cache breakpoint itself and keeps the default lifetime.
+  supportsLongCacheRetention: false,
+  supportsExplicitPromptCacheMode: false,
+} as const satisfies OpenAIResponsesCompat;
+
+/**
  * Responses API settings for a model from Pi's OpenRouter catalog. Pi lists
  * OpenRouter models for Chat Completions or, for Claude, OpenRouter's
  * Anthropic Messages endpoint. OAO sends every OpenRouter model through
@@ -58,16 +78,10 @@ function openRouterResponsesCompat(model: Model<Api>): OpenAIResponsesCompat {
     ...(typeof compat.supportsDeveloperRole === "boolean"
       ? { supportsDeveloperRole: compat.supportsDeveloperRole }
       : {}),
-    ...(typeof compat.supportsStrictMode === "boolean"
-      ? { supportsStrictMode: compat.supportsStrictMode }
-      : {}),
     ...(compat.supportsMidConvoSystemMessages === true
       ? { supportsMidConvoSystemMessages: true }
       : {}),
-    sessionAffinityFormat: "openrouter",
-    // OAO places every cache breakpoint itself and keeps the default lifetime.
-    supportsLongCacheRetention: false,
-    supportsExplicitPromptCacheMode: false,
+    ...OPENROUTER_RESPONSES_COMPAT,
   };
 }
 
@@ -509,9 +523,7 @@ function dynamicOpenRouterModel(input: {
           maxTokens: 4_096,
           compat: {
             supportsDeveloperRole: false,
-            sessionAffinityFormat: "openrouter",
-            supportsLongCacheRetention: false,
-            supportsExplicitPromptCacheMode: false,
+            ...OPENROUTER_RESPONSES_COMPAT,
           },
         },
   );
