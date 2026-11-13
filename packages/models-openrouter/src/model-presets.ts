@@ -9,6 +9,14 @@ import {
 } from "@oao/contracts";
 import * as v from "valibot";
 import { isApprovedCatalogModel } from "./catalog.js";
+import {
+  effectiveModelLimits,
+  modelLimitsKey,
+  modelLimitsOrder,
+  withModelLimits,
+  type EffectiveModelLimits,
+  type ModelPresetLimitsInput,
+} from "./model-limits.js";
 import { createAnthropicProjectProvider } from "./providers/anthropic.js";
 import { createBedrockProjectProvider } from "./providers/bedrock.js";
 import { createOpenAIProjectProvider } from "./providers/openai.js";
@@ -107,6 +115,8 @@ export interface ProjectModelPresetInput extends ModelPresetTenant {
   readonly model: string;
   readonly routing: ModelRoutingPolicy;
   readonly settings?: ModelGenerationSettings | null;
+  /** The preset's latest limits; absent or null when it has none. */
+  readonly limits?: ModelPresetLimitsInput | null;
 }
 
 export interface ResolvedModelPreset {
@@ -117,6 +127,8 @@ export interface ResolvedModelPreset {
   readonly approvedModel: string;
   readonly origin: "deployment" | "project";
   readonly settings?: ModelGenerationSettings | null;
+  /** The limits a project preset's model calls run with. */
+  readonly limits?: EffectiveModelLimits;
 }
 
 function projectPresetProviderId(input: ProjectModelPresetInput): string {
@@ -178,6 +190,7 @@ function createProjectPresetProvider(input: {
   readonly apiKey: string;
   readonly routing: OpenRouterRouting | undefined;
   readonly settings: ModelGenerationSettings | null;
+  readonly maxOutputTokens: number | null;
 }): Provider {
   if (input.providerType === "openrouter")
     return createOpenRouterProjectProvider(input);
@@ -206,6 +219,8 @@ export class ProjectModelPresetRegistry {
       readonly resolved: ResolvedModelPreset;
       readonly fingerprint: string;
       readonly credentialVersion: number;
+      readonly limitsKey: string;
+      readonly limitsOrder: number;
     }
   >();
 
@@ -260,18 +275,34 @@ export class ProjectModelPresetRegistry {
     );
     const cacheKey = ProjectModelPresetRegistry.#cacheKey(input, input.key);
     const fingerprint = presetFingerprint({ ...input, settings });
+    // Limits stay out of the fingerprint: they change on a preset without a
+    // new definition, and a change registers the provider again.
+    const limitsKey = modelLimitsKey(input.limits);
+    const limitsOrder = modelLimitsOrder(input.limits);
     const existing = this.#active.get(cacheKey);
     if (existing) {
       if (existing.fingerprint !== fingerprint)
         throw new Error(
           `Model preset definition changed after activation: ${input.key}`,
         );
-      if (existing.credentialVersion >= input.credentialVersion)
+      // Activations read the preset concurrently and can finish out of
+      // order. One that read an older credential or older limits than the
+      // registered ones is stale: registering it would bring back a rotated
+      // key or limits that were already replaced.
+      if (
+        input.credentialVersion < existing.credentialVersion ||
+        limitsOrder < existing.limitsOrder
+      )
+        return existing.resolved;
+      if (
+        input.credentialVersion === existing.credentialVersion &&
+        existing.limitsKey === limitsKey
+      )
         return existing.resolved;
     }
     const providerId = projectPresetProviderId(input);
     const catalogId = input.model.slice(input.providerType.length + 1);
-    this.#registerProvider(
+    const provider = withModelLimits(
       createProjectPresetProvider({
         providerId,
         providerType: input.providerType,
@@ -280,19 +311,40 @@ export class ProjectModelPresetRegistry {
         apiKey: input.apiKey,
         routing: toOpenRouterRouting(input.routing),
         settings,
+        maxOutputTokens: input.limits?.maxOutputTokens ?? null,
       }),
+      input.limits,
     );
+    // A run resolves its model once, when it starts, so a run already under
+    // way keeps the limits it started with and the next run gets these.
+    this.#registerProvider(provider);
+    const models = provider.getModels();
+    const model = models.find((entry) => entry.id === catalogId) ?? models[0];
     const resolved: ResolvedModelPreset = deepFreeze({
       key: input.key,
       model: `${providerId}/${catalogId}`,
       approvedModel: input.model,
       origin: "project",
       settings,
+      ...(model
+        ? {
+            limits: effectiveModelLimits({
+              model,
+              limits: input.limits,
+              settingsMaxTokens:
+                settings && "thinking" in settings
+                  ? settings.maxTokens
+                  : undefined,
+            }),
+          }
+        : {}),
     });
     this.#active.set(cacheKey, {
       resolved,
       fingerprint,
       credentialVersion: input.credentialVersion,
+      limitsKey,
+      limitsOrder,
     });
     return resolved;
   }

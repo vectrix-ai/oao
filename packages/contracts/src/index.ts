@@ -1738,6 +1738,22 @@ export const OAO_MCP_TOOL_CATALOG: readonly OaoMcpToolDescriptor[] = [
     readOnly: false,
   },
   {
+    name: "list_model_preset_limits",
+    title: "List model preset limits",
+    description:
+      "Lists a model preset's context window and output limit history, newest first. The newest applies.",
+    scopes: ["agent:read"],
+    readOnly: true,
+  },
+  {
+    name: "set_model_preset_limits",
+    title: "Set model preset limits",
+    description:
+      "Sets a model preset's context window and output limit in tokens from its next run on, without a new agent version. A null limit uses the model's catalog value, or OAO's default.",
+    scopes: ["project:admin"],
+    readOnly: false,
+  },
+  {
     name: "list_mcp_servers",
     title: "List MCP servers",
     description:
@@ -3446,6 +3462,78 @@ export const SetModelPresetPriceInputSchema = v.strictObject({
   validFrom: v.optional(TimestampSchema),
 });
 
+/** The largest context window, in tokens, a preset can set. */
+export const MODEL_PRESET_CONTEXT_WINDOW_MAX = 10_000_000;
+/** The smallest context window, in tokens, a preset can set. */
+export const MODEL_PRESET_CONTEXT_WINDOW_MIN = 1_024;
+/** The largest output limit, in tokens, a preset can set. */
+export const MODEL_PRESET_MAX_OUTPUT_TOKENS_MAX = 1_000_000;
+
+const ModelContextWindowSchema = v.pipe(
+  v.number(),
+  v.integer(),
+  v.minValue(MODEL_PRESET_CONTEXT_WINDOW_MIN),
+  v.maxValue(MODEL_PRESET_CONTEXT_WINDOW_MAX),
+);
+
+const ModelMaxOutputTokensSchema = v.pipe(
+  v.number(),
+  v.integer(),
+  v.minValue(1),
+  v.maxValue(MODEL_PRESET_MAX_OUTPUT_TOKENS_MAX),
+);
+
+const ModelPresetLimitEntries = {
+  /**
+   * The tokens a model call may hold, input and output together. Flue
+   * compacts a conversation once a call passes it minus an output reserve.
+   */
+  contextWindow: v.nullable(ModelContextWindowSchema),
+  /** The most output tokens, reasoning included, a model call may write. */
+  maxOutputTokens: v.nullable(ModelMaxOutputTokensSchema),
+};
+
+function outputFitsContextWindow(limits: {
+  readonly contextWindow: number | null;
+  readonly maxOutputTokens: number | null;
+}): boolean {
+  return (
+    limits.contextWindow === null ||
+    limits.maxOutputTokens === null ||
+    limits.maxOutputTokens <= limits.contextWindow
+  );
+}
+
+/**
+ * A preset's own context window and output limit. A null one leaves the
+ * model's catalog value in place, or OAO's default when the catalog does not
+ * know the model.
+ */
+export const ModelPresetLimitValueEntries = {
+  contextWindow: v.optional(ModelPresetLimitEntries.contextWindow, null),
+  maxOutputTokens: v.optional(ModelPresetLimitEntries.maxOutputTokens, null),
+};
+
+export const ModelPresetLimitValuesSchema = v.pipe(
+  v.strictObject(ModelPresetLimitValueEntries),
+  v.check(
+    outputFitsContextWindow,
+    "maxOutputTokens must not be larger than contextWindow",
+  ),
+);
+
+/** One entry of a preset's append-only limits history; the latest applies. */
+export const ModelPresetLimitsSchema = v.object({
+  id: IdSchema,
+  presetId: IdSchema,
+  ...ModelPresetLimitEntries,
+  createdByPrincipalId: v.nullable(IdSchema),
+  createdAt: TimestampSchema,
+});
+
+/** Replaces a preset's limits from the next run on; null clears one. */
+export const SetModelPresetLimitsInputSchema = ModelPresetLimitValuesSchema;
+
 const UsageTotalsEntries = {
   modelCalls: v.number(),
   inputTokens: v.number(),
@@ -3556,6 +3644,8 @@ export const ModelPresetSchema = v.object({
   createdAt: v.nullable(TimestampSchema),
   /** The price in effect now; null when none is set. */
   price: v.optional(v.nullable(ModelPresetPriceSchema)),
+  /** The limits in effect now; null when none were ever set. */
+  limits: v.optional(v.nullable(ModelPresetLimitsSchema)),
 });
 
 export const CreateModelPresetInputSchema = v.strictObject({
@@ -3583,6 +3673,8 @@ export const CreateModelPresetInputSchema = v.strictObject({
   settings: v.optional(v.nullable(ModelGenerationSettingsSchema), null),
   /** The preset's first price. Later changes add to its price history. */
   price: v.optional(v.nullable(ModelPriceRatesSchema), null),
+  /** The preset's first limits. Later changes add to its limits history. */
+  limits: v.optional(v.nullable(ModelPresetLimitValuesSchema), null),
 });
 
 /** Safe, credential-free metadata for one provider catalog model or preset. */
@@ -3623,6 +3715,12 @@ export function parseSetModelPresetPriceInput(
   input: unknown,
 ): SetModelPresetPriceInput {
   return v.parse(SetModelPresetPriceInputSchema, input);
+}
+
+export function parseSetModelPresetLimitsInput(
+  input: unknown,
+): SetModelPresetLimitsInput {
+  return v.parse(SetModelPresetLimitsInputSchema, input);
 }
 
 export function parseCreateModelPresetInput(
@@ -3856,6 +3954,13 @@ export type ModelPresetPrice = v.InferOutput<typeof ModelPresetPriceSchema>;
 export type SetModelPresetPriceInput = v.InferOutput<
   typeof SetModelPresetPriceInputSchema
 >;
+export type ModelPresetLimitValues = v.InferOutput<
+  typeof ModelPresetLimitValuesSchema
+>;
+export type ModelPresetLimits = v.InferOutput<typeof ModelPresetLimitsSchema>;
+export type SetModelPresetLimitsInput = v.InferOutput<
+  typeof SetModelPresetLimitsInputSchema
+>;
 export type CostProvenance = v.InferOutput<typeof CostProvenanceSchema>;
 export type SessionUsage = v.InferOutput<typeof SessionUsageSchema>;
 export type ProjectUsageGroup = v.InferOutput<typeof ProjectUsageGroupSchema>;
@@ -4023,6 +4128,23 @@ const BackupModelPresetSchema = v.strictObject({
         longContext: v.nullable(ModelPriceLongContextSchema),
         validFrom: TimestampSchema,
       }),
+    ),
+    [],
+  ),
+  /** The limits history. Backups made before limits existed leave it out. */
+  limits: v.optional(
+    v.array(
+      v.pipe(
+        v.strictObject({
+          id: IdSchema,
+          ...ModelPresetLimitEntries,
+          createdAt: TimestampSchema,
+        }),
+        v.check(
+          (limits) => outputFitsContextWindow(limits),
+          "maxOutputTokens must not be larger than contextWindow",
+        ),
+      ),
     ),
     [],
   ),

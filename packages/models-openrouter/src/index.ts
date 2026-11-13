@@ -4,6 +4,7 @@ export {
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
 export * from "./catalog.js";
+export * from "./model-limits.js";
 export * from "./model-presets.js";
 export * from "./model-call-timeout.js";
 export * from "./prompt-cache.js";

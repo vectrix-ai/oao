@@ -3,6 +3,7 @@ import {
   CreateMcpServerInputSchema,
   CreateMcpToolsetInputSchema,
   CreateModelPresetInputSchema,
+  ModelPresetLimitValueEntries,
   ProjectUsageGroupSchema,
   SetModelPresetPriceInputSchema,
   DiscoverMcpServerInputSchema,
@@ -17,6 +18,7 @@ import {
   type CreateAgentInput,
   type CreateModelPresetInput,
   type SetModelPresetPriceInput,
+  type SetModelPresetLimitsInput,
   type CreateSessionInput,
   type OaoClient,
   type PublishAgentVersionInput,
@@ -712,6 +714,32 @@ export const OAO_TOOLS: readonly OaoTool[] = [
         input.presetId,
         price as SetModelPresetPriceInput,
         write(context, "set_model_preset_price"),
+      );
+    },
+  }),
+  tool("list_model_preset_limits", {
+    input: { presetId: Id, limit: Limit, cursor: Cursor },
+    run: (input, context) =>
+      context.client.listModelPresetLimits(
+        context.projectId,
+        input.presetId,
+        page(input),
+        withSignal(context),
+      ),
+  }),
+  tool("set_model_preset_limits", {
+    input: {
+      presetId: Id,
+      ...ModelPresetLimitValueEntries,
+      idempotencyKey: IdempotencyKey,
+    },
+    run: (input, context) => {
+      const limits = without(without(input, "idempotencyKey"), "presetId");
+      return context.client.setModelPresetLimits(
+        context.projectId,
+        input.presetId,
+        limits as SetModelPresetLimitsInput,
+        write(context, "set_model_preset_limits"),
       );
     },
   }),

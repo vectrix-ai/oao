@@ -77,6 +77,8 @@ export function createRoutes(apiPrefix = "/v1") {
       `${project(projectId)}/model-presets/${segment(presetId)}`,
     modelPresetPrices: (projectId: string, presetId: string) =>
       `${project(projectId)}/model-presets/${segment(presetId)}/prices`,
+    modelPresetLimits: (projectId: string, presetId: string) =>
+      `${project(projectId)}/model-presets/${segment(presetId)}/limits`,
     projectUsage: (projectId: string) => `${project(projectId)}/usage`,
     sessionUsage: (projectId: string, sessionId: string) =>
       `${project(projectId)}/sessions/${segment(sessionId)}/usage`,

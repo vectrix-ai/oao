@@ -34,8 +34,10 @@ import type {
   CreateEventWebhookInput,
   CreateModelProviderInput,
   CreateModelPresetInput,
+  ModelPresetLimits,
   ModelPresetPrice,
   SessionUsage,
+  SetModelPresetLimitsInput,
   SetModelPresetPriceInput,
   CreateSandboxProviderInput,
   CreateSkillInput,
@@ -1353,6 +1355,7 @@ export class DemoConsoleApi implements ConsoleApi {
     settingsSeed.members,
   ) as SettingsData["members"][number][];
   #modelPresets = structuredClone(modelPresetsSeed) as ModelPreset[];
+  #modelPresetLimits: ModelPresetLimits[] = [];
   #modelPresetPrices: ModelPresetPrice[] = [
     {
       id: "44444444-4444-4444-8444-000000000901",
@@ -3062,9 +3065,96 @@ export class DemoConsoleApi implements ConsoleApi {
       data: structuredClone(this.#modelPresets).map((preset) => ({
         ...preset,
         price: this.#currentPresetPrice(preset.id),
+        limits: this.#currentPresetLimits(preset.id),
       })),
       credentialEncryptionConfigured: true,
     };
+  }
+
+  #currentPresetLimits(presetId: string | null): ModelPresetLimits | null {
+    return (
+      this.#modelPresetLimits
+        .filter((limits) => limits.presetId === presetId)
+        .sort((left, right) =>
+          right.createdAt.localeCompare(left.createdAt),
+        )[0] ?? null
+    );
+  }
+
+  async listModelPresetLimits(presetId: string) {
+    this.#guard();
+    return structuredClone(
+      this.#modelPresetLimits
+        .filter((limits) => limits.presetId === presetId)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
+    );
+  }
+
+  async setModelPresetLimits(
+    presetId: string,
+    input: SetModelPresetLimitsInput,
+  ): Promise<ModelPresetLimits> {
+    this.#guard();
+    if (!this.#modelPresets.some((preset) => preset.id === presetId))
+      throw new Error("Model preset not found.");
+    return structuredClone(this.#addPresetLimits(presetId, input));
+  }
+
+  #assertPresetLimits(input: SetModelPresetLimitsInput): void {
+    const { contextWindow, maxOutputTokens } = input;
+    if (
+      contextWindow !== null &&
+      (!Number.isInteger(contextWindow) ||
+        contextWindow < 1_024 ||
+        contextWindow > 10_000_000)
+    )
+      throw new Error(
+        "The context window must be a whole number from 1,024 to 10,000,000 tokens.",
+      );
+    if (
+      maxOutputTokens !== null &&
+      (!Number.isInteger(maxOutputTokens) ||
+        maxOutputTokens < 1 ||
+        maxOutputTokens > 1_000_000)
+    )
+      throw new Error(
+        "The output limit must be a whole number from 1 to 1,000,000 tokens.",
+      );
+    if (
+      contextWindow !== null &&
+      maxOutputTokens !== null &&
+      maxOutputTokens > contextWindow
+    )
+      throw new Error(
+        "The output limit cannot be larger than the context window.",
+      );
+  }
+
+  #addPresetLimits(
+    presetId: string,
+    input: SetModelPresetLimitsInput,
+  ): ModelPresetLimits {
+    this.#assertPresetLimits(input);
+    const { contextWindow, maxOutputTokens } = input;
+    this.#counter += 1;
+    const now = new Date(
+      Math.max(
+        Date.now(),
+        ...this.#modelPresetLimits
+          .filter((limits) => limits.presetId === presetId)
+          .map((limits) => Date.parse(limits.createdAt) + 1),
+      ),
+    ).toISOString();
+    const limits: ModelPresetLimits = {
+      id: `55555555-5555-4555-8555-${String(this.#counter).padStart(12, "0")}`,
+      presetId,
+      contextWindow,
+      maxOutputTokens,
+      createdByPrincipalId: principalId,
+      createdAt: now,
+    };
+    this.#modelPresetLimits = [...this.#modelPresetLimits, limits];
+    return limits;
   }
 
   async listModelPresetPrices(presetId: string) {
@@ -3730,11 +3820,18 @@ export class DemoConsoleApi implements ConsoleApi {
       createdByPrincipalId: principalId,
       createdAt: new Date().toISOString(),
     };
+    if (input.limits) this.#assertPresetLimits(input.limits);
     this.#modelPresets = [...this.#modelPresets, created];
     const price = input.price
       ? this.#addPresetPrice(created.id ?? "", input.price)
       : null;
-    return structuredClone({ ...created, price });
+    const limits =
+      input.limits &&
+      (input.limits.contextWindow !== null ||
+        input.limits.maxOutputTokens !== null)
+        ? this.#addPresetLimits(created.id ?? "", input.limits)
+        : null;
+    return structuredClone({ ...created, price, limits });
   }
 
   async getSettings(): Promise<SettingsData> {
@@ -3907,6 +4004,14 @@ export class DemoConsoleApi implements ConsoleApi {
                     outputUsdPerMillion: price.outputUsdPerMillion,
                     longContext: price.longContext,
                     validFrom: price.validFrom,
+                  })),
+                limits: this.#modelPresetLimits
+                  .filter((limits) => limits.presetId === preset.id)
+                  .map((limits) => ({
+                    id: limits.id,
+                    contextWindow: limits.contextWindow,
+                    maxOutputTokens: limits.maxOutputTokens,
+                    createdAt: limits.createdAt,
                   })),
               },
             ]

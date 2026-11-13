@@ -224,6 +224,8 @@ project-scoped.
 | `DELETE` | `/projects/{projectId}/model-presets/{id}`              | Archive a project preset.                            |
 | `GET`    | `/projects/{projectId}/model-presets/{id}/prices`       | List a preset's price history, newest first.         |
 | `POST`   | `/projects/{projectId}/model-presets/{id}/prices`       | Add a price, from now or a later time.               |
+| `GET`    | `/projects/{projectId}/model-presets/{id}/limits`       | List a preset's limits history, newest first.        |
+| `POST`   | `/projects/{projectId}/model-presets/{id}/limits`       | Replace its limits from the preset's next run on.    |
 
 Reads require `agent:read`; writes require `project:admin`. Every write requires
 an `Idempotency-Key`.
@@ -245,6 +247,22 @@ are append-only and apply to later model calls, so past runs keep the cost they
 were given. A catalog entry carries `listPrice` where OAO knows
 the model's list price. See
 [Set a model preset's price](/models/adding-models#set-a-model-presets-price).
+
+A preset's limits are `contextWindow`, an integer from 1,024 to 10,000,000, and
+`maxOutputTokens`, an integer from 1 to 1,000,000 that is not larger than
+`contextWindow`; either can be `null`, which uses the model's catalog value, or
+128,000 and 4,096 for a model the catalog does not know, such as an OpenRouter
+saved preset. `POST /model-presets` accepts them as `limits`; each preset in the
+list returns the latest as `limits` (`{ id, presetId, contextWindow,
+maxOutputTokens, createdByPrincipalId, createdAt }`), or `null` when it never
+had any. `POST /model-presets/{id}/limits` takes `{ contextWindow,
+maxOutputTokens }`, where a field left out counts as `null`, adds a row to the
+preset's append-only history, and returns it with `201`; out-of-range values
+return `400` and an unknown or archived preset `404`. New limits apply from the
+preset's next run without a new agent version; a run already under way keeps
+its limits. Each model call records them in
+`debug.modelInvocations[].safeRequest.modelLimits`. See
+[Set a model preset's limits](/models/adding-models#set-a-model-presets-limits).
 
 `DELETE /model-presets/{id}` archives a project preset and returns
 `{ "id", "key", "archived": true }`. Presets stay append-only: the row, key,
@@ -844,13 +862,15 @@ of the session keep the 100,000-character limit. Webhooks with
 `includeMessageContent` deliver the whole first message.
 
 <Warning>
-  The model still needs room for the whole message. For an OpenRouter preset, or
-  a model outside OAO's catalog, OAO assumes a 128,000-token context window.
-  Once a call uses more than that window minus the output reserve, about 124,000
-  tokens for a preset, the run compacts its conversation and a summary replaces
-  the first message, stable start included. 500,000 characters are often 115,000
-  to 130,000 tokens, so a message near both limits can pass that on its first
-  call.
+  The model still needs room for the whole message. A run compacts its
+  conversation once a call passes the preset's context window minus an output
+  reserve of up to 20,000 tokens, and a summary then replaces the first message,
+  stable start included. An OpenRouter saved preset without limits assumes a
+  128,000-token window, so it compacts past about 124,000 tokens; 500,000
+  characters are often 115,000 to 130,000 tokens. Give such a preset a larger
+  context window, as in [Set a model preset's
+  limits](/models/adding-models#set-a-model-presets-limits), before sending
+  messages near both limits.
 </Warning>
 
 In that transaction OAO also resolves every Skill and delegate the agent
