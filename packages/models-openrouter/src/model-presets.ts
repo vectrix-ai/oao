@@ -12,6 +12,7 @@ import { isApprovedCatalogModel } from "./catalog.js";
 import {
   effectiveModelLimits,
   modelLimitsKey,
+  modelLimitsOrder,
   withModelLimits,
   type EffectiveModelLimits,
   type ModelPresetLimitsInput,
@@ -219,6 +220,7 @@ export class ProjectModelPresetRegistry {
       readonly fingerprint: string;
       readonly credentialVersion: number;
       readonly limitsKey: string;
+      readonly limitsOrder: number;
     }
   >();
 
@@ -276,14 +278,24 @@ export class ProjectModelPresetRegistry {
     // Limits stay out of the fingerprint: they change on a preset without a
     // new definition, and a change registers the provider again.
     const limitsKey = modelLimitsKey(input.limits);
+    const limitsOrder = modelLimitsOrder(input.limits);
     const existing = this.#active.get(cacheKey);
     if (existing) {
       if (existing.fingerprint !== fingerprint)
         throw new Error(
           `Model preset definition changed after activation: ${input.key}`,
         );
+      // Activations read the preset concurrently and can finish out of
+      // order. One that read an older credential or older limits than the
+      // registered ones is stale: registering it would bring back a rotated
+      // key or limits that were already replaced.
       if (
-        existing.credentialVersion >= input.credentialVersion &&
+        input.credentialVersion < existing.credentialVersion ||
+        limitsOrder < existing.limitsOrder
+      )
+        return existing.resolved;
+      if (
+        input.credentialVersion === existing.credentialVersion &&
         existing.limitsKey === limitsKey
       )
         return existing.resolved;
@@ -330,11 +342,9 @@ export class ProjectModelPresetRegistry {
     this.#active.set(cacheKey, {
       resolved,
       fingerprint,
-      credentialVersion: Math.max(
-        input.credentialVersion,
-        existing?.credentialVersion ?? 0,
-      ),
+      credentialVersion: input.credentialVersion,
       limitsKey,
+      limitsOrder,
     });
     return resolved;
   }

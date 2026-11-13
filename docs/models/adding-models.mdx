@@ -284,9 +284,9 @@ values. Each model call records the limits it ran with, and where each came
 from, in `debug.modelInvocations[].safeRequest.modelLimits`.
 
 An Anthropic preset also has a **Max tokens** generation setting. Each of its
-calls asks for that setting, or for the output limit when that is smaller. An
-Anthropic preset without an output limit keeps asking for its setting, as
-before.
+calls asks for that setting, or for the output limit when that is smaller, and,
+like every call, for no more than the context window leaves. An Anthropic preset
+without an output limit keeps its setting as the most a call asks for.
 
 ## Model timeouts and retries
 

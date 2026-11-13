@@ -1055,6 +1055,7 @@ test("a run activates its preset with the preset's latest limits", async () => {
       limits_id: "00000000-0000-4000-8000-000000000071",
       context_window: 250_000,
       max_output_tokens: 128_000,
+      limits_created_at: new Date("2026-11-13T10:00:00.000Z"),
     },
   ]);
   const activated: unknown[] = [];
@@ -1080,6 +1081,8 @@ test("a run activates its preset with the preset's latest limits", async () => {
       id: "00000000-0000-4000-8000-000000000071",
       contextWindow: 250_000,
       maxOutputTokens: 128_000,
+      // The save time lets the registry tell an older read from a newer one.
+      createdAt: "2026-11-13T10:00:00.000Z",
     },
   ]);
   // The lookup reads the newest limits row of the preset.

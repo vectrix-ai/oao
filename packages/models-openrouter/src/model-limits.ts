@@ -9,6 +9,23 @@ export interface ModelPresetLimitsInput {
   readonly id: string | null;
   readonly contextWindow: number | null;
   readonly maxOutputTokens: number | null;
+  /**
+   * When the row was saved. Rows of a preset get strictly later times, so an
+   * activation can tell that it read older limits than another one.
+   */
+  readonly createdAt?: string | null;
+}
+
+/**
+ * Where a preset's limits stand in its history: the row's save time, or -1
+ * without a row. Rows are only ever added, so a lower number is older.
+ */
+export function modelLimitsOrder(
+  limits: ModelPresetLimitsInput | null | undefined,
+): number {
+  if (!limits) return -1;
+  const savedAt = limits.createdAt ? Date.parse(limits.createdAt) : Number.NaN;
+  return Number.isFinite(savedAt) ? savedAt : 0;
 }
 
 /** Where a limit in effect on a model call came from. */

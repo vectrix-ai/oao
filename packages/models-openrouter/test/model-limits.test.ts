@@ -161,8 +161,9 @@ test("a preset without limits keeps OAO's placeholder for an unknown model", asy
 
 test("new limits register the preset again for its next run, and one limit can stay the model's", () => {
   const { registry: presets, providers } = registry();
-  presets.activate({ ...solPreset, limits: solLimits });
-  presets.activate({ ...solPreset, limits: solLimits });
+  const first = { ...solLimits, createdAt: "2026-11-13T10:00:00.000Z" };
+  presets.activate({ ...solPreset, limits: first });
+  presets.activate({ ...solPreset, limits: first });
   assert.equal(providers.length, 1);
 
   const smaller = presets.activate({
@@ -171,6 +172,7 @@ test("new limits register the preset again for its next run, and one limit can s
       id: "00000000-0000-4000-8000-000000000073",
       contextWindow: 200_000,
       maxOutputTokens: null,
+      createdAt: "2026-11-13T10:05:00.000Z",
     },
   });
   assert.equal(providers.length, 2);
@@ -180,7 +182,16 @@ test("new limits register the preset again for its next run, and one limit can s
   assert.equal(runtimeModel(providers[1]).maxTokens, 4_096);
   assert.equal(smaller.limits?.maxOutputTokensSource, "model");
 
-  presets.activate(solPreset);
+  // Clearing both limits is a newer row; the model's own values return.
+  presets.activate({
+    ...solPreset,
+    limits: {
+      id: "00000000-0000-4000-8000-000000000075",
+      contextWindow: null,
+      maxOutputTokens: null,
+      createdAt: "2026-11-13T10:10:00.000Z",
+    },
+  });
   assert.equal(providers.length, 3);
   assert.equal(runtimeModel(providers[2]).contextWindow, 128_000);
   // Limits are not part of the definition, so changing them is not refused.
@@ -188,6 +199,50 @@ test("new limits register the preset again for its next run, and one limit can s
     presets.resolve(solPreset.key, tenant).limits?.contextWindow,
     128_000,
   );
+});
+
+test("an activation that read older credentials or older limits does not replace newer ones", async () => {
+  const { registry: presets, providers } = registry();
+  const older = { ...solLimits, createdAt: "2026-11-13T10:00:00.000Z" };
+  const newer = {
+    id: "00000000-0000-4000-8000-000000000076",
+    contextWindow: 200_000,
+    maxOutputTokens: 64_000,
+    createdAt: "2026-11-13T10:05:00.000Z",
+  };
+  // The newest read registers first: a rotated key and newer limits.
+  presets.activate({
+    ...solPreset,
+    apiKey: "sk-or-rotated",
+    credentialVersion: 2,
+    limits: newer,
+  });
+  assert.equal(providers.length, 1);
+  // Reads that started earlier finish later, each older in one respect.
+  for (const stale of [
+    { apiKey: "sk-or-revoked", credentialVersion: 1, limits: newer },
+    { apiKey: "sk-or-revoked", credentialVersion: 1, limits: older },
+    { apiKey: "sk-or-rotated", credentialVersion: 2, limits: older },
+    { apiKey: "sk-or-rotated", credentialVersion: 2, limits: null },
+  ]) {
+    const resolved = presets.activate({ ...solPreset, ...stale });
+    assert.equal(resolved.limits?.presetLimitsId, newer.id);
+  }
+  assert.equal(providers.length, 1);
+  const auth = await providers[0]?.auth.apiKey?.resolve({
+    ctx: { env: async () => undefined, fileExists: async () => false },
+    signal: new AbortController().signal,
+  });
+  assert.equal(auth?.auth.apiKey, "sk-or-rotated");
+  assert.equal(runtimeModel(providers[0]).contextWindow, 200_000);
+  // A newer key with the same limits still registers.
+  presets.activate({
+    ...solPreset,
+    apiKey: "sk-or-rotated-again",
+    credentialVersion: 3,
+    limits: newer,
+  });
+  assert.equal(providers.length, 2);
 });
 
 test("an Anthropic call asks for the smaller of its maxTokens setting and its output limit", async () => {
@@ -226,6 +281,33 @@ test("an Anthropic call asks for the smaller of its maxTokens setting and its ou
     assert.equal(resolved.limits?.maxOutputTokens, asked);
     assert.equal(resolved.limits?.maxOutputTokensSource, source);
   }
+});
+
+test("an Anthropic call asks for no more than its context window leaves", async () => {
+  const { registry: presets, providers } = registry();
+  presets.activate({
+    ...tenant,
+    providerId: "00000000-0000-4000-8000-000000000004",
+    providerType: "anthropic",
+    apiKey: "sk-ant-limits-test",
+    credentialVersion: 1,
+    key: "claude-sonnet-5-small-v1",
+    model: "anthropic/claude-sonnet-5",
+    routing: {},
+    settings: { thinking: "adaptive", maxTokens: 20_000, effort: "high" },
+    limits: { id: "small", contextWindow: 10_000, maxOutputTokens: 8_000 },
+  });
+  const model = runtimeModel(providers[0]);
+  // About 5,000 input tokens leave less than the 8,000 the limit allows.
+  const content = "word ".repeat(4_000);
+  const payload = await sentPayload(providers[0]!, model, content);
+  const fitted = clampMaxTokensToContext(
+    model,
+    normalizeContext({ messages: [{ role: "user", content, timestamp: 1 }] }),
+    8_000,
+  );
+  assert.ok(fitted < 8_000, String(fitted));
+  assert.equal(payload?.max_tokens, fitted);
 });
 
 test("the limits in effect name where each came from", () => {

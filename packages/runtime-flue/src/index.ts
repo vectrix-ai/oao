@@ -202,11 +202,12 @@ const RUN_MODEL_LIMITS_MAX_ENTRIES = 10_000;
 const runModelLimits = new Map<string, EffectiveModelLimits>();
 
 /**
- * Keeps the limits a run started with in this process. A later wake of the
- * same run, such as a reconciliation, activates the preset again and may see
- * newer limits, but the run's live execution keeps the model it resolved, so
- * the first record stands. After a restart the map is empty, and the run's
- * next render records the limits it then resolves.
+ * Keeps the limits a run started with in this process, recorded when the run
+ * renders and Flue resolves its model. A later render of the same run, or a
+ * wake that activates the preset again with newer limits, does not change the
+ * model its live execution holds, so the first record stands. After a
+ * restart the map is empty, and the run's next render records the limits it
+ * then resolves.
  */
 function rememberRunModelLimits(
   runId: string,
@@ -1839,6 +1840,10 @@ export function ManagedAgent(): string {
     organizationId: initial.organizationId,
     projectId: initial.projectId,
   });
+  // Flue resolves the model during this render, from the same registration,
+  // so these are the limits the run's calls use. Another run may register
+  // newer limits between this run's admission and its render.
+  rememberRunModelLimits(delivery.runId, preset.limits);
   useModel(preset.model, {
     ...(preset.settings
       ? {
@@ -3426,11 +3431,7 @@ export class ManagedRuntimeOrchestrator {
       // Flue resolves `useModel` synchronously during the agent render, so a
       // durable project preset must be loaded and registered before dispatch.
       try {
-        const preset = await this.modelPresets?.activate(
-          run,
-          run.snapshot.modelPreset,
-        );
-        rememberRunModelLimits(run.runId, preset?.limits);
+        await this.modelPresets?.activate(run, run.snapshot.modelPreset);
       } catch (error) {
         if (!(error instanceof ModelPresetUnavailableError)) throw error;
         await this.failBeforeDispatch(run, error);
@@ -6284,6 +6285,7 @@ interface ProjectModelPresetRow {
   limits_id: string | null;
   context_window: number | null;
   max_output_tokens: number | null;
+  limits_created_at: Date | null;
 }
 
 /**
@@ -6326,13 +6328,15 @@ export function createProjectModelPresetActivator(input: {
                     c.provider_type,c.encrypted_api_key,c.encryption_nonce,
                     c.encryption_tag,c.encryption_key_version,
                     (c.archived_at IS NOT NULL) AS provider_removed,
-                    l.id AS limits_id,l.context_window,l.max_output_tokens
+                    l.id AS limits_id,l.context_window,l.max_output_tokens,
+                    l.created_at AS limits_created_at
              FROM oao.project_model_presets p
              JOIN oao.project_model_providers c
                ON c.organization_id=p.organization_id
               AND c.id=p.provider_id
              LEFT JOIN LATERAL (
-               SELECT latest.id,latest.context_window,latest.max_output_tokens
+               SELECT latest.id,latest.context_window,latest.max_output_tokens,
+                      latest.created_at
                  FROM oao.model_preset_limits latest
                 WHERE latest.organization_id=p.organization_id
                   AND latest.project_id=p.project_id
@@ -6392,6 +6396,10 @@ export function createProjectModelPresetActivator(input: {
                 id: row.limits_id,
                 contextWindow: row.context_window,
                 maxOutputTokens: row.max_output_tokens,
+                createdAt:
+                  row.limits_created_at instanceof Date
+                    ? row.limits_created_at.toISOString()
+                    : (row.limits_created_at ?? null),
               },
       });
     },
