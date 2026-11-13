@@ -1365,28 +1365,6 @@ test("a model preset price is complete, non-negative, and may have long-context 
   );
 });
 
-test("a model preset may be created with its first price", () => {
-  const preset = {
-    key: "gpt-6-1-sol-v1",
-    displayName: "GPT-6.1 Sol",
-    providerId: "11111111-1111-4111-8111-111111111111",
-    model: "openai/gpt-6.1-sol",
-  };
-  assert.equal(parseCreateModelPresetInput(preset).price, null);
-  assert.equal(
-    parseCreateModelPresetInput({
-      ...preset,
-      price: {
-        inputUsdPerMillion: 2,
-        cachedInputUsdPerMillion: 0.1,
-        cacheWriteUsdPerMillion: 2.5,
-        outputUsdPerMillion: 10,
-      },
-    }).price?.outputUsdPerMillion,
-    10,
-  );
-});
-
 test("preset limits are optional token counts, with the output not above the window", () => {
   assert.deepEqual(parseSetModelPresetLimitsInput({}), {
     contextWindow: null,
@@ -1436,5 +1414,27 @@ test("preset limits are optional token counts, with the output not above the win
       model: "openrouter/@preset/azure-sol-61",
       limits: { contextWindow: 1_000 },
     }),
+  );
+});
+
+test("a model preset may be created with its first price", () => {
+  const preset = {
+    key: "gpt-6-1-sol-v1",
+    displayName: "GPT-6.1 Sol",
+    providerId: "11111111-1111-4111-8111-111111111111",
+    model: "openai/gpt-6.1-sol",
+  };
+  assert.equal(parseCreateModelPresetInput(preset).price, null);
+  assert.equal(
+    parseCreateModelPresetInput({
+      ...preset,
+      price: {
+        inputUsdPerMillion: 2,
+        cachedInputUsdPerMillion: 0.1,
+        cacheWriteUsdPerMillion: 2.5,
+        outputUsdPerMillion: 10,
+      },
+    }).price?.outputUsdPerMillion,
+    10,
   );
 });
