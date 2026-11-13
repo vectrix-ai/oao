@@ -118,7 +118,9 @@ and price caps. OAO sends every OpenRouter model, Claude models and saved
 presets included, through OpenRouter's Responses API, which carries these
 routing controls for every model family. The requests are stateless: OAO sends
 the full conversation, reasoning items included, on every call and asks
-OpenRouter to store nothing. OpenAI, Anthropic, xAI, and Amazon Bedrock are direct provider connections, so
+OpenRouter to store nothing. Every tool goes with `strict: false`, so a tool's
+optional properties stay optional and its free-form objects take any keys; the
+Responses API would read a tool without `strict` as strict. OpenAI, Anthropic, xAI, and Amazon Bedrock are direct provider connections, so
 OpenRouter routing controls must be empty.
 
 For direct OpenAI presets, OAO maps the stored controls to the Responses API as
