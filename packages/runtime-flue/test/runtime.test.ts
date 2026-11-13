@@ -994,9 +994,9 @@ test("an image run with a shared message start keeps its attachments", async () 
 
 test("model calls run with their session's prompt cache key", async () => {
   const instanceId = "oao:v1:org:project:thread-with-key";
-  runtimeTesting.rememberPromptCacheKey(instanceId, "vectrix-extraction:p1");
+  runtimeTesting.rememberPromptCacheKey(instanceId, "extraction:p1");
   const scope = runtimeTesting.managedPromptCacheScope(instanceId);
-  assert.equal(scope.key, "vectrix-extraction:p1");
+  assert.equal(scope.key, "extraction:p1");
   assert.equal(scope.stablePrefixLength, managedRunCachePrefixLength);
   // An instance this process has not rendered keeps Flue's own key.
   assert.equal(
@@ -1021,7 +1021,7 @@ test("model calls run with their session's prompt cache key", async () => {
       { instanceId },
       async () => currentModelPromptCacheScope()?.key,
     );
-  assert.equal(await seen("model"), "vectrix-extraction:p1");
+  assert.equal(await seen("model"), "extraction:p1");
   assert.equal(await seen("tool"), undefined);
 });
 

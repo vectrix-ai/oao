@@ -1879,7 +1879,7 @@ test(
 
         for (const [index, promptCache] of [
           null,
-          "vectrix-extraction:p1",
+          "extraction:p1",
           { prefixChars: 3 },
           { key: "" },
           { key: "has space" },
@@ -1921,7 +1921,7 @@ test(
         assert.equal(filesOnly.status, 400, await filesOnly.clone().text());
 
         const accepted = await createSession(
-          { key: "vectrix-extraction:p1", prefixChars: stable.length },
+          { key: "extraction:p1", prefixChars: stable.length },
           "prompt-cache-session-1",
         );
         assert.equal(accepted.status, 201, await accepted.clone().text());
@@ -1930,7 +1930,7 @@ test(
           latestRunId: string;
         };
         const keyOnly = await createSession(
-          { key: "vectrix-extraction:p1" },
+          { key: "extraction:p1" },
           "prompt-cache-session-2",
         );
         assert.equal(keyOnly.status, 201, await keyOnly.clone().text());
@@ -1953,13 +1953,13 @@ test(
         assert.deepEqual(stored.rows, [
           {
             session_id: session.id,
-            cache_key: "vectrix-extraction:p1",
+            cache_key: "extraction:p1",
             initial_run_id: session.latestRunId,
             initial_prefix_chars: stable.length,
           },
           {
             session_id: keyOnlySession.id,
-            cache_key: "vectrix-extraction:p1",
+            cache_key: "extraction:p1",
             initial_run_id: (
               await pool.query<{ id: string }>(
                 "SELECT id FROM oao.runs WHERE session_id=$1",

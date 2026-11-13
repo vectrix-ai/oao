@@ -246,7 +246,7 @@ test("a prompt cache scope sets the cache key and splits the stable prefix", asy
   const stable = "Project rules that every session shares.";
   const { sent, request } = await withModelPromptCacheScope(
     {
-      key: "vectrix-extraction:project-1",
+      key: "extraction:project-1",
       stablePrefixLength: (text) =>
         text.startsWith(stable) ? stable.length : undefined,
     },
@@ -267,11 +267,8 @@ test("a prompt cache scope sets the cache key and splits the stable prefix", asy
         { sessionId: "aff_random_conversation_key" },
       ),
   );
-  assert.equal(
-    request.headers.get("x-session-id"),
-    "vectrix-extraction:project-1",
-  );
-  assert.equal(sent.prompt_cache_key, "vectrix-extraction:project-1");
+  assert.equal(request.headers.get("x-session-id"), "extraction:project-1");
+  assert.equal(sent.prompt_cache_key, "extraction:project-1");
   assert.deepEqual((sent.input as { content: unknown }[])[1]?.content, [
     {
       type: "input_text",
@@ -290,6 +287,185 @@ test("a prompt cache scope sets the cache key and splits the stable prefix", asy
     sessionId: "aff_random_conversation_key",
   });
   assert.equal(unscoped.sent.prompt_cache_key, "aff_random_conversation_key");
+});
+
+/** A Responses API event stream as OpenRouter sends it. */
+function responsesStream(events: readonly Record<string, unknown>[]): Response {
+  return new Response(
+    events
+      .map(
+        (event) =>
+          `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`,
+      )
+      .join(""),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+test("a Responses reply with reasoning and a tool call is replayed on the next call", async () => {
+  const provider = createOpenRouterPresetProviders([
+    { key: "sol-replay", model: "openrouter/openai/gpt-6.1-sol" },
+  ])[0]!;
+  const model = provider.getModels()[0]!;
+  const reasoning = {
+    type: "reasoning",
+    id: "rs_1",
+    summary: [{ type: "summary_text", text: "Look up the address." }],
+    encrypted_content: "opaque-reasoning",
+  };
+  const call = {
+    type: "function_call",
+    id: "fc_1",
+    call_id: "call_1",
+    name: "match_location",
+    arguments: '{"address":"Keizerslaan 12"}',
+  };
+  const answer = {
+    type: "message",
+    id: "msg_1",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text: "LOC-1", annotations: [] }],
+  };
+  const sent: Record<string, unknown>[] = [];
+  const fetch = async (input: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(input, init);
+    sent.push(JSON.parse(await request.text()) as Record<string, unknown>);
+    const first = sent.length === 1;
+    const output = first ? [reasoning, call] : [answer];
+    return responsesStream([
+      { type: "response.created", response: { id: `resp_${sent.length}` } },
+      ...output.flatMap((item, index) => [
+        {
+          type: "response.output_item.added",
+          output_index: index,
+          item:
+            item.type === "function_call"
+              ? { ...item, arguments: "" }
+              : { ...item, content: [], summary: [] },
+        },
+        { type: "response.output_item.done", output_index: index, item },
+      ]),
+      {
+        type: "response.completed",
+        response: {
+          id: `resp_${sent.length}`,
+          status: "completed",
+          output,
+          usage: {
+            input_tokens: first ? 1_000 : 1_040,
+            input_tokens_details: first
+              ? { cached_tokens: 600, cache_write_tokens: 350 }
+              : { cached_tokens: 1_000, cache_write_tokens: 30 },
+            output_tokens: 20,
+            output_tokens_details: { reasoning_tokens: 5 },
+            total_tokens: first ? 1_020 : 1_060,
+          },
+        },
+      },
+    ]);
+  };
+  const tools = [
+    {
+      name: "match_location",
+      description: "Find a location.",
+      parameters: {
+        type: "object",
+        properties: { address: { type: "string" } },
+        required: ["address"],
+      },
+    },
+  ];
+  const user = { role: "user" as const, content: "Order.", timestamp: 1 };
+  const options = {
+    apiKey: "sk-openrouter-test",
+    sessionId: "session-1",
+    maxRetries: 0,
+    reasoningEffort: "medium",
+    fetch,
+  };
+  const first = await provider
+    .stream(
+      model,
+      normalizeContext({
+        systemPrompt: "Instructions.",
+        messages: [user],
+        tools,
+      }),
+      options as never,
+    )
+    .result();
+  assert.equal(first.stopReason, "toolUse");
+  // Responses usage counts cache reads and writes inside input_tokens.
+  assert.deepEqual(
+    {
+      input: first.usage.input,
+      cacheRead: first.usage.cacheRead,
+      cacheWrite: first.usage.cacheWrite,
+      output: first.usage.output,
+    },
+    { input: 50, cacheRead: 600, cacheWrite: 350, output: 20 },
+  );
+  const toolCall = first.content.find((block) => block.type === "toolCall");
+  assert.ok(toolCall?.type === "toolCall");
+  assert.deepEqual(toolCall.arguments, { address: "Keizerslaan 12" });
+
+  const second = await provider
+    .stream(
+      model,
+      normalizeContext({
+        systemPrompt: "Instructions.",
+        messages: [
+          user,
+          first,
+          {
+            role: "toolResult",
+            toolCallId: toolCall.id,
+            toolName: "match_location",
+            content: [{ type: "text", text: '{"locationId":"LOC-1"}' }],
+            isError: false,
+            timestamp: 2,
+          },
+        ],
+        tools,
+      }),
+      options as never,
+    )
+    .result();
+  assert.equal(second.stopReason, "stop");
+  assert.deepEqual(
+    second.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text),
+    ["LOC-1"],
+  );
+  assert.equal(second.usage.cacheRead, 1_000);
+  assert.equal(second.usage.cacheWrite, 30);
+
+  // The second request replays the encrypted reasoning with its tool call and
+  // ends in a breakpoint on the tool output.
+  const replay = sent[1]!;
+  assert.equal(replay.store, false);
+  assert.deepEqual(replay.include, ["reasoning.encrypted_content"]);
+  assert.equal(replay.previous_response_id, undefined);
+  const input = replay.input as Record<string, unknown>[];
+  assert.deepEqual(
+    input.map((item) => item.type ?? item.role),
+    ["developer", "user", "reasoning", "function_call", "function_call_output"],
+  );
+  assert.equal(input[2]?.encrypted_content, "opaque-reasoning");
+  assert.equal(input[3]?.call_id, "call_1");
+  assert.deepEqual(input[4], {
+    type: "function_call_output",
+    call_id: "call_1",
+    output: [
+      {
+        type: "input_text",
+        text: '{"locationId":"LOC-1"}',
+        prompt_cache_breakpoint: { mode: "explicit" },
+      },
+    ],
+  });
 });
 
 test("every pinned OpenRouter model streams through the Responses API", () => {

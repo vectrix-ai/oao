@@ -1391,11 +1391,11 @@ test("a model preset may be created with its first price", () => {
 test("a session prompt cache key is printable ASCII and its prefix a bounded integer", () => {
   assert.deepEqual(
     parseSessionPromptCache({
-      key: "vectrix-extraction:00000000-0000-4000-8000-000000000001",
+      key: "extraction:00000000-0000-4000-8000-000000000001",
       prefixChars: 41_234,
     }),
     {
-      key: "vectrix-extraction:00000000-0000-4000-8000-000000000001",
+      key: "extraction:00000000-0000-4000-8000-000000000001",
       prefixChars: 41_234,
     },
   );
