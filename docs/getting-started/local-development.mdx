@@ -15,7 +15,7 @@ OAO's default development profile runs the console, API, runtime worker, and Pos
 
 Install the following before starting OAO:
 
-- Node.js 22.19.0 or newer
+- Node.js 22.22.0 or newer
 - pnpm 10.27.0, which is the version pinned by the workspace
 - The Docker CLI and a running Docker-compatible daemon, unless you
   [use an existing PostgreSQL server](#use-an-existing-postgresql-server)
@@ -267,7 +267,7 @@ pnpm test:postgres:fresh
 pnpm test:stack:fresh
 ```
 
-CI runs these checks with Node.js 22.19.0; use that version when reproducing
+CI runs these checks with Node.js 22.22.0; use that version when reproducing
 CI-only failures. The long runtime scenario runs in an isolated process with a
 three-minute deadline. Its cleanup retains the original error, and the parent
 terminates the scenario process group so background workers cannot hang the

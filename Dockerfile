@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:22.19.0-bookworm-slim AS build
+FROM node:22.22.0-bookworm-slim AS build
 
 # Keep the promoted image provider-neutral. The API receives AUTH_PROVIDER at
 # runtime; the console discovers the configured provider from API behavior.
@@ -25,7 +25,7 @@ RUN pnpm install --offline --frozen-lockfile \
  && pnpm --filter @oao/api --prod deploy --legacy /opt/oao-api \
  && pnpm --filter @oao/runtime-worker --prod deploy --legacy /opt/oao-runtime-worker
 
-FROM node:22.19.0-bookworm-slim AS runtime
+FROM node:22.22.0-bookworm-slim AS runtime
 
 ENV NODE_ENV=production
 
