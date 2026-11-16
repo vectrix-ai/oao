@@ -1738,6 +1738,22 @@ export const OAO_MCP_TOOL_CATALOG: readonly OaoMcpToolDescriptor[] = [
     readOnly: false,
   },
   {
+    name: "list_model_preset_limits",
+    title: "List model preset limits",
+    description:
+      "Lists a model preset's context window and output limit history, newest first. The newest applies.",
+    scopes: ["agent:read"],
+    readOnly: true,
+  },
+  {
+    name: "set_model_preset_limits",
+    title: "Set model preset limits",
+    description:
+      "Sets a model preset's context window and output limit in tokens from its next run on, without a new agent version. A null limit uses the model's catalog value, or OAO's default.",
+    scopes: ["project:admin"],
+    readOnly: false,
+  },
+  {
     name: "list_mcp_servers",
     title: "List MCP servers",
     description:
@@ -2059,6 +2075,50 @@ export const ManagedAgentSnapshotSchema = v.strictObject({
   limits: ManagedAgentPublicationConfigSchema.entries.limits,
 });
 
+/** The longest prompt cache key: OpenAI's `prompt_cache_key` limit. */
+export const PROMPT_CACHE_KEY_MAX_LENGTH = 64;
+
+/**
+ * A caller's prompt cache key: 1 to 64 printable ASCII characters without
+ * spaces. Model calls send it to the provider as cache and routing key.
+ */
+export const PromptCacheKeySchema = v.pipe(
+  v.string(),
+  v.regex(/^[!-~]{1,64}$/u),
+);
+
+/**
+ * The longest message of a run, in JavaScript string length (UTF-16 code
+ * units). A session's first message with a cached start may be longer: this
+ * limit then applies to the part after that start.
+ */
+export const RUN_MESSAGE_MAX_LENGTH = 100_000;
+
+/**
+ * The longest cached start of a session's first message
+ * (`promptCache.prefixChars`).
+ */
+export const PROMPT_CACHE_PREFIX_MAX_LENGTH = 400_000;
+
+/**
+ * The longest message a run can store: a session's first message with a
+ * cached start of the longest length and the longest part after it.
+ */
+export const RUN_INPUT_MESSAGE_MAX_LENGTH =
+  PROMPT_CACHE_PREFIX_MAX_LENGTH + RUN_MESSAGE_MAX_LENGTH;
+
+/**
+ * How the model calls of a session share the provider's prompt cache with
+ * other sessions. The first `prefixChars` characters of the initial message
+ * are the same for every session that sends the same key. The API also
+ * checks `prefixChars` against the message and against
+ * {@link PROMPT_CACHE_PREFIX_MAX_LENGTH}.
+ */
+export const SessionPromptCacheSchema = v.object({
+  key: PromptCacheKeySchema,
+  prefixChars: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0))),
+});
+
 export const ManagedAgentInstanceDataSchema = v.object({
   organizationId: IdSchema,
   projectId: IdSchema,
@@ -2073,6 +2133,8 @@ export const ManagedAgentInstanceDataSchema = v.object({
     }),
   ),
   snapshot: ManagedAgentSnapshotSchema,
+  /** The session's prompt cache key, when its creator gave one. */
+  promptCacheKey: v.optional(PromptCacheKeySchema),
 });
 
 /** One Skill binding of an agent version as a session tree resolved it. */
@@ -2163,7 +2225,11 @@ export const ManagedRunDeliverySchema = v.object({
 });
 
 export const ManagedRunInputV1Schema = v.object({
-  message: v.pipe(v.string(), v.minLength(1), v.maxLength(100_000)),
+  message: v.pipe(
+    v.string(),
+    v.minLength(1),
+    v.maxLength(RUN_INPUT_MESSAGE_MAX_LENGTH),
+  ),
   files: v.optional(
     v.pipe(
       v.array(
@@ -2352,6 +2418,7 @@ export type AgentDelegationState = v.InferOutput<
   typeof AgentDelegationStateSchema
 >;
 export type ManagedRunDelivery = v.InferOutput<typeof ManagedRunDeliverySchema>;
+export type SessionPromptCache = v.InferOutput<typeof SessionPromptCacheSchema>;
 export type ManagedRunInputV1 = v.InferOutput<typeof ManagedRunInputV1Schema>;
 export type ToolResultEnvelope = v.InferOutput<typeof ToolResultEnvelopeSchema>;
 export type ApiError = v.InferOutput<typeof ApiErrorSchema>;
@@ -3395,6 +3462,78 @@ export const SetModelPresetPriceInputSchema = v.strictObject({
   validFrom: v.optional(TimestampSchema),
 });
 
+/** The largest context window, in tokens, a preset can set. */
+export const MODEL_PRESET_CONTEXT_WINDOW_MAX = 10_000_000;
+/** The smallest context window, in tokens, a preset can set. */
+export const MODEL_PRESET_CONTEXT_WINDOW_MIN = 1_024;
+/** The largest output limit, in tokens, a preset can set. */
+export const MODEL_PRESET_MAX_OUTPUT_TOKENS_MAX = 1_000_000;
+
+const ModelContextWindowSchema = v.pipe(
+  v.number(),
+  v.integer(),
+  v.minValue(MODEL_PRESET_CONTEXT_WINDOW_MIN),
+  v.maxValue(MODEL_PRESET_CONTEXT_WINDOW_MAX),
+);
+
+const ModelMaxOutputTokensSchema = v.pipe(
+  v.number(),
+  v.integer(),
+  v.minValue(1),
+  v.maxValue(MODEL_PRESET_MAX_OUTPUT_TOKENS_MAX),
+);
+
+const ModelPresetLimitEntries = {
+  /**
+   * The tokens a model call may hold, input and output together. Flue
+   * compacts a conversation once a call passes it minus an output reserve.
+   */
+  contextWindow: v.nullable(ModelContextWindowSchema),
+  /** The most output tokens, reasoning included, a model call may write. */
+  maxOutputTokens: v.nullable(ModelMaxOutputTokensSchema),
+};
+
+function outputFitsContextWindow(limits: {
+  readonly contextWindow: number | null;
+  readonly maxOutputTokens: number | null;
+}): boolean {
+  return (
+    limits.contextWindow === null ||
+    limits.maxOutputTokens === null ||
+    limits.maxOutputTokens <= limits.contextWindow
+  );
+}
+
+/**
+ * A preset's own context window and output limit. A null one leaves the
+ * model's catalog value in place, or OAO's default when the catalog does not
+ * know the model.
+ */
+export const ModelPresetLimitValueEntries = {
+  contextWindow: v.optional(ModelPresetLimitEntries.contextWindow, null),
+  maxOutputTokens: v.optional(ModelPresetLimitEntries.maxOutputTokens, null),
+};
+
+export const ModelPresetLimitValuesSchema = v.pipe(
+  v.strictObject(ModelPresetLimitValueEntries),
+  v.check(
+    outputFitsContextWindow,
+    "maxOutputTokens must not be larger than contextWindow",
+  ),
+);
+
+/** One entry of a preset's append-only limits history; the latest applies. */
+export const ModelPresetLimitsSchema = v.object({
+  id: IdSchema,
+  presetId: IdSchema,
+  ...ModelPresetLimitEntries,
+  createdByPrincipalId: v.nullable(IdSchema),
+  createdAt: TimestampSchema,
+});
+
+/** Replaces a preset's limits from the next run on; null clears one. */
+export const SetModelPresetLimitsInputSchema = ModelPresetLimitValuesSchema;
+
 const UsageTotalsEntries = {
   modelCalls: v.number(),
   inputTokens: v.number(),
@@ -3505,6 +3644,8 @@ export const ModelPresetSchema = v.object({
   createdAt: v.nullable(TimestampSchema),
   /** The price in effect now; null when none is set. */
   price: v.optional(v.nullable(ModelPresetPriceSchema)),
+  /** The limits in effect now; null when none were ever set. */
+  limits: v.optional(v.nullable(ModelPresetLimitsSchema)),
 });
 
 export const CreateModelPresetInputSchema = v.strictObject({
@@ -3532,6 +3673,8 @@ export const CreateModelPresetInputSchema = v.strictObject({
   settings: v.optional(v.nullable(ModelGenerationSettingsSchema), null),
   /** The preset's first price. Later changes add to its price history. */
   price: v.optional(v.nullable(ModelPriceRatesSchema), null),
+  /** The preset's first limits. Later changes add to its limits history. */
+  limits: v.optional(v.nullable(ModelPresetLimitValuesSchema), null),
 });
 
 /** Safe, credential-free metadata for one provider catalog model or preset. */
@@ -3564,10 +3707,20 @@ export function parseCreateProjectMemberInput(
   return v.parse(CreateProjectMemberInputSchema, input);
 }
 
+export function parseSessionPromptCache(input: unknown): SessionPromptCache {
+  return v.parse(SessionPromptCacheSchema, input);
+}
+
 export function parseSetModelPresetPriceInput(
   input: unknown,
 ): SetModelPresetPriceInput {
   return v.parse(SetModelPresetPriceInputSchema, input);
+}
+
+export function parseSetModelPresetLimitsInput(
+  input: unknown,
+): SetModelPresetLimitsInput {
+  return v.parse(SetModelPresetLimitsInputSchema, input);
 }
 
 export function parseCreateModelPresetInput(
@@ -3801,6 +3954,13 @@ export type ModelPresetPrice = v.InferOutput<typeof ModelPresetPriceSchema>;
 export type SetModelPresetPriceInput = v.InferOutput<
   typeof SetModelPresetPriceInputSchema
 >;
+export type ModelPresetLimitValues = v.InferOutput<
+  typeof ModelPresetLimitValuesSchema
+>;
+export type ModelPresetLimits = v.InferOutput<typeof ModelPresetLimitsSchema>;
+export type SetModelPresetLimitsInput = v.InferOutput<
+  typeof SetModelPresetLimitsInputSchema
+>;
 export type CostProvenance = v.InferOutput<typeof CostProvenanceSchema>;
 export type SessionUsage = v.InferOutput<typeof SessionUsageSchema>;
 export type ProjectUsageGroup = v.InferOutput<typeof ProjectUsageGroupSchema>;
@@ -3968,6 +4128,23 @@ const BackupModelPresetSchema = v.strictObject({
         longContext: v.nullable(ModelPriceLongContextSchema),
         validFrom: TimestampSchema,
       }),
+    ),
+    [],
+  ),
+  /** The limits history. Backups made before limits existed leave it out. */
+  limits: v.optional(
+    v.array(
+      v.pipe(
+        v.strictObject({
+          id: IdSchema,
+          ...ModelPresetLimitEntries,
+          createdAt: TimestampSchema,
+        }),
+        v.check(
+          (limits) => outputFitsContextWindow(limits),
+          "maxOutputTokens must not be larger than contextWindow",
+        ),
+      ),
     ),
     [],
   ),

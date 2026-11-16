@@ -1344,6 +1344,38 @@ test("reads and sets model preset prices and reads usage", async () => {
   );
 });
 
+test("reads and sets model preset limits", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({ data: [], pageInfo: { hasMore: false } });
+    },
+  });
+  await client.listModelPresetLimits("project-1", "preset/1", { limit: 5 });
+  const limits = { contextWindow: 250_000, maxOutputTokens: 128_000 };
+  await client.setModelPresetLimits("project-1", "preset/1", limits, {
+    idempotencyKey: "limits-1",
+  });
+  assert.equal(
+    requests[0]?.url,
+    "https://api.example.test/v1/projects/project-1/model-presets/preset%2F1/limits?limit=5",
+  );
+  assert.equal(requests[1]?.method, "POST");
+  assert.equal(
+    requests[1]?.url,
+    "https://api.example.test/v1/projects/project-1/model-presets/preset%2F1/limits",
+  );
+  assert.equal(requests[1]?.headers.get("idempotency-key"), "limits-1");
+  assert.deepEqual(await requests[1]?.json(), limits);
+  await assert.rejects(
+    client.setModelPresetLimits("project-1", "preset-1", limits, {
+      idempotencyKey: "",
+    }),
+  );
+});
+
 test("price writes require an idempotency key", async () => {
   const client = new OaoClient({
     baseUrl: "https://api.example.test",

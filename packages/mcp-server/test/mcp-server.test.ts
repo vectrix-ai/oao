@@ -296,6 +296,44 @@ test("prices and usage reach their API routes", async () => {
   await client.close();
 });
 
+test("preset limits reach their API routes", async () => {
+  const { client, api } = await connect(["agent:read", "project:admin"]);
+  const presetId = "66666666-6666-4666-8666-666666666666";
+  await client.callTool({
+    name: "set_model_preset_limits",
+    arguments: { presetId, contextWindow: 250_000, maxOutputTokens: 128_000 },
+  });
+  await client.callTool({
+    name: "set_model_preset_limits",
+    arguments: { presetId, contextWindow: 200_000 },
+  });
+  await client.callTool({
+    name: "list_model_preset_limits",
+    arguments: { presetId },
+  });
+  const [set, partial, list] = api.requests;
+  assert.equal(set?.method, "POST");
+  assert.equal(
+    set?.path,
+    `/v1/projects/${PROJECT}/model-presets/${presetId}/limits`,
+  );
+  assert.ok(set?.idempotencyKey);
+  assert.deepEqual(set?.body, {
+    contextWindow: 250_000,
+    maxOutputTokens: 128_000,
+  });
+  // A limit left out is sent as none, so the model's own value applies.
+  assert.deepEqual(partial?.body, {
+    contextWindow: 200_000,
+    maxOutputTokens: null,
+  });
+  assert.match(
+    list?.path ?? "",
+    new RegExp(`/model-presets/${presetId}/limits`, "u"),
+  );
+  await client.close();
+});
+
 test("send_message asks the agent in its session and returns its answer", async () => {
   const { client, api } = await connect(["run:create", "run:read"]);
   const result = await client.callTool({

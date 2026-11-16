@@ -4,6 +4,7 @@ import type {
   ModelCatalogEntry,
   ModelGenerationSettings,
   ModelPreset,
+  ModelPresetLimits,
   ModelPresetPrice,
   ModelPriceRates,
   ModelRoutingPolicy,
@@ -49,6 +50,7 @@ export type {
   ModelCatalogEntry,
   ModelGenerationSettings,
   ModelPreset,
+  ModelPresetLimits,
   ModelPresetPrice,
   ModelPriceRates,
   ModelRoutingPolicy,
@@ -122,6 +124,17 @@ export interface CreateModelPresetInput {
   readonly settings?: ModelGenerationSettings | null;
   /** The preset's first price, per one million tokens in USD. */
   readonly price?: ModelPriceRates | null;
+  /** The preset's first limits, in tokens. */
+  readonly limits?: SetModelPresetLimitsInput | null;
+}
+
+/**
+ * A preset's context window and output limit, in tokens. A null one uses the
+ * model's catalog value, or OAO's default when the catalog does not know it.
+ */
+export interface SetModelPresetLimitsInput {
+  readonly contextWindow: number | null;
+  readonly maxOutputTokens: number | null;
 }
 
 export interface SetModelPresetPriceInput extends ModelPriceRates {
@@ -938,6 +951,13 @@ export interface ConsoleApi {
     presetId: string,
     input: SetModelPresetPriceInput,
   ): Promise<ModelPresetPrice>;
+  listModelPresetLimits(
+    presetId: string,
+  ): Promise<readonly ModelPresetLimits[]>;
+  setModelPresetLimits(
+    presetId: string,
+    input: SetModelPresetLimitsInput,
+  ): Promise<ModelPresetLimits>;
   getSettings(): Promise<SettingsData>;
   addMember(
     input:

@@ -239,6 +239,7 @@ async function seedSource(
           outputUsdPerMillion: 15,
         },
       },
+      limits: { contextWindow: 250_000, maxOutputTokens: 128_000 },
     },
     201,
   );
@@ -1210,6 +1211,17 @@ test(
         );
         assert.equal(renamed.rows[0]?.name, "Backup second");
 
+        // A preset's limits travel with it, so a restored preset keeps them.
+        const backedUpPreset = backup.projects
+          .find((entry) => entry.slug === "backup-source")
+          ?.modelPresets.find((preset) => preset.key === "backup-model-v1");
+        assert.deepEqual(
+          backedUpPreset?.limits.map((limits) => [
+            limits.contextWindow,
+            limits.maxOutputTokens,
+          ]),
+          [[250_000, 128_000]],
+        );
         const restored = await download(targetApp, target.organizationId);
         assert.deepEqual(
           normalise(restored.backup, ["backup-source", "backup-second"]),

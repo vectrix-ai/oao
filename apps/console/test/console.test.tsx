@@ -2815,6 +2815,138 @@ describe("management console", () => {
     expect(created?.price?.outputUsdPerMillion).toBe(12.5);
   });
 
+  it("prefills a new preset's limits from the catalog and keeps what was typed", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/models", api);
+    await user.click(
+      await screen.findByRole("button", { name: "Add model preset" }),
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "Add model preset" }),
+    );
+    await user.click(dialog.getByRole("combobox", { name: "Model" }));
+    await user.click(
+      await dialog.findByRole("option", { name: /Claude Sonnet 4\.6/u }),
+    );
+    const window = dialog.getByRole("textbox", { name: "Context window" });
+    const output = dialog.getByRole("textbox", { name: "Output limit" });
+    expect(window).toHaveValue("200000");
+    expect(output).toHaveValue("64000");
+
+    await user.clear(output);
+    await user.type(output, "300000");
+    expect(
+      dialog.getByText(
+        /output limit cannot be larger than the context window/u,
+      ),
+    ).toBeInTheDocument();
+    await user.clear(output);
+    await user.type(output, "32000");
+    await user.clear(dialog.getByRole("textbox", { name: "Preset key" }));
+    await user.type(
+      dialog.getByRole("textbox", { name: "Preset key" }),
+      "sonnet-limited-v1",
+    );
+    await user.click(dialog.getByRole("button", { name: "Add model preset" }));
+    await screen.findByText("sonnet-limited-v1");
+    const created = (await api.listModelPresets()).data.find(
+      (preset) => preset.key === "sonnet-limited-v1",
+    );
+    expect(created?.limits?.contextWindow).toBe(200_000);
+    expect(created?.limits?.maxOutputTokens).toBe(32_000);
+  });
+
+  it("changes a preset's limits from its next run and lists their history", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/models", api);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Claude Sonnet 4\.6 \(zero retention\)/u,
+      }),
+    );
+    const detail = within(
+      screen.getByRole("dialog", {
+        name: "Claude Sonnet 4.6 (zero retention)",
+      }),
+    );
+    expect(await detail.findByText(/^No limits\./u)).toBeInTheDocument();
+    await user.click(detail.getByRole("button", { name: "Set limits" }));
+    await user.type(
+      detail.getByRole("textbox", { name: "Context window" }),
+      "250,000",
+    );
+    await user.type(
+      detail.getByRole("textbox", { name: "Output limit" }),
+      "128000",
+    );
+    await user.click(detail.getByRole("button", { name: "Save limits" }));
+    expect(
+      await detail.findByText(
+        "250,000 context window · 128,000 output limit, in tokens.",
+      ),
+    ).toBeInTheDocument();
+    const preset = (await api.listModelPresets()).data.find(
+      (entry) => entry.key === "claude-sonnet-4-6-zdr-v1",
+    );
+    expect(preset?.limits?.contextWindow).toBe(250_000);
+    expect(preset?.limits?.maxOutputTokens).toBe(128_000);
+
+    // Clearing one limit leaves the model's own value for it.
+    await user.click(detail.getByRole("button", { name: "Change limits" }));
+    expect(detail.getByRole("textbox", { name: "Context window" })).toHaveValue(
+      "250000",
+    );
+    await user.clear(detail.getByRole("textbox", { name: "Output limit" }));
+    await user.click(detail.getByRole("button", { name: "Save limits" }));
+    expect(
+      await detail.findByText(
+        "250,000 context window · model's output limit, in tokens.",
+      ),
+    ).toBeInTheDocument();
+    expect(await api.listModelPresetLimits(preset?.id ?? "")).toHaveLength(2);
+  });
+
+  it("duplicates a preset with the limits just saved on it", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    renderConsole("/models", api);
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Claude Sonnet 4\.6 \(zero retention\)/u,
+      }),
+    );
+    const detail = within(
+      screen.getByRole("dialog", {
+        name: "Claude Sonnet 4.6 (zero retention)",
+      }),
+    );
+    await user.click(await detail.findByRole("button", { name: "Set limits" }));
+    await user.type(
+      detail.getByRole("textbox", { name: "Context window" }),
+      "150000",
+    );
+    await user.click(detail.getByRole("button", { name: "Save limits" }));
+    await detail.findByText(
+      "150,000 context window · model's output limit, in tokens.",
+    );
+    await user.click(
+      detail.getByRole("button", { name: "Duplicate as new preset" }),
+    );
+    const dialog = within(
+      await screen.findByRole("dialog", {
+        name: "Duplicate “Claude Sonnet 4.6 (zero retention)”",
+      }),
+    );
+    expect(dialog.getByRole("textbox", { name: "Context window" })).toHaveValue(
+      "150000",
+    );
+    expect(dialog.getByRole("textbox", { name: "Output limit" })).toHaveValue(
+      "",
+    );
+  });
+
   it("says a preset's price failed to load rather than that it has none", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
