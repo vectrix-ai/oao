@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/vectrix-ai/oao/compare/v0.15.0...v0.16.0) (2026-11-16)
+
+
+### Features
+
+* **VEC-2406, VEC-2419:** OpenRouter on Responses with cross-session prompt caching, and editable preset limits ([#66](https://github.com/vectrix-ai/oao/issues/66)) ([885072d](https://github.com/vectrix-ai/oao/commit/885072d293982bdc19701e43f6daf30519e2d7ef))
+
 ## [0.15.0](https://github.com/vectrix-ai/oao/compare/v0.14.1...v0.15.0) (2026-11-11)
 
 
