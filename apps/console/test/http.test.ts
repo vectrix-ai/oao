@@ -1011,6 +1011,53 @@ describe("HTTP console adapter", () => {
     );
   });
 
+  it("reads and sets model preset limits through the public API", async () => {
+    const limits = {
+      id: "77777777-7777-4777-8777-777777777777",
+      presetId: "preset/1",
+      contextWindow: 250_000,
+      maxOutputTokens: 128_000,
+      createdByPrincipalId: CONTEXT.principal.id,
+      createdAt: "2026-11-13T00:00:00.000Z",
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(CONTEXT))
+      .mockResolvedValueOnce(
+        Response.json({
+          data: [limits],
+          pageInfo: { hasMore: true, nextCursor: "older/limits" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          data: [limits],
+          pageInfo: { hasMore: false, nextCursor: null },
+        }),
+      )
+      .mockResolvedValueOnce(Response.json(limits, { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+    await expect(api.listModelPresetLimits("preset/1")).resolves.toEqual([
+      limits,
+      limits,
+    ]);
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
+      `/v1/projects/${PROJECT_ID}/model-presets/preset%2F1/limits?limit=200&cursor=older%2Flimits`,
+    );
+    const input = { contextWindow: 250_000, maxOutputTokens: null };
+    await api.setModelPresetLimits("preset/1", input);
+    const init = fetchMock.mock.calls.at(-1)?.[1] as RequestInit;
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
+      `/v1/projects/${PROJECT_ID}/model-presets/preset%2F1/limits`,
+    );
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual(
+      expect.objectContaining({ "idempotency-key": expect.any(String) }),
+    );
+    expect(JSON.parse(String(init.body))).toEqual(input);
+  });
+
   it("reads and sets model preset prices and reads session usage through the public API", async () => {
     const usage = { sessionId: "session/1", modelCalls: 5 };
     const price = {

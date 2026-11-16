@@ -37,6 +37,7 @@ import type {
   CreatedPlatformApiKey,
   CreateModelPresetInput,
   SetModelPresetPriceInput,
+  SetModelPresetLimitsInput,
   ProjectUsageOptions,
   CreateProjectModelProviderInput,
   CreateEventWebhookInput,
@@ -51,6 +52,7 @@ import type {
   ModelCatalogPage,
   ModelPreset,
   ModelPresetPrice,
+  ModelPresetLimits,
   ProjectUsage,
   SessionUsage,
   ModelPresetPage,
@@ -765,6 +767,41 @@ export class OaoClient {
   ): Promise<ModelPresetPrice> {
     return this.#write(
       this.routes.modelPresetPrices(projectId, presetId),
+      "POST",
+      input,
+      options,
+    );
+  }
+
+  /** A preset's limits history, newest first. The newest applies. */
+  listModelPresetLimits(
+    projectId: string,
+    presetId: string,
+    pagination: PaginationOptions = {},
+    options?: RequestOptions,
+  ): Promise<Page<ModelPresetLimits>> {
+    return this.#request(
+      this.#path(
+        this.routes.modelPresetLimits(projectId, presetId),
+        pagination,
+      ),
+      options,
+    );
+  }
+
+  /**
+   * Replaces a preset's context window and output limit from its next run on,
+   * without a new agent version. A null or missing limit falls back to the
+   * model's catalog value, or OAO's default.
+   */
+  setModelPresetLimits(
+    projectId: string,
+    presetId: string,
+    input: SetModelPresetLimitsInput,
+    options: WriteOptions,
+  ): Promise<ModelPresetLimits> {
+    return this.#write(
+      this.routes.modelPresetLimits(projectId, presetId),
       "POST",
       input,
       options,

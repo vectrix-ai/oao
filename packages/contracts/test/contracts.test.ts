@@ -18,10 +18,17 @@ import {
   ToolCallSchema,
   parseCreateModelPresetInput,
   parseSetModelPresetPriceInput,
+  parseSetModelPresetLimitsInput,
   parseCreateProjectSandboxProviderInput,
   parseCreateProjectStorageProviderInput,
   parseManagedAgentSnapshotForPublication,
   parseSessionVersionResolution,
+  parseSessionPromptCache,
+  ManagedAgentInstanceDataSchema,
+  ManagedRunInputV1Schema,
+  PROMPT_CACHE_PREFIX_MAX_LENGTH,
+  RUN_INPUT_MESSAGE_MAX_LENGTH,
+  RUN_MESSAGE_MAX_LENGTH,
   parseModelRoutingPolicy,
   validateToolJsonSchema,
   validateToolJsonValue,
@@ -1364,6 +1371,58 @@ test("a model preset price is complete, non-negative, and may have long-context 
   );
 });
 
+test("preset limits are optional token counts, with the output not above the window", () => {
+  assert.deepEqual(parseSetModelPresetLimitsInput({}), {
+    contextWindow: null,
+    maxOutputTokens: null,
+  });
+  assert.deepEqual(
+    parseSetModelPresetLimitsInput({
+      contextWindow: 250_000,
+      maxOutputTokens: 128_000,
+    }),
+    { contextWindow: 250_000, maxOutputTokens: 128_000 },
+  );
+  assert.deepEqual(
+    parseSetModelPresetLimitsInput({ maxOutputTokens: 64_000 }),
+    {
+      contextWindow: null,
+      maxOutputTokens: 64_000,
+    },
+  );
+  for (const input of [
+    { contextWindow: 1_023 },
+    { contextWindow: 10_000_001 },
+    { contextWindow: 250_000.5 },
+    { maxOutputTokens: 0 },
+    { maxOutputTokens: 1_000_001 },
+    { contextWindow: 100_000, maxOutputTokens: 100_001 },
+    { contextWindow: "250000" },
+    { contextWindow: 250_000, other: true },
+  ])
+    assert.throws(
+      () => parseSetModelPresetLimitsInput(input),
+      JSON.stringify(input),
+    );
+  // A preset created without limits reads as none.
+  const created = parseCreateModelPresetInput({
+    key: "sol-v1",
+    displayName: "Sol",
+    providerId: "00000000-0000-4000-8000-000000000001",
+    model: "openrouter/@preset/azure-sol-61",
+  });
+  assert.equal(created.limits, null);
+  assert.throws(() =>
+    parseCreateModelPresetInput({
+      key: "sol-v1",
+      displayName: "Sol",
+      providerId: "00000000-0000-4000-8000-000000000001",
+      model: "openrouter/@preset/azure-sol-61",
+      limits: { contextWindow: 1_000 },
+    }),
+  );
+});
+
 test("a model preset may be created with its first price", () => {
   const preset = {
     key: "gpt-6-1-sol-v1",
@@ -1384,4 +1443,63 @@ test("a model preset may be created with its first price", () => {
     }).price?.outputUsdPerMillion,
     10,
   );
+});
+
+test("a session prompt cache key is printable ASCII and its prefix a non-negative integer", () => {
+  assert.deepEqual(
+    parseSessionPromptCache({
+      key: "extraction:00000000-0000-4000-8000-000000000001",
+      prefixChars: 41_234,
+    }),
+    {
+      key: "extraction:00000000-0000-4000-8000-000000000001",
+      prefixChars: 41_234,
+    },
+  );
+  assert.deepEqual(parseSessionPromptCache({ key: "k" }), { key: "k" });
+  for (const input of [
+    undefined,
+    null,
+    "k",
+    {},
+    { key: "" },
+    { key: "a b" },
+    { key: "x".repeat(65) },
+    { key: "caf\u00e9" },
+    { key: "line\nbreak" },
+    { key: "k", prefixChars: -1 },
+    { key: "k", prefixChars: 0.5 },
+    { key: "k", prefixChars: "1" },
+    { key: "k", prefixChars: Number.MAX_SAFE_INTEGER + 1 },
+  ])
+    assert.throws(() => parseSessionPromptCache(input), JSON.stringify(input));
+  // The API compares the prefix with the message and with its own limit, so
+  // it can name the part that is too long.
+  assert.deepEqual(
+    parseSessionPromptCache({ key: "k", prefixChars: 400_001 }),
+    {
+      key: "k",
+      prefixChars: 400_001,
+    },
+  );
+  assert.equal(PROMPT_CACHE_PREFIX_MAX_LENGTH, 400_000);
+  assert.equal(RUN_MESSAGE_MAX_LENGTH, 100_000);
+  // A stored run keeps a first message with the longest start and rest.
+  assert.equal(RUN_INPUT_MESSAGE_MAX_LENGTH, 500_000);
+  assert.equal(
+    v.safeParse(ManagedRunInputV1Schema, { message: "m".repeat(500_000) })
+      .success,
+    true,
+  );
+  assert.equal(
+    v.safeParse(ManagedRunInputV1Schema, { message: "m".repeat(500_001) })
+      .success,
+    false,
+  );
+  // Instance data from before prompt cache keys still parses.
+  const instance = v.safeParse(
+    ManagedAgentInstanceDataSchema.entries.promptCacheKey,
+    undefined,
+  );
+  assert.equal(instance.success, true);
 });

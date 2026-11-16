@@ -224,6 +224,8 @@ project-scoped.
 | `DELETE` | `/projects/{projectId}/model-presets/{id}`              | Archive a project preset.                            |
 | `GET`    | `/projects/{projectId}/model-presets/{id}/prices`       | List a preset's price history, newest first.         |
 | `POST`   | `/projects/{projectId}/model-presets/{id}/prices`       | Add a price, from now or a later time.               |
+| `GET`    | `/projects/{projectId}/model-presets/{id}/limits`       | List a preset's limits history, newest first.        |
+| `POST`   | `/projects/{projectId}/model-presets/{id}/limits`       | Replace its limits from the preset's next run on.    |
 
 Reads require `agent:read`; writes require `project:admin`. Every write requires
 an `Idempotency-Key`.
@@ -245,6 +247,22 @@ are append-only and apply to later model calls, so past runs keep the cost they
 were given. A catalog entry carries `listPrice` where OAO knows
 the model's list price. See
 [Set a model preset's price](/models/adding-models#set-a-model-presets-price).
+
+A preset's limits are `contextWindow`, an integer from 1,024 to 10,000,000, and
+`maxOutputTokens`, an integer from 1 to 1,000,000 that is not larger than
+`contextWindow`; either can be `null`, which uses the model's catalog value, or
+128,000 and 4,096 for a model the catalog does not know, such as an OpenRouter
+saved preset. `POST /model-presets` accepts them as `limits`; each preset in the
+list returns the latest as `limits` (`{ id, presetId, contextWindow,
+maxOutputTokens, createdByPrincipalId, createdAt }`), or `null` when it never
+had any. `POST /model-presets/{id}/limits` takes `{ contextWindow,
+maxOutputTokens }`, where a field left out counts as `null`, adds a row to the
+preset's append-only history, and returns it with `201`; out-of-range values
+return `400` and an unknown or archived preset `404`. New limits apply from the
+preset's next run without a new agent version; a run already under way keeps
+its limits. Each model call records them in
+`debug.modelInvocations[].safeRequest.modelLimits`. See
+[Set a model preset's limits](/models/adding-models#set-a-model-presets-limits).
 
 `DELETE /model-presets/{id}` archives a project preset and returns
 `{ "id", "key", "archived": true }`. Presets stay append-only: the row, key,
@@ -791,6 +809,70 @@ transaction. The response contains the session, `latestRunId`, first queued
 `run`, and `resolvedVersions`. Session create and follow-up bodies do not
 accept a Skill list.
 
+### Share the prompt cache across sessions
+
+Sessions that start the same way can read that start from the model provider's
+prompt cache instead of paying for it as new input in every session. Add an
+optional `promptCache` object to the create body:
+
+```json
+{
+  "agentId": "d1111111-1111-4111-8111-111111111111",
+  "initialMessage": "# Project rules\n...\n# Email\n...",
+  "promptCache": {
+    "key": "extraction:project-42",
+    "prefixChars": 41234
+  }
+}
+```
+
+| Field         | Rules                                                                                                                                                                                                                                                               |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `key`         | Required. 1 to 64 printable ASCII characters without spaces. Every model call of the session, its follow-up runs included, sends it to the provider as cache and routing key.                                                                                       |
+| `prefixChars` | Optional integer from 0 to the length of `initialMessage` and at most 400,000, counted as JavaScript string length. That many characters at the start of `initialMessage` must be identical for every session that sends the same key. Absent or 0 marks no prefix. |
+
+OAO stores the setting with the session; session reads do not return it. It
+applies only to models OAO calls through OpenRouter. A value that breaks these
+rules returns `400`, and so does a `prefixChars` above 0 on a session created
+from files alone. Without `promptCache`, a session uses a key shared by every
+session of its agent version, so sessions of one agent version still share
+their instructions and tool definitions. See [Prompt
+caching](/models/adding-models#prompt-caching) for what the provider caches.
+
+A stable start lets the first message be longer, because the model reads that
+start from the cache. Lengths are JavaScript string lengths (UTF-16 code units):
+
+| Session                | `initialMessage` limit                                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------------------------------- |
+| `prefixChars` above 0  | The first `prefixChars` characters at most 400,000, and the rest at most 100,000: up to 500,000 in all. |
+| No `prefixChars`, or 0 | 100,000, as for every run message.                                                                      |
+
+A part over its limit returns `400` with code `bad_request` and one of these
+messages:
+
+| Part over its limit              | `error.message`                                                                                  |
+| -------------------------------- | ------------------------------------------------------------------------------------------------ |
+| The stable start                 | `The cached start of initialMessage (promptCache.prefixChars) must be at most 400000 characters` |
+| The rest, after the stable start | `The rest of initialMessage after promptCache.prefixChars must be at most 100000 characters`     |
+| A message without a stable start | `initialMessage must be a non-empty string of at most 100000 characters`                         |
+
+The last message is the one every OAO version returns, so a client can tell an
+OAO without the longer limit by it and send a shorter message. Follow-up runs
+of the session keep the 100,000-character limit. Webhooks with
+`includeMessageContent` deliver the whole first message.
+
+<Warning>
+  The model still needs room for the whole message. A run compacts its
+  conversation once a call passes the preset's context window minus an output
+  reserve of up to 20,000 tokens, and a summary then replaces the first message,
+  stable start included. An OpenRouter saved preset without limits assumes a
+  128,000-token window, so it compacts past about 124,000 tokens; 500,000
+  characters are often 115,000 to 130,000 tokens. Give such a preset a larger
+  context window, as in [Set a model preset's
+  limits](/models/adding-models#set-a-model-presets-limits), before sending
+  messages near both limits.
+</Warning>
+
 In that transaction OAO also resolves every Skill and delegate the agent
 version follows, for the version itself and for every delegate it can reach,
 from one database snapshot. It binds the resulting exact Skill versions to the
@@ -983,7 +1065,9 @@ rows count once in `totals`.
 
 A later turn accepts either `{ "message": "..." }` or the SDK-compatible
 `{ "redactedInput": "..." }`, plus the same optional `files` array used during
-session creation. Message text is limited to 100,000 characters and raw file
+session creation. Message text is limited to 100,000 characters (a session's
+first message may be longer; see [Share the prompt cache across
+sessions](#share-the-prompt-cache-across-sessions)) and raw file
 bytes to 10 MiB per file and 20 MiB per turn. A text field may be
 omitted only when `files` is non-empty. File submissions require a
 sandbox-enabled agent with read tooling, plus a default project storage
