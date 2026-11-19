@@ -1874,7 +1874,11 @@ describe("management console", () => {
     });
     expect(header.runId).toBe(full.runId);
     expect(header.events).toEqual([]);
+    expect(header.skills).toEqual([]);
+    expect(header.delegations).toEqual([]);
     expect(header.debug).toBeUndefined();
+    const withSkills = await api.getSession(full.id, { include: ["skills"] });
+    expect(withSkills.skills).toEqual(full.skills);
     const cancelled = await api.runSessionAction(full.id, "cancel");
     expect(cancelled.status).toBe("cancelled");
   });

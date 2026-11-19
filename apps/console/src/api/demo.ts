@@ -2858,6 +2858,9 @@ export class DemoConsoleApi implements ConsoleApi {
         include.has("transcript") || include.has("timeline")
           ? header.events
           : [],
+      // The HTTP adapter maps sections the API left out to empty lists.
+      skills: include.has("skills") ? header.skills : [],
+      delegations: include.has("delegations") ? header.delegations : [],
       ...(runs && include.has("runs") ? { runs } : {}),
       ...(transcript && include.has("transcript") ? { transcript } : {}),
       ...(pendingWork && include.has("pendingWork") ? { pendingWork } : {}),

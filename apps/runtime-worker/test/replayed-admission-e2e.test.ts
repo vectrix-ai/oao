@@ -322,9 +322,11 @@ test(
       env: { ...process.env, OAO_RUNTIME_SERVICE_PRINCIPAL_ID: service },
       fakeResponses: Array.from({ length: 256 }, () => respond),
     });
+    let heldRun: RunId | undefined;
     t.after(async () => {
       while (held.length) held.shift()?.();
-      // The unsettled dispatch staged below would block every later stop.
+      if (heldRun) await waitSettled(admin, heldRun).catch(() => undefined);
+      // An unsettled dispatch left behind would block every later stop.
       await admin.query(
         "UPDATE oao.runtime_dispatches SET state='settled' WHERE organization_id=$1 AND state<>'settled'",
         [tenant.organizationId],
@@ -425,8 +427,10 @@ test(
             row.fence,
           ],
         );
+        // The old writer marked the successor's dispatch aborting without
+        // aborting Flue, and no watcher settled it after Flue finished.
         await transaction.query(
-          "UPDATE oao.runtime_dispatches SET updated_at=clock_timestamp() WHERE run_id=$1",
+          "UPDATE oao.runtime_dispatches SET state='aborting',updated_at=clock_timestamp() WHERE run_id=$1",
           [successor],
         );
       });
@@ -446,29 +450,18 @@ test(
       });
       await corruptLikeReplayedAdmission(admin, forged, forgedRun, forgedRun);
 
-      // The same signature, but another submission is still running.
+      // The same signature, but the successor is still running in Flue.
       const runningFirst = await seedRun(admin, running);
       assert.equal(
         await admitAndSettle(worker, admin, runningFirst),
         "completed",
       );
-      const runningSecond = await seedRun(admin, running);
-      assert.equal(
-        await admitAndSettle(worker, admin, runningSecond),
-        "completed",
+      heldRun = await seedRun(admin, running, "hold this run");
+      await worker.orchestrator.handleWake(admitJob(heldRun));
+      await waitUntil("the held run to reach the model", async () =>
+        held.length > 0 ? true : undefined,
       );
-      await corruptLikeReplayedAdmission(
-        admin,
-        running,
-        runningFirst,
-        runningFirst,
-      );
-      await withTenantTransaction(admin, tenant, (transaction) =>
-        transaction.query(
-          "UPDATE oao.runtime_dispatches SET state='aborting' WHERE run_id=$1",
-          [runningSecond],
-        ),
-      );
+      await corruptLikeReplayedAdmission(admin, running, runningFirst, heldRun);
 
       // Corrupted by the projection's identity check: it appends no event.
       const projectedRun = await seedRun(admin, projected);
@@ -543,6 +536,12 @@ test(
           [withSuccessor.threadId],
         );
         assert.equal(heads.rowCount, 0);
+        // The successor's stale aborting dispatch was finished.
+        const unsettled = await admin.query(
+          "SELECT 1 FROM oao.runtime_dispatches WHERE thread_id=$1 AND state<>'settled'",
+          [withSuccessor.threadId],
+        );
+        assert.equal(unsettled.rowCount, 0);
         const repairedEvents = await admin.query<{ count: number }>(
           `SELECT count(*)::int AS count FROM oao.product_events
             WHERE organization_id=$1 AND project_id=$2

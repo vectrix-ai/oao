@@ -3574,9 +3574,11 @@ export class ManagedRuntimeOrchestrator {
    * became idempotent. Migration 0068 recorded the candidates whose database
    * state matches that signature; each is repaired here only when Flue still
    * stores the thread's bound conversation identity, nothing on the thread is
-   * still running, and the candidate is still corrupt. A candidate with a
-   * running dispatch stays pending for the next start; any other mismatch is
-   * skipped and the thread stays corrupt.
+   * still running, and the candidate is still corrupt. A dispatch the old
+   * writer left aborting is finished when its run is terminal and Flue
+   * settled its submission. A candidate with a dispatch that may still run
+   * stays pending for the next start; any other mismatch is skipped and the
+   * thread stays corrupt.
    */
   async repairReplayedAdmissions(): Promise<
     readonly IncarnationRepairResult[]
@@ -3606,16 +3608,48 @@ export class ManagedRuntimeOrchestrator {
   private async repairReplayedAdmission(
     candidate: TenantContext & { readonly threadId: ThreadId },
   ): Promise<IncarnationRepairResult> {
-    const before = await withTenantTransaction(
+    const { before, unsettledSubmissions } = await withTenantTransaction(
       this.pool,
       candidate,
-      (transaction) =>
-        transaction.query<ThreadInstanceRow>(
+      async (transaction) => {
+        const tenantThread = [
+          candidate.organizationId,
+          candidate.projectId,
+          candidate.threadId,
+        ];
+        const instance = await transaction.query<ThreadInstanceRow>(
           `SELECT * FROM oao.runtime_thread_instances
            WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3`,
-          [candidate.organizationId, candidate.projectId, candidate.threadId],
-        ),
+          tenantThread,
+        );
+        const unsettled = await transaction.query<{
+          flue_submission_id: string | null;
+        }>(
+          `SELECT flue_submission_id FROM oao.runtime_dispatches
+            WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3
+              AND state<>'settled'`,
+          tenantThread,
+        );
+        return {
+          before: instance,
+          unsettledSubmissions: unsettled.rows.flatMap((row) =>
+            row.flue_submission_id ? [row.flue_submission_id] : [],
+          ),
+        };
+      },
     );
+    // The corruption writer marked the head's dispatch aborting without
+    // aborting Flue. When Flue settled that submission while no watcher was
+    // tracking it, the dispatch stayed unsettled although nothing runs.
+    const settledSubmissions = new Set<string>();
+    if (unsettledSubmissions.length) {
+      const flue = await this.pool.query<{ submission_id: string }>(
+        `SELECT submission_id FROM flue_agent_submissions
+          WHERE submission_id = ANY($1::text[]) AND status='settled'`,
+        [unsettledSubmissions],
+      );
+      for (const row of flue.rows) settledSubmissions.add(row.submission_id);
+    }
     const boundUid = before.rows[0]?.flue_instance_uid ?? undefined;
     const flueUid =
       before.rows[0] && boundUid
@@ -3696,15 +3730,37 @@ export class ManagedRuntimeOrchestrator {
       );
       if (foreignDispatch.rowCount)
         return resolve("skipped", "dispatch_identity_mismatch");
-      // A submission still running is left for the next start.
-      const unsettled = await transaction.query(
-        `SELECT 1 FROM oao.runtime_dispatches
-          WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3
-            AND state<>'settled'
-          LIMIT 1`,
+      // A dispatch of a terminal run whose Flue submission settled is
+      // finished here, the way settlement finishes it on a corrupt thread.
+      // Anything that may still run is left for the next start.
+      const unsettled = await transaction.query<{
+        run_id: RunId;
+        flue_submission_id: string | null;
+        run_state: string;
+      }>(
+        `SELECT dispatch.run_id,dispatch.flue_submission_id,run.state::text AS run_state
+           FROM oao.runtime_dispatches dispatch
+           JOIN oao.runs run ON run.organization_id=dispatch.organization_id
+            AND run.project_id=dispatch.project_id AND run.id=dispatch.run_id
+          WHERE dispatch.organization_id=$1 AND dispatch.project_id=$2
+            AND dispatch.thread_id=$3 AND dispatch.state<>'settled'
+          FOR UPDATE OF dispatch`,
         tenantThread,
       );
-      if (unsettled.rowCount) return result("pending", "unsettled_dispatch");
+      const finished = unsettled.rows.filter(
+        (row) =>
+          row.flue_submission_id !== null &&
+          settledSubmissions.has(row.flue_submission_id) &&
+          TERMINAL_CHILD_STATES.has(row.run_state),
+      );
+      if (finished.length < unsettled.rows.length)
+        return result("pending", "unsettled_dispatch");
+      for (const row of finished)
+        await transaction.query(
+          `UPDATE oao.runtime_dispatches SET state='settled',updated_at=clock_timestamp()
+            WHERE organization_id=$1 AND project_id=$2 AND run_id=$3`,
+          [candidate.organizationId, candidate.projectId, row.run_id],
+        );
       const head = await transaction.query<{ run_id: RunId; state: string }>(
         `SELECT head.run_id,run.state::text AS state
            FROM oao.thread_admission_heads head
