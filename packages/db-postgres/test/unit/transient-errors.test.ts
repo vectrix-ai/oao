@@ -27,6 +27,10 @@ test("a lost or unreachable database is transient", () => {
   );
   assert.equal(isTransientDatabaseError(withCode("reset", "ECONNRESET")), true);
   assert.equal(
+    isTransientDatabaseError(withCode("getaddrinfo EAI_AGAIN db", "EAI_AGAIN")),
+    true,
+  );
+  assert.equal(
     isTransientDatabaseError(
       new Error("read failed", {
         cause: new Error("Connection terminated unexpectedly"),

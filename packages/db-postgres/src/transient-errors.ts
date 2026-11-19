@@ -4,6 +4,8 @@ const SOCKET_CODES = new Set([
   "ECONNREFUSED",
   "ETIMEDOUT",
   "EPIPE",
+  // A temporary DNS failure resolving the database host.
+  "EAI_AGAIN",
 ]);
 
 /** node-postgres messages for a lost connection or a pool checkout timeout. */
