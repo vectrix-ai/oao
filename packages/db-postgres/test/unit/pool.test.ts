@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createPool } from "../../src/index.js";
+import { createPool, databasePoolMax } from "../../src/index.js";
 
 // No query runs, so the pool never opens a connection to this address.
 const unreachable = "postgresql://oao:oao@127.0.0.1:1/oao";
@@ -19,5 +19,19 @@ test("an idle connection error reaches the handler instead of crashing", async (
 test("a pool without a handler still absorbs idle connection errors", async () => {
   const pool = createPool(unreachable);
   assert.doesNotThrow(() => pool.emit("error", new Error("connection lost")));
+  await pool.end();
+});
+
+test("the pool size comes from DATABASE_POOL_MAX", async () => {
+  assert.equal(databasePoolMax({}), 10);
+  assert.equal(databasePoolMax({ DATABASE_POOL_MAX: " 40 " }), 40);
+  for (const invalid of ["0", "201", "1.5", "ten"])
+    assert.throws(
+      () => databasePoolMax({ DATABASE_POOL_MAX: invalid }),
+      /DATABASE_POOL_MAX must be an integer from 1 to 200/u,
+    );
+  const pool = createPool(unreachable, { max: 3 });
+  assert.equal(pool.options.max, 3);
+  assert.equal(pool.options.connectionTimeoutMillis, 10_000);
   await pool.end();
 });

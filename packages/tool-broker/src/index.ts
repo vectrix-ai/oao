@@ -5,11 +5,19 @@ import {
   ToolResultEnvelopeSchema,
   type ToolResultEnvelope,
 } from "@oao/contracts";
-import type { PgPool, Queryable, TenantContext } from "@oao/db-postgres";
+import type {
+  PgPool,
+  ProjectWakeWaiter,
+  ProjectWakeWatch,
+  Queryable,
+  TenantContext,
+} from "@oao/db-postgres";
 import {
   withTenantTransaction,
+  abortableDelay,
   DEFAULT_APPROVAL_TTL_MS,
   lockApprovalDeadlines,
+  sleepingProjectWakeWatch,
 } from "@oao/db-postgres";
 import type { PrincipalId, PublicValue, RunId } from "@oao/domain";
 import {
@@ -373,11 +381,28 @@ async function transitionRun(
 }
 
 export class PostgresToolBroker {
+  /** Open waits per project; their projects' approvals are expired on one timer. */
+  readonly #waits = new Map<
+    string,
+    { readonly tenant: TenantContext; readonly watches: Set<ProjectWakeWatch> }
+  >();
+  #expiryTimer: NodeJS.Timeout | undefined;
+  #expiring: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly pool: PgPool,
     private readonly options: {
       readonly servicePrincipalId: PrincipalId;
+      /**
+       * Wakes a waiting tool call when its project commits a product event:
+       * a caller result, an approval decision. Without it each wait re-checks
+       * every `pollMilliseconds`.
+       */
+      readonly projectWakes?: ProjectWakeWaiter;
+      /** Re-check interval without `projectWakes`. Defaults to 250 ms. */
       readonly pollMilliseconds?: number;
+      /** How often pending approvals of waiting projects expire. Defaults to 5 seconds. */
+      readonly approvalExpiryMilliseconds?: number;
       readonly approvalTtlMilliseconds?: number;
       /** Platform execution lease duration; renewed while execute runs. */
       readonly platformLeaseMilliseconds?: number;
@@ -597,19 +622,27 @@ export class PostgresToolBroker {
     execute: (signal?: AbortSignal) => Promise<PublicValue>,
     signal?: AbortSignal,
   ): Promise<ToolOutcome> {
-    for (;;) {
-      const row = await this.read(input, toolCallId);
-      const failed = this.stageFailure(row);
-      if (failed) {
-        await this.resumeRun(input, row);
-        return failed;
-      }
-      if (row.approval_status === "approved") {
-        await this.resumeRun(input, row);
-        return this.claimExecuteCommit(input, toolCallId, execute, signal);
-      }
-      await this.pause(signal);
-    }
+    // Resolves to the gate's failure, or to undefined once approved.
+    const blocked = await this.waitFor<ToolOutcome | undefined>(
+      input,
+      signal,
+      async () => {
+        const row = await this.read(input, toolCallId);
+        const failed = this.stageFailure(row);
+        if (failed) {
+          await this.resumeRun(input, row);
+          return { done: failed };
+        }
+        if (row.approval_status === "approved") {
+          await this.resumeRun(input, row);
+          return { done: undefined };
+        }
+        return undefined;
+      },
+    );
+    return (
+      blocked ?? this.claimExecuteCommit(input, toolCallId, execute, signal)
+    );
   }
 
   private async claimExecuteCommit(
@@ -835,12 +868,12 @@ export class PostgresToolBroker {
     signal?: AbortSignal,
     validateResult?: ToolResultValueValidator,
   ): Promise<ToolOutcome> {
-    for (;;) {
+    return this.waitFor<ToolOutcome>(input, signal, async () => {
       const row = await this.read(input, toolCallId);
       const failed = this.stageFailure(row);
       if (failed) {
         await this.resumeRun(input, row);
-        return failed;
+        return { done: failed };
       }
       if (
         (row.stage === "result_submitted" ||
@@ -853,10 +886,12 @@ export class PostgresToolBroker {
           const validation = validateResult(outcome.value);
           if (!validation.valid) {
             await this.resumeRun(input, row);
-            return failure(
-              "invalid_tool_result",
-              validation.message ?? "Tool returned an invalid result",
-            );
+            return {
+              done: failure(
+                "invalid_tool_result",
+                validation.message ?? "Tool returned an invalid result",
+              ),
+            };
           }
         }
         if (row.stage === "result_submitted") {
@@ -884,10 +919,10 @@ export class PostgresToolBroker {
           });
         }
         await this.resumeRun(input, row);
-        return outcome;
+        return { done: outcome };
       }
-      await this.pause(signal);
-    }
+      return undefined;
+    });
   }
 
   private async retryState(
@@ -1070,7 +1105,6 @@ export class PostgresToolBroker {
     toolCallId: string,
   ): Promise<ToolRow> {
     return withTenantTransaction(this.pool, input, async (transaction) => {
-      await transaction.query("SELECT oao.expire_approvals(clock_timestamp())");
       const result = await transaction.query(
         `SELECT c.id,c.stage,c.claim_fence,r.safe_result,r.idempotency_key,a.status AS approval_status
          FROM oao.tool_calls c
@@ -1086,23 +1120,90 @@ export class PostgresToolBroker {
     });
   }
 
-  private async pause(signal?: AbortSignal): Promise<void> {
+  /**
+   * Re-runs `check` until it returns a result: after each project wake, and
+   * at the fallback interval. Approvals of a waiting project expire on one
+   * timer per broker instead of on every check.
+   */
+  private async waitFor<T>(
+    tenant: TenantContext,
+    signal: AbortSignal | undefined,
+    check: () => Promise<{ readonly done: T } | undefined>,
+  ): Promise<T> {
     if (signal?.aborted) throw signal.reason;
-    if (this.options.sleep) {
-      await this.options.sleep(this.options.pollMilliseconds ?? 250, signal);
-      return;
+    const watch = this.options.projectWakes
+      ? await this.options.projectWakes.watch(tenant)
+      : sleepingProjectWakeWatch(
+          this.options.sleep ?? abortableDelay,
+          this.options.pollMilliseconds ?? 250,
+        );
+    const release = this.registerWait(tenant, watch);
+    try {
+      for (;;) {
+        const result = await check();
+        if (result) return result.done;
+        await watch.next(signal);
+      }
+    } finally {
+      release();
+      await watch.close();
     }
-    await new Promise<void>((resolve, reject) => {
-      const onAbort = () => {
-        clearTimeout(timer);
-        reject(signal?.reason);
+  }
+
+  private registerWait(
+    tenant: TenantContext,
+    watch: ProjectWakeWatch,
+  ): () => void {
+    const key = `${tenant.organizationId}/${tenant.projectId}`;
+    let entry = this.#waits.get(key);
+    if (!entry) {
+      entry = {
+        tenant: {
+          organizationId: tenant.organizationId,
+          projectId: tenant.projectId,
+        },
+        watches: new Set(),
       };
-      const timer = setTimeout(() => {
-        signal?.removeEventListener("abort", onAbort);
-        resolve();
-      }, this.options.pollMilliseconds ?? 250);
-      signal?.addEventListener("abort", onAbort, { once: true });
-    });
+      this.#waits.set(key, entry);
+    }
+    entry.watches.add(watch);
+    if (!this.#expiryTimer) {
+      this.#expiryTimer = setInterval(() => {
+        this.#expiring = this.#expiring.then(() => this.expireApprovals());
+      }, this.options.approvalExpiryMilliseconds ?? 5_000);
+      this.#expiryTimer.unref();
+    }
+    const current = entry;
+    return () => {
+      current.watches.delete(watch);
+      if (current.watches.size === 0 && this.#waits.get(key) === current)
+        this.#waits.delete(key);
+      if (this.#waits.size === 0 && this.#expiryTimer) {
+        clearInterval(this.#expiryTimer);
+        this.#expiryTimer = undefined;
+      }
+    };
+  }
+
+  /** Expires due approvals of every waiting project and wakes its waits. */
+  private async expireApprovals(): Promise<void> {
+    for (const entry of [...this.#waits.values()]) {
+      try {
+        const expired = await withTenantTransaction(
+          this.pool,
+          entry.tenant,
+          async (transaction) => {
+            const result = await transaction.query<{ expired: number }>(
+              "SELECT oao.expire_approvals(clock_timestamp()) AS expired",
+            );
+            return Number(result.rows[0]?.expired ?? 0);
+          },
+        );
+        if (expired > 0) for (const watch of entry.watches) watch.wake();
+      } catch {
+        // The next tick retries; a waiting call is never failed by expiry.
+      }
+    }
   }
 }
 

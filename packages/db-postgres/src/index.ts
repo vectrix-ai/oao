@@ -41,6 +41,10 @@ export interface MigrationResult {
 }
 
 export interface CreatePoolOptions {
+  /** Most connections the pool opens. Defaults to 10. */
+  readonly max?: number;
+  /** How long a query waits for a free connection before it fails. Defaults to 10 seconds. */
+  readonly connectionTimeoutMillis?: number;
   /**
    * Called when PostgreSQL closes a connection while it sits idle in the pool,
    * for example on a server restart, a failover or a forced database drop.
@@ -48,6 +52,23 @@ export interface CreatePoolOptions {
    * next query. Defaults to ignoring the error.
    */
   readonly onIdleClientError?: (error: Error) => void;
+  /**
+   * Called when a connection fails while a caller has it checked out, for
+   * example when its backend is terminated in the middle of a transaction.
+   * The caller's pending query rejects with the same error; this hook only
+   * reports it. Defaults to ignoring the error.
+   */
+  readonly onClientError?: (error: Error) => void;
+}
+
+/** Reads `DATABASE_POOL_MAX`: an integer from 1 to 200, 10 when unset. */
+export function databasePoolMax(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.DATABASE_POOL_MAX?.trim();
+  if (!raw) return 10;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > 200)
+    throw new Error("DATABASE_POOL_MAX must be an integer from 1 to 200");
+  return value;
 }
 
 export function createPool(
@@ -56,13 +77,28 @@ export function createPool(
 ): PgPool {
   const pool = new Pool({
     connectionString,
-    max: 10,
+    max: options.max ?? 10,
     idleTimeoutMillis: 10_000,
+    connectionTimeoutMillis: options.connectionTimeoutMillis ?? 10_000,
   });
   // pg-pool re-emits an idle connection's error on the pool. Without a
   // listener Node treats that as an uncaught exception and the process exits.
   const onIdleClientError = options.onIdleClientError ?? (() => undefined);
   pool.on("error", (error) => onIdleClientError(error));
+  // A connection that fails while checked out emits 'error' on the client
+  // itself, which pg-pool does not forward. Without a listener there the
+  // process exits; the caller's query still rejects with the error.
+  // Idle errors already reach onIdleClientError, so only checked-out clients
+  // are reported here.
+  const onClientError = options.onClientError ?? (() => undefined);
+  const checkedOut = new WeakSet<pg.PoolClient>();
+  pool.on("acquire", (client) => checkedOut.add(client));
+  pool.on("release", (_error, client) => checkedOut.delete(client));
+  pool.on("connect", (client) => {
+    client.on("error", (error) => {
+      if (checkedOut.has(client)) onClientError(error);
+    });
+  });
   return pool;
 }
 
@@ -136,6 +172,9 @@ export async function withTenantTransaction<T>(
   options: TenantTransactionOptions = {},
 ): Promise<T> {
   const client = await pool.connect();
+  // A connection whose ROLLBACK fails is broken; destroy it instead of
+  // returning it to the pool for the next caller.
+  let broken = false;
   try {
     await client.query(
       options.snapshot
@@ -151,10 +190,12 @@ export async function withTenantTransaction<T>(
     await client.query("COMMIT");
     return result;
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => undefined);
+    await client.query("ROLLBACK").catch(() => {
+      broken = true;
+    });
     throw error;
   } finally {
-    client.release();
+    client.release(broken);
   }
 }
 
@@ -518,6 +559,11 @@ function projectWakeKey(
 }
 
 export interface PostgresWakeNotifierOptions {
+  /**
+   * The notification channel. Defaults to the product-event channel, whose
+   * payload names the project; scoped subscribers only wake for their project.
+   */
+  readonly channel?: string;
   /** Creates the dedicated LISTEN connection. Defaults to the pool's connection settings. */
   readonly createListenerClient?: () => pg.Client;
   /** First delay before reconnecting a failed listener. Doubles up to the maximum. */
@@ -542,6 +588,7 @@ interface WakeSubscriber {
  */
 export class PostgresWakeNotifier implements WakeOnlyNotifier {
   readonly #pool: PgPool;
+  readonly #channel: string;
   readonly #createListenerClient: () => pg.Client;
   readonly #reconnectDelayMs: number;
   readonly #maxReconnectDelayMs: number;
@@ -558,6 +605,11 @@ export class PostgresWakeNotifier implements WakeOnlyNotifier {
 
   constructor(pool: PgPool, options: PostgresWakeNotifierOptions = {}) {
     this.#pool = pool;
+    this.#channel = options.channel ?? PRODUCT_EVENT_CHANNEL;
+    if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(this.#channel))
+      throw new Error(
+        "Wake notification channel must be a lowercase identifier",
+      );
     this.#createListenerClient =
       options.createListenerClient ??
       (() =>
@@ -581,7 +633,7 @@ export class PostgresWakeNotifier implements WakeOnlyNotifier {
     projectId: ProjectId,
   ): Promise<void> {
     await this.#pool.query("SELECT pg_notify($1, $2)", [
-      PRODUCT_EVENT_CHANNEL,
+      this.#channel,
       projectWakeKey(organizationId, projectId),
     ]);
   }
@@ -655,12 +707,11 @@ export class PostgresWakeNotifier implements WakeOnlyNotifier {
     client.on("error", lost);
     client.on("end", () => lost());
     client.on("notification", (message) => {
-      if (message.channel === PRODUCT_EVENT_CHANNEL)
-        this.#dispatch(message.payload);
+      if (message.channel === this.#channel) this.#dispatch(message.payload);
     });
     try {
       await client.connect();
-      await client.query(`LISTEN ${PRODUCT_EVENT_CHANNEL}`);
+      await client.query(`LISTEN ${this.#channel}`);
     } catch (error) {
       lost(error);
       return;
@@ -763,3 +814,14 @@ export {
 } from "./approval-deadline.js";
 
 export { findRunModelPresetPrice } from "./model-preset-prices.js";
+
+export {
+  abortableDelay,
+  createProjectWakeWaiter,
+  sleepingProjectWakeWatch,
+  type ProjectWakeWaiter,
+  type ProjectWakeWaiterOptions,
+  type ProjectWakeWatch,
+} from "./project-wakes.js";
+
+export { isTransientDatabaseError } from "./transient-errors.js";

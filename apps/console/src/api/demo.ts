@@ -2840,11 +2840,32 @@ export class DemoConsoleApi implements ConsoleApi {
     };
   }
 
-  async getSession(id: string) {
+  async getSession(
+    id: string,
+    options?: Parameters<ConsoleApi["getSession"]>[1],
+  ) {
     this.#guard();
     const value = this.#sessions.find((session) => session.id === id);
     if (!value) throw new Error("Session not found");
-    return structuredClone(value);
+    const detail = structuredClone(value);
+    if (!options?.include) return detail;
+    // Like the API, sections that were not asked for are left out.
+    const include = new Set(options.include);
+    const { runs, transcript, pendingWork, debug, ...header } = detail;
+    return {
+      ...header,
+      events:
+        include.has("transcript") || include.has("timeline")
+          ? header.events
+          : [],
+      // The HTTP adapter maps sections the API left out to empty lists.
+      skills: include.has("skills") ? header.skills : [],
+      delegations: include.has("delegations") ? header.delegations : [],
+      ...(runs && include.has("runs") ? { runs } : {}),
+      ...(transcript && include.has("transcript") ? { transcript } : {}),
+      ...(pendingWork && include.has("pendingWork") ? { pendingWork } : {}),
+      ...(debug && include.has("debug") ? { debug } : {}),
+    } satisfies SessionDetail;
   }
 
   async getSessionFile(sessionId: string, path: string): Promise<Uint8Array> {

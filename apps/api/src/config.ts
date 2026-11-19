@@ -1,3 +1,5 @@
+import { databasePoolMax } from "@oao/db-postgres";
+
 export type AuthProvider = "development" | "iap" | "workos";
 
 export interface IapServerConfiguration {
@@ -14,6 +16,8 @@ export interface WorkOsServerConfiguration {
 export interface ApiServerConfiguration {
   readonly authProvider: AuthProvider;
   readonly databaseUrl: string;
+  /** Pool size from `DATABASE_POOL_MAX`, 1 to 200; 10 when unset. */
+  readonly databasePoolMax: number;
   readonly port: number;
   readonly appOrigins: readonly string[];
   readonly appOrigin: string;
@@ -66,6 +70,7 @@ export function loadServerConfiguration(
   return {
     authProvider,
     databaseUrl,
+    databasePoolMax: databasePoolMax(environment),
     port,
     appOrigins,
     appOrigin,

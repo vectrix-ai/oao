@@ -5,8 +5,11 @@ import {
 } from "@oao/artifact-s3";
 import type { ServerType } from "@hono/node-server";
 import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 import {
   createPool,
+  createProjectWakeWaiter,
+  databasePoolMax,
   migrate,
   PostgresWakeNotifier,
   type PgPool,
@@ -43,7 +46,11 @@ import {
   type McpRemotePort,
 } from "@oao/mcp-remote";
 import { ProviderCredentialCipher } from "@oao/provider-credentials";
-import { PostgresWakeQueue, WakeWorker } from "@oao/queue-postgres";
+import {
+  PostgresWakeQueue,
+  RUNTIME_WAKE_CHANNEL,
+  WakeWorker,
+} from "@oao/queue-postgres";
 import {
   ManagedRuntimeOrchestrator,
   PostgresAgentDelegationCoordinator,
@@ -105,17 +112,34 @@ export async function startRuntimeWorker(input: {
   readonly runFileDownloadTimeoutMs?: number;
 }): Promise<RuntimeWorkerHandle> {
   const env = input.env ?? process.env;
+  const wakeConcurrency = integerSetting(
+    env,
+    "OAO_WAKE_CONCURRENCY",
+    32,
+    1,
+    256,
+  );
+  const wakePollMilliseconds = integerSetting(
+    env,
+    "OAO_WAKE_POLL_MS",
+    1_000,
+    100,
+    60_000,
+  );
+  const logPoolError = (source: string) => (error: Error) => {
+    console.error(
+      JSON.stringify({
+        level: "warn",
+        source,
+        errorType: error.name,
+        errorMessage: error.message,
+      }),
+    );
+  };
   const pool = createPool(input.databaseUrl, {
-    onIdleClientError: (error) => {
-      console.error(
-        JSON.stringify({
-          level: "warn",
-          source: "postgres-pool",
-          errorType: error.name,
-          errorMessage: error.message,
-        }),
-      );
-    },
+    max: databasePoolMax(env),
+    onIdleClientError: logPoolError("postgres-pool"),
+    onClientError: logPoolError("postgres-client"),
   });
   await migrate(pool);
   const telemetryStop = await configureVendorNeutralTelemetry({
@@ -129,8 +153,25 @@ export async function startRuntimeWorker(input: {
   const servicePrincipalId =
     (env.OAO_RUNTIME_SERVICE_PRINCIPAL_ID as PrincipalId | undefined) ??
     DEFAULT_SERVICE_PRINCIPAL;
+  const logListenerError = (source: string) => (error: unknown) => {
+    console.error(
+      JSON.stringify({
+        level: "warn",
+        source,
+        errorType: error instanceof Error ? error.name : typeof error,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  };
+  // Product-event commits wake caller-tool, approval and delegation waits,
+  // and the webhook dispatcher; each falls back to polling meanwhile.
+  const productWakes = new PostgresWakeNotifier(pool, {
+    onListenerError: logListenerError("product-event-wakes"),
+  });
+  const projectWakes = createProjectWakeWaiter(productWakes);
   const broker = new PostgresToolBroker(pool, {
     servicePrincipalId,
+    projectWakes,
     // The model only ever sees a redacted platform_tool_failed outcome, so
     // the underlying cause must land in the worker log to stay diagnosable.
     onPlatformToolError: (error, context) => {
@@ -191,7 +232,9 @@ export async function startRuntimeWorker(input: {
     ),
   });
   const skills = new PostgresSkillRegistry(pool);
-  const delegations = new PostgresAgentDelegationCoordinator(pool, queue);
+  const delegations = new PostgresAgentDelegationCoordinator(pool, queue, {
+    projectWakes,
+  });
   const mcp = credentialCipher
     ? createPostgresMcpToolExecutor({
         pool,
@@ -297,35 +340,53 @@ export async function startRuntimeWorker(input: {
         : { downloadTimeoutMs: input.runFileDownloadTimeoutMs }),
     },
   );
+  // Each process needs its own lease owner: a shared id would let one
+  // container complete or renew another container's claim.
+  const workerId = `runtime-${hostname()}-${randomUUID()}`;
+  // Enqueued wakes notify on their own channel; one LISTEN connection serves
+  // the whole wake loop, and the poll is only a fallback.
+  const runtimeWakes = new PostgresWakeNotifier(pool, {
+    channel: RUNTIME_WAKE_CHANNEL,
+    onListenerError: logListenerError("runtime-wakes"),
+  });
   const wakeWorker = new WakeWorker(
     queue,
     (job) => orchestrator.handleWake(job),
-    { workerId: `runtime-${process.pid}`, pollMilliseconds: 100 },
+    {
+      workerId,
+      concurrency: wakeConcurrency,
+      pollMilliseconds: wakePollMilliseconds,
+      subscribeToWakes: (onWake) => runtimeWakes.subscribe(onWake),
+      onError: (error, job) => {
+        console.error(
+          JSON.stringify({
+            level: "warn",
+            source: "runtime-wakes",
+            ...(job
+              ? {
+                  organizationId: job.organizationId,
+                  projectId: job.projectId,
+                  runId: job.runId,
+                  wakeKind: job.kind,
+                  attempts: job.attempts,
+                }
+              : {}),
+            errorType: error instanceof Error ? error.name : typeof error,
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
+          }),
+        );
+      },
+    },
   );
   if (input.backgroundWakes !== false) {
+    await repairReplayedAdmissions(orchestrator);
     await orchestrator.enqueueRecovery();
     wakeWorker.start();
   }
-  // Commit notifications wake the dispatcher at once; polling is the fallback.
-  const webhookWakes =
-    credentialCipher && input.eventWebhooks !== false
-      ? new PostgresWakeNotifier(pool, {
-          onListenerError: (error) => {
-            console.error(
-              JSON.stringify({
-                level: "warn",
-                source: "event-webhook-wakes",
-                errorType: error instanceof Error ? error.name : typeof error,
-                errorMessage:
-                  error instanceof Error ? error.message : String(error),
-              }),
-            );
-          },
-        })
-      : undefined;
   const webhookDispatcher =
-    credentialCipher && webhookWakes
-      ? createEventWebhookDispatcher(pool, credentialCipher, webhookWakes, env)
+    credentialCipher && input.eventWebhooks !== false
+      ? createEventWebhookDispatcher(pool, credentialCipher, productWakes, env)
       : undefined;
   webhookDispatcher?.start();
 
@@ -372,9 +433,12 @@ export async function startRuntimeWorker(input: {
       );
     disposed = true;
     ready = false;
-    await wakeWorker.stop();
+    // In-process disposal stops Flue below, so no handler may still be about
+    // to submit to it.
+    await wakeWorker.stop({ graceMilliseconds: Number.POSITIVE_INFINITY });
+    await runtimeWakes.close();
     await webhookDispatcher?.stop();
-    await webhookWakes?.close();
+    await productWakes.close();
     await projection.stop();
     await flue.stop();
     resetManagedAgentRuntime();
@@ -393,14 +457,17 @@ export async function startRuntimeWorker(input: {
       if (handoffPrepared) return "handoff_required";
       handoffPrepared = true;
       ready = false;
-      await wakeWorker.stop();
+      // Shutdown stays bounded: a handler still running after the grace
+      // period may yet submit to Flue, so Flue must not be stopped under it.
+      const handlersDrained = await wakeWorker.stop();
+      await runtimeWakes.close();
       // An interrupted delivery keeps its batch; the lease expires and another
       // worker resends it under the same webhook-id.
       await webhookDispatcher?.stop();
-      await webhookWakes?.close();
+      await productWakes.close();
       await projection.stop();
       await closeServer();
-      if (await hasActiveDispatches()) {
+      if (!handlersDrained || (await hasActiveDispatches())) {
         // Flue 2.3.0 stop() aborts active tools and durably records that abort.
         // Leave the process-owned lease for bounded startup recovery instead;
         // the signal handler exits immediately after this method returns.
@@ -475,6 +542,52 @@ function createEventWebhookDispatcher(
       );
     },
   });
+}
+
+function integerSetting(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const raw = env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < minimum || value > maximum)
+    throw new Error(`${name} must be an integer from ${minimum} to ${maximum}`);
+  return value;
+}
+
+/** One-time repair of chats a replayed admission broke; see migration 0068. */
+async function repairReplayedAdmissions(
+  orchestrator: ManagedRuntimeOrchestrator,
+): Promise<void> {
+  try {
+    const repairs = await orchestrator.repairReplayedAdmissions();
+    for (const repair of repairs)
+      console.error(
+        JSON.stringify({
+          level: repair.outcome === "repaired" ? "info" : "warn",
+          source: "runtime-incarnation-repair",
+          organizationId: repair.organizationId,
+          projectId: repair.projectId,
+          threadId: repair.threadId,
+          outcome: repair.outcome,
+          code: repair.code,
+        }),
+      );
+  } catch (error) {
+    // A failed repair leaves its threads pending for the next start.
+    console.error(
+      JSON.stringify({
+        level: "error",
+        source: "runtime-incarnation-repair",
+        errorType: error instanceof Error ? error.name : typeof error,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
 }
 
 async function main(): Promise<void> {

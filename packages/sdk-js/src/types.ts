@@ -64,6 +64,7 @@ import type {
   ConfigurationRestoreCredentialsInput,
   ConfigurationRestorePlan,
   ConfigurationRestoreResult,
+  SessionDetailSection,
 } from "@oao/contracts";
 
 export type {
@@ -132,6 +133,7 @@ export type {
   ConfigurationRestoreCredentialsInput,
   ConfigurationRestorePlan,
   ConfigurationRestoreResult,
+  SessionDetailSection,
 };
 
 export interface McpServerList {
@@ -782,8 +784,19 @@ export interface CreatedSession {
   readonly resolvedVersions?: SessionVersionResolution;
 }
 
-/** A session as `getSession` returns it. */
+/**
+ * A session as `getSession` returns it. The section fields (`runs`,
+ * `transcript`, `timeline`, `pendingWork`, `delegations`, `skills`, `debug`)
+ * are present only when requested, and always when `include` is omitted.
+ */
 export type SessionDetail = Session & {
+  readonly runs?: readonly Run[];
+  readonly transcript?: readonly Readonly<Record<string, unknown>>[];
+  readonly timeline?: readonly Readonly<Record<string, unknown>>[];
+  readonly pendingWork?: readonly Readonly<Record<string, unknown>>[];
+  readonly delegations?: readonly Readonly<Record<string, unknown>>[];
+  readonly skills?: readonly Readonly<Record<string, unknown>>[];
+  readonly debug?: Readonly<Record<string, unknown>>;
   /**
    * The agent, delegate, and Skill versions fixed when the session tree
    * started; null for sessions that started before OAO recorded them.
@@ -861,6 +874,15 @@ export interface PaginationOptions {
 
 export interface RequestOptions {
   readonly signal?: AbortSignal;
+}
+
+export interface GetSessionOptions extends RequestOptions {
+  /**
+   * The sections to return; `"none"` returns only the session header.
+   * Omitted, every section is returned. To follow a run until it settles,
+   * use `getRun`, `waitForRun`, the event stream, or webhooks instead.
+   */
+  readonly include?: readonly SessionDetailSection[] | "none";
 }
 
 export interface WriteOptions extends RequestOptions {

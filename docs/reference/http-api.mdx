@@ -54,14 +54,17 @@ const run = await oao.waitForRunSettled(context.project.id, runId, {
 `waitForRunSettled` polls `GET /projects/{projectId}/runs/{runId}` until the run
 is `completed`, `failed`, `cancelled`, or `timed_out`. It throws
 `run_wait_timeout` when the configured deadline expires; it does not cancel the
-durable run.
+durable run. Poll the run rather than `GET /sessions/{sessionId}`, which reads
+the whole session; see [Read only the parts of a session you
+need](#read-only-the-parts-of-a-session-you-need).
 
 The SDK types mirror the version-binding contract: `PublishAgentVersionInput`
 accepts `skillIds` next to `skillVersionIds`, and each `DelegateInput` names
 either `agentVersionId` or `agentId`. `createSession` returns
 `resolvedVersions`, absent only when an idempotent retry replays a response
 from an OAO release that did not record it, and `getSession` returns a
-`SessionDetail` whose `resolvedVersions` is `null` for older sessions.
+`SessionDetail` whose `resolvedVersions` is `null` for older sessions. Its
+`include` option asks for only some sections of the session.
 
 ## Browser authentication
 
@@ -982,6 +985,35 @@ price behind it, so the cost leaves it out; `unavailable` means the provider
 reported no usage. Each `debug.modelInvocations` entry records what it was charged
 in `pricingSnapshot`: its `source` (`preset_price`, `catalog`, or `none`), its
 `costByKind` when charged and, for a preset price, the `priceId` and rates.
+
+### Read only the parts of a session you need
+
+`GET /sessions/{sessionId}` returns the session header (agent, status, tools,
+usage and cost, `resolvedVersions`, and `suggestion`) and, by default, every
+section: `runs`, `transcript`, `timeline`, `pendingWork`, `delegations`,
+`skills`, and `debug`. The `include` query parameter limits the response to the
+sections it names, comma-separated, and OAO then skips the reads behind the
+other sections:
+
+```http
+GET /v1/projects/{projectId}/sessions/{sessionId}?include=runs,pendingWork
+GET /v1/projects/{projectId}/sessions/{sessionId}?include=none
+```
+
+`include=none` returns only the header. A section that is not requested is left
+out of the response, not returned empty. An empty `include` or an unknown
+section returns `400 bad_request`. Without `include` the response is the same as
+before the parameter existed, so existing clients keep working. The SDK's
+`getSession` takes the same choice as `include: ["runs", "pendingWork"]` or
+`include: "none"`.
+
+The session detail is the most expensive read in the API: `debug` alone holds
+every product event, model call, tool call, and sandbox command of the session.
+To follow a run until it settles, poll `GET /runs/{runId}` (or use
+`waitForRunSettled`), subscribe to the [project event
+stream](/reference/events), or receive [event
+webhooks](/integrations/event-webhooks), and read the session detail once
+afterwards.
 
 ### Read usage and cost
 

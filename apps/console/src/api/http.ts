@@ -2031,10 +2031,19 @@ export class HttpConsoleApi implements ConsoleApi {
     );
   };
 
-  getSession = async (id: string) =>
+  getSession = async (
+    id: string,
+    options?: Parameters<ConsoleApi["getSession"]>[1],
+  ) =>
     sessionDetail(
       await this.#projectRequest<Record<string, unknown>>(
-        `/sessions/${encodeURIComponent(id)}`,
+        `/sessions/${encodeURIComponent(id)}${
+          options?.include
+            ? `?include=${encodeURIComponent(
+                options.include.length ? options.include.join(",") : "none",
+              )}`
+            : ""
+        }`,
       ),
     );
 
@@ -2125,7 +2134,8 @@ export class HttpConsoleApi implements ConsoleApi {
       throw new Error(
         `${action.replaceAll("-", " ")} is deferred in the local MVP.`,
       );
-    const session = await this.getSession(id);
+    // Cancelling needs only the latest run, not the transcript or debug.
+    const session = await this.getSession(id, { include: ["runs"] });
     await this.#projectRequest(
       `/runs/${encodeURIComponent(session.runId)}/cancel`,
       {

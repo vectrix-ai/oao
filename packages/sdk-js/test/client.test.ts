@@ -1417,3 +1417,25 @@ test("an event webhook event types its attached message and prompt suggestion", 
   assert.equal(event.suggestion?.runId, event.aggregateId);
   assert.equal(event.message, undefined);
 });
+
+test("client asks for only the session detail sections it names", async () => {
+  const requests: Request[] = [];
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    apiKey: "oao_test_key",
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json({ id: "session-1", resolvedVersions: null });
+    },
+  });
+  await client.getSession("project-1", "session-1");
+  await client.getSession("project-1", "session-1", {
+    include: ["runs", "pendingWork"],
+  });
+  await client.getSession("project-1", "session-1", { include: "none" });
+  await client.getSession("project-1", "session-1", { include: [] });
+  assert.deepEqual(
+    requests.map((request) => new URL(request.url).search),
+    ["", "?include=runs%2CpendingWork", "?include=none", "?include=none"],
+  );
+});

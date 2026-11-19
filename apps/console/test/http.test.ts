@@ -2565,4 +2565,28 @@ describe("HTTP console adapter", () => {
     connection.close();
     await waitFor(() => expect(aborted).toBe(true));
   });
+
+  it("cancels a session's latest run after reading only its runs", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(CONTEXT))
+      .mockResolvedValue(
+        jsonResponse({
+          id: "session-1",
+          latestRunId: "run-1",
+          runs: [{ id: "run-1", state: "running" }],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    await new HttpConsoleApi().runSessionAction("session/1", "cancel");
+    const paths = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(paths).toContain(
+      `/v1/projects/${PROJECT_ID}/sessions/session%2F1?include=runs`,
+    );
+    expect(paths).toContain(`/v1/projects/${PROJECT_ID}/runs/run-1/cancel`);
+    // The refreshed session the page shows is the full detail.
+    expect(paths.at(-1)).toBe(
+      `/v1/projects/${PROJECT_ID}/sessions/session%2F1`,
+    );
+  });
 });

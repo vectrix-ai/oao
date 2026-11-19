@@ -1012,6 +1012,51 @@ export const SessionSchema = v.object({
   lastActivityAt: TimestampSchema,
 });
 
+/**
+ * Optional parts of `GET /sessions/{id}`. Without `include` the response has
+ * all of them; `include=none` returns only the session header.
+ */
+export const SESSION_DETAIL_SECTIONS = [
+  "runs",
+  "transcript",
+  "timeline",
+  "pendingWork",
+  "delegations",
+  "skills",
+  "debug",
+] as const;
+export const SessionDetailSectionSchema = v.picklist(SESSION_DETAIL_SECTIONS);
+export type SessionDetailSection = v.InferOutput<
+  typeof SessionDetailSectionSchema
+>;
+
+/**
+ * Parses an `include` query value: undefined for every section, an empty set
+ * for `none`. Throws a TypeError for an empty list or an unknown section.
+ */
+export function parseSessionDetailInclude(
+  value: string | undefined,
+): ReadonlySet<SessionDetailSection> | undefined {
+  if (value === undefined) return undefined;
+  const names = value
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+  if (names.length === 1 && names[0] === "none") return new Set();
+  if (names.length === 0)
+    throw new TypeError("include must name sections or be none");
+  const sections = new Set<SessionDetailSection>();
+  for (const name of names) {
+    const parsed = v.safeParse(SessionDetailSectionSchema, name);
+    if (!parsed.success)
+      throw new TypeError(
+        `include must be none or a comma-separated list of ${SESSION_DETAIL_SECTIONS.join(", ")}`,
+      );
+    sections.add(parsed.output);
+  }
+  return sections;
+}
+
 export const RunStateSchema = v.picklist([
   "queued",
   "running",
@@ -1565,7 +1610,7 @@ export const OAO_MCP_TOOL_CATALOG: readonly OaoMcpToolDescriptor[] = [
     name: "get_session",
     title: "Get session",
     description:
-      "Reads a session: its agent, runs, full transcript, timeline, delegations, pending work, and resolvedVersions, the exact agent, delegate, and Skill versions its tree runs. includeDebug adds model invocations, tool calls, and sandbox detail.",
+      "Reads a session: its agent, runs, full transcript, timeline, delegations, pending work, and resolvedVersions, the exact agent, delegate, and Skill versions its tree runs. includeDebug adds model invocations, tool calls, and sandbox detail. To wait for a run to finish, read get_run instead of this.",
     scopes: ["session:read"],
     readOnly: true,
   },

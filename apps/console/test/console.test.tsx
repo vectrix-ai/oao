@@ -1865,6 +1865,24 @@ describe("management console", () => {
     expect(within(skillDetail!).getByText("true")).toBeInTheDocument();
   });
 
+  it("returns only the requested session sections from the demo API", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const full = await api.getSession("session_01J5QTXE7W9M2R6C4A8K3N1P0V");
+    expect(full.events.length).toBeGreaterThan(0);
+    const header = await api.getSession("session_01J5QTXE7W9M2R6C4A8K3N1P0V", {
+      include: ["runs"],
+    });
+    expect(header.runId).toBe(full.runId);
+    expect(header.events).toEqual([]);
+    expect(header.skills).toEqual([]);
+    expect(header.delegations).toEqual([]);
+    expect(header.debug).toBeUndefined();
+    const withSkills = await api.getSession(full.id, { include: ["skills"] });
+    expect(withSkills.skills).toEqual(full.skills);
+    const cancelled = await api.runSessionAction(full.id, "cancel");
+    expect(cancelled.status).toBe("cancelled");
+  });
+
   it("decodes a JSON-string tool response into readable structured data", async () => {
     const user = userEvent.setup();
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });

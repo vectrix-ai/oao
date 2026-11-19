@@ -131,7 +131,30 @@ OTel SDK -> optional Collector -> configured OTLP backend
     holds, and only while the run is unsettled. A run an agent started, and
     any run it delegates to, keeps only read scopes: it cannot change OAO or
     start or message further runs.
-20. A prompt suggestion is part of the final reply: an agent version that
+20. Runtime wakes are durable PostgreSQL jobs claimed at least once. An
+    enqueued wake that is due notifies the runtime workers on
+    `oao_runtime_wakes` when it commits; each worker holds one LISTEN
+    connection for it and polls only as a fallback (once a second by default).
+    A worker runs up to `OAO_WAKE_CONCURRENCY` jobs at once, each under its own
+    lease that a heartbeat renews every third of the lease while the handler
+    runs. A job whose lease was lost is neither completed nor retried by that
+    handler; a completion that comes after the lease expired still counts while
+    owner and fence match, and a finished job is never turned into a retry.
+    Every worker process has its own lease owner id. A wake that runs again
+    after its run settled is a no-op: admission returns for a terminal run and
+    for a settled dispatch without touching the thread. Chats that an earlier
+    release corrupted this way are repaired once: migration 0068 records the
+    threads whose state matches that signature, and the worker repairs each
+    after confirming Flue's stored identity and that none of its submissions
+    is still running.
+21. No run polls PostgreSQL on a fixed interval while it works. The runtime
+    projection settles a run from Flue's in-process settlement observation;
+    a safety net probes Flue's submission status once when it starts tracking
+    and then every 15 seconds. Waiting caller tool calls, approvals, and
+    delegated child runs re-check after a product-event wake of their project,
+    at most every 250 ms and at least every 5 seconds; pending approvals of
+    waiting projects expire on one timer per worker process.
+22. A prompt suggestion is part of the final reply: an agent version that
     asks for one instructs the model to end its reply with a marked line.
     Settlement cuts that line out of the reply, and stores its text on the
     run and appends `run.suggestion_created` in the same transaction that
@@ -160,7 +183,7 @@ OTel SDK -> optional Collector -> configured OTLP backend
 ### Runtime
 
 - `@oao/runtime-flue`: generic compiled `ManagedAgent`, pinned `@flue/postgres`, verified PostgreSQL Skill registry, progressive Flue Skill activation, durable child-session coordinator, and history projection.
-- `@oao/queue-postgres`: PostgreSQL wake jobs and platform dispatch leases.
+- `@oao/queue-postgres`: PostgreSQL wake jobs, per-job lease renewal, and the concurrent, push-driven wake worker.
 - `@oao/event-webhooks`: outbound event webhook delivery: Standard Webhooks signing, SSRF-guarded HTTPS transport, fenced PostgreSQL cursor store, and the runtime-worker dispatcher.
 - `@oao/tool-broker`: caller requests/claims/results and single-approver gates.
 - `@oao/models-openrouter`: live OpenRouter/OpenAI/Anthropic/xAI/Bedrock catalog projections, provider-neutral routing and generation-setting translation, project-scoped preset activation, and provider construction. OpenAI and Anthropic remain constrained by pinned runtime metadata; xAI dynamically admits text-output language models behind its OpenAI-compatible API; Bedrock uses the pinned Pi model list and the Converse Streaming API with a region-bound Bedrock API key. The package name is retained while the adapter seam expands beyond OpenRouter.
@@ -223,7 +246,13 @@ deployment-policy layer with explicit verification and diagnostics.
 
 The MVP publication contract accepts a single platform turn cap of 32 and rejects any other per-agent value. Runtime enforces that cap before provider calls. Each immutable agent snapshot also carries a durable product deadline; expiry aborts the Flue submission and settles the product run as `timed_out`.
 
-Flue 2.3.0's in-process `stop()` aborts active tool executions and records that abort in conversation history. OAO therefore separates full idle-process disposal from process handoff: SIGTERM stops new wake intake, projections, and HTTP, preserves any live Flue lease without calling the aborting stop path, and exits so recovery can reclaim that same submission after its 30-second lease expires. Reclaiming also depends on Flue's 15-second periodic scan and elapsed-time gate; lease expiry does not guarantee immediate recovery. In-process hot restart with an active submission is intentionally unsupported.
+A database error never ends a process: connections that fail while idle in
+the pool or while a caller holds them are logged and replaced, and a
+transaction whose `ROLLBACK` fails destroys its connection instead of
+returning it to the pool. `DATABASE_POOL_MAX` sizes the pool of the API and
+the worker.
+
+Flue 2.3.0's in-process `stop()` aborts active tool executions and records that abort in conversation history. OAO therefore separates full idle-process disposal from process handoff: SIGTERM stops new wake intake, projections, and HTTP, waits up to 5 seconds for running wake handlers, preserves any live Flue lease, or any handler still running after that wait, without calling the aborting stop path, and exits so recovery can reclaim that same submission after its 30-second lease expires. Reclaiming also depends on Flue's 15-second periodic scan and elapsed-time gate; lease expiry does not guarantee immediate recovery. In-process hot restart with an active submission is intentionally unsupported.
 
 ## Implementation order
 

@@ -167,6 +167,11 @@ test(
           qual: "true",
         },
         {
+          tablename: "runtime_incarnation_repairs",
+          cmd: "SELECT",
+          qual: "true",
+        },
+        {
           tablename: "runtime_wake_jobs",
           cmd: "ALL",
           qual: "true",
@@ -204,7 +209,9 @@ test(
               'claim_runtime_wakes',
               'complete_runtime_wake',
               'find_runtime_dispatch',
+              'list_runtime_incarnation_repairs',
               'list_runtime_recovery_heads',
+              'renew_runtime_wake',
               'retry_runtime_wake',
               'runtime_has_active_dispatches'
             )
@@ -240,9 +247,23 @@ test(
           public_can_execute: false,
         },
         {
+          proname: "list_runtime_incarnation_repairs",
+          owner: "oao_recovery",
+          app_can_execute: false,
+          runtime_can_execute: true,
+          public_can_execute: false,
+        },
+        {
           proname: "list_runtime_recovery_heads",
           owner: "oao_recovery",
           app_can_execute: true,
+          runtime_can_execute: true,
+          public_can_execute: false,
+        },
+        {
+          proname: "renew_runtime_wake",
+          owner: "oao_recovery",
+          app_can_execute: false,
           runtime_can_execute: true,
           public_can_execute: false,
         },

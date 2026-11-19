@@ -3390,6 +3390,42 @@ test(
           detailBody.debug.workspaceBackups[0]?.files,
           workspaceFiles,
         );
+        const sections = [
+          "runs",
+          "transcript",
+          "timeline",
+          "pendingWork",
+          "delegations",
+          "skills",
+          "debug",
+        ];
+        for (const section of sections)
+          assert.ok(section in detailBody, `${section} is returned by default`);
+        const sectionsOf = async (include: string) => {
+          const response = await app.request(
+            `${projectPath}/sessions/${sessionId}?include=${include}`,
+          );
+          assert.equal(response.status, 200, await response.clone().text());
+          const body = (await response.json()) as Record<string, unknown>;
+          assert.equal(body.id, sessionId);
+          assert.ok("resolvedVersions" in body && "suggestion" in body);
+          return { body, present: sections.filter((name) => name in body) };
+        };
+        assert.deepEqual((await sectionsOf("none")).present, []);
+        assert.deepEqual((await sectionsOf("runs")).present, ["runs"]);
+        const partial = await sectionsOf("transcript,debug");
+        assert.deepEqual(partial.present, ["transcript", "debug"]);
+        assert.deepEqual(
+          (partial.body.debug as typeof detailBody.debug).workspaceBackups[0]
+            ?.files,
+          workspaceFiles,
+        );
+        for (const invalid of ["", "runs,secrets", "none,runs"]) {
+          const rejected = await app.request(
+            `${projectPath}/sessions/${sessionId}?include=${invalid}`,
+          );
+          assert.equal(rejected.status, 400, invalid);
+        }
         const fileList = await app.request(
           `${projectPath}/sessions/${sessionId}/files`,
         );
