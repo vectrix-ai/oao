@@ -231,6 +231,30 @@ test("stop waits a bounded time for running handlers", async () => {
   worker.start();
   await until(() => started);
   const stopping = Date.now();
-  await worker.stop();
+  // A handler still running is reported, so shutdown can hand off.
+  assert.equal(await worker.stop(), false);
   assert.ok(Date.now() - stopping < 1_000);
+});
+
+test("stop reports drained handlers and can wait for all of them", async () => {
+  const { queue, calls } = fakeQueue([job(1)]);
+  let started = false;
+  let finish: () => void = () => undefined;
+  const worker = new WakeWorker(
+    queue,
+    async () => {
+      started = true;
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+    },
+    { workerId: "w", pollMilliseconds: 60_000, stopGraceMilliseconds: 10 },
+  );
+  worker.start();
+  await until(() => started);
+  const stopping = worker.stop({ graceMilliseconds: Number.POSITIVE_INFINITY });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  finish();
+  assert.equal(await stopping, true);
+  assert.deepEqual(calls.completed, ["job-1"]);
 });

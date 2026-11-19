@@ -222,23 +222,34 @@ export class WakeWorker {
     this.#running = this.loop();
   }
 
-  /** Stops claiming and waits briefly for running handlers; leases cover the rest. */
-  async stop(): Promise<void> {
+  /**
+   * Stops claiming and waits for running handlers, by default for
+   * `stopGraceMilliseconds`; leases cover the rest. Pass
+   * `graceMilliseconds: Infinity` to wait for every handler. Resolves true
+   * when no handler is still running, so a caller knows whether a handler
+   * may still submit work after this returns.
+   */
+  async stop(options: { graceMilliseconds?: number } = {}): Promise<boolean> {
     this.#abort.abort();
     this.#signal();
     await this.#running;
-    if (this.#active.size === 0) return;
+    if (this.#active.size === 0) return true;
+    const grace =
+      options.graceMilliseconds ?? this.options.stopGraceMilliseconds ?? 5_000;
+    const handlers = Promise.allSettled([...this.#active]);
+    if (grace === Number.POSITIVE_INFINITY) {
+      await handlers;
+      return true;
+    }
     let timer: NodeJS.Timeout | undefined;
     await Promise.race([
-      Promise.allSettled([...this.#active]),
+      handlers,
       new Promise<void>((resolve) => {
-        timer = setTimeout(
-          resolve,
-          this.options.stopGraceMilliseconds ?? 5_000,
-        );
+        timer = setTimeout(resolve, grace);
       }),
     ]);
     clearTimeout(timer);
+    return this.#active.size === 0;
   }
 
   #signal(): void {

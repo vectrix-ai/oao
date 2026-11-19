@@ -433,7 +433,9 @@ export async function startRuntimeWorker(input: {
       );
     disposed = true;
     ready = false;
-    await wakeWorker.stop();
+    // In-process disposal stops Flue below, so no handler may still be about
+    // to submit to it.
+    await wakeWorker.stop({ graceMilliseconds: Number.POSITIVE_INFINITY });
     await runtimeWakes.close();
     await webhookDispatcher?.stop();
     await productWakes.close();
@@ -455,7 +457,9 @@ export async function startRuntimeWorker(input: {
       if (handoffPrepared) return "handoff_required";
       handoffPrepared = true;
       ready = false;
-      await wakeWorker.stop();
+      // Shutdown stays bounded: a handler still running after the grace
+      // period may yet submit to Flue, so Flue must not be stopped under it.
+      const handlersDrained = await wakeWorker.stop();
       await runtimeWakes.close();
       // An interrupted delivery keeps its batch; the lease expires and another
       // worker resends it under the same webhook-id.
@@ -463,7 +467,7 @@ export async function startRuntimeWorker(input: {
       await productWakes.close();
       await projection.stop();
       await closeServer();
-      if (await hasActiveDispatches()) {
+      if (!handlersDrained || (await hasActiveDispatches())) {
         // Flue 2.3.0 stop() aborts active tools and durably records that abort.
         // Leave the process-owned lease for bounded startup recovery instead;
         // the signal handler exits immediately after this method returns.
