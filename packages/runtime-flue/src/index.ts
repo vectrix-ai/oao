@@ -82,6 +82,7 @@ import type {
 import {
   abortableDelay,
   findRunModelPresetPrice,
+  isTransientDatabaseError,
   sleepingProjectWakeWatch,
   withTenantTransaction,
 } from "@oao/db-postgres";
@@ -5385,17 +5386,27 @@ export class RuntimeProjection {
   private async watchAdmission(
     input: TenantContext & { readonly runId: RunId },
   ): Promise<void> {
-    const result = await withTenantTransaction(
-      this.pool,
-      input,
-      (transaction) =>
-        transaction.query<DispatchRow>(
-          `SELECT * FROM oao.runtime_dispatches WHERE organization_id=$1
-           AND project_id=$2 AND run_id=$3 AND flue_submission_id IS NOT NULL`,
-          [input.organizationId, input.projectId, input.runId],
-        ),
-    );
-    const runtimeDispatch = result.rows[0];
+    let runtimeDispatch: DispatchRow | undefined;
+    for (;;) {
+      try {
+        const result = await withTenantTransaction(
+          this.pool,
+          input,
+          (transaction) =>
+            transaction.query<DispatchRow>(
+              `SELECT * FROM oao.runtime_dispatches WHERE organization_id=$1
+               AND project_id=$2 AND run_id=$3 AND flue_submission_id IS NOT NULL`,
+              [input.organizationId, input.projectId, input.runId],
+            ),
+        );
+        runtimeDispatch = result.rows[0];
+        break;
+      } catch (error) {
+        // A database blip must not drop the only safety net for this run.
+        if (!isTransientDatabaseError(error)) throw error;
+        await abortableDelay(1_000, this.#abort.signal);
+      }
+    }
     if (
       !runtimeDispatch?.flue_submission_id ||
       runtimeDispatch.state === "settled"
@@ -5456,22 +5467,30 @@ export class RuntimeProjection {
   private async readAndSettle(runtimeDispatch: DispatchRow): Promise<void> {
     const submissionId = runtimeDispatch.flue_submission_id;
     if (!submissionId) return;
+    let text: string;
     try {
       const receipt = await this.receiptFor(runtimeDispatch);
       const reply = await init(ManagedAgent, {
         id: runtimeDispatch.flue_conversation_id,
         uid: receipt.uid,
       }).read(receipt, { signal: this.#abort.signal });
-      await this.settle(runtimeDispatch, "completed", submissionId, reply.text);
+      text = reply.text;
     } catch (error) {
       if (this.#abort.signal.aborted) return;
-      const outcome = error instanceof AgentRunError ? error.outcome : "failed";
       if (error instanceof FlueIncarnationCorruptionError) {
         await this.recordCorruption(runtimeDispatch);
         return;
       }
+      // A database blip is not the run's outcome: the watcher reads again at
+      // its next probe instead of recording a successful run as failed.
+      if (isTransientDatabaseError(error)) throw error;
+      const outcome = error instanceof AgentRunError ? error.outcome : "failed";
       await this.settle(runtimeDispatch, outcome, submissionId);
+      return;
     }
+    // Outside the read's error handling: a failed write is retried at the next
+    // probe and never turns into a failed settlement.
+    await this.settle(runtimeDispatch, "completed", submissionId, text);
   }
 
   private async receiptFor(

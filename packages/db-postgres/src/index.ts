@@ -823,3 +823,5 @@ export {
   type ProjectWakeWaiterOptions,
   type ProjectWakeWatch,
 } from "./project-wakes.js";
+
+export { isTransientDatabaseError } from "./transient-errors.js";
