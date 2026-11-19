@@ -61,6 +61,9 @@ function mapWake(row: RuntimeWakeRow): RuntimeWakeJob {
   };
 }
 
+/** The channel `oao.enqueue_runtime_wake` notifies when a wake is due. */
+export const RUNTIME_WAKE_CHANNEL = "oao_runtime_wakes";
+
 export class PostgresWakeQueue {
   constructor(private readonly pool: PgPool) {}
 
@@ -119,6 +122,29 @@ export class PostgresWakeQueue {
     ]);
   }
 
+  /**
+   * Extends a claimed job's lease. False means this worker no longer owns the
+   * job: it was re-claimed after the lease expired, or already finished.
+   */
+  async renew(
+    workerId: string,
+    job: RuntimeWakeJob,
+    leaseMilliseconds: number,
+  ): Promise<boolean> {
+    const result = await this.pool.query<{ renewed: boolean }>(
+      "SELECT oao.renew_runtime_wake($1,$2,$3,$4,$5,($6 || ' milliseconds')::interval) AS renewed",
+      [
+        job.organizationId,
+        job.projectId,
+        job.id,
+        workerId,
+        job.fence.toString(),
+        leaseMilliseconds,
+      ],
+    );
+    return result.rows[0]?.renewed === true;
+  }
+
   async retry(
     workerId: string,
     job: RuntimeWakeJob,
@@ -147,18 +173,46 @@ export class PostgresWakeQueue {
 
 export interface WakeWorkerOptions {
   readonly workerId: string;
-  readonly pollMilliseconds?: number;
+  /** Jobs handled at the same time. Defaults to 32. */
+  readonly concurrency?: number;
+  /** Lease per job, renewed every third of it while the handler runs. Defaults to 30 seconds. */
   readonly leaseMilliseconds?: number;
-  readonly batchSize?: number;
+  /** Fallback poll when no wake notification arrives. Defaults to 1 second. */
+  readonly pollMilliseconds?: number;
   readonly maxAttempts?: number;
+  /** How long `stop` waits for running handlers. Defaults to 5 seconds. */
+  readonly stopGraceMilliseconds?: number;
+  /** Registers for enqueue notifications; polling continues regardless. */
+  readonly subscribeToWakes?: (
+    onWake: () => void,
+  ) => Promise<() => Promise<void>>;
+  /** Receives queue errors. The loop logs them and keeps going. */
+  readonly onError?: (error: unknown, job?: RuntimeWakeJob) => void;
 }
 
+const MAX_CLAIM = 100;
+const CLAIM_RETRY_MILLISECONDS = 1_000;
+
+/**
+ * Runs claimed runtime wakes concurrently. Each job keeps its own lease alive
+ * while its handler runs, so a slow handler is never replayed by a second
+ * claim, and a job whose lease was lost is neither completed nor retried here.
+ */
 export class WakeWorker {
   readonly #abort = new AbortController();
+  readonly #active = new Set<Promise<void>>();
   #running: Promise<void> | undefined;
+  /** A wake arrived since the last claim. */
+  #pending = false;
+  /** The last claim was capped by free slots, so more work may be due. */
+  #backlog = false;
+  #wake: (() => void) | undefined;
 
   constructor(
-    private readonly queue: PostgresWakeQueue,
+    private readonly queue: Pick<
+      PostgresWakeQueue,
+      "claim" | "complete" | "retry" | "renew"
+    >,
     private readonly handler: (job: RuntimeWakeJob) => Promise<void>,
     private readonly options: WakeWorkerOptions,
   ) {}
@@ -168,53 +222,181 @@ export class WakeWorker {
     this.#running = this.loop();
   }
 
+  /** Stops claiming and waits briefly for running handlers; leases cover the rest. */
   async stop(): Promise<void> {
     this.#abort.abort();
+    this.#signal();
     await this.#running;
+    if (this.#active.size === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      Promise.allSettled([...this.#active]),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(
+          resolve,
+          this.options.stopGraceMilliseconds ?? 5_000,
+        );
+      }),
+    ]);
+    clearTimeout(timer);
+  }
+
+  #signal(): void {
+    this.#pending = true;
+    this.#wake?.();
+  }
+
+  #report(error: unknown, job?: RuntimeWakeJob): void {
+    try {
+      this.options.onError?.(error, job);
+    } catch {
+      // Reporting must never end the loop.
+    }
   }
 
   private async loop(): Promise<void> {
     const signal = this.#abort.signal;
-    while (!signal.aborted) {
-      const jobs = await this.queue.claim(this.options.workerId, {
-        limit: this.options.batchSize ?? 10,
-        leaseMilliseconds: this.options.leaseMilliseconds ?? 15_000,
+    const unsubscribe = await Promise.resolve()
+      .then(() => this.options.subscribeToWakes?.(() => this.#signal()))
+      .catch((error: unknown) => {
+        this.#report(error);
+        return undefined;
       });
-      for (const job of jobs) {
-        if (signal.aborted) return;
-        try {
-          await this.handler(job);
-          await this.queue.complete(this.options.workerId, job);
-        } catch {
-          const dead = job.attempts >= (this.options.maxAttempts ?? 10);
-          await this.queue.retry(this.options.workerId, job, {
-            delayMilliseconds: Math.min(
-              30_000,
-              250 * 2 ** Math.min(job.attempts, 7),
-            ),
-            safeError: {
-              code: dead ? "wake_attempts_exhausted" : "wake_retry_scheduled",
-              message: dead
-                ? "Runtime wake attempts exhausted"
-                : "Runtime wake will be retried",
-            },
-            dead,
-          });
+    const concurrency = Math.max(1, this.options.concurrency ?? 32);
+    const leaseMilliseconds = this.options.leaseMilliseconds ?? 30_000;
+    try {
+      while (!signal.aborted) {
+        const free = concurrency - this.#active.size;
+        let failed = false;
+        if (free === 0) {
+          // Due work may be waiting; claim again as soon as a slot frees up.
+          if (this.#pending) this.#backlog = true;
+        } else {
+          this.#pending = false;
+          const limit = Math.min(MAX_CLAIM, free);
+          try {
+            const jobs = await this.queue.claim(this.options.workerId, {
+              limit,
+              leaseMilliseconds,
+            });
+            this.#backlog = jobs.length === limit;
+            for (const job of jobs) this.#launch(job, leaseMilliseconds);
+          } catch (error) {
+            this.#report(error);
+            failed = true;
+          }
         }
+        if (signal.aborted) break;
+        const idleSlots = concurrency - this.#active.size;
+        if (!failed && idleSlots > 0 && (this.#backlog || this.#pending))
+          continue;
+        await this.#idle(
+          failed
+            ? CLAIM_RETRY_MILLISECONDS
+            : (this.options.pollMilliseconds ?? 1_000),
+          failed,
+        );
       }
-      if (jobs.length === 0) {
-        await new Promise<void>((resolve) => {
-          const onAbort = () => {
-            clearTimeout(timer);
-            resolve();
-          };
-          const timer = setTimeout(() => {
-            signal.removeEventListener("abort", onAbort);
-            resolve();
-          }, this.options.pollMilliseconds ?? 250);
-          signal.addEventListener("abort", onAbort, { once: true });
+    } finally {
+      await Promise.resolve(unsubscribe?.()).catch(() => undefined);
+    }
+  }
+
+  /** Waits for a wake, a finished job, the timeout or stop. */
+  async #idle(milliseconds: number, ignoreWakes: boolean): Promise<void> {
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.#wake = undefined;
+        resolve();
+      };
+      const timer = setTimeout(done, milliseconds);
+      // After a claim error only stop ends the backoff early.
+      this.#wake = ignoreWakes
+        ? () => {
+            if (this.#abort.signal.aborted) done();
+          }
+        : done;
+      if (this.#abort.signal.aborted) done();
+    });
+  }
+
+  #launch(job: RuntimeWakeJob, leaseMilliseconds: number): void {
+    const running = this.#run(job, leaseMilliseconds).finally(() => {
+      this.#active.delete(running);
+      // A freed slot only matters when due work was left unclaimed.
+      if (this.#backlog || this.#pending) this.#wake?.();
+    });
+    this.#active.add(running);
+  }
+
+  async #run(job: RuntimeWakeJob, leaseMilliseconds: number): Promise<void> {
+    const workerId = this.options.workerId;
+    let lost = false;
+    let renewing: Promise<void> = Promise.resolve();
+    const heartbeat = setInterval(
+      () => {
+        renewing = renewing.then(async () => {
+          if (lost) return;
+          try {
+            if (!(await this.queue.renew(workerId, job, leaseMilliseconds)))
+              lost = true;
+          } catch (error) {
+            // A transient error keeps the current lease until the next beat.
+            this.#report(error, job);
+          }
         });
+      },
+      Math.max(1, Math.floor(leaseMilliseconds / 3)),
+    );
+    // A handler still running after stop must not keep the process alive.
+    heartbeat.unref();
+    let failure: unknown;
+    let failed = false;
+    try {
+      await this.handler(job);
+    } catch (error) {
+      failed = true;
+      failure = error;
+    } finally {
+      clearInterval(heartbeat);
+      await renewing;
+    }
+    if (lost) {
+      this.#report(
+        new Error("Runtime wake lease was lost while its handler ran"),
+        job,
+      );
+      return;
+    }
+    if (!failed) {
+      try {
+        await this.queue.complete(workerId, job);
+      } catch (error) {
+        // Never turn a finished job into a retry: running it again would
+        // repeat work that already succeeded.
+        this.#report(error, job);
       }
+      return;
+    }
+    this.#report(failure, job);
+    const dead = job.attempts >= (this.options.maxAttempts ?? 10);
+    try {
+      await this.queue.retry(workerId, job, {
+        delayMilliseconds: Math.min(
+          30_000,
+          250 * 2 ** Math.min(job.attempts, 7),
+        ),
+        safeError: {
+          code: dead ? "wake_attempts_exhausted" : "wake_retry_scheduled",
+          message: dead
+            ? "Runtime wake attempts exhausted"
+            : "Runtime wake will be retried",
+        },
+        dead,
+      });
+    } catch (error) {
+      this.#report(error, job);
     }
   }
 }

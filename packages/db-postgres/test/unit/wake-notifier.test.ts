@@ -211,3 +211,32 @@ test("a listener lost during a slow startup still reconnects", async () => {
   await waitFor(() => clients[1]?.listening === true, "replacement listener");
   await notifier.close();
 });
+
+test("a notifier on another channel listens there and wakes unscoped subscribers", async () => {
+  const clients: FakeListenerClient[] = [];
+  const notifier = new PostgresWakeNotifier(unusedPool, {
+    channel: "oao_runtime_wakes",
+    createListenerClient: () => {
+      const client = new FakeListenerClient();
+      clients.push(client);
+      return client as unknown as pg.Client;
+    },
+  });
+  let wakes = 0;
+  const unsubscribe = await notifier.subscribe(() => {
+    wakes += 1;
+  });
+  await waitFor(
+    () => clients[0]?.queries.includes("LISTEN oao_runtime_wakes") === true,
+    "the runtime wake listener",
+  );
+  clients[0]?.notify("", "oao_runtime_wakes");
+  clients[0]?.notify("", "oao_product_events");
+  assert.equal(wakes, 1);
+  await unsubscribe();
+  await notifier.close();
+  assert.throws(
+    () => new PostgresWakeNotifier(unusedPool, { channel: "bad; DROP" }),
+    /lowercase identifier/u,
+  );
+});

@@ -74,11 +74,15 @@ import {
 import type {
   PgClient,
   PgPool,
+  ProjectWakeWaiter,
+  ProjectWakeWatch,
   Queryable,
   TenantContext,
 } from "@oao/db-postgres";
 import {
+  abortableDelay,
   findRunModelPresetPrice,
+  sleepingProjectWakeWatch,
   withTenantTransaction,
 } from "@oao/db-postgres";
 import type { ProviderCredentialCipher } from "@oao/provider-credentials";
@@ -2399,6 +2403,7 @@ export function createFluePostgresAdapter(pool: PgPool) {
     query: async (text, params) => (await pool.query(text, params)).rows,
     transaction: async (callback) => {
       const client = await pool.connect();
+      let broken = false;
       try {
         await client.query("BEGIN");
         const result = await callback({
@@ -2408,10 +2413,13 @@ export function createFluePostgresAdapter(pool: PgPool) {
         await client.query("COMMIT");
         return result;
       } catch (error) {
-        await client.query("ROLLBACK").catch(() => undefined);
+        // A connection whose ROLLBACK fails is destroyed, not reused.
+        await client.query("ROLLBACK").catch(() => {
+          broken = true;
+        });
         throw error;
       } finally {
-        client.release();
+        client.release(broken);
       }
     },
     close: () => undefined,
@@ -2476,6 +2484,14 @@ interface ThreadInstanceRow {
 }
 
 class FlueIncarnationCorruptionError extends Error {}
+
+/** What the one-time replayed-admission repair did with one thread. */
+export interface IncarnationRepairResult extends TenantContext {
+  readonly threadId: ThreadId;
+  /** `pending` waits for the thread's running submission to settle. */
+  readonly outcome: "repaired" | "skipped" | "pending";
+  readonly code: string;
+}
 
 /** Only permanent, locally verified Skill errors use this safe public failure. */
 export class SkillPackageUnavailableError extends Error {
@@ -2808,6 +2824,13 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
   constructor(
     private readonly pool: PgPool,
     private readonly queue: PostgresWakeQueue,
+    private readonly options: {
+      /**
+       * Wakes a parent when its project commits a product event, such as the
+       * child run settling. Without it the parent re-checks every 250 ms.
+       */
+      readonly projectWakes?: ProjectWakeWaiter;
+    } = {},
   ) {}
 
   async delegate(
@@ -3403,23 +3426,30 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
     readonly childRunId: string;
     readonly signal?: AbortSignal;
   }): Promise<AgentDelegationResult> {
-    for (;;) {
-      if (input.signal?.aborted)
-        throw input.signal.reason ?? new Error("Delegation wait was aborted");
-      const result = await withTenantTransaction(
-        this.pool,
-        {
-          organizationId: input.organizationId as OrganizationId,
-          projectId: input.projectId as ProjectId,
-        },
-        (transaction) =>
-          transaction.query<{
-            state: AgentDelegationResult["status"];
-            response: string | null;
-          }>(
-            // A child that paused for approval holds its reply in several
-            // assistant messages; the parent receives all of them in order.
-            `SELECT run.state::text AS state,
+    const tenant = {
+      organizationId: input.organizationId as OrganizationId,
+      projectId: input.projectId as ProjectId,
+    };
+    // Subscribed before the first read, so a settlement committed in between
+    // still wakes this wait. The child's settlement appends a product event.
+    const wakes: ProjectWakeWatch = this.options.projectWakes
+      ? await this.options.projectWakes.watch(tenant)
+      : sleepingProjectWakeWatch(abortableDelay, 250);
+    try {
+      for (;;) {
+        if (input.signal?.aborted)
+          throw input.signal.reason ?? new Error("Delegation wait was aborted");
+        const result = await withTenantTransaction(
+          this.pool,
+          tenant,
+          (transaction) =>
+            transaction.query<{
+              state: AgentDelegationResult["status"];
+              response: string | null;
+            }>(
+              // A child that paused for approval holds its reply in several
+              // assistant messages; the parent receives all of them in order.
+              `SELECT run.state::text AS state,
                     (SELECT string_agg(message.redacted_content, E'\\n\\n'
                               ORDER BY message.created_at,message.id)
                        FROM oao.messages message
@@ -3428,22 +3458,15 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
                         AND message.run_id=run.id AND message.role='assistant') AS response
                FROM oao.runs run
               WHERE run.organization_id=$1 AND run.project_id=$2 AND run.id=$3`,
-            [input.organizationId, input.projectId, input.childRunId],
-          ),
-      );
-      const row = result.rows[0];
-      if (!row) throw new Error("Delegated child run disappeared");
-      if (TERMINAL_CHILD_STATES.has(row.state)) {
-        await withTenantTransaction(
-          this.pool,
-          {
-            organizationId: input.organizationId as OrganizationId,
-            projectId: input.projectId as ProjectId,
-          },
-          (transaction) =>
+              [input.organizationId, input.projectId, input.childRunId],
+            ),
+        );
+        const row = result.rows[0];
+        if (!row) throw new Error("Delegated child run disappeared");
+        if (TERMINAL_CHILD_STATES.has(row.state)) {
+          await withTenantTransaction(this.pool, tenant, (transaction) =>
             appendEventOnce(transaction, {
-              organizationId: input.organizationId as OrganizationId,
-              projectId: input.projectId as ProjectId,
+              ...tenant,
               id: eventUuid(`event:${input.childRunId}:delegation-settled`),
               aggregateType: "delegation",
               aggregateId: input.delegationId,
@@ -3453,28 +3476,23 @@ export class PostgresAgentDelegationCoordinator implements AgentDelegationPort {
                   : "delegation.failed",
               payload: { childRunId: input.childRunId, state: row.state },
             }),
-        );
-        return {
-          delegationId: input.delegationId,
-          childSessionId: input.childSessionId,
-          childRunId: input.childRunId,
-          status: row.state,
-          response: row.response ?? "",
-        };
-      }
-      await new Promise<void>((resolve, reject) => {
-        const onAbort = () => {
-          clearTimeout(timer);
-          reject(
-            input.signal?.reason ?? new Error("Delegation wait was aborted"),
           );
-        };
-        const timer = setTimeout(() => {
-          input.signal?.removeEventListener("abort", onAbort);
-          resolve();
-        }, 250);
-        input.signal?.addEventListener("abort", onAbort, { once: true });
-      });
+          return {
+            delegationId: input.delegationId,
+            childSessionId: input.childSessionId,
+            childRunId: input.childRunId,
+            status: row.state,
+            response: row.response ?? "",
+          };
+        }
+        await wakes.next(input.signal).catch(() => {
+          throw (
+            input.signal?.reason ?? new Error("Delegation wait was aborted")
+          );
+        });
+      }
+    } finally {
+      await wakes.close();
     }
   }
 }
@@ -3551,8 +3569,201 @@ export class ManagedRuntimeOrchestrator {
     return heads.rowCount ?? 0;
   }
 
+  /**
+   * Repairs, once, the chats that a replayed admission broke before admission
+   * became idempotent. Migration 0068 recorded the candidates whose database
+   * state matches that signature; each is repaired here only when Flue still
+   * stores the thread's bound conversation identity, nothing on the thread is
+   * still running, and the candidate is still corrupt. A candidate with a
+   * running dispatch stays pending for the next start; any other mismatch is
+   * skipped and the thread stays corrupt.
+   */
+  async repairReplayedAdmissions(): Promise<
+    readonly IncarnationRepairResult[]
+  > {
+    const pending = await this.pool.query<{
+      organization_id: OrganizationId;
+      project_id: ProjectId;
+      thread_id: ThreadId;
+    }>("SELECT * FROM oao.list_runtime_incarnation_repairs()");
+    const results: IncarnationRepairResult[] = [];
+    for (const row of pending.rows) {
+      const candidate = {
+        organizationId: row.organization_id,
+        projectId: row.project_id,
+        threadId: row.thread_id,
+      };
+      try {
+        results.push(await this.repairReplayedAdmission(candidate));
+      } catch {
+        // One thread's failure leaves it pending for the next start.
+        results.push({ ...candidate, outcome: "pending", code: "error" });
+      }
+    }
+    return results;
+  }
+
+  private async repairReplayedAdmission(
+    candidate: TenantContext & { readonly threadId: ThreadId },
+  ): Promise<IncarnationRepairResult> {
+    const before = await withTenantTransaction(
+      this.pool,
+      candidate,
+      (transaction) =>
+        transaction.query<ThreadInstanceRow>(
+          `SELECT * FROM oao.runtime_thread_instances
+           WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3`,
+          [candidate.organizationId, candidate.projectId, candidate.threadId],
+        ),
+    );
+    const boundUid = before.rows[0]?.flue_instance_uid ?? undefined;
+    const flueUid =
+      before.rows[0] && boundUid
+        ? (
+            await getAgentInstance(
+              ManagedAgent,
+              before.rows[0].flue_instance_id,
+            )
+          )?.uid
+        : undefined;
+    return withTenantTransaction(this.pool, candidate, async (transaction) => {
+      const tenantThread = [
+        candidate.organizationId,
+        candidate.projectId,
+        candidate.threadId,
+      ];
+      const result = (
+        outcome: IncarnationRepairResult["outcome"],
+        code: string,
+      ): IncarnationRepairResult => ({ ...candidate, outcome, code });
+      const resolve = async (
+        outcome: "repaired" | "skipped",
+        code: string,
+      ): Promise<IncarnationRepairResult> => {
+        await transaction.query(
+          `UPDATE oao.runtime_incarnation_repairs
+              SET state=$4,outcome_code=$5,resolved_at=clock_timestamp()
+            WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3
+              AND state='pending'`,
+          [...tenantThread, outcome, code],
+        );
+        return result(outcome, code);
+      };
+      const repair = await transaction.query<{
+        affected_run_id: RunId;
+        state: string;
+      }>(
+        `SELECT affected_run_id,state FROM oao.runtime_incarnation_repairs
+          WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3 FOR UPDATE`,
+        tenantThread,
+      );
+      const affectedRunId = repair.rows[0]?.affected_run_id;
+      if (!affectedRunId || repair.rows[0]?.state !== "pending")
+        return result("skipped", "not_pending");
+      const instance = (
+        await transaction.query<
+          ThreadInstanceRow & { safe_error: { code?: unknown } | null }
+        >(
+          `SELECT * FROM oao.runtime_thread_instances
+            WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3 FOR UPDATE`,
+          tenantThread,
+        )
+      ).rows[0];
+      if (
+        !instance ||
+        instance.state !== "corrupt" ||
+        instance.safe_error?.code !== "flue_incarnation_mismatch"
+      )
+        return resolve("skipped", "not_corrupt");
+      // The identity Flue stores must still be the one the thread bound.
+      if (
+        !instance.flue_instance_uid ||
+        instance.flue_instance_uid !== boundUid ||
+        flueUid !== instance.flue_instance_uid
+      )
+        return resolve("skipped", "flue_identity_mismatch");
+      const foreignDispatch = await transaction.query(
+        `SELECT 1 FROM oao.runtime_dispatches
+          WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3
+            AND (flue_conversation_id<>$4
+              OR (flue_instance_uid IS NOT NULL AND flue_instance_uid<>$5))
+          LIMIT 1`,
+        [
+          ...tenantThread,
+          instance.flue_instance_id,
+          instance.flue_instance_uid,
+        ],
+      );
+      if (foreignDispatch.rowCount)
+        return resolve("skipped", "dispatch_identity_mismatch");
+      // A submission still running is left for the next start.
+      const unsettled = await transaction.query(
+        `SELECT 1 FROM oao.runtime_dispatches
+          WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3
+            AND state<>'settled'
+          LIMIT 1`,
+        tenantThread,
+      );
+      if (unsettled.rowCount) return result("pending", "unsettled_dispatch");
+      const head = await transaction.query<{ run_id: RunId; state: string }>(
+        `SELECT head.run_id,run.state::text AS state
+           FROM oao.thread_admission_heads head
+           JOIN oao.runs run ON run.organization_id=head.organization_id
+            AND run.project_id=head.project_id AND run.id=head.run_id
+          WHERE head.organization_id=$1 AND head.project_id=$2
+            AND head.thread_id=$3
+          FOR UPDATE OF head`,
+        tenantThread,
+      );
+      const heldBy = head.rows[0];
+      if (heldBy && !TERMINAL_CHILD_STATES.has(heldBy.state))
+        return result("pending", "active_admission");
+      // Released the way settlement releases it.
+      if (heldBy)
+        await transaction.query(
+          `DELETE FROM oao.thread_admission_heads
+            WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3`,
+          tenantThread,
+        );
+      await transaction.query(
+        `UPDATE oao.runtime_thread_instances
+            SET state='ready',safe_error=NULL,updated_at=clock_timestamp()
+          WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3`,
+        tenantThread,
+      );
+      const successor = await transaction.query<{ id: RunId }>(
+        `SELECT id FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND thread_id=$3
+          AND state IN ('queued','retry_scheduled') AND cancellation_requested_at IS NULL
+          ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`,
+        tenantThread,
+      );
+      const next = successor.rows[0];
+      if (next)
+        await this.queue.enqueue(transaction, {
+          ...candidate,
+          id: eventUuid(`wake:repair-admit:${next.id}`),
+          runId: next.id,
+          dispatchKey: `repair-admit:${next.id}`,
+          kind: "admit",
+          payload: { reason: "replayed_admission_repaired" },
+        });
+      await appendEventOnce(transaction, {
+        ...candidate,
+        id: eventUuid(`event:${candidate.threadId}:incarnation-repaired`),
+        aggregateType: "run",
+        aggregateId: affectedRunId,
+        kind: "runtime.recovery_completed",
+        payload: { outcome: "repaired", code: "replayed_admission" },
+      });
+      return resolve("repaired", "replayed_admission");
+    });
+  }
+
   async admit(job: RuntimeWakeJob): Promise<void> {
     const run = await this.loadRun(job);
+    // A wake can run again after its run settled (a lease that expired while
+    // the handler ran, a retried completion). Admission is then a no-op.
+    if (TERMINAL_CHILD_STATES.has(run.state)) return;
     // A durable receipt lets cancellation abort without rendering again. An
     // ambiguous dispatch still needs activation on a fresh worker so recovery
     // can render and obtain its receipt before aborting the incarnation.
@@ -3619,7 +3830,7 @@ export class ManagedRuntimeOrchestrator {
     }
     let textOnlyDelivery = false;
     const flueInstanceId = threadInstanceId(run);
-    let runtimeDispatch: DispatchRow;
+    let runtimeDispatch: DispatchRow | undefined;
     try {
       runtimeDispatch = await withTenantTransaction(
         this.pool,
@@ -3666,6 +3877,9 @@ export class ManagedRuntimeOrchestrator {
             [run.organizationId, run.projectId, run.runId],
           );
           const existing = existingResult.rows[0];
+          // The run settled after loadRun: its head is gone or held by a
+          // successor, which is not a correlation mismatch.
+          if (existing?.state === "settled") return undefined;
           if (existing) {
             ({ requestHash, textOnlyDelivery } = recoveredAdmissionRequest({
               requestHash,
@@ -3773,6 +3987,7 @@ export class ManagedRuntimeOrchestrator {
       }
       throw error;
     }
+    if (!runtimeDispatch) return;
 
     if (!runtimeDispatch.flue_submission_id) {
       try {
@@ -4764,6 +4979,10 @@ function shouldProjectObservation(event: FlueObservation): boolean {
   }
 }
 
+function runKey(runtimeDispatch: DispatchRow): string {
+  return `${runtimeDispatch.organization_id}/${runtimeDispatch.project_id}/${runtimeDispatch.run_id}`;
+}
+
 export class RuntimeProjection {
   #pending = Promise.resolve();
   #unsubscribe: (() => void) | undefined;
@@ -4795,16 +5014,36 @@ export class RuntimeProjection {
     }
   >();
   readonly #abort = new AbortController();
+  /** Wakes the settlement watcher of a run once this process settled it. */
+  readonly #settledHere = new Map<string, () => void>();
+  readonly #settlementProbeMilliseconds: number;
 
   constructor(
     private readonly pool: PgPool,
     private readonly queue: PostgresWakeQueue,
-  ) {}
+    options: {
+      /**
+       * How often a watcher asks Flue whether a tracked submission settled.
+       * The in-process settlement observation settles runs at once; this
+       * probe only covers a settlement this process did not observe.
+       */
+      readonly settlementProbeMilliseconds?: number;
+    } = {},
+  ) {
+    this.#settlementProbeMilliseconds =
+      options.settlementProbeMilliseconds ?? 15_000;
+  }
 
   start(): void {
     if (this.#unsubscribe) return;
     this.#unsubscribe = observe((event) => {
-      if (!event.conversationId || !shouldProjectObservation(event)) return;
+      // Flue's coordinator reports a settlement by submission only, without
+      // the conversation; find_runtime_dispatch resolves either.
+      const correlated =
+        event.conversationId !== undefined ||
+        (event.type === "submission_settled" &&
+          event.submissionId !== undefined);
+      if (!correlated || !shouldProjectObservation(event)) return;
       const harnessCorrelation = harnessObservationCorrelation(event);
       this.#pending = this.#pending
         .then(() => this.project(event, harnessCorrelation))
@@ -4828,9 +5067,13 @@ export class RuntimeProjection {
   trackAdmission(input: TenantContext & { readonly runId: RunId }): void {
     const key = `${input.organizationId}/${input.projectId}/${input.runId}`;
     if (this.#watching.has(key)) return;
-    const watching = this.watchAdmission(input).finally(() => {
-      this.#watching.delete(key);
-    });
+    const watching = this.watchAdmission(input)
+      // A failed first read leaves the run to the in-process observation and
+      // to startup recovery; it must not become an unhandled rejection.
+      .catch(() => undefined)
+      .finally(() => {
+        this.#watching.delete(key);
+      });
     this.#watching.set(key, watching);
   }
 
@@ -5077,6 +5320,12 @@ export class RuntimeProjection {
     );
   }
 
+  /**
+   * The safety net behind the in-process settlement observation: one status
+   * probe when tracking starts (the submission may have settled before this
+   * process started), then one every probe interval, and the canonical read
+   * and settlement once Flue reports the submission settled.
+   */
   private async watchAdmission(
     input: TenantContext & { readonly runId: RunId },
   ): Promise<void> {
@@ -5096,18 +5345,68 @@ export class RuntimeProjection {
       runtimeDispatch.state === "settled"
     )
       return;
+    const key = runKey(runtimeDispatch);
+    let settledHere = false;
+    let wake: (() => void) | undefined;
+    this.#settledHere.set(key, () => {
+      settledHere = true;
+      wake?.();
+    });
+    try {
+      for (;;) {
+        if (this.#abort.signal.aborted || settledHere) return;
+        try {
+          if (
+            (await this.submissionStatus(
+              runtimeDispatch.flue_submission_id,
+            )) === "settled"
+          ) {
+            if (!settledHere) await this.readAndSettle(runtimeDispatch);
+            return;
+          }
+        } catch {
+          // A database error is retried at the next probe.
+          if (this.#abort.signal.aborted) return;
+        }
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            clearTimeout(timer);
+            this.#abort.signal.removeEventListener("abort", done);
+            wake = undefined;
+            resolve();
+          };
+          const timer = setTimeout(done, this.#settlementProbeMilliseconds);
+          wake = done;
+          this.#abort.signal.addEventListener("abort", done, { once: true });
+          if (this.#abort.signal.aborted || settledHere) done();
+        });
+      }
+    } finally {
+      this.#settledHere.delete(key);
+    }
+  }
+
+  /** Flue's durable submission status, without reading the conversation. */
+  private async submissionStatus(
+    submissionId: string,
+  ): Promise<string | undefined> {
+    const status = await this.pool.query<{ status: string }>(
+      "SELECT status FROM flue_agent_submissions WHERE submission_id=$1",
+      [submissionId],
+    );
+    return status.rows[0]?.status;
+  }
+
+  private async readAndSettle(runtimeDispatch: DispatchRow): Promise<void> {
+    const submissionId = runtimeDispatch.flue_submission_id;
+    if (!submissionId) return;
     try {
       const receipt = await this.receiptFor(runtimeDispatch);
       const reply = await init(ManagedAgent, {
         id: runtimeDispatch.flue_conversation_id,
         uid: receipt.uid,
       }).read(receipt, { signal: this.#abort.signal });
-      await this.settle(
-        runtimeDispatch,
-        "completed",
-        runtimeDispatch.flue_submission_id,
-        reply.text,
-      );
+      await this.settle(runtimeDispatch, "completed", submissionId, reply.text);
     } catch (error) {
       if (this.#abort.signal.aborted) return;
       const outcome = error instanceof AgentRunError ? error.outcome : "failed";
@@ -5115,11 +5414,7 @@ export class RuntimeProjection {
         await this.recordCorruption(runtimeDispatch);
         return;
       }
-      await this.settle(
-        runtimeDispatch,
-        outcome,
-        runtimeDispatch.flue_submission_id,
-      );
+      await this.settle(runtimeDispatch, outcome, submissionId);
     }
   }
 
@@ -5677,6 +5972,8 @@ export class RuntimeProjection {
         });
       }
     });
+    // The dispatch is settled now, by this call or an earlier one.
+    this.#settledHere.get(runKey(runtimeDispatch))?.();
   }
 
   private async harnessOperation(

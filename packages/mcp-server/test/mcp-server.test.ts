@@ -27,6 +27,7 @@ const ENDPOINT = `https://oao.example.test/v1/projects/${PROJECT}/mcp`;
 interface Recorded {
   readonly method: string;
   readonly path: string;
+  readonly search: string;
   readonly authorization: string | null;
   readonly idempotencyKey: string | null;
   readonly body: unknown;
@@ -59,6 +60,7 @@ function fakeApi() {
     requests.push({
       method: request.method,
       path,
+      search: new URL(request.url).search,
       authorization: request.headers.get("authorization"),
       idempotencyKey: request.headers.get("idempotency-key"),
       body: request.body ? await request.json() : undefined,
@@ -378,7 +380,7 @@ test("a write without its own key still sends a fresh Idempotency-Key", async ()
 });
 
 test("get_session leaves out the debug block unless asked", async () => {
-  const { client } = await connect(["session:read"]);
+  const { client, api } = await connect(["session:read"]);
   const plain = JSON.parse(
     text(
       await client.callTool({
@@ -397,6 +399,19 @@ test("get_session leaves out the debug block unless asked", async () => {
     ),
   ) as Record<string, unknown>;
   assert.ok(full.debug);
+  // Without includeDebug the API is asked to skip the debug statements.
+  const reads = api.requests.filter((request) =>
+    request.path.endsWith(`/sessions/${SESSION}`),
+  );
+  assert.deepEqual(
+    reads.map((request) => request.search),
+    [
+      `?include=${encodeURIComponent(
+        "runs,transcript,timeline,pendingWork,delegations,skills",
+      )}`,
+      "",
+    ],
+  );
   await client.close();
 });
 

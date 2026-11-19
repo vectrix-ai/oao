@@ -71,6 +71,7 @@ import type {
   RotateProjectSandboxProviderCredentialInput,
   RotateProjectStorageProviderCredentialInput,
   ReadinessStatus,
+  GetSessionOptions,
   RequestOptions,
   SkillDetail,
   SkillDraft,
@@ -1370,9 +1371,20 @@ export class OaoClient {
   getSession(
     projectId: string,
     sessionId: string,
-    options?: RequestOptions,
+    options?: GetSessionOptions,
   ): Promise<SessionDetail> {
-    return this.#request(this.routes.session(projectId, sessionId), options);
+    const include = options?.include;
+    return this.#request(
+      this.#path(this.routes.session(projectId, sessionId), {
+        include:
+          include === undefined
+            ? undefined
+            : include === "none" || include.length === 0
+              ? "none"
+              : include.join(","),
+      }),
+      options?.signal ? { signal: options.signal } : undefined,
+    );
   }
 
   listSessionFiles(

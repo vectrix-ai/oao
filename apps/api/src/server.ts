@@ -26,16 +26,19 @@ import { PostgresApiStore } from "./store.js";
 import { PostgresRuntimeCommandPort } from "./runtime-commands.js";
 
 const configuration = loadServerConfiguration(process.env);
+const logPoolError = (component: string) => (error: Error) => {
+  process.stderr.write(
+    `${JSON.stringify({
+      component,
+      ...apiErrorLogFields(error),
+      level: "warn",
+    })}\n`,
+  );
+};
 const pool = createPool(configuration.databaseUrl, {
-  onIdleClientError: (error) => {
-    process.stderr.write(
-      `${JSON.stringify({
-        component: "postgres-pool",
-        ...apiErrorLogFields(error),
-        level: "warn",
-      })}\n`,
-    );
-  },
+  max: configuration.databasePoolMax,
+  onIdleClientError: logPoolError("postgres-pool"),
+  onClientError: logPoolError("postgres-client"),
 });
 await migrate(pool);
 

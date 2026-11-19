@@ -178,3 +178,22 @@ test("composition seeds development or resolves database-owned IAP defaults", as
   assert.ok(workosComposition.webhookAuth);
   assert.equal(calls.length, 0);
 });
+
+test("the database pool size comes from DATABASE_POOL_MAX", () => {
+  const base = {
+    AUTH_PROVIDER: "development",
+    APP_ORIGIN: "http://localhost:5173",
+    DATABASE_URL: databaseUrl,
+    NODE_ENV: "development",
+  };
+  assert.equal(loadServerConfiguration(base).databasePoolMax, 10);
+  assert.equal(
+    loadServerConfiguration({ ...base, DATABASE_POOL_MAX: "50" })
+      .databasePoolMax,
+    50,
+  );
+  assert.throws(
+    () => loadServerConfiguration({ ...base, DATABASE_POOL_MAX: "500" }),
+    /DATABASE_POOL_MAX/u,
+  );
+});

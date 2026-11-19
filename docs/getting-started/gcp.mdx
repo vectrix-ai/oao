@@ -102,9 +102,51 @@ transactions assume after migration. Do not grant PostgreSQL superuser or
 permissions with your PostgreSQL provider.
 
 Cloud SQL maintenance, a restart, or a failover can close connections that OAO
-holds idle in its pool. The API and the worker keep running: each discards the
-closed connection, writes a `warn` log line from `postgres-pool`, and opens a
-new connection for the next query.
+holds idle in its pool or is using. The API and the worker keep running: each
+discards the closed connection, writes a `warn` log line from `postgres-pool`
+(idle) or `postgres-client` (in use, where the request or wake that used it
+fails and is retried), and opens a new connection for the next query.
+
+### Database connections and run start
+
+These optional settings size the database pool and the runtime worker's wake
+loop. Set `DATABASE_POOL_MAX` on both workloads and the others on the worker:
+
+| Variable               | Default | Range        | Effect                                                                                  |
+| ---------------------- | ------- | ------------ | --------------------------------------------------------------------------------------- |
+| `DATABASE_POOL_MAX`    | `10`    | 1 to 200     | Most PostgreSQL connections one API or worker process opens.                            |
+| `OAO_WAKE_CONCURRENCY` | `32`    | 1 to 256     | Runtime wakes, such as run admissions, one worker handles at the same time.             |
+| `OAO_WAKE_POLL_MS`     | `1000`  | 100 to 60000 | How often the worker looks for due wakes when no notification arrives; only a fallback. |
+
+A new run notifies the worker when its transaction commits, so it starts within
+milliseconds; the poll only covers a lost notification. Each worker also keeps
+up to two LISTEN connections outside its pool, one for runtime wakes and one for
+product events, and each API process keeps one. Count them, plus every pool,
+against the database's connection limit. LISTEN needs a direct session: behind a
+transaction-mode connection pooler, point OAO at the database itself, or the
+notifications never arrive and every wake waits for the poll.
+
+Shared-core Cloud SQL tiers such as `db-f1-micro` are not meant for production:
+their fraction of one vCPU saturates at a few dozen commits per second, and an
+idle OAO deployment already uses about a dozen. Use a dedicated-core tier for
+anything beyond a trial.
+
+### One-time repair of chats broken by a replayed run start
+
+Before this release, a run's start could be replayed after the run had
+finished, which marked its chat's runtime instance corrupt
+(`flue_incarnation_mismatch`) and failed every later message in that chat. The
+upgrade's migration records the chats whose stored state matches exactly that
+pattern; the worker then repairs each one once when it starts, after confirming
+that Flue still holds the chat's conversation identity and that nothing in the
+chat is still running. A repaired chat accepts new messages again; runs that
+already failed stay failed. Each repair appends a `runtime.recovery_completed`
+event with `outcome: "repaired"` to the run that recorded the corruption, and
+the worker logs one `runtime-incarnation-repair` line per chat with its outcome:
+`repaired`, `skipped` with the reason, or `pending` when a submission in the
+chat is still running (it is retried at the next start). How many chats match
+is only known when the migration runs against your database; a database without
+such chats records none.
 
 For a full explanation of local configuration and disposable PostgreSQL checks,
 see [Local development](/getting-started/local-development). The

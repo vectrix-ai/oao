@@ -39,6 +39,7 @@ import {
   PROMPT_CACHE_PREFIX_MAX_LENGTH,
   RUN_DOCUMENT_CONTENT_TYPE_BY_EXTENSION,
   RUN_MESSAGE_MAX_LENGTH,
+  parseSessionDetailInclude,
   validateToolJsonValue,
   validateToolJsonSchema,
   type CreateEventWebhookInput,
@@ -55,6 +56,7 @@ import {
   type McpCredentialTestResult,
   type ModelProviderType,
   type SandboxSnapshotEntry,
+  type SessionDetailSection,
   type SessionPromptCache,
   type ToolResultEnvelope,
   type UpdateEventWebhookInput,
@@ -7866,7 +7868,7 @@ function registerRunRoutes(
                 }>(
                   `SELECT latest_version_id FROM oao.agent_definitions
                  WHERE organization_id=$1 AND project_id=$2 AND id=$3
-                   AND archived_at IS NULL FOR UPDATE`,
+                   AND archived_at IS NULL FOR SHARE`,
                   [actor.organizationId, actor.projectId, submittedAgentId],
                 );
                 if (definition.rows.length === 0)
@@ -8113,9 +8115,24 @@ function registerRunRoutes(
 
   app.get("/v1/projects/:projectId/sessions/:sessionId", async (c) => {
     const actor = assertProject(c);
-    return dependencies.store.transaction(actor, "session:read", async (tx) => {
-      const result = await tx.query(
-        `SELECT s.id,s.organization_id,s.project_id,s.thread_id,s.agent_version_id,t.title,
+    let include: ReadonlySet<SessionDetailSection> | undefined;
+    try {
+      include = parseSessionDetailInclude(c.req.query("include"));
+    } catch (error) {
+      throw new HttpApiError(
+        "bad_request",
+        error instanceof Error ? error.message : "Invalid include",
+      );
+    }
+    // Without include every section is returned, as before include existed.
+    const wants = (section: SessionDetailSection) =>
+      include === undefined || include.has(section);
+    const detail = await dependencies.store.transaction(
+      actor,
+      "session:read",
+      async (tx) => {
+        const result = await tx.query(
+          `SELECT s.id,s.organization_id,s.project_id,s.thread_id,s.agent_version_id,t.title,
                 d.id AS agent_id,d.name AS agent_name,v.version AS agent_version,
                 v.config->>'modelPreset' AS model,
                 COALESCE((
@@ -8151,7 +8168,7 @@ function registerRunRoutes(
                     AND binding.project_id=s.project_id
                     AND binding.session_id=s.id
                 ),'[]'::jsonb) AS tools,
-                lr.id AS latest_run_id,
+                lr.id AS latest_run_id,lr.suggestion AS latest_run_suggestion,
                 COALESCE(lr.state::text,'queued') AS status,
                 lr.created_at AS started_at,lr.settled_at AS completed_at,
                 COALESCE(ss.input_tokens,0)::float8 AS input_tokens,
@@ -8171,7 +8188,9 @@ function registerRunRoutes(
          JOIN oao.agent_definitions d ON d.organization_id=v.organization_id AND d.project_id=v.project_id AND d.id=v.agent_definition_id
          LEFT JOIN oao.session_summaries ss ON ss.organization_id=s.organization_id AND ss.project_id=s.project_id AND ss.session_id=s.id
          LEFT JOIN LATERAL (
-           SELECT r.id,r.state,r.created_at,r.settled_at FROM oao.runs r
+           SELECT r.id,r.state,r.created_at,r.settled_at,
+                  oao.current_run_suggestion(r) AS suggestion
+           FROM oao.runs r
            WHERE r.organization_id=s.organization_id AND r.project_id=s.project_id AND r.session_id=s.id
            ORDER BY r.created_at DESC,r.id DESC LIMIT 1
          ) lr ON true
@@ -8185,148 +8204,46 @@ function registerRunRoutes(
            WHERE r.organization_id=s.organization_id AND r.project_id=s.project_id AND r.session_id=s.id
          ) mi ON true
          WHERE s.organization_id=$1 AND s.project_id=$2 AND s.id=$3`,
-        [actor.organizationId, actor.projectId, c.req.param("sessionId")],
-      );
-      const session = publicValue(result.rows[0]) as
-        Readonly<Record<string, unknown>> | undefined;
-      if (!session) throw new HttpApiError("not_found", "Session not found");
-      const values: unknown[] = [
-        actor.organizationId,
-        actor.projectId,
-        c.req.param("sessionId"),
-      ];
-      const runs = await tx.query(
-        `SELECT id,thread_id,session_id,agent_version_id,state,cancellation_requested_at,
-                    admitted_at,settled_at,oao.current_run_suggestion(runs) AS suggestion,
-                    created_at,updated_at
-             FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND session_id=$3
-             ORDER BY created_at,id`,
-        values,
-      );
-      const transcript = await tx.query(
-        `SELECT m.id,m.organization_id,m.project_id,m.thread_id,m.run_id,m.role,
-                m.redacted_content,m.created_at,
-                  CASE WHEN m.role='user' THEN COALESCE((
-                    SELECT jsonb_agg(jsonb_build_object(
-                      'id',f.value->>'id','organization_id',m.organization_id,
-                      'project_id',m.project_id,'run_id',m.run_id,'message_id',m.id,
-                      'name',f.value->>'name','content_type',f.value->>'contentType',
-                      'size_bytes',(f.value->>'sizeBytes')::int,
-                      'sha256',f.value->>'sha256',
-                      'storage_provider_id',f.value->>'storageProviderId',
-                      'object_key',f.value->>'objectKey','created_at',m.created_at
-                    ) ORDER BY f.ordinality)
-                    FROM jsonb_array_elements(COALESCE(r.input_public->'files','[]'::jsonb))
-                      WITH ORDINALITY AS f(value,ordinality)
-                  ),'[]'::jsonb) ELSE '[]'::jsonb END AS files
-             FROM oao.messages m JOIN oao.runs r
-               ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id
-             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
-             ORDER BY m.created_at,m.id`,
-        values,
-      );
-      const timeline = await tx.query(
-        `SELECT e.run_id,e.entry_sequence,e.entry_type,e.started_at,e.completed_at,e.safe_detail
-             FROM oao.timeline_entries e JOIN oao.runs r
-               ON r.organization_id=e.organization_id AND r.project_id=e.project_id AND r.id=e.run_id
-             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
-             ORDER BY r.created_at,e.entry_sequence`,
-        values,
-      );
-      const invocations = await tx.query(
-        `SELECT m.id,m.run_id,m.attempt,m.provider_key,m.model_key,m.provider_request_id,
-                    m.status,m.input_tokens,m.output_tokens,m.cache_read_tokens,
-                    m.cache_write_tokens,m.cost_microunits,m.usage_source,
-                    m.pricing_snapshot,m.provider_route,m.safe_request,m.safe_response,
-                    m.started_at,m.completed_at
-             FROM oao.model_invocations m JOIN oao.runs r
-               ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id
-             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
-             ORDER BY m.started_at,m.attempt`,
-        values,
-      );
-      const events = await tx.query(
-        `SELECT e.project_position,e.id,e.aggregate_type,e.aggregate_id,e.aggregate_sequence,
-                    e.event_kind,e.public_payload,e.occurred_at
-             FROM oao.product_events e WHERE e.organization_id=$1 AND e.project_id=$2
-               AND (e.aggregate_id=$3 OR e.aggregate_id IN (
-                 SELECT r.id FROM oao.runs r WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
-               )) ORDER BY e.project_position`,
-        values,
-      );
-      const toolCalls = await tx.query(
-        `SELECT c.id,c.run_id,c.tool_name,c.owner,c.stage,c.safe_arguments,c.claim_fence,
-                    c.lease_expires_at,c.flue_tool_call_ref,c.created_at,c.updated_at,
-                    result.safe_result
-             FROM oao.tool_calls c JOIN oao.runs r
-               ON r.organization_id=c.organization_id AND r.project_id=c.project_id AND r.id=c.run_id
-             LEFT JOIN oao.tool_call_results result
-               ON result.organization_id=c.organization_id
-              AND result.project_id=c.project_id AND result.tool_call_id=c.id
-             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
-             ORDER BY c.created_at,c.id`,
-        values,
-      );
-      const approvals = await tx.query(
-        `SELECT a.id,a.run_id,a.tool_call_id,a.status,a.summary,a.expires_at,
-                    a.resolved_by_principal_id,a.resolved_at,a.created_at
-             FROM oao.approvals a JOIN oao.runs r
-               ON r.organization_id=a.organization_id AND r.project_id=a.project_id AND r.id=a.run_id
-             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
-             ORDER BY a.created_at,a.id`,
-        values,
-      );
-      const sandboxCommands = await tx.query(
-        `SELECT c.id,c.run_id,c.state,
-                    c.safe_command->>'toolName' AS tool_name,
-                    NULLIF(c.safe_command->>'path','') AS path,
-                    NULLIF(c.safe_command->>'commandName','') AS command_name,
-                    NULLIF(c.safe_command->>'origin','') AS origin,
-                    NULLIF(c.safe_command->>'action','') AS action,
-                    c.command_key,c.safe_command,c.safe_result,
-                    c.created_at,c.started_at,c.completed_at
-             FROM oao.sandbox_commands c JOIN oao.runs r
-               ON r.organization_id=c.organization_id AND r.project_id=c.project_id AND r.id=c.run_id
-             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
-             ORDER BY c.created_at,c.id`,
-        values,
-      );
-      const sandboxes = await tx.query(
-        `SELECT id,run_id,thread_id,session_id,provider,provider_ref,target_preference,provider_target,
-                    state,egress_policy,safe_error,created_at,updated_at,stopped_at
-             FROM oao.sandbox_instances WHERE organization_id=$1 AND project_id=$2 AND session_id=$3
-             ORDER BY created_at,id`,
-        values,
-      );
-      const workspaceBackups = await tx.query<WorkspaceBackupReadRow>(
-        `SELECT b.thread_id,b.session_id,b.last_run_id,b.storage_provider_id,
-                  p.provider_key,p.display_name,p.provider_type,p.bucket,
-                  b.object_key,b.content_length::text,
-                  encode(b.content_sha256,'hex') AS archive_sha256,b.generation::text,
-                  b.backed_up_at,b.last_restored_at
-             FROM oao.sessions workspace_session
-             JOIN oao.thread_workspace_bindings binding
-               ON binding.organization_id=workspace_session.organization_id
-              AND binding.project_id=workspace_session.project_id
-              AND binding.thread_id=workspace_session.thread_id
-             JOIN oao.agent_workspaces workspace
-               ON workspace.organization_id=binding.organization_id
-              AND workspace.project_id=binding.project_id
-              AND workspace.id=binding.workspace_id
-             JOIN oao.thread_workspace_backups b
-               ON b.organization_id=workspace.organization_id
-              AND b.project_id=workspace.project_id
-              AND b.thread_id=workspace.owner_thread_id
-             JOIN oao.project_storage_providers p
-               ON p.organization_id=b.organization_id
-              AND p.id=b.storage_provider_id
-            WHERE workspace_session.organization_id=$1
-              AND workspace_session.project_id=$2
-              AND workspace_session.id=$3`,
-        values,
-      );
-      const skills = await tx.query(
-        `SELECT binding.skill_version_id,binding.skill_name AS name,
+          [actor.organizationId, actor.projectId, c.req.param("sessionId")],
+        );
+        const row = result.rows[0] as
+          | (Record<string, unknown> & {
+              readonly latest_run_id: string | null;
+              readonly latest_run_suggestion: string | null;
+            })
+          | undefined;
+        if (!row) throw new HttpApiError("not_found", "Session not found");
+        const { latest_run_suggestion: latestSuggestion, ...header } = row;
+        const session = publicValue(header) as Readonly<
+          Record<string, unknown>
+        >;
+        const values: unknown[] = [
+          actor.organizationId,
+          actor.projectId,
+          c.req.param("sessionId"),
+        ];
+        // Each section's statements run only when it is requested.
+        const read = (sql: string) => tx.query(sql, values);
+        const resolution = await tx.query<{ resolution: unknown }>(
+          `SELECT resolution FROM oao.session_version_resolutions
+          WHERE organization_id=$1 AND project_id=$2 AND session_id=$3`,
+          values,
+        );
+        const body: Record<string, unknown> = {
+          ...session,
+          // Only the session's latest run can hold a suggestion that still applies.
+          suggestion:
+            latestSuggestion && row.latest_run_id
+              ? { runId: row.latest_run_id, text: latestSuggestion }
+              : null,
+          // The exact versions this session tree runs; null for sessions that
+          // started before versions were recorded.
+          resolvedVersions: resolution.rows[0]?.resolution ?? null,
+        };
+        if (wants("skills"))
+          body.skills = rows(
+            await read(
+              `SELECT binding.skill_version_id,binding.skill_name AS name,
                   version.skill_id,version.version,version.description,
                   encode(version.content_hash,'hex') AS content_hash,
                   lifecycle.status
@@ -8342,10 +8259,12 @@ function registerRunRoutes(
            WHERE binding.organization_id=$1 AND binding.project_id=$2
              AND binding.session_id=$3
            ORDER BY binding.skill_name`,
-        values,
-      );
-      const delegations = await tx.query(
-        `SELECT delegation.id,delegation.parent_run_id,delegation.parent_thread_id,
+            ),
+          );
+        if (wants("delegations"))
+          body.delegations = rows(
+            await read(
+              `SELECT delegation.id,delegation.parent_run_id,delegation.parent_thread_id,
                   delegation.parent_session_id,delegation.parent_agent_version_id,
                   delegation.delegate_key,delegation.child_agent_version_id,
                   delegation.child_thread_id,delegation.child_session_id,
@@ -8369,56 +8288,197 @@ function registerRunRoutes(
             WHERE delegation.organization_id=$1 AND delegation.project_id=$2
               AND (delegation.parent_session_id=$3 OR delegation.child_session_id=$3)
             ORDER BY delegation.created_at,delegation.id`,
-        values,
-      );
-      const resolution = await tx.query<{ resolution: unknown }>(
-        `SELECT resolution FROM oao.session_version_resolutions
-          WHERE organization_id=$1 AND project_id=$2 AND session_id=$3`,
-        values,
-      );
-      // Only the session's latest run can hold a suggestion that still applies.
-      const latestRun = runs.rows.at(-1) as
-        { readonly id: string; readonly suggestion: string | null } | undefined;
-      return c.json({
-        ...session,
-        suggestion: latestRun?.suggestion
-          ? { runId: latestRun.id, text: latestRun.suggestion }
-          : null,
-        skills: rows(skills),
-        // The exact versions this session tree runs; null for sessions that
-        // started before versions were recorded.
-        resolvedVersions: resolution.rows[0]?.resolution ?? null,
-        delegations: rows(delegations),
-        runs: rows(runs),
-        transcript: rows(transcript),
-        timeline: rows(timeline),
-        pendingWork: [
-          ...rows(toolCalls).filter((item) =>
-            [
-              "caller_pending",
-              "caller_claimed",
-              "platform_ready",
-              "platform_executing",
-            ].includes(String((item as Record<string, unknown>).stage)),
+            ),
+          );
+        if (wants("runs"))
+          body.runs = rows(
+            await read(
+              `SELECT id,thread_id,session_id,agent_version_id,state,cancellation_requested_at,
+                    admitted_at,settled_at,oao.current_run_suggestion(runs) AS suggestion,
+                    created_at,updated_at
+             FROM oao.runs WHERE organization_id=$1 AND project_id=$2 AND session_id=$3
+             ORDER BY created_at,id`,
+            ),
+          );
+        if (wants("transcript"))
+          body.transcript = rows(
+            await read(
+              `SELECT m.id,m.organization_id,m.project_id,m.thread_id,m.run_id,m.role,
+                m.redacted_content,m.created_at,
+                  CASE WHEN m.role='user' THEN COALESCE((
+                    SELECT jsonb_agg(jsonb_build_object(
+                      'id',f.value->>'id','organization_id',m.organization_id,
+                      'project_id',m.project_id,'run_id',m.run_id,'message_id',m.id,
+                      'name',f.value->>'name','content_type',f.value->>'contentType',
+                      'size_bytes',(f.value->>'sizeBytes')::int,
+                      'sha256',f.value->>'sha256',
+                      'storage_provider_id',f.value->>'storageProviderId',
+                      'object_key',f.value->>'objectKey','created_at',m.created_at
+                    ) ORDER BY f.ordinality)
+                    FROM jsonb_array_elements(COALESCE(r.input_public->'files','[]'::jsonb))
+                      WITH ORDINALITY AS f(value,ordinality)
+                  ),'[]'::jsonb) ELSE '[]'::jsonb END AS files
+             FROM oao.messages m JOIN oao.runs r
+               ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id
+             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+             ORDER BY m.created_at,m.id`,
+            ),
+          );
+        if (wants("timeline"))
+          body.timeline = rows(
+            await read(
+              `SELECT e.run_id,e.entry_sequence,e.entry_type,e.started_at,e.completed_at,e.safe_detail
+             FROM oao.timeline_entries e JOIN oao.runs r
+               ON r.organization_id=e.organization_id AND r.project_id=e.project_id AND r.id=e.run_id
+             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+             ORDER BY r.created_at,e.entry_sequence`,
+            ),
+          );
+        const needsToolWork = wants("pendingWork") || wants("debug");
+        const toolCalls = needsToolWork
+          ? rows(
+              await read(
+                `SELECT c.id,c.run_id,c.tool_name,c.owner,c.stage,c.safe_arguments,c.claim_fence,
+                    c.lease_expires_at,c.flue_tool_call_ref,c.created_at,c.updated_at,
+                    result.safe_result
+             FROM oao.tool_calls c JOIN oao.runs r
+               ON r.organization_id=c.organization_id AND r.project_id=c.project_id AND r.id=c.run_id
+             LEFT JOIN oao.tool_call_results result
+               ON result.organization_id=c.organization_id
+              AND result.project_id=c.project_id AND result.tool_call_id=c.id
+             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+             ORDER BY c.created_at,c.id`,
+              ),
+            )
+          : [];
+        const approvals = needsToolWork
+          ? rows(
+              await read(
+                `SELECT a.id,a.run_id,a.tool_call_id,a.status,a.summary,a.expires_at,
+                    a.resolved_by_principal_id,a.resolved_at,a.created_at
+             FROM oao.approvals a JOIN oao.runs r
+               ON r.organization_id=a.organization_id AND r.project_id=a.project_id AND r.id=a.run_id
+             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+             ORDER BY a.created_at,a.id`,
+              ),
+            )
+          : [];
+        if (wants("pendingWork"))
+          body.pendingWork = [
+            ...toolCalls.filter((item) =>
+              [
+                "caller_pending",
+                "caller_claimed",
+                "platform_ready",
+                "platform_executing",
+              ].includes(String((item as Record<string, unknown>).stage)),
+            ),
+            ...approvals.filter(
+              (item) => (item as Record<string, unknown>).status === "pending",
+            ),
+          ];
+        if (!wants("debug")) return { body };
+        const productEvents = rows(
+          await read(
+            `SELECT e.project_position,e.id,e.aggregate_type,e.aggregate_id,e.aggregate_sequence,
+                    e.event_kind,e.public_payload,e.occurred_at
+             FROM oao.product_events e WHERE e.organization_id=$1 AND e.project_id=$2
+               AND e.aggregate_id = ANY (ARRAY[$3::uuid] || ARRAY(
+                 SELECT r.id FROM oao.runs r WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+               )) ORDER BY e.project_position`,
           ),
-          ...rows(approvals).filter(
-            (item) => (item as Record<string, unknown>).status === "pending",
+        );
+        const modelInvocations = rows(
+          await read(
+            `SELECT m.id,m.run_id,m.attempt,m.provider_key,m.model_key,m.provider_request_id,
+                    m.status,m.input_tokens,m.output_tokens,m.cache_read_tokens,
+                    m.cache_write_tokens,m.cost_microunits,m.usage_source,
+                    m.pricing_snapshot,m.provider_route,m.safe_request,m.safe_response,
+                    m.started_at,m.completed_at
+             FROM oao.model_invocations m JOIN oao.runs r
+               ON r.organization_id=m.organization_id AND r.project_id=m.project_id AND r.id=m.run_id
+             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+             ORDER BY m.started_at,m.attempt`,
           ),
-        ],
-        debug: {
-          productEvents: rows(events),
-          modelInvocations: rows(invocations),
-          toolCalls: rows(toolCalls),
-          approvals: rows(approvals),
-          sandboxCommands: rows(sandboxCommands),
-          sandboxes: rows(sandboxes),
-          workspaceBackups: await publicWorkspaceBackups(
-            dependencies.runFileStorage,
-            actor,
-            workspaceBackups.rows,
+        );
+        const sandboxCommands = rows(
+          await read(
+            `SELECT c.id,c.run_id,c.state,
+                    c.safe_command->>'toolName' AS tool_name,
+                    NULLIF(c.safe_command->>'path','') AS path,
+                    NULLIF(c.safe_command->>'commandName','') AS command_name,
+                    NULLIF(c.safe_command->>'origin','') AS origin,
+                    NULLIF(c.safe_command->>'action','') AS action,
+                    c.command_key,c.safe_command,c.safe_result,
+                    c.created_at,c.started_at,c.completed_at
+             FROM oao.sandbox_commands c JOIN oao.runs r
+               ON r.organization_id=c.organization_id AND r.project_id=c.project_id AND r.id=c.run_id
+             WHERE r.organization_id=$1 AND r.project_id=$2 AND r.session_id=$3
+             ORDER BY c.created_at,c.id`,
           ),
-        },
-      });
+        );
+        const sandboxes = rows(
+          await read(
+            `SELECT id,run_id,thread_id,session_id,provider,provider_ref,target_preference,provider_target,
+                    state,egress_policy,safe_error,created_at,updated_at,stopped_at
+             FROM oao.sandbox_instances WHERE organization_id=$1 AND project_id=$2 AND session_id=$3
+             ORDER BY created_at,id`,
+          ),
+        );
+        const workspaceBackups = await tx.query<WorkspaceBackupReadRow>(
+          `SELECT b.thread_id,b.session_id,b.last_run_id,b.storage_provider_id,
+                  p.provider_key,p.display_name,p.provider_type,p.bucket,
+                  b.object_key,b.content_length::text,
+                  encode(b.content_sha256,'hex') AS archive_sha256,b.generation::text,
+                  b.backed_up_at,b.last_restored_at
+             FROM oao.sessions workspace_session
+             JOIN oao.thread_workspace_bindings binding
+               ON binding.organization_id=workspace_session.organization_id
+              AND binding.project_id=workspace_session.project_id
+              AND binding.thread_id=workspace_session.thread_id
+             JOIN oao.agent_workspaces workspace
+               ON workspace.organization_id=binding.organization_id
+              AND workspace.project_id=binding.project_id
+              AND workspace.id=binding.workspace_id
+             JOIN oao.thread_workspace_backups b
+               ON b.organization_id=workspace.organization_id
+              AND b.project_id=workspace.project_id
+              AND b.thread_id=workspace.owner_thread_id
+             JOIN oao.project_storage_providers p
+               ON p.organization_id=b.organization_id
+              AND p.id=b.storage_provider_id
+            WHERE workspace_session.organization_id=$1
+              AND workspace_session.project_id=$2
+              AND workspace_session.id=$3`,
+          values,
+        );
+        return {
+          body,
+          debug: {
+            productEvents,
+            modelInvocations,
+            toolCalls,
+            approvals,
+            sandboxCommands,
+            sandboxes,
+          },
+          workspaceBackups: workspaceBackups.rows,
+        };
+      },
+    );
+    if (!detail.debug) return c.json(detail.body);
+    // Reading backup manifests from object storage happens after the
+    // transaction, so it never holds a database connection meanwhile.
+    return c.json({
+      ...detail.body,
+      debug: {
+        ...detail.debug,
+        workspaceBackups: await publicWorkspaceBackups(
+          dependencies.runFileStorage,
+          actor,
+          detail.workspaceBackups,
+        ),
+      },
     });
   });
 

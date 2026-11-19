@@ -42,6 +42,7 @@ import type {
   ConfigurationRestorePlan,
   ConfigurationRestoreResult,
   SessionVersionResolution,
+  SessionDetailSection,
 } from "@oao/contracts";
 
 export type {
@@ -853,7 +854,14 @@ export interface ConsoleApi {
   listMcpToolsets(): Promise<McpToolsetList>;
   createMcpToolset(input: CreateMcpToolsetInput): Promise<McpToolset>;
   listSessions(filters: ListFilters): Promise<PageResult<SessionSummary>>;
-  getSession(id: string): Promise<SessionDetail>;
+  /**
+   * Reads one session. `include` limits the response to those sections, so a
+   * caller that needs only the latest run skips the transcript and debug.
+   */
+  getSession(
+    id: string,
+    options?: { readonly include?: readonly SessionDetailSection[] },
+  ): Promise<SessionDetail>;
   getSessionUsage(id: string): Promise<SessionUsage>;
   getSessionFile(sessionId: string, path: string): Promise<Uint8Array>;
   createSession(input: {

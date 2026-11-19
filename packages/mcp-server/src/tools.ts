@@ -9,6 +9,7 @@ import {
   DiscoverMcpServerInputSchema,
   ManagedAgentPublicationConfigSchema,
   OAO_MCP_TOOL_CATALOG,
+  SESSION_DETAIL_SECTIONS,
   availableOaoMcpTools,
   type OaoMcpToolDescriptor,
   type Run,
@@ -164,6 +165,10 @@ function page(input: {
     ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
   };
 }
+
+const SESSION_SECTIONS_WITHOUT_DEBUG = SESSION_DETAIL_SECTIONS.filter(
+  (section) => section !== "debug",
+);
 
 function withSignal(context: OaoToolContext) {
   return context.signal ? { signal: context.signal } : {};
@@ -403,10 +408,16 @@ export const OAO_TOOLS: readonly OaoTool[] = [
   tool("get_session", {
     input: { sessionId: Id, includeDebug: v.optional(v.boolean()) },
     run: async (input, context) => {
+      // Without includeDebug the API skips the debug statements altogether.
       const session = (await context.client.getSession(
         context.projectId,
         input.sessionId,
-        withSignal(context),
+        {
+          ...withSignal(context),
+          ...(input.includeDebug === true
+            ? {}
+            : { include: SESSION_SECTIONS_WITHOUT_DEBUG }),
+        },
       )) as unknown as Readonly<Record<string, unknown>>;
       return input.includeDebug === true ? session : without(session, "debug");
     },

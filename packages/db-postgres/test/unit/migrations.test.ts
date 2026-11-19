@@ -1165,3 +1165,79 @@ test("a session's prompt cache key is a tenant-scoped, insert-only row that leav
   );
   assert.doesNotMatch(sql, /DROP |UPDATE oao\.|GRANT .*(?:UPDATE|DELETE)/u);
 });
+
+test("runtime wake migration pushes wakes, renews leases, and completes late handlers", async () => {
+  const sql = await readFile(
+    new URL("../../migrations/0067_runtime_wake_push.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(sql, /PERFORM pg_notify\('oao_runtime_wakes', ''\)/u);
+  assert.match(sql, /DROP INDEX oao\.runtime_wake_jobs_claim_idx/u);
+  assert.match(sql, /\(available_at, created_at\)\s+WHERE state = 'pending'/u);
+  assert.match(sql, /\(lease_expires_at\)\s+WHERE state = 'leased'/u);
+  // A value, so the claim's due check is an index condition.
+  assert.match(sql, /available_at <= claimed_at/u);
+  const complete = sql.slice(
+    sql.indexOf("CREATE OR REPLACE FUNCTION oao.complete_runtime_wake"),
+  );
+  assert.doesNotMatch(
+    complete.slice(0, complete.indexOf("$$;")),
+    /lease_expires_at > clock_timestamp\(\)/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.renew_runtime_wake\(uuid,uuid,uuid,text,bigint,interval\) OWNER TO oao_recovery/u,
+  );
+  assert.match(
+    sql,
+    /REVOKE ALL ON FUNCTION oao\.renew_runtime_wake\(uuid,uuid,uuid,text,bigint,interval\) FROM PUBLIC, oao_app/u,
+  );
+  assert.match(sql, /REVOKE oao_recovery FROM %I/u);
+  for (const index of [
+    "runs_session_created_idx",
+    "runs_project_created_idx",
+    "messages_run_created_idx",
+    "product_events_aggregate_id_idx",
+    "approvals_run_idx",
+    "sandbox_commands_run_idx",
+  ])
+    assert.match(sql, new RegExp(`CREATE INDEX ${index}`, "u"));
+  assert.doesNotMatch(sql, /INDEX CONCURRENTLY/u);
+});
+
+test("replayed-admission repair migration only detects, and restores forced RLS", async () => {
+  const sql = await readFile(
+    new URL(
+      "../../migrations/0068_replayed_admission_repairs.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  for (const table of [
+    "runtime_thread_instances",
+    "runs",
+    "product_events",
+    "runtime_dispatches",
+    "runtime_wake_jobs",
+  ]) {
+    assert.match(
+      sql,
+      new RegExp(`ALTER TABLE oao\\.${table} NO FORCE ROW LEVEL SECURITY`, "u"),
+    );
+    assert.match(
+      sql,
+      new RegExp(`ALTER TABLE oao\\.${table} FORCE ROW LEVEL SECURITY`, "u"),
+    );
+  }
+  assert.match(
+    sql,
+    /ALTER TABLE oao\.runtime_incarnation_repairs FORCE ROW LEVEL SECURITY/u,
+  );
+  assert.match(
+    sql,
+    /ALTER FUNCTION oao\.list_runtime_incarnation_repairs\(\) OWNER TO oao_recovery/u,
+  );
+  assert.match(sql, /job\.attempts >= 2/u);
+  // Nothing in the migration changes a thread instance.
+  assert.doesNotMatch(sql, /UPDATE oao\.runtime_thread_instances/u);
+});

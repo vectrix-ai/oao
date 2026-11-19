@@ -60,7 +60,10 @@ example `http://${{web.RAILWAY_PRIVATE_DOMAIN}}:${{web.PORT}}`, so agents can
 use [OAO tools](/integrations/oao-mcp-server#let-oao-agents-use-these-tools).
 Do not generate a public domain for the worker. The worker
 also delivers [event webhooks](/integrations/event-webhooks), so it needs
-outbound HTTPS access to their endpoints.
+outbound HTTPS access to their endpoints. `DATABASE_POOL_MAX`,
+`OAO_WAKE_CONCURRENCY`, and `OAO_WAKE_POLL_MS` size the database pool and the
+worker's wake loop; see [Database connections and run
+start](/getting-started/gcp#database-connections-and-run-start).
 
 ## Provision the first identity
 
