@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0](https://github.com/vectrix-ai/oao/compare/v0.16.0...v0.17.0) (2026-11-19)
+
+
+### Features
+
+* **VEC-2436:** start runs within milliseconds and stop replayed admissions breaking chats ([#71](https://github.com/vectrix-ai/oao/issues/71)) ([014e454](https://github.com/vectrix-ai/oao/commit/014e454e4c869514d4d83d60fe3f4a308febc59f))
+
+
+### Bug Fixes
+
+* **deps:** patch telemetry and router vulnerabilities ([#67](https://github.com/vectrix-ai/oao/issues/67)) ([419bfc7](https://github.com/vectrix-ai/oao/commit/419bfc7869275f5ba02ba847d8ef47968a3b02be))
+
 ## [0.16.0](https://github.com/vectrix-ai/oao/compare/v0.15.0...v0.16.0) (2026-11-16)
 
 
