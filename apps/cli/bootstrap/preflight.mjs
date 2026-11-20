@@ -68,6 +68,25 @@ function atLeastVersion(actual, minimum) {
   return true;
 }
 
+/**
+ * Whether a Node.js version satisfies an `engines.node` range made of `^x.y.z`
+ * and `>=x.y.z` alternatives joined by `||`, such as
+ * `^22.22.2 || ^24.15.0 || >=26.0.0`.
+ */
+function satisfiesNodeRange(actual, range) {
+  return range.split("||").some((alternative) => {
+    const clause = alternative.trim();
+    if (clause.startsWith("^")) {
+      const minimum = clause.slice(1);
+      return (
+        actual.split(".")[0] === minimum.split(".")[0] &&
+        atLeastVersion(actual, minimum)
+      );
+    }
+    return atLeastVersion(actual, clause.replace(/^>=/u, ""));
+  });
+}
+
 function canonicalEncryptionKey(value) {
   try {
     const decoded = Buffer.from(value, "base64");
@@ -205,8 +224,8 @@ export async function collectPreflight({
     ? JSON.parse(readFileSync(packagePath, "utf8"))
     : undefined;
   const requiredNode = String(
-    packageJson?.engines?.node ?? ">=22.22.2",
-  ).replace(/^>=/u, "");
+    packageJson?.engines?.node ?? "^22.22.2 || ^24.15.0 || >=26.0.0",
+  );
   const requiredPnpm =
     String(packageJson?.packageManager ?? "pnpm@10.27.0").split("@")[1] ??
     "10.27.0";
@@ -226,9 +245,9 @@ export async function collectPreflight({
   checks.push(
     check(
       "node",
-      atLeastVersion(nodeVersion, requiredNode) ? "pass" : "fail",
-      `Node.js ${nodeVersion} detected; OAO requires ${requiredNode} or newer.`,
-      `Install Node.js ${requiredNode} or newer.`,
+      satisfiesNodeRange(nodeVersion, requiredNode) ? "pass" : "fail",
+      `Node.js ${nodeVersion} detected; OAO requires Node.js ${requiredNode}.`,
+      `Install a Node.js version that satisfies ${requiredNode}.`,
     ),
   );
 
@@ -516,4 +535,4 @@ export function printPreflight(report, { json = false } = {}) {
   );
 }
 
-export { canonicalEncryptionKey, parseDotEnvContents };
+export { canonicalEncryptionKey, parseDotEnvContents, satisfiesNodeRange };

@@ -25,9 +25,10 @@ response-time or support-level commitments.
 ## Development environment
 
 OAO is a TypeScript ESM monorepo built with Turbo. It requires Node.js 22.22.2
-or newer and the exact pnpm version declared in `package.json` (currently
-10.27.0). Docker or another Docker-compatible runtime is required for the
-disposable integration harnesses and the local stack.
+or newer (24.15.0 or newer on Node 24, or Node 26 and later) and the exact pnpm
+version declared in `package.json` (currently 10.27.0). Docker or another
+Docker-compatible runtime is required for the disposable integration harnesses
+and the local stack.
 
 ```sh
 corepack enable
