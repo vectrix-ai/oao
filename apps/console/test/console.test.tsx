@@ -4691,11 +4691,12 @@ describe("management console", () => {
       "/sessions/session_01J5QTXE7W9M2R6C4A8K3N1P0V",
       new DemoConsoleApi({ eventDelayMs: 60_000 }),
     );
+    // jsdom does not blockify flex items, so the row's parts can run together.
     const extract = await screen.findByRole("button", {
-      name: /Harness · extract_shipment 3 model turns/u,
+      name: /Harness · extract_shipment\s*3 model turns/u,
     });
     const verify = screen.getByRole("button", {
-      name: /Harness · verify_shipment 2 model turns/u,
+      name: /Harness · verify_shipment\s*2 model turns/u,
     });
     expect(extract.closest("article")).toHaveClass(
       "activity--harness-parallel",

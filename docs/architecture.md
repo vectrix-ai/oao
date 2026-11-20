@@ -252,7 +252,7 @@ transaction whose `ROLLBACK` fails destroys its connection instead of
 returning it to the pool. `DATABASE_POOL_MAX` sizes the pool of the API and
 the worker.
 
-Flue 2.3.0's in-process `stop()` aborts active tool executions and records that abort in conversation history. OAO therefore separates full idle-process disposal from process handoff: SIGTERM stops new wake intake, projections, and HTTP, waits up to 5 seconds for running wake handlers, preserves any live Flue lease, or any handler still running after that wait, without calling the aborting stop path, and exits so recovery can reclaim that same submission after its 30-second lease expires. Reclaiming also depends on Flue's 15-second periodic scan and elapsed-time gate; lease expiry does not guarantee immediate recovery. In-process hot restart with an active submission is intentionally unsupported.
+Flue 2.3.1's in-process `stop()` aborts active tool executions and records that abort in conversation history. OAO therefore separates full idle-process disposal from process handoff: SIGTERM stops new wake intake, projections, and HTTP, waits up to 5 seconds for running wake handlers, preserves any live Flue lease, or any handler still running after that wait, without calling the aborting stop path, and exits so recovery can reclaim that same submission after its 30-second lease expires. Reclaiming also depends on Flue's 15-second periodic scan and elapsed-time gate; lease expiry does not guarantee immediate recovery. In-process hot restart with an active submission is intentionally unsupported.
 
 ## Implementation order
 

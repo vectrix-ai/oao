@@ -86,10 +86,10 @@ function harnessOperationRun(
 
 test("Flue packages are pinned to the planned release", () => {
   assert.deepEqual(FLUE_PACKAGE_VERSIONS, {
-    runtime: "2.3.0",
-    postgres: "2.3.0",
-    opentelemetry: "2.3.0",
-    piAi: "1.5.2",
+    runtime: "2.3.1",
+    postgres: "2.3.1",
+    opentelemetry: "2.3.1",
+    piAi: "1.6.0",
   });
 });
 

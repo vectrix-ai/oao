@@ -6,7 +6,7 @@ OAO is an open, self-hostable managed-agent platform built around Flue and Postg
 
 ## Commands
 
-Node.js 22.19+, pnpm 10.27, Turbo. TypeScript ESM everywhere.
+Node.js 22.22.2+, pnpm 10.27, Turbo. TypeScript ESM everywhere.
 
 ```sh
 pnpm install

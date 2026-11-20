@@ -2,7 +2,7 @@
 
 ## Working rules
 
-- Use TypeScript, ESM, Node.js 22.19+, pnpm, and Turbo.
+- Use TypeScript, ESM, Node.js 22.22.2+, pnpm, and Turbo.
 - Keep domain packages independent from Hono, React, Flue, Railway, WorkOS, Daytona, and OpenRouter implementation types; consume providers through the ports in `@oao/domain` with adapters in their own packages.
 - Project-scoped database relations repeat organization/project identity in keys and foreign keys; organization-shared resource families (API keys, model providers, storage providers, sandbox providers, MCP servers/credentials/policies) carry organization identity alone. Tenant queries run through the RLS transaction helpers.
 - Never expose secrets, authorization headers in logs, traces, list views, or SSE events. Provider credentials are write-only: encrypted at rest, returned only as fingerprint plus version.

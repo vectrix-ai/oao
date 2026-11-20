@@ -173,6 +173,27 @@ test("each immutable preset owns its routing variant even for the same model", a
   );
 });
 
+test("OpenRouter reasoning models outside OpenAI and Anthropic get system instructions", async () => {
+  const providers = createOpenRouterPresetProviders([
+    { key: "deepseek", model: "openrouter/deepseek/deepseek-v4-pro" },
+    { key: "gpt", model: "openrouter/openai/gpt-5" },
+  ]);
+  const roles: Record<string, unknown> = {};
+  for (const provider of providers) {
+    const model = provider.getModels()[0];
+    assert.ok(model);
+    // Both are reasoning models, which Pi's Responses adapter would otherwise
+    // give the developer role.
+    assert.equal(model.reasoning, true);
+    const { sent } = await openRouterRequest(provider, model);
+    roles[model.id] = (sent.input as Record<string, unknown>[])[0]?.role;
+  }
+  assert.deepEqual(roles, {
+    "deepseek/deepseek-v4-pro": "system",
+    "openai/gpt-5": "developer",
+  });
+});
+
 test("OpenRouter Anthropic presets keep routing, cache markers, and session affinity", async () => {
   const provider = createOpenRouterPresetProviders([
     {
