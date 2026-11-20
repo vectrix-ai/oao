@@ -16,10 +16,10 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "1.5.2",
-    "@flue/opentelemetry": "2.3.0",
-    "@flue/postgres": "2.3.0",
-    "@flue/runtime": "2.3.0",
+    "@earendil-works/pi-ai": "1.6.0",
+    "@flue/opentelemetry": "2.3.1",
+    "@flue/postgres": "2.3.1",
+    "@flue/runtime": "2.3.1",
     "@oao/contracts": "workspace:*",
     "@oao/db-postgres": "workspace:*",
     "@oao/domain": "workspace:*",

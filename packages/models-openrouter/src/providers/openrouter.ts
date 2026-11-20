@@ -61,6 +61,25 @@ const OPENROUTER_RESPONSES_COMPAT = {
 } as const satisfies OpenAIResponsesCompat;
 
 /**
+ * Whether a reasoning model from Pi's Chat Completions catalog gets its
+ * instructions in the `developer` role rather than `system`. Pi's Responses
+ * adapter uses `developer` unless the model says otherwise. Only OpenAI and
+ * Anthropic models take `developer` on OpenRouter; other models' chat
+ * templates may reject it. Pi 1.5 wrote `supportsDeveloperRole: false` on
+ * every other OpenRouter model, and Pi 1.6 dropped the flag because its Chat
+ * Completions adapter now sends `system` to every host except OpenAI's, so OAO
+ * applies the rule itself. An explicit catalog flag still wins.
+ */
+function openRouterDeveloperRole(
+  model: Model<Api>,
+  compat: Readonly<Record<string, unknown>>,
+): boolean {
+  if (typeof compat.supportsDeveloperRole === "boolean")
+    return compat.supportsDeveloperRole;
+  return model.id.startsWith("openai/") || model.id.startsWith("anthropic/");
+}
+
+/**
  * Responses API settings for a model from Pi's OpenRouter catalog. Pi lists
  * OpenRouter models for Chat Completions or, for Claude, OpenRouter's
  * Anthropic Messages endpoint. OAO sends every OpenRouter model through
@@ -75,8 +94,8 @@ function openRouterResponsesCompat(model: Model<Api>): OpenAIResponsesCompat {
       ? ((model.compat ?? {}) as Readonly<Record<string, unknown>>)
       : {};
   return {
-    ...(typeof compat.supportsDeveloperRole === "boolean"
-      ? { supportsDeveloperRole: compat.supportsDeveloperRole }
+    ...(model.api === "openai-completions"
+      ? { supportsDeveloperRole: openRouterDeveloperRole(model, compat) }
       : {}),
     ...(compat.supportsMidConvoSystemMessages === true
       ? { supportsMidConvoSystemMessages: true }

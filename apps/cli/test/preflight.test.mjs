@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   canonicalEncryptionKey,
   parseDotEnvContents,
+  satisfiesNodeRange,
 } from "../bootstrap/preflight.mjs";
 
 test("preflight recognizes only canonical 32-byte encryption keys", () => {
@@ -17,6 +18,15 @@ test("preflight recognizes only canonical 32-byte encryption keys", () => {
   );
   assert.equal(canonicalEncryptionKey(`${valid}\n`), false);
   assert.equal(canonicalEncryptionKey("not-base64"), false);
+});
+
+test("preflight checks Node.js against each alternative of the engines range", () => {
+  const range = "^22.22.2 || ^24.15.0 || >=26.0.0";
+  for (const version of ["22.22.2", "22.23.5", "24.15.0", "26.0.0", "27.1.0"])
+    assert.equal(satisfiesNodeRange(version, range), true, version);
+  for (const version of ["22.22.0", "23.11.0", "24.14.1", "25.9.0", "20.19.0"])
+    assert.equal(satisfiesNodeRange(version, range), false, version);
+  assert.equal(satisfiesNodeRange("22.22.2", ">=22.22.2"), true);
 });
 
 test("preflight parses dotenv values without treating comments as packages", () => {

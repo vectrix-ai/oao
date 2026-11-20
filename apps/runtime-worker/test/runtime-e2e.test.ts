@@ -40,7 +40,7 @@ const databaseUrl = process.env.DATABASE_URL;
 const testAdminDatabaseUrl =
   process.env.OAO_TEST_ADMIN_DATABASE_URL ?? databaseUrl;
 
-// Flue 2.3.0 renews ownership for 30s and scans expired leases every 15s.
+// Flue 2.3.1 renews ownership for 30s and scans expired leases every 15s.
 // Its scan also checks elapsed time: a timer tick just before that gate can
 // defer reconciliation to the following tick. Allow two scan intervals plus
 // child startup/completion grace; lease expiry alone is not a recovery SLA.

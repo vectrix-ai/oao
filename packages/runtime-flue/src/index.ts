@@ -152,10 +152,10 @@ import {
 export { PROMPT_SUGGESTION_INSTRUCTION } from "./prompt-suggestions.js";
 
 export const FLUE_PACKAGE_VERSIONS = Object.freeze({
-  runtime: "2.3.0",
-  postgres: "2.3.0",
-  opentelemetry: "2.3.0",
-  piAi: "1.5.2",
+  runtime: "2.3.1",
+  postgres: "2.3.1",
+  opentelemetry: "2.3.1",
+  piAi: "1.6.0",
 });
 
 import {
