@@ -7,6 +7,7 @@ export * from "./catalog.js";
 export * from "./model-limits.js";
 export * from "./model-presets.js";
 export * from "./model-call-timeout.js";
+export * from "./model-output-budget.js";
 export * from "./prompt-cache.js";
 export * from "./providers/anthropic.js";
 export * from "./providers/bedrock.js";

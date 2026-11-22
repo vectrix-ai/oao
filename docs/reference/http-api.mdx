@@ -1224,8 +1224,15 @@ including replay; a restored event can therefore arrive after the call finishes.
 window, OAO's normalized `finishReason`, and any provider thinking text returned
 with the response. A failed invocation also includes the provider's exact
 bounded `providerFinishReason` when available and a safe `errorExplanation`
-describing why that finish condition is an error. The Console event inspector
-labels these as **Provider finish reason** and **Why this is an error**.
+describing why that finish condition is an error, including when OAO triggered
+context compaction and retried a turn because too little output room remained
+(below 2,000 tokens) or the model stopped on `length` with no text or tool call.
+If a run still reaches settlement with no reply text and no committed assistant
+message (and did not finish a normal tool-only run, or stopped on `length`), OAO
+fails the run with `code: "empty_reply"` on its terminal `run.state_changed`
+event and run timeline entry rather than marking it `completed`. The Console
+event inspector labels model invocation diagnostics as **Provider finish
+reason** and **Why this is an error**.
 
 The transcript renders each invocation as a collapsed **Reasoning** row.
 Expanding it shows the full duration, token counts, and thinking text without

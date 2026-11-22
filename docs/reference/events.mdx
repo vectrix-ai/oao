@@ -83,13 +83,21 @@ prompt tokens reused from the provider cache; cache writes represent prompt
 tokens newly stored there. A provider that does not report cache usage
 contributes zero for those fields.
 
-When a model call fails because of a provider finish condition, the failed
-event also includes the provider's exact bounded `providerFinishReason` when it
-is available, plus a safe `errorExplanation` describing why OAO classified the
-response as failed. For example, `providerFinishReason: "content_filter"`
-explains that the provider's content filter stopped the response and OAO could
-not treat the partial output as a completed reply. These payloads never include
-prompt or response content, raw provider error messages, or credentials.
+When a model call fails because of a provider finish condition or a context
+output-budget overflow, the failed event also includes the provider's exact
+bounded `providerFinishReason` when it is available, plus a safe
+`errorExplanation` describing why OAO classified the response as failed (for
+example `providerFinishReason: "content_filter"` or a context-compaction retry
+when a conversation leaves fewer than 2,000 output tokens or stops on `length`
+with no text or tool call). These payloads never include prompt or response
+content, raw provider error messages, or credentials.
+
+When a run settles as `failed`, the terminal `run.state_changed` event can carry
+a bounded `code` in `publicPayload`—such as `empty_reply` when the model
+completed without producing any assistant text (with no committed text and no
+normal tool-only completion, or after a final `length` stop), or a pre-dispatch
+code such as `model_preset_unavailable`, `skill_package_unavailable`, or
+`run_file_storage_unavailable`.
 
 ## Prompt suggestion events
 

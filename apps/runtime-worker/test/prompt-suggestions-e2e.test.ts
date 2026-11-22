@@ -644,7 +644,8 @@ test(
               marker,
             );
           }
-          // A reply that is nothing but the line is no reply to follow.
+          // A reply that is nothing but the line leaves no reply and fails
+          // with empty_reply instead of completing silently.
           const session = await seedSession(pool, "only-line", suggesting);
           const run = await seedRun(
             pool,
@@ -655,7 +656,7 @@ test(
           const facts = await settled(running, pool, run);
           assert.deepEqual(
             [facts.state, facts.messages, facts.suggestion, facts.events],
-            ["completed", [], null, ["state:completed"]],
+            ["failed", [], null, ["state:failed"]],
           );
         },
       );

@@ -499,6 +499,47 @@ test("runtime projections explain exact provider finish errors safely", () => {
         "The model invocation ended before a complete response was returned, so OAO failed the run.",
     },
   );
+  assert.deepEqual(
+    runtimeTesting.modelInvocationDiagnostics(
+      {
+        finishReason: "error",
+        error: {
+          message:
+            "Context window exceeded: remaining output token budget is too small",
+        },
+      },
+      true,
+    ),
+    {
+      finishReason: "error",
+      errorExplanation:
+        "The conversation left too little output token room in the model's context window. OAO compacts and retries once when the conversation can be compacted and the recovery budget permits.",
+    },
+  );
+  assert.deepEqual(
+    runtimeTesting.modelInvocationDiagnostics(
+      {
+        finishReason: "error",
+        error: {
+          message:
+            "Context window exceeded: model stopped on length with no output",
+        },
+      },
+      true,
+    ),
+    {
+      finishReason: "error",
+      errorExplanation:
+        "The model reached the output length limit without producing text or a tool call. OAO compacts and retries once when the conversation can be compacted and the recovery budget permits.",
+    },
+  );
+  assert.deepEqual(
+    runtimeTesting.modelInvocationDiagnostics(
+      { finishReason: "length" },
+      false,
+    ),
+    { finishReason: "length" },
+  );
 });
 
 const delivery = {
