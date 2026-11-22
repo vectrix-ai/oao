@@ -84,7 +84,9 @@ describe("Combobox", () => {
     render(<Harness />);
     const control = screen.getByRole("combobox", { name: "Model" });
     await user.click(control);
-    await user.click(screen.getByRole("option", { name: /Model 3\b/u }));
+    // jsdom does not blockify flex items, so the label and the description
+    // run together in the accessible name.
+    await user.click(screen.getByRole("option", { name: /^Model 3(?!\d)/u }));
     await user.click(control);
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("option")).not.toBeInTheDocument();

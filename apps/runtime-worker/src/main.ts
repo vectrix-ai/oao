@@ -468,7 +468,7 @@ export async function startRuntimeWorker(input: {
       await projection.stop();
       await closeServer();
       if (!handlersDrained || (await hasActiveDispatches())) {
-        // Flue 2.3.0 stop() aborts active tools and durably records that abort.
+        // Flue 2.3.1 stop() aborts active tools and durably records that abort.
         // Leave the process-owned lease for bounded startup recovery instead;
         // the signal handler exits immediately after this method returns.
         return "handoff_required";

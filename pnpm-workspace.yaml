@@ -3,20 +3,13 @@ packages:
   - packages/*
 
 overrides:
-  # Flue pins client 2.0.0 exactly; retain its security upgrade to 2.3.1.
-  "@modelcontextprotocol/client": 2.3.1
+  # Flue pins client 2.0.0 exactly; keep one copy on the workspace's 2.4.0.
+  "@modelcontextprotocol/client": 2.4.0
 
   # OTel SDK parents pin vulnerable resources exactly (AIKIDO-2026-461086).
   "@opentelemetry/resources@2.12.0": 2.12.1
   "@opentelemetry/resources@3.0.0": 3.1.1
   "@opentelemetry/resources@3.1.0": 3.1.1
 
-patchedDependencies:
-  # pi-ai 1.5 removed Type; remove when Flue imports TypeBox directly.
-  "@flue/runtime@2.3.0": patches/@flue__runtime@2.3.0.patch
-
-# Supply the dependency used by the Flue compatibility patch in deployments.
-packageExtensions:
-  "@flue/runtime@2.3.0":
-    dependencies:
-      typebox: 1.4.4
+  # @daytona/sdk 0.230.0 pins vulnerable ws 8.22.0 exactly (AIKIDO-2026-844803).
+  "ws@8.22.0": 8.23.0

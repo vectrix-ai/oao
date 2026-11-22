@@ -676,20 +676,35 @@ unbound presets are history only.
 
 ## Bundled model catalog
 
-The runtime uses pi-ai 1.5.2. This adds Claude Fable 5.2 catalog support
-(including its OpenRouter entry) and provider compatibility options. OpenAI-compatible
-requests without tools now omit the empty tools array even with tool history;
-older proxies that require it need `compat.requiresToolsWithToolHistory`. Native
-Anthropic sessions can use message threads. Its catalog excludes realtime and image-only
-models from chat choices and includes newer chat models. Upstream lists OpenRouter models for Chat Completions or, for Claude,
-Anthropic Messages. OAO sends all of them through OpenRouter's Responses API
-instead, so routing controls and prompt cache breakpoints apply to every
-family; reasoning is replayed as encrypted reasoning items. OpenRouter billed cost totals use
+The runtime uses pi-ai 1.6.0. Its catalog adds GPT-6.2 Astra and GPT-6.2 Sol
+(272,000-token context window, 128,000-token output limit) to the OpenAI and
+Bedrock catalogs, and newer OpenRouter chat models. Several existing OpenRouter
+entries changed their catalog context window or output limit; a preset without
+its own limits follows the new catalog values, so set preset limits when a run
+depends on a specific size. OpenAI-compatible requests without tools omit the
+empty tools array even with tool history; older proxies that require it need
+`compat.requiresToolsWithToolHistory`. The catalog excludes realtime and
+image-only models from chat choices.
+
+Native Anthropic presets use Anthropic message threads. A model call whose
+earlier messages and settings match what Anthropic already holds for the
+session continues that thread and sends only the new messages; any other call
+starts a new thread. Thread state lives in the worker process, so a restarted
+or different worker starts a new thread, and an endpoint that rejects threads
+gets ordinary requests.
+
+Upstream lists OpenRouter models for Chat Completions or, for Claude, Anthropic
+Messages. OAO sends all of them through OpenRouter's Responses API instead, so
+routing controls and prompt cache breakpoints apply to every family; reasoning
+is replayed as encrypted reasoning items. Reasoning models from OpenAI and
+Anthropic receive their instructions in the `developer` role; every other
+OpenRouter model receives them as `system`, because other models' chat
+templates may reject `developer`. OpenRouter billed cost totals use
 provider-reported billing; component costs remain catalog estimates.
 GPT-6.1 Terra is included, with a 500K context window on the Codex provider.
 Model context limits remain provider-specific; configure presets accordingly.
 
 Tool arguments use pi-schema JSON Schema validation and coercion. Validation
-messages may differ from earlier releases. Flue 2.3.0 carries a local import
-compatibility patch for pi-ai 1.5.2; its persisted format and lease timings
-are unchanged.
+messages may differ from earlier releases. Flue 2.3.1 imports TypeBox itself,
+so OAO no longer patches it; its persisted format and lease timings are
+unchanged.

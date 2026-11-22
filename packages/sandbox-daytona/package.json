@@ -22,15 +22,15 @@
   },
   "dependencies": {
     "@daytona/sdk": "0.230.0",
-    "@earendil-works/pi-ai": "1.5.2",
-    "@flue/runtime": "2.3.0",
+    "@earendil-works/pi-ai": "1.6.0",
+    "@flue/runtime": "2.3.1",
     "@oao/artifact-s3": "workspace:*",
     "@oao/contracts": "workspace:*",
     "@oao/db-postgres": "workspace:*",
     "@oao/domain": "workspace:*",
     "@oao/model-images": "workspace:*",
     "@oao/provider-credentials": "workspace:*",
-    "typebox": "1.4.4"
+    "typebox": "1.4.7"
   },
   "devDependencies": {
     "@oao/testkit": "workspace:*"

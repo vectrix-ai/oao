@@ -67,7 +67,7 @@ const context = { instanceId: "managed-instance", submissionId: "submission" };
 test("stream reads share one durable admission, including concurrent reads", async () => {
   const db = admissionDatabase();
   const admit = runtimeTesting.createModelTurnAdmission(db.pool);
-  // Flue 2.3.0 passes the same operation to stream creation, next(), and result().
+  // Flue 2.3.1 passes the same operation to stream creation, next(), and result().
   const operation = { type: "model" as const, turnId: "first-turn" };
   const pending = admit(operation, context);
   for (let chunk = 0; chunk < 100; chunk++)

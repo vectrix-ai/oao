@@ -3,7 +3,7 @@
  * Daytona adapter for Flue.
  *
  * This file is the source emitted by `flue add sandbox daytona` (blueprint
- * sandbox/daytona@1, unchanged through Flue 2.3.0).
+ * sandbox/daytona@1, unchanged through Flue 2.3.1).
  * OAO owns provisioning and lifecycle in `index.ts`; this adapter only maps an
  * already-initialized Daytona sandbox onto Flue's SandboxFactory contract.
  */
