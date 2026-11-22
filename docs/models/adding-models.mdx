@@ -273,6 +273,14 @@ The context window is also how you choose when long conversations compact. A
 model that accepts 1,050,000 tokens can still get a context window of 250,000:
 its runs then compact past 230,000 tokens instead of sending their whole history
 on every call. With an output limit of 128,000, each call may write up to that.
+If tool results inside a run leave fewer than 2,000 output tokens in the context
+window—or a call stops on `length` without producing text or a tool call—OAO
+triggers context compaction and retries that turn once. The pre-call output-room
+check uses pi's character-based context-token estimate and runs only when the
+conversation has earlier history that compaction can cut; if compaction cannot
+free enough room or the retry overflows again, the run fails instead of
+completing with an empty reply. A response that hits `length` after writing text
+or requesting tools is kept as returned.
 
 In **Add model preset**, the **Limits** section is prefilled with the context
 window and output limit the catalog lists for the chosen model; overwrite them

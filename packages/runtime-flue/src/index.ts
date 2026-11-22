@@ -118,8 +118,11 @@ import type {
   ResolvedModelPreset,
 } from "@oao/models-openrouter";
 import {
+  EMPTY_LENGTH_OVERFLOW_MESSAGE,
   MODEL_CALL_TIMEOUT_MS,
+  OUTPUT_BUDGET_OVERFLOW_MESSAGE,
   withModelCallTimeout,
+  withModelOutputBudget,
   withModelPromptCacheScope,
   type ModelPromptCacheScope,
 } from "@oao/models-openrouter";
@@ -319,7 +322,7 @@ export interface McpToolExecutionPort {
  */
 export function registerRuntimeModelProvider(provider: Provider): void {
   recordRuntimeModels(provider);
-  setProvider(withModelCallTimeout(provider));
+  setProvider(withModelCallTimeout(withModelOutputBudget(provider)));
 }
 
 // Input modalities of every registered runtime model, keyed like Flue's
@@ -2758,15 +2761,21 @@ function modelInvocationDiagnostics(
     publicProviderFinishReason(standardizedReason);
   const errorExplanation = !isError
     ? undefined
-    : /^Model call timed out after \d+ms$/u.test(response.error?.message ?? "")
-      ? "The model attempt exceeded its deadline and was aborted. OAO retries it when the retry budget and run deadline permit."
-      : providerFinishReason === "content_filter"
-        ? "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run."
-        : providerFinishReason === "network_error"
-          ? "The provider reported a network error before producing a complete response, so OAO failed the run."
-          : providerFinishReason
-            ? `The provider ended the response with "${providerFinishReason}", which OAO treats as an incomplete model response and a failed run.`
-            : "The model invocation ended before a complete response was returned, so OAO failed the run.";
+    : response.error?.message === OUTPUT_BUDGET_OVERFLOW_MESSAGE
+      ? "The conversation left too little output token room in the model's context window. OAO compacts and retries once when the conversation can be compacted and the recovery budget permits."
+      : response.error?.message === EMPTY_LENGTH_OVERFLOW_MESSAGE
+        ? "The model reached the output length limit without producing text or a tool call. OAO compacts and retries once when the conversation can be compacted and the recovery budget permits."
+        : /^Model call timed out after \d+ms$/u.test(
+              response.error?.message ?? "",
+            )
+          ? "The model attempt exceeded its deadline and was aborted. OAO retries it when the retry budget and run deadline permit."
+          : providerFinishReason === "content_filter"
+            ? "The provider stopped the response because its content filter was triggered, so OAO treated the partial response as incomplete and failed the run."
+            : providerFinishReason === "network_error"
+              ? "The provider reported a network error before producing a complete response, so OAO failed the run."
+              : providerFinishReason
+                ? `The provider ended the response with "${providerFinishReason}", which OAO treats as an incomplete model response and a failed run.`
+                : "The model invocation ended before a complete response was returned, so OAO failed the run.";
   return {
     finishReason,
     ...(providerFinishReason ? { providerFinishReason } : {}),
@@ -5883,30 +5892,13 @@ export class RuntimeProjection {
         [tenant.organizationId, tenant.projectId, runtimeDispatch.run_id],
       );
       if (!fence.rowCount) return;
-      await transaction.query(
-        "UPDATE oao.runs SET state=$4 WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND state NOT IN ('completed','failed','cancelled','timed_out')",
-        [
-          tenant.organizationId,
-          tenant.projectId,
-          runtimeDispatch.run_id,
-          productState,
-        ],
-      );
-      await transaction.query(
-        `UPDATE oao.timeline_entries SET completed_at=clock_timestamp(),safe_detail=$4
-         WHERE organization_id=$1 AND project_id=$2 AND run_id=$3 AND entry_sequence=1`,
-        [
-          tenant.organizationId,
-          tenant.projectId,
-          runtimeDispatch.run_id,
-          { status: productState },
-        ],
-      );
       const finalMessageId = eventUuid(
         `message:${runtimeDispatch.run_id}:assistant`,
       );
-      if (redactedReply) {
-        // Text committed ahead of approval gates is already in the transcript.
+      let hasCommittedAssistantText = false;
+      if (redactedReply || productState === "completed") {
+        // Text committed ahead of approval gates or tool calls is already in
+        // the transcript.
         const committed = await transaction.query<{
           redacted_content: string;
         }>(
@@ -5921,11 +5913,90 @@ export class RuntimeProjection {
             finalMessageId,
           ],
         );
-        redactedReply = replyAfterCommittedText(
-          redactedReply,
-          committed.rows.map((row) => row.redacted_content),
+        hasCommittedAssistantText = committed.rows.some(
+          (row) => row.redacted_content.trim().length > 0,
         );
+        if (redactedReply) {
+          redactedReply = replyAfterCommittedText(
+            redactedReply,
+            committed.rows.map((row) => row.redacted_content),
+          );
+        }
       }
+      let emptyReply = false;
+      if (
+        productState === "completed" &&
+        redactedReply.trim().length === 0 &&
+        !hasCommittedAssistantText
+      ) {
+        const activity = await transaction.query<{
+          last_finish_reason: string | null;
+          had_tool_call: boolean;
+        }>(
+          `SELECT
+             (SELECT safe_response->>'finishReason'
+                FROM oao.model_invocations
+               WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+                 AND COALESCE(safe_request->>'purpose','agent')='agent'
+               ORDER BY attempt DESC LIMIT 1) AS last_finish_reason,
+             (EXISTS (
+                SELECT 1 FROM oao.model_invocations
+                 WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+                   AND COALESCE(safe_request->>'purpose','agent')='agent'
+                   AND safe_response->>'finishReason'='toolUse'
+              ) OR EXISTS (
+                SELECT 1 FROM oao.tool_calls
+                 WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+              ) OR EXISTS (
+                SELECT 1 FROM oao.sandbox_commands
+                 WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+              ) OR EXISTS (
+                SELECT 1 FROM oao.mcp_call_attempts
+                 WHERE organization_id=$1 AND project_id=$2 AND run_id=$3
+              ) OR EXISTS (
+                SELECT 1 FROM oao.delegation_runs
+                 WHERE organization_id=$1 AND project_id=$2 AND requested_by_run_id=$3
+              )) AS had_tool_call`,
+          [tenant.organizationId, tenant.projectId, runtimeDispatch.run_id],
+        );
+        const lastFinishReason = activity.rows[0]?.last_finish_reason ?? null;
+        const hadToolCall = activity.rows[0]?.had_tool_call === true;
+        // Tool-only runs whose final turn stopped normally remain valid;
+        // fail empty completed runs when no tool work occurred or the final
+        // model turn stopped on length.
+        emptyReply = !hadToolCall || lastFinishReason === "length";
+      }
+      const settledState = emptyReply ? "failed" : productState;
+      const settlementCode = emptyReply ? "empty_reply" : undefined;
+      if (emptyReply) {
+        redactedReply = "";
+        suggestion = undefined;
+      }
+      await transaction.query(
+        "UPDATE oao.runs SET state=$4 WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND state NOT IN ('completed','failed','cancelled','timed_out')",
+        [
+          tenant.organizationId,
+          tenant.projectId,
+          runtimeDispatch.run_id,
+          settledState,
+        ],
+      );
+      await transaction.query(
+        `UPDATE oao.timeline_entries SET completed_at=clock_timestamp(),safe_detail=$4
+         WHERE organization_id=$1 AND project_id=$2 AND run_id=$3 AND entry_sequence=1`,
+        [
+          tenant.organizationId,
+          tenant.projectId,
+          runtimeDispatch.run_id,
+          emptyReply
+            ? {
+                status: "failed",
+                code: "empty_reply",
+                message: "The model completed without producing a reply",
+              }
+            : { status: settledState },
+        ],
+      );
       if (redactedReply) {
         await transaction.query(
           `INSERT INTO oao.messages (
@@ -5998,7 +6069,10 @@ export class RuntimeProjection {
         aggregateType: "run",
         aggregateId: runtimeDispatch.run_id,
         kind: "run.state_changed",
-        payload: { state: productState },
+        payload: {
+          state: settledState,
+          ...(settlementCode ? { code: settlementCode } : {}),
+        },
       });
       await appendEventOnce(transaction, {
         ...tenant,
@@ -6006,7 +6080,7 @@ export class RuntimeProjection {
         aggregateType: "session",
         aggregateId: run.session_id,
         kind: "session.summary_changed",
-        payload: { runId: runtimeDispatch.run_id, state: productState },
+        payload: { runId: runtimeDispatch.run_id, state: settledState },
       });
       await closeRunObligations(
         transaction,
@@ -6014,7 +6088,7 @@ export class RuntimeProjection {
           ...tenant,
           runId: runtimeDispatch.run_id,
         },
-        productState,
+        settledState,
       );
       if (run.thread_instance_state === "corrupt") {
         await transaction.query(
@@ -7177,7 +7251,7 @@ export async function startManagedFlueRuntime(input: {
     agents: [ManagedAgent],
     db: createFluePostgresAdapter(input.pool),
     providers: input.providers.map((provider) =>
-      withModelCallTimeout(provider),
+      withModelCallTimeout(withModelOutputBudget(provider)),
     ),
   });
 }
