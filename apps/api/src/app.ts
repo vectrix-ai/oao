@@ -9626,6 +9626,10 @@ function registerEventRoutes(
     const actor = assertProject(c);
     const header = c.req.header("last-event-id");
     const query = c.req.query("cursor");
+    const from = c.req.query("from");
+    if (from !== undefined && from !== "beginning" && from !== "now") {
+      throw new HttpApiError("bad_request", "from must be beginning or now");
+    }
     let after = 0n;
     if (header || query) {
       try {
@@ -9633,6 +9637,19 @@ function registerEventRoutes(
       } catch {
         throw new HttpApiError("bad_request", "Invalid event cursor");
       }
+    } else if (from === "now") {
+      after = await dependencies.store.transaction(
+        actor,
+        "run:read",
+        async (tx) => {
+          const current = await tx.query<{ committed_position: string }>(
+            `SELECT committed_position::text FROM oao.project_event_positions
+             WHERE organization_id=$1 AND project_id=$2`,
+            [actor.organizationId, actor.projectId],
+          );
+          return BigInt(current.rows[0]?.committed_position ?? "0");
+        },
+      );
     }
     const once = c.req.query("once") === "true";
     const timing = {
@@ -9641,6 +9658,7 @@ function registerEventRoutes(
     };
     // Ask buffering reverse proxies (nginx and compatible) to pass frames through at once.
     c.header("X-Accel-Buffering", "no");
+    c.header("x-oao-event-cursor", encodeEventCursor(after));
     const response = streamSSE(c, async (stream) => {
       const deadline = Date.now() + (once ? 0 : timing.maxConnectionMs);
       let position = after;

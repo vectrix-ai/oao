@@ -4,7 +4,7 @@ import { DEVELOPMENT_PRINCIPAL, DevelopmentAuthAdapter } from "@oao/auth-core";
 import type { PgClient, PgPool, TenantContext } from "@oao/db-postgres";
 import type { AuthorizationAction, Principal } from "@oao/domain";
 import type { WakeOnlyNotifier, WakeSubscriptionScope } from "@oao/events";
-import { decodeEventCursor } from "@oao/events";
+import { decodeEventCursor, encodeEventCursor } from "@oao/events";
 import { createApiApp, type EventStreamTiming } from "../../src/app.js";
 import type { RuntimeCommandPort } from "../../src/runtime-commands.js";
 import { PostgresApiStore } from "../../src/store.js";
@@ -38,8 +38,12 @@ function eventRow(position: number): Record<string, unknown> {
 class EventPageStore extends PostgresApiStore {
   readonly readAt: number[] = [];
   readonly positions: string[] = [];
+  headLookups = 0;
 
-  constructor(private readonly pages: Record<string, unknown>[][]) {
+  constructor(
+    private readonly pages: Record<string, unknown>[][],
+    private readonly committedPosition?: string,
+  ) {
     super(unusedPool, "unit-test-api-key-pepper");
   }
 
@@ -48,9 +52,17 @@ class EventPageStore extends PostgresApiStore {
     _action: AuthorizationAction | readonly AuthorizationAction[] | undefined,
     callback: (transaction: PgClient, tenant: TenantContext) => Promise<T>,
   ): Promise<T> {
-    const rows = this.pages.shift() ?? [];
     const transaction = {
-      query: async (_text: string, values: readonly unknown[]) => {
+      query: async (text: string, values: readonly unknown[]) => {
+        if (text.includes("project_event_positions")) {
+          this.headLookups += 1;
+          const rows =
+            this.committedPosition === undefined
+              ? []
+              : [{ committed_position: this.committedPosition }];
+          return { rowCount: rows.length, rows };
+        }
+        const rows = this.pages.shift() ?? [];
         this.readAt.push(Date.now());
         this.positions.push(String(values[2]));
         return { rowCount: rows.length, rows };
@@ -257,4 +269,65 @@ test("a wake notification triggers a read before the poll interval", async () =>
   await reading;
   assert.equal(store.readAt.length, 2);
   await waitFor(() => notifier.unsubscribed === 1, "unsubscribe");
+});
+
+test("from=now starts at the project's committed head and exposes x-oao-event-cursor", async () => {
+  const store = new EventPageStore([[eventRow(43)]], "42");
+  const app = eventApp(store, {});
+  const response = await app.request(`${eventsPath}?from=now&once=true`);
+  assert.equal(response.status, 200);
+  assert.equal(
+    response.headers.get("x-oao-event-cursor"),
+    encodeEventCursor(42n),
+  );
+  const body = await response.text();
+  assert.equal(store.headLookups, 1);
+  assert.deepEqual(store.positions, ["42"]);
+  const ids = [...body.matchAll(/^id: (.+)$/gmu)].map((match) => match[1]);
+  assert.deepEqual(
+    ids.map((id) => decodeEventCursor(id ?? "")),
+    [43n],
+  );
+});
+
+test("from=now starts at position 0 when a project has no committed events yet", async () => {
+  const store = new EventPageStore([[]]);
+  const app = eventApp(store, {});
+  const response = await app.request(`${eventsPath}?from=now&once=true`);
+  assert.equal(response.status, 200);
+  assert.equal(
+    response.headers.get("x-oao-event-cursor"),
+    encodeEventCursor(0n),
+  );
+  await response.text();
+  assert.equal(store.headLookups, 1);
+  assert.deepEqual(store.positions, ["0"]);
+});
+
+test("Last-Event-ID takes precedence over from=now on reconnect", async () => {
+  const store = new EventPageStore([[eventRow(11)]], "99");
+  const app = eventApp(store, {});
+  const response = await app.request(`${eventsPath}?from=now&once=true`, {
+    headers: { "last-event-id": encodeEventCursor(10n) },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(
+    response.headers.get("x-oao-event-cursor"),
+    encodeEventCursor(10n),
+  );
+  await response.text();
+  assert.equal(store.headLookups, 0);
+  assert.deepEqual(store.positions, ["10"]);
+});
+
+test("invalid from query parameter returns 400 bad_request", async () => {
+  const store = new EventPageStore([]);
+  const app = eventApp(store, {});
+  const response = await app.request(`${eventsPath}?from=latest`);
+  assert.equal(response.status, 400);
+  const body = (await response.json()) as {
+    error: { code: string; message: string };
+  };
+  assert.equal(body.error.code, "bad_request");
+  assert.match(body.error.message, /beginning or now/u);
 });

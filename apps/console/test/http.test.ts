@@ -2566,6 +2566,78 @@ describe("HTTP console adapter", () => {
     await waitFor(() => expect(aborted).toBe(true));
   });
 
+  it("streams from 'now', captures x-oao-event-cursor, and resumes via last-event-id on reconnect", async () => {
+    let secondAborted = false;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(": connected\n\n"));
+              controller.close();
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              "content-type": "text/event-stream",
+              "x-oao-event-cursor": "djE6OTk",
+            },
+          },
+        ),
+      )
+      .mockImplementationOnce(
+        (_input: unknown, init?: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => {
+                secondAborted = true;
+                reject(new DOMException("Aborted", "AbortError"));
+              },
+              { once: true },
+            );
+          }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpConsoleApi();
+    const onOpen = vi.fn();
+    const onCursor = vi.fn();
+
+    const connection = api.connectEvents({
+      projectId: PROJECT_ID,
+      from: "now",
+      onOpen,
+      onEvent: vi.fn(),
+      onCursor,
+      onError: vi.fn(),
+    });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2), {
+      timeout: 2_000,
+    });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(onCursor).toHaveBeenCalledWith("djE6OTk");
+
+    const [firstUrl, firstInit] = fetchMock.mock.calls[0]!;
+    expect(firstUrl).toBe(`/v1/projects/${PROJECT_ID}/events?from=now`);
+    expect((firstInit as RequestInit | undefined)?.headers).not.toHaveProperty(
+      "last-event-id",
+    );
+
+    const [secondUrl, secondInit] = fetchMock.mock.calls[1]!;
+    expect(secondUrl).toBe(`/v1/projects/${PROJECT_ID}/events`);
+    expect((secondInit as RequestInit | undefined)?.headers).toEqual(
+      expect.objectContaining({
+        "last-event-id": "djE6OTk",
+      }),
+    );
+
+    connection.close();
+    await waitFor(() => expect(secondAborted).toBe(true));
+  });
+
   it("cancels a session's latest run after reading only its runs", async () => {
     const fetchMock = vi
       .fn()

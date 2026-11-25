@@ -5619,4 +5619,88 @@ describe("management console", () => {
       ),
     ).toBe("djE6NDI");
   });
+
+  it("starts live SSE from 'now' on a fresh tab and coalesces event bursts", async () => {
+    const sessionId = "session_01J5QTXE7W9M2R6C4A8K3N1P0V";
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const getUsage = vi.spyOn(api, "getSessionUsage");
+    const listPending = vi.spyOn(api, "listPendingWork");
+    const connectEvents = vi.spyOn(api, "connectEvents");
+
+    renderConsole(`/sessions/${sessionId}`, api);
+    await screen.findByRole("complementary", { name: "Session details" });
+    await waitFor(() => expect(connectEvents).toHaveBeenCalled());
+
+    const firstCall = connectEvents.mock.lastCall?.[0];
+    expect(firstCall?.from).toBe("now");
+    expect(firstCall?.after).toBeUndefined();
+    expect(firstCall?.projectId).toBe("22222222-2222-4222-8222-222222222222");
+
+    await waitFor(() => {
+      expect(getUsage).toHaveBeenCalled();
+      expect(listPending).toHaveBeenCalled();
+    });
+    const usageBefore = getUsage.mock.calls.length;
+    const pendingBefore = listPending.mock.calls.length;
+
+    for (let index = 0; index < 50; index += 1) {
+      firstCall?.onEvent({
+        kind:
+          index % 2 === 0
+            ? "model.invocation_completed"
+            : "tool_call.requested",
+        aggregateId: `run-${index}`,
+        publicPayload: { sessionId: `other-session-${index}` },
+      } as unknown as ProductEvent);
+    }
+
+    await waitFor(() => {
+      expect(getUsage.mock.calls.length).toBeGreaterThan(usageBefore);
+      expect(listPending.mock.calls.length).toBeGreaterThan(pendingBefore);
+    });
+    expect(getUsage.mock.calls.length - usageBefore).toBe(1);
+    expect(listPending.mock.calls.length - pendingBefore).toBe(1);
+  });
+
+  it("reconnects SSE to the new project from 'now' when switching projects", async () => {
+    const user = userEvent.setup();
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const closed: string[] = [];
+    const opened: Array<{ projectId?: string; from?: string; after?: string }> =
+      [];
+    vi.spyOn(api, "connectEvents").mockImplementation((input) => {
+      opened.push({
+        ...(input.projectId ? { projectId: input.projectId } : {}),
+        ...(input.from ? { from: input.from } : {}),
+        ...(input.after ? { after: input.after } : {}),
+      });
+      return {
+        close: () => {
+          closed.push(input.projectId ?? "");
+        },
+      };
+    });
+
+    renderConsole("/sessions", api);
+    await waitFor(() => expect(opened).toHaveLength(1));
+    expect(opened[0]).toEqual({
+      projectId: "22222222-2222-4222-8222-222222222222",
+      from: "now",
+    });
+
+    const projectSelect = await screen.findByRole("combobox", {
+      name: "Project",
+    });
+    await user.selectOptions(
+      projectSelect,
+      "23232323-2323-4232-8232-232323232323",
+    );
+
+    await waitFor(() => expect(opened).toHaveLength(2));
+    expect(closed).toContain("22222222-2222-4222-8222-222222222222");
+    expect(opened[1]).toEqual({
+      projectId: "23232323-2323-4232-8232-232323232323",
+      from: "now",
+    });
+  });
 });

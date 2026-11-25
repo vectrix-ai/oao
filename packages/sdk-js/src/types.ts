@@ -15,6 +15,7 @@ import type {
   ModelRoutingPolicy,
   Organization,
   Page,
+  EventStreamFrom,
   ProductEvent,
   Project,
   ProjectMember,
@@ -84,6 +85,7 @@ export type {
   ModelRoutingPolicy,
   Organization,
   Page,
+  EventStreamFrom,
   ProductEvent,
   Project,
   ProjectMember,
@@ -891,6 +893,11 @@ export interface WriteOptions extends RequestOptions {
 
 export interface ProjectEventStreamOptions extends RequestOptions {
   readonly lastEventId?: string;
+  /**
+   * Where to begin when `lastEventId` is not set: `"beginning"` (default)
+   * replays from position 0, and `"now"` starts at the project's current head.
+   */
+  readonly from?: EventStreamFrom;
   readonly reconnect?: boolean;
   readonly reconnectDelayMs?: number;
 }

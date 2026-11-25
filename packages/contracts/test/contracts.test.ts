@@ -7,6 +7,7 @@ import {
   MODEL_PRESET_KEY_PATTERN,
   ModelCatalogEntrySchema,
   PLATFORM_MAX_TURNS,
+  EventStreamFromSchema,
   ProductEventSchema,
   ProjectMemberSchema,
   CreateProjectMemberInputSchema,
@@ -1502,4 +1503,10 @@ test("a session prompt cache key is printable ASCII and its prefix a non-negativ
     undefined,
   );
   assert.equal(instance.success, true);
+});
+
+test("EventStreamFromSchema accepts beginning and now only", () => {
+  assert.equal(v.parse(EventStreamFromSchema, "beginning"), "beginning");
+  assert.equal(v.parse(EventStreamFromSchema, "now"), "now");
+  assert.equal(v.safeParse(EventStreamFromSchema, "latest").success, false);
 });

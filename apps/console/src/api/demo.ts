@@ -4669,12 +4669,17 @@ export class DemoConsoleApi implements ConsoleApi {
   connectEvents(
     input: Parameters<ConsoleApi["connectEvents"]>[0],
   ): EventConnection {
+    let closed = false;
     const delay = this.#options.eventDelayMs ?? 1200;
+    queueMicrotask(() => {
+      if (!closed && !input.signal?.aborted) input.onOpen?.();
+    });
     const timer = setTimeout(() => {
+      if (closed || input.signal?.aborted) return;
       const event: ProductEvent = {
         id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
         organizationId: ORG_ID,
-        projectId: PROJECT_ID,
+        projectId: input.projectId ?? PROJECT_ID,
         aggregateType: "run",
         aggregateId: sessionsSeed[0]!.runId,
         aggregateSequence: 12,
@@ -4689,10 +4694,14 @@ export class DemoConsoleApi implements ConsoleApi {
       input.onCursor("djE6NDI");
       input.onEvent(event);
     }, delay);
-    input.signal?.addEventListener("abort", () => clearTimeout(timer), {
+    const close = () => {
+      closed = true;
+      clearTimeout(timer);
+    };
+    input.signal?.addEventListener("abort", close, {
       once: true,
     });
-    return { close: () => clearTimeout(timer) };
+    return { close };
   }
 }
 

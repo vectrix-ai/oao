@@ -12,6 +12,7 @@ import type {
   ProjectSandboxProvider,
   ProjectStorageProvider,
   SandboxSnapshotEntry,
+  EventStreamFrom,
   ProductEvent,
   RunState,
   SessionUsage,
@@ -1005,8 +1006,11 @@ export interface ConsoleApi {
     readonly credentials: ConfigurationRestoreCredentialsInput;
   }): Promise<ConfigurationRestoreResult>;
   connectEvents(input: {
+    readonly projectId?: string;
     readonly after?: string;
+    readonly from?: EventStreamFrom;
     readonly signal?: AbortSignal;
+    readonly onOpen?: () => void;
     readonly onEvent: (event: ProductEvent) => void;
     readonly onCursor: (cursor: string) => void;
     readonly onError: (error: Error) => void;
