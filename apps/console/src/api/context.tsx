@@ -1,4 +1,8 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useQuery,
+  useQueryClient,
+  type QueryFilters,
+} from "@tanstack/react-query";
 import {
   createContext,
   useContext,
@@ -141,39 +145,55 @@ export function useProjectEvents(): {
       flushing = true;
       needsReflush = false;
       try {
-        const invalidations: Promise<void>[] = [];
-        if (sessions) {
-          invalidations.push(
-            queryClient.invalidateQueries({ queryKey: ["sessions"] }),
-          );
-        }
+        const filters: QueryFilters[] = [];
+        if (sessions) filters.push({ queryKey: ["sessions"] });
         if (allSessionDetails) {
-          invalidations.push(
-            queryClient.invalidateQueries({ queryKey: ["session"] }),
-          );
+          filters.push({ queryKey: ["session"] });
         } else {
           for (const id of sessionIds) {
-            invalidations.push(
-              queryClient.invalidateQueries({ queryKey: ["session", id] }),
-            );
+            filters.push({ queryKey: ["session", id] });
           }
           if (usage) {
-            invalidations.push(
-              queryClient.invalidateQueries({
-                predicate: ({ queryKey }) =>
-                  queryKey[0] === "session" &&
-                  queryKey[2] === "usage" &&
-                  !sessionIdSet.has(String(queryKey[1])),
-              }),
-            );
+            filters.push({
+              predicate: ({ queryKey }) =>
+                queryKey[0] === "session" &&
+                queryKey[2] === "usage" &&
+                !sessionIdSet.has(String(queryKey[1])),
+            });
           }
         }
-        if (pendingWork) {
-          invalidations.push(
-            queryClient.invalidateQueries({ queryKey: ["pending-work"] }),
+        if (pendingWork) filters.push({ queryKey: ["pending-work"] });
+        // TanStack Query reuses an in-flight fetch when a query has no cached
+        // data yet, so track any such active queries and re-invalidate them
+        // once their pre-cursor initial fetch settles.
+        const preCursorQueries = filters
+          .flatMap((filter) =>
+            queryClient.getQueryCache().findAll({ ...filter, type: "active" }),
+          )
+          .filter(
+            (query) =>
+              query.state.fetchStatus === "fetching" &&
+              query.state.data === undefined,
+          );
+        await Promise.allSettled(
+          filters.map((filter) => queryClient.invalidateQueries(filter)),
+        );
+        if (!disposed && preCursorQueries.length > 0) {
+          const seenHashes = new Set<string>();
+          const followUps = preCursorQueries.filter((query) => {
+            if (seenHashes.has(query.queryHash)) return false;
+            seenHashes.add(query.queryHash);
+            return true;
+          });
+          await Promise.allSettled(
+            followUps.map((query) =>
+              queryClient.invalidateQueries({
+                queryKey: query.queryKey,
+                exact: true,
+              }),
+            ),
           );
         }
-        await Promise.allSettled(invalidations);
       } finally {
         flushing = false;
         if (needsReflush && !disposed) {

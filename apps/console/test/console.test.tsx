@@ -5663,6 +5663,9 @@ describe("management console", () => {
     const usageAfterOpen = getUsage.mock.calls.length;
     const pendingAfterOpen = listPending.mock.calls.length;
     eventCallbacks?.onOpen?.();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(getUsage.mock.calls.length).toBe(usageAfterOpen);
+    expect(listPending.mock.calls.length).toBe(pendingAfterOpen);
 
     for (let index = 0; index < 50; index += 1) {
       eventCallbacks?.onEvent({
@@ -5681,6 +5684,52 @@ describe("management console", () => {
     });
     expect(getUsage.mock.calls.length - usageAfterOpen).toBe(1);
     expect(listPending.mock.calls.length - pendingAfterOpen).toBe(1);
+  });
+
+  it("issues a fresh post-cursor read when the initial query is still pending on from=now open", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const initialPage = await api.listSessions({});
+    const updatedPage = {
+      ...initialPage,
+      data: initialPage.data.map((session, index) =>
+        index === 0 ? { ...session, title: "Updated during connect" } : session,
+      ),
+    };
+    let resolveInitial: ((value: typeof initialPage) => void) | undefined;
+    const listSessions = vi
+      .spyOn(api, "listSessions")
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveInitial = resolve;
+          }),
+      )
+      .mockResolvedValue(updatedPage);
+
+    let eventCallbacks:
+      Parameters<DemoConsoleApi["connectEvents"]>[0] | undefined;
+    vi.spyOn(api, "connectEvents").mockImplementation((input) => {
+      eventCallbacks = input;
+      return { close: () => undefined };
+    });
+
+    renderConsole("/sessions", api);
+    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(eventCallbacks).toBeDefined());
+
+    // Stream opens and the coalesced flush runs while listSessions is still
+    // pending with no cached data.
+    eventCallbacks?.onOpen?.();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(listSessions).toHaveBeenCalledTimes(1);
+
+    // Once the pre-cursor initial request resolves, a fresh post-cursor read
+    // runs and brings the view up to date.
+    resolveInitial?.(initialPage);
+    expect(
+      await screen.findByText("Updated during connect"),
+    ).toBeInTheDocument();
+    expect(listSessions).toHaveBeenCalledTimes(2);
   });
 
   it("reconnects SSE to the new project from 'now' on A -> B -> A even with a saved cursor", async () => {
