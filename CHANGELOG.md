@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.17.1](https://github.com/vectrix-ai/oao/compare/v0.17.0...v0.17.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **deps:** patch vite, jsdom and vitest vulnerabilities and upgrade Flue 2.3.1 ([#72](https://github.com/vectrix-ai/oao/issues/72)) ([f0b5815](https://github.com/vectrix-ai/oao/commit/f0b5815e4bfd399716bfbf2eb961777df0490d5a))
+* **events:** start console SSE from now and coalesce invalidations ([#75](https://github.com/vectrix-ai/oao/issues/75)) ([3251a10](https://github.com/vectrix-ai/oao/commit/3251a104ecac882b7b639547fb5add78f51938db))
+* **VEC-2442:** compact and retry on context output exhaustion instead of ending silently ([#74](https://github.com/vectrix-ai/oao/issues/74)) ([4bd6f04](https://github.com/vectrix-ai/oao/commit/4bd6f0466f5a813918b6414598f454716372c86d))
+
 ## [0.17.0](https://github.com/vectrix-ai/oao/compare/v0.16.0...v0.17.0) (2026-11-19)
 
 
