@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -77,11 +78,17 @@ export function useProjectEvents(): {
     queryFn: () => api.getContext(),
   });
   const projectId = context.data?.project.id;
+  const previousProjectIdRef = useRef<string | undefined>(undefined);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!projectId) return;
+    const switchedProject =
+      previousProjectIdRef.current !== undefined &&
+      previousProjectIdRef.current !== projectId;
+    previousProjectIdRef.current = projectId;
+
     const controller = new AbortController();
     let disposed = false;
     let flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -116,6 +123,7 @@ export function useProjectEvents(): {
       const pendingWork = dirtyPendingWork;
       const allSessionDetails = dirtyAllSessionDetails;
       const sessionIds = [...dirtySessionIds];
+      const sessionIdSet = new Set(sessionIds);
       dirtySessions = false;
       dirtyUsage = false;
       dirtyPendingWork = false;
@@ -141,28 +149,24 @@ export function useProjectEvents(): {
         }
         if (allSessionDetails) {
           invalidations.push(
-            queryClient.invalidateQueries({
-              predicate: ({ queryKey }) =>
-                queryKey[0] === "session" && queryKey.length === 2,
-            }),
+            queryClient.invalidateQueries({ queryKey: ["session"] }),
           );
         } else {
           for (const id of sessionIds) {
             invalidations.push(
+              queryClient.invalidateQueries({ queryKey: ["session", id] }),
+            );
+          }
+          if (usage) {
+            invalidations.push(
               queryClient.invalidateQueries({
-                queryKey: ["session", id],
-                exact: true,
+                predicate: ({ queryKey }) =>
+                  queryKey[0] === "session" &&
+                  queryKey[2] === "usage" &&
+                  !sessionIdSet.has(String(queryKey[1])),
               }),
             );
           }
-        }
-        if (usage) {
-          invalidations.push(
-            queryClient.invalidateQueries({
-              predicate: ({ queryKey }) =>
-                queryKey[0] === "session" && queryKey[2] === "usage",
-            }),
-          );
         }
         if (pendingWork) {
           invalidations.push(
@@ -180,7 +184,8 @@ export function useProjectEvents(): {
     };
 
     const cursorKey = `oao:event-cursor:${projectId}`;
-    const after = sessionStorage.getItem(cursorKey);
+    const after = switchedProject ? null : sessionStorage.getItem(cursorKey);
+    let syncedFromNow = Boolean(after);
     const connection = api.connectEvents({
       projectId,
       ...(after ? { after } : { from: "now" }),
@@ -189,6 +194,15 @@ export function useProjectEvents(): {
         if (disposed) return;
         setConnected(true);
         setError(null);
+        // Close any race between initial REST reads and the server's from=now
+        // head lookup with one coalesced refresh after the stream cursor is fixed.
+        if (!syncedFromNow) {
+          syncedFromNow = true;
+          dirtySessions = true;
+          dirtyAllSessionDetails = true;
+          dirtyPendingWork = true;
+          scheduleFlush();
+        }
       },
       onCursor: (cursor) => {
         if (disposed) return;
@@ -260,11 +274,12 @@ export function useProjectEvents(): {
     };
   }, [api, projectId, queryClient]);
 
-  const contextError = context.isError
-    ? context.error instanceof Error
-      ? context.error.message
-      : "Unable to load project context"
-    : null;
+  const contextError =
+    !context.data && context.isError
+      ? context.error instanceof Error
+        ? context.error.message
+        : "Unable to load project context"
+      : null;
 
   return {
     connected: contextError ? false : connected,

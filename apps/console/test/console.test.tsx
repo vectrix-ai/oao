@@ -5620,31 +5620,52 @@ describe("management console", () => {
     ).toBe("djE6NDI");
   });
 
-  it("starts live SSE from 'now' on a fresh tab and coalesces event bursts", async () => {
+  it("starts live SSE from 'now' on a fresh tab, refreshes once on open, and coalesces event bursts", async () => {
     const sessionId = "session_01J5QTXE7W9M2R6C4A8K3N1P0V";
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     const getUsage = vi.spyOn(api, "getSessionUsage");
     const listPending = vi.spyOn(api, "listPendingWork");
-    const connectEvents = vi.spyOn(api, "connectEvents");
+    let eventCallbacks:
+      Parameters<DemoConsoleApi["connectEvents"]>[0] | undefined;
+    const connectEvents = vi
+      .spyOn(api, "connectEvents")
+      .mockImplementation((input) => {
+        eventCallbacks = input;
+        return { close: () => undefined };
+      });
 
     renderConsole(`/sessions/${sessionId}`, api);
     await screen.findByRole("complementary", { name: "Session details" });
     await waitFor(() => expect(connectEvents).toHaveBeenCalled());
 
-    const firstCall = connectEvents.mock.lastCall?.[0];
-    expect(firstCall?.from).toBe("now");
-    expect(firstCall?.after).toBeUndefined();
-    expect(firstCall?.projectId).toBe("22222222-2222-4222-8222-222222222222");
+    expect(eventCallbacks?.from).toBe("now");
+    expect(eventCallbacks?.after).toBeUndefined();
+    expect(eventCallbacks?.projectId).toBe(
+      "22222222-2222-4222-8222-222222222222",
+    );
 
     await waitFor(() => {
       expect(getUsage).toHaveBeenCalled();
       expect(listPending).toHaveBeenCalled();
     });
-    const usageBefore = getUsage.mock.calls.length;
-    const pendingBefore = listPending.mock.calls.length;
+    const usageBeforeOpen = getUsage.mock.calls.length;
+    const pendingBeforeOpen = listPending.mock.calls.length;
+
+    // First onOpen triggers one catch-up refresh to close the gap between
+    // initial REST reads and the server's from=now head lookup.
+    eventCallbacks?.onOpen?.();
+    await waitFor(() => {
+      expect(getUsage.mock.calls.length).toBe(usageBeforeOpen + 1);
+      expect(listPending.mock.calls.length).toBe(pendingBeforeOpen + 1);
+    });
+
+    // A subsequent onOpen (reconnect) does not trigger another refresh.
+    const usageAfterOpen = getUsage.mock.calls.length;
+    const pendingAfterOpen = listPending.mock.calls.length;
+    eventCallbacks?.onOpen?.();
 
     for (let index = 0; index < 50; index += 1) {
-      firstCall?.onEvent({
+      eventCallbacks?.onEvent({
         kind:
           index % 2 === 0
             ? "model.invocation_completed"
@@ -5655,15 +5676,20 @@ describe("management console", () => {
     }
 
     await waitFor(() => {
-      expect(getUsage.mock.calls.length).toBeGreaterThan(usageBefore);
-      expect(listPending.mock.calls.length).toBeGreaterThan(pendingBefore);
+      expect(getUsage.mock.calls.length).toBeGreaterThan(usageAfterOpen);
+      expect(listPending.mock.calls.length).toBeGreaterThan(pendingAfterOpen);
     });
-    expect(getUsage.mock.calls.length - usageBefore).toBe(1);
-    expect(listPending.mock.calls.length - pendingBefore).toBe(1);
+    expect(getUsage.mock.calls.length - usageAfterOpen).toBe(1);
+    expect(listPending.mock.calls.length - pendingAfterOpen).toBe(1);
   });
 
-  it("reconnects SSE to the new project from 'now' when switching projects", async () => {
+  it("reconnects SSE to the new project from 'now' on A -> B -> A even with a saved cursor", async () => {
     const user = userEvent.setup();
+    const projectA = "22222222-2222-4222-8222-222222222222";
+    const projectB = "23232323-2323-4232-8232-232323232323";
+    sessionStorage.setItem(`oao:event-cursor:${projectA}`, "djE6MTA");
+    sessionStorage.setItem(`oao:event-cursor:${projectB}`, "djE6MjA");
+
     const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
     const closed: string[] = [];
     const opened: Array<{ projectId?: string; from?: string; after?: string }> =
@@ -5684,22 +5710,26 @@ describe("management console", () => {
     renderConsole("/sessions", api);
     await waitFor(() => expect(opened).toHaveLength(1));
     expect(opened[0]).toEqual({
-      projectId: "22222222-2222-4222-8222-222222222222",
-      from: "now",
+      projectId: projectA,
+      after: "djE6MTA",
     });
 
     const projectSelect = await screen.findByRole("combobox", {
       name: "Project",
     });
-    await user.selectOptions(
-      projectSelect,
-      "23232323-2323-4232-8232-232323232323",
-    );
-
+    await user.selectOptions(projectSelect, projectB);
     await waitFor(() => expect(opened).toHaveLength(2));
-    expect(closed).toContain("22222222-2222-4222-8222-222222222222");
+    expect(closed).toContain(projectA);
     expect(opened[1]).toEqual({
-      projectId: "23232323-2323-4232-8232-232323232323",
+      projectId: projectB,
+      from: "now",
+    });
+
+    await user.selectOptions(projectSelect, projectA);
+    await waitFor(() => expect(opened).toHaveLength(3));
+    expect(closed).toContain(projectB);
+    expect(opened[2]).toEqual({
+      projectId: projectA,
       from: "now",
     });
   });
