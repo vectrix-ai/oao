@@ -2706,21 +2706,31 @@ export class HttpConsoleApi implements ConsoleApi {
     while (!signal.aborted) {
       try {
         const token = await this.#getAccessToken();
-        const response = await fetch(
-          `${this.#baseUrl}${await this.#projectPath("/events")}`,
-          {
-            credentials: "include",
-            headers: {
-              accept: "text/event-stream",
-              ...(cursor ? { "last-event-id": cursor } : {}),
-              ...(token ? { authorization: `Bearer ${token}` } : {}),
-            },
-            signal,
+        const suffix =
+          !cursor && input.from
+            ? `/events?from=${encodeURIComponent(input.from)}`
+            : "/events";
+        const path = input.projectId
+          ? `/projects/${encodeURIComponent(input.projectId)}${suffix}`
+          : await this.#projectPath(suffix);
+        const response = await fetch(`${this.#baseUrl}${path}`, {
+          credentials: "include",
+          headers: {
+            accept: "text/event-stream",
+            ...(cursor ? { "last-event-id": cursor } : {}),
+            ...(token ? { authorization: `Bearer ${token}` } : {}),
           },
-        );
+          signal,
+        });
         if (!response.ok || !response.body)
           throw new Error(`Event stream failed (${response.status})`);
         retryMs = 750;
+        const headerCursor = response.headers.get("x-oao-event-cursor");
+        if (!cursor && headerCursor) {
+          cursor = headerCursor;
+          input.onCursor(headerCursor);
+        }
+        input.onOpen?.();
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";

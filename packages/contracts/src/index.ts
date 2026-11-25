@@ -2337,6 +2337,8 @@ export const ProductEventSchema = v.object({
   occurredAt: TimestampSchema,
 });
 
+export const EventStreamFromSchema = v.picklist(["beginning", "now"]);
+
 export const CursorSchema = v.pipe(
   v.string(),
   v.minLength(1),
@@ -2448,6 +2450,7 @@ export type ToolStage = v.InferOutput<typeof ToolStageSchema>;
 export type Approval = v.InferOutput<typeof ApprovalSchema>;
 export type ProductEventKind = v.InferOutput<typeof ProductEventKindSchema>;
 export type ProductEvent = v.InferOutput<typeof ProductEventSchema>;
+export type EventStreamFrom = v.InferOutput<typeof EventStreamFromSchema>;
 export type ManagedAgentSnapshot = v.InferOutput<
   typeof ManagedAgentSnapshotSchema
 >;

@@ -40,6 +40,17 @@ ordered batches to your endpoint and keeps its own durable cursor.
 
 - **Opening:** the server writes a `: connected` comment line as soon as the
   stream opens, so proxies commit the response before the first event exists.
+  The HTTP response also includes `X-OAO-Event-Cursor` with the starting opaque
+  cursor for that stream.
+- **Starting position:** without `Last-Event-ID` or `?cursor=…`, `from=beginning`
+  (the default) replays from the start of the project's event log, and
+  `from=now` starts at the project's current committed head without replaying
+  older events. Any other `from` value returns `400 bad_request`. When
+  `Last-Event-ID` or `cursor` is also supplied, it takes precedence over `from`,
+  so a client that reconnects on a `?from=now` URL resumes cleanly from its last
+  cursor. Live UIs (including the OAO Console) should connect with `from=now`
+  when they have no saved cursor and persist `X-OAO-Event-Cursor` so quiet
+  reconnects do not skip events.
 - **Keepalive:** after 10 seconds without other output, the server writes a
   `: keepalive` comment line. Standards-compliant SSE parsers ignore lines that
   start with `:`. A custom parser must skip them and never treat them as events.
@@ -230,6 +241,7 @@ The workspace SDK reconnects automatically unless disabled:
 ```ts
 for await (const frame of client.streamProjectEvents(projectId, {
   lastEventId: savedCursor,
+  from: savedCursor ? undefined : "now",
   reconnect: true,
   signal: abortController.signal,
 })) {
@@ -237,6 +249,11 @@ for await (const frame of client.streamProjectEvents(projectId, {
   await saveCursor(frame.id);
 }
 ```
+
+When `lastEventId` is omitted and `from: "now"` is set, the SDK opens the first
+connection at `?from=now`, records the server's `X-OAO-Event-Cursor` response
+header, and sends that cursor in `Last-Event-ID` on subsequent reconnects even
+if no events arrived before the stream closed.
 
 Abort the supplied signal during application shutdown. For a browser using the
 WorkOS cookie, configure the client with `credentials: "include"`; for a

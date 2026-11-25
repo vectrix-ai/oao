@@ -3682,6 +3682,15 @@ test(
       const resumedText = await resumed.text();
       assert.match(resumedText, /run\.cancellation_requested/u);
       assert.doesNotMatch(resumedText, /run\.created/u);
+
+      const fromNow = await app.request(
+        `${projectPath}/events?from=now&once=true`,
+      );
+      assert.equal(fromNow.status, 200);
+      const tailCursor = fromNow.headers.get("x-oao-event-cursor");
+      assert.ok(tailCursor);
+      assert.ok(decodeEventCursor(tailCursor) > decodeEventCursor(lastId));
+      assert.equal(await fromNow.text(), "");
     });
 
     await t.test(

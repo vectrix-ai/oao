@@ -5619,4 +5619,243 @@ describe("management console", () => {
       ),
     ).toBe("djE6NDI");
   });
+
+  it("starts live SSE from 'now' on a fresh tab, refreshes once on open, and coalesces event bursts", async () => {
+    const sessionId = "session_01J5QTXE7W9M2R6C4A8K3N1P0V";
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const getUsage = vi.spyOn(api, "getSessionUsage");
+    const listPending = vi.spyOn(api, "listPendingWork");
+    let eventCallbacks:
+      Parameters<DemoConsoleApi["connectEvents"]>[0] | undefined;
+    const connectEvents = vi
+      .spyOn(api, "connectEvents")
+      .mockImplementation((input) => {
+        eventCallbacks = input;
+        return { close: () => undefined };
+      });
+
+    renderConsole(`/sessions/${sessionId}`, api);
+    await screen.findByRole("complementary", { name: "Session details" });
+    await waitFor(() => expect(connectEvents).toHaveBeenCalled());
+
+    expect(eventCallbacks?.from).toBe("now");
+    expect(eventCallbacks?.after).toBeUndefined();
+    expect(eventCallbacks?.projectId).toBe(
+      "22222222-2222-4222-8222-222222222222",
+    );
+
+    await waitFor(() => {
+      expect(getUsage).toHaveBeenCalled();
+      expect(listPending).toHaveBeenCalled();
+    });
+    const usageBeforeOpen = getUsage.mock.calls.length;
+    const pendingBeforeOpen = listPending.mock.calls.length;
+
+    // First onOpen triggers one catch-up refresh to close the gap between
+    // initial REST reads and the server's from=now head lookup.
+    eventCallbacks?.onOpen?.();
+    await waitFor(() => {
+      expect(getUsage.mock.calls.length).toBe(usageBeforeOpen + 1);
+      expect(listPending.mock.calls.length).toBe(pendingBeforeOpen + 1);
+    });
+
+    // A subsequent onOpen (reconnect) does not trigger another refresh.
+    const usageAfterOpen = getUsage.mock.calls.length;
+    const pendingAfterOpen = listPending.mock.calls.length;
+    eventCallbacks?.onOpen?.();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(getUsage.mock.calls.length).toBe(usageAfterOpen);
+    expect(listPending.mock.calls.length).toBe(pendingAfterOpen);
+
+    for (let index = 0; index < 50; index += 1) {
+      eventCallbacks?.onEvent({
+        kind:
+          index % 2 === 0
+            ? "model.invocation_completed"
+            : "tool_call.requested",
+        aggregateId: `run-${index}`,
+        publicPayload: { sessionId: `other-session-${index}` },
+      } as unknown as ProductEvent);
+    }
+
+    await waitFor(() => {
+      expect(getUsage.mock.calls.length).toBeGreaterThan(usageAfterOpen);
+      expect(listPending.mock.calls.length).toBeGreaterThan(pendingAfterOpen);
+    });
+    expect(getUsage.mock.calls.length - usageAfterOpen).toBe(1);
+    expect(listPending.mock.calls.length - pendingAfterOpen).toBe(1);
+  });
+
+  it("issues a fresh post-cursor read when the initial query is still pending on from=now open", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const initialPage = await api.listSessions({});
+    const updatedPage = {
+      ...initialPage,
+      data: initialPage.data.map((session, index) =>
+        index === 0 ? { ...session, title: "Updated during connect" } : session,
+      ),
+    };
+    let resolveInitial: ((value: typeof initialPage) => void) | undefined;
+    const listSessions = vi
+      .spyOn(api, "listSessions")
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveInitial = resolve;
+          }),
+      )
+      .mockResolvedValue(updatedPage);
+
+    let eventCallbacks:
+      Parameters<DemoConsoleApi["connectEvents"]>[0] | undefined;
+    vi.spyOn(api, "connectEvents").mockImplementation((input) => {
+      eventCallbacks = input;
+      return { close: () => undefined };
+    });
+
+    renderConsole("/sessions", api);
+    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(eventCallbacks).toBeDefined());
+
+    // Stream opens and the coalesced flush runs while listSessions is still
+    // pending with no cached data.
+    eventCallbacks?.onOpen?.();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(listSessions).toHaveBeenCalledTimes(1);
+
+    // Once the pre-cursor initial request resolves, a fresh post-cursor read
+    // runs and brings the view up to date.
+    resolveInitial?.(initialPage);
+    expect(
+      await screen.findByText("Updated during connect"),
+    ).toBeInTheDocument();
+    expect(listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it("serializes overlapping SSE refreshes and flushes events that arrive mid-refresh", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const initialPage = await api.listSessions({});
+    const finalPage = {
+      ...initialPage,
+      data: initialPage.data.map((session, index) =>
+        index === 0 ? { ...session, title: "Picked up after flush" } : session,
+      ),
+    };
+
+    let eventCallbacks:
+      Parameters<DemoConsoleApi["connectEvents"]>[0] | undefined;
+    vi.spyOn(api, "connectEvents").mockImplementation((input) => {
+      eventCallbacks = input;
+      return { close: () => undefined };
+    });
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let callCount = 0;
+    let resolveHeldRefresh: ((value: typeof initialPage) => void) | undefined;
+    const listSessions = vi
+      .spyOn(api, "listSessions")
+      .mockImplementation(async () => {
+        callCount += 1;
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        try {
+          if (callCount === 1) return initialPage;
+          if (callCount === 2) {
+            return await new Promise<typeof initialPage>((resolve) => {
+              resolveHeldRefresh = resolve;
+            });
+          }
+          return finalPage;
+        } finally {
+          inFlight -= 1;
+        }
+      });
+
+    renderConsole("/sessions", api);
+    expect(
+      await screen.findByText("Q3 contract extraction"),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(eventCallbacks).toBeDefined());
+    expect(listSessions).toHaveBeenCalledTimes(1);
+
+    // First event triggers refresh #1, which we hold open.
+    eventCallbacks?.onEvent({
+      kind: "run.state_changed",
+      aggregateId: "run-1",
+      publicPayload: { sessionId: "session-1", state: "running" },
+    } as unknown as ProductEvent);
+    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(2));
+    expect(inFlight).toBe(1);
+
+    // Another event arrives while refresh #1 is still in flight: it must not
+    // start an overlapping request even after the 250ms coalesce window passes.
+    eventCallbacks?.onEvent({
+      kind: "run.state_changed",
+      aggregateId: "run-2",
+      publicPayload: { sessionId: "session-2", state: "completed" },
+    } as unknown as ProductEvent);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(listSessions).toHaveBeenCalledTimes(2);
+    expect(maxInFlight).toBe(1);
+
+    // Releasing refresh #1 schedules one follow-up flush that picks up event #2.
+    resolveHeldRefresh?.(initialPage);
+    expect(
+      await screen.findByText("Picked up after flush"),
+    ).toBeInTheDocument();
+    expect(listSessions).toHaveBeenCalledTimes(3);
+    expect(maxInFlight).toBe(1);
+  });
+
+  it("reconnects SSE to the new project from 'now' on A -> B -> A even with a saved cursor", async () => {
+    const user = userEvent.setup();
+    const projectA = "22222222-2222-4222-8222-222222222222";
+    const projectB = "23232323-2323-4232-8232-232323232323";
+    sessionStorage.setItem(`oao:event-cursor:${projectA}`, "djE6MTA");
+    sessionStorage.setItem(`oao:event-cursor:${projectB}`, "djE6MjA");
+
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const closed: string[] = [];
+    const opened: Array<{ projectId?: string; from?: string; after?: string }> =
+      [];
+    vi.spyOn(api, "connectEvents").mockImplementation((input) => {
+      opened.push({
+        ...(input.projectId ? { projectId: input.projectId } : {}),
+        ...(input.from ? { from: input.from } : {}),
+        ...(input.after ? { after: input.after } : {}),
+      });
+      return {
+        close: () => {
+          closed.push(input.projectId ?? "");
+        },
+      };
+    });
+
+    renderConsole("/sessions", api);
+    await waitFor(() => expect(opened).toHaveLength(1));
+    expect(opened[0]).toEqual({
+      projectId: projectA,
+      after: "djE6MTA",
+    });
+
+    const projectSelect = await screen.findByRole("combobox", {
+      name: "Project",
+    });
+    await user.selectOptions(projectSelect, projectB);
+    await waitFor(() => expect(opened).toHaveLength(2));
+    expect(closed).toContain(projectA);
+    expect(opened[1]).toEqual({
+      projectId: projectB,
+      from: "now",
+    });
+
+    await user.selectOptions(projectSelect, projectA);
+    await waitFor(() => expect(opened).toHaveLength(3));
+    expect(closed).toContain(projectB);
+    expect(opened[2]).toEqual({
+      projectId: projectA,
+      from: "now",
+    });
+  });
 });

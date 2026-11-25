@@ -1012,6 +1012,88 @@ test("project SSE sends Last-Event-ID and yields the durable event", async () =>
   assert.deepEqual(frames, [{ id: "42", event: "product_event", data: event }]);
 });
 
+test("streamProjectEvents with from='now' captures x-oao-event-cursor for quiet reconnects", async () => {
+  const requests: Request[] = [];
+  const event = {
+    id: "00000000-0000-4000-8000-000000000002",
+    organizationId: "00000000-0000-4000-8000-000000000001",
+    projectId: "project-1",
+    aggregateType: "run",
+    aggregateId: "00000000-0000-4000-8000-000000000003",
+    aggregateSequence: 2,
+    projectPosition: "43",
+    kind: "run.state_changed",
+    publicPayload: { state: "completed" },
+    occurredAt: "2026-01-01T00:00:01.000Z",
+  };
+  const controller = new AbortController();
+  const client = new OaoClient({
+    baseUrl: "https://api.example.test",
+    apiKey: "oao_test_key",
+    fetch: async (input, init) => {
+      const req = new Request(input, init);
+      requests.push(req);
+      if (requests.length === 1) {
+        return new Response(
+          new ReadableStream({
+            start(streamController) {
+              streamController.enqueue(
+                new TextEncoder().encode(": connected\n\n"),
+              );
+              streamController.close();
+            },
+          }),
+          {
+            headers: {
+              "content-type": "text/event-stream",
+              "x-oao-event-cursor": "djE6NDI",
+            },
+          },
+        );
+      }
+      return new Response(
+        new ReadableStream({
+          start(streamController) {
+            streamController.enqueue(
+              new TextEncoder().encode(
+                `id: djE6NDM\nevent: run.state_changed\ndata: ${JSON.stringify(event)}\n\n`,
+              ),
+            );
+            streamController.close();
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  });
+
+  const frames = [];
+  for await (const frame of client.streamProjectEvents("project-1", {
+    from: "now",
+    reconnect: true,
+    reconnectDelayMs: 0,
+    signal: controller.signal,
+  })) {
+    frames.push(frame);
+    break;
+  }
+
+  assert.equal(requests.length, 2);
+  assert.equal(
+    requests[0]?.url,
+    "https://api.example.test/v1/projects/project-1/events?from=now",
+  );
+  assert.equal(requests[0]?.headers.get("last-event-id"), null);
+  assert.equal(
+    requests[1]?.url,
+    "https://api.example.test/v1/projects/project-1/events",
+  );
+  assert.equal(requests[1]?.headers.get("last-event-id"), "djE6NDI");
+  assert.deepEqual(frames, [
+    { id: "djE6NDM", event: "run.state_changed", data: event },
+  ]);
+});
+
 test("client reads and approves model presets over HTTP", async () => {
   const requests: Request[] = [];
   const client = new OaoClient({

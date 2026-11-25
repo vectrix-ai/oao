@@ -1740,16 +1740,21 @@ export class OaoClient {
         accept: "text/event-stream",
         ...(lastEventId === undefined ? {} : { "last-event-id": lastEventId }),
       });
-      const response = await this.#fetch(
-        this.#url(this.routes.events(projectId)),
-        {
-          method: "GET",
-          headers,
-          credentials: this.#credentials,
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
-        },
+      const path = this.#path(
+        this.routes.events(projectId),
+        lastEventId === undefined && options.from !== undefined
+          ? { from: options.from }
+          : {},
       );
+      const response = await this.#fetch(this.#url(path), {
+        method: "GET",
+        headers,
+        credentials: this.#credentials,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      });
       if (!response.ok) await this.#throwResponseError(response);
+      const headerCursor = response.headers.get("x-oao-event-cursor");
+      if (lastEventId === undefined && headerCursor) lastEventId = headerCursor;
       if (response.body === null) {
         throw new OaoApiError(
           response.status,

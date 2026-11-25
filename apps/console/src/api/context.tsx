@@ -1,9 +1,14 @@
-import { useQueryClient } from "@tanstack/react-query";
+import {
+  useQuery,
+  useQueryClient,
+  type QueryFilters,
+} from "@tanstack/react-query";
 import {
   createContext,
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -11,6 +16,9 @@ import type { ProductEvent } from "@oao/contracts";
 import { DemoConsoleApi, createDemoApiFromLocation } from "./demo";
 import { HttpConsoleApi } from "./http";
 import type { ConsoleApi, SessionDetail, SessionSummary } from "./types";
+
+const EVENT_INVALIDATION_COALESCE_MS = 250;
+const MAX_COALESCED_SESSION_IDS = 20;
 
 const ApiContext = createContext<ConsoleApi | null>(null);
 
@@ -69,93 +77,234 @@ export function useProjectEvents(): {
 } {
   const api = useApi();
   const queryClient = useQueryClient();
+  const context = useQuery({
+    queryKey: ["context"],
+    queryFn: () => api.getContext(),
+  });
+  const projectId = context.data?.project.id;
+  const previousProjectIdRef = useRef<string | undefined>(undefined);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!projectId) return;
+    const switchedProject =
+      previousProjectIdRef.current !== undefined &&
+      previousProjectIdRef.current !== projectId;
+    previousProjectIdRef.current = projectId;
+
     const controller = new AbortController();
-    let connection: ReturnType<ConsoleApi["connectEvents"]> | undefined;
-    void api
-      .getContext()
-      .then((context) => {
-        if (controller.signal.aborted) return;
-        const cursorKey = `oao:event-cursor:${context.project.id}`;
-        const after = sessionStorage.getItem(cursorKey);
-        connection = api.connectEvents({
-          ...(after ? { after } : {}),
-          signal: controller.signal,
-          onCursor: (cursor) => sessionStorage.setItem(cursorKey, cursor),
-          onError: (streamError) => {
-            setConnected(false);
-            setError(streamError.message);
-          },
-          onEvent: (event) => {
-            setConnected(true);
-            setError(null);
-            const sessionId =
-              typeof event.publicPayload.sessionId === "string"
-                ? event.publicPayload.sessionId
-                : event.aggregateId;
-            if (event.kind === "run.state_changed") {
-              queryClient.setQueriesData<{ data: SessionSummary[] }>(
-                { queryKey: ["sessions"] },
-                (old) =>
-                  old
-                    ? {
-                        ...old,
-                        data: old.data.map((session) =>
-                          applyRunState(session, event),
-                        ),
-                      }
-                    : old,
-              );
-              queryClient.setQueryData<SessionDetail>(
-                ["session", sessionId],
-                (old) => (old ? applyRunState(old, event) : old),
-              );
-            }
-            void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-            void queryClient.invalidateQueries({
-              queryKey: ["session", sessionId],
+    let disposed = false;
+    let flushTimer: ReturnType<typeof setTimeout> | undefined;
+    let flushing = false;
+    let needsReflush = false;
+    let dirtySessions = false;
+    let dirtyUsage = false;
+    let dirtyPendingWork = false;
+    let dirtyAllSessionDetails = false;
+    const dirtySessionIds = new Set<string>();
+
+    setConnected(false);
+    setError(null);
+
+    const scheduleFlush = () => {
+      if (disposed) return;
+      if (flushing) {
+        needsReflush = true;
+        return;
+      }
+      if (flushTimer !== undefined) return;
+      flushTimer = setTimeout(() => {
+        flushTimer = undefined;
+        void flush();
+      }, EVENT_INVALIDATION_COALESCE_MS);
+    };
+
+    const flush = async () => {
+      if (disposed || flushing) return;
+      const sessions = dirtySessions;
+      const usage = dirtyUsage;
+      const pendingWork = dirtyPendingWork;
+      const allSessionDetails = dirtyAllSessionDetails;
+      const sessionIds = [...dirtySessionIds];
+      const sessionIdSet = new Set(sessionIds);
+      dirtySessions = false;
+      dirtyUsage = false;
+      dirtyPendingWork = false;
+      dirtyAllSessionDetails = false;
+      dirtySessionIds.clear();
+      if (
+        !sessions &&
+        !usage &&
+        !pendingWork &&
+        !allSessionDetails &&
+        sessionIds.length === 0
+      ) {
+        return;
+      }
+      flushing = true;
+      needsReflush = false;
+      try {
+        const filters: QueryFilters[] = [];
+        if (sessions) filters.push({ queryKey: ["sessions"] });
+        if (allSessionDetails) {
+          filters.push({ queryKey: ["session"] });
+        } else {
+          for (const id of sessionIds) {
+            filters.push({ queryKey: ["session", id] });
+          }
+          if (usage) {
+            filters.push({
+              predicate: ({ queryKey }) =>
+                queryKey[0] === "session" &&
+                queryKey[2] === "usage" &&
+                !sessionIdSet.has(String(queryKey[1])),
             });
-            // A delegate's calls count towards the sessions above it too, and
-            // its events don't name them.
-            if (
-              event.kind === "model.invocation_completed" ||
-              event.kind === "model.invocation_failed" ||
-              event.kind === "run.state_changed"
-            )
-              void queryClient.invalidateQueries({
-                predicate: ({ queryKey }) =>
-                  queryKey[0] === "session" && queryKey[2] === "usage",
-              });
-            if (
-              event.kind.startsWith("tool_call.") ||
-              event.kind.startsWith("approval.")
-            )
-              void queryClient.invalidateQueries({
-                queryKey: ["pending-work"],
-              });
-          },
-        });
-      })
-      .catch((contextError: unknown) => {
-        if (!controller.signal.aborted) {
-          setConnected(false);
-          setError(
-            contextError instanceof Error
-              ? contextError.message
-              : "Unable to load project context",
+          }
+        }
+        if (pendingWork) filters.push({ queryKey: ["pending-work"] });
+        // TanStack Query reuses an in-flight fetch when a query has no cached
+        // data yet, so track any such active queries and re-invalidate them
+        // once their pre-cursor initial fetch settles.
+        const preCursorQueries = filters
+          .flatMap((filter) =>
+            queryClient.getQueryCache().findAll({ ...filter, type: "active" }),
+          )
+          .filter(
+            (query) =>
+              query.state.fetchStatus === "fetching" &&
+              query.state.data === undefined,
+          );
+        await Promise.allSettled(
+          filters.map((filter) => queryClient.invalidateQueries(filter)),
+        );
+        if (!disposed && preCursorQueries.length > 0) {
+          const seenHashes = new Set<string>();
+          const followUps = preCursorQueries.filter((query) => {
+            if (seenHashes.has(query.queryHash)) return false;
+            seenHashes.add(query.queryHash);
+            return true;
+          });
+          await Promise.allSettled(
+            followUps.map((query) =>
+              queryClient.invalidateQueries({
+                queryKey: query.queryKey,
+                exact: true,
+              }),
+            ),
           );
         }
-      });
-    return () => {
-      controller.abort();
-      connection?.close();
+      } finally {
+        flushing = false;
+        if (needsReflush && !disposed) {
+          needsReflush = false;
+          scheduleFlush();
+        }
+      }
     };
-  }, [api, queryClient]);
 
-  return { connected, error };
+    const cursorKey = `oao:event-cursor:${projectId}`;
+    const after = switchedProject ? null : sessionStorage.getItem(cursorKey);
+    let syncedFromNow = Boolean(after);
+    const connection = api.connectEvents({
+      projectId,
+      ...(after ? { after } : { from: "now" }),
+      signal: controller.signal,
+      onOpen: () => {
+        if (disposed) return;
+        setConnected(true);
+        setError(null);
+        // Close any race between initial REST reads and the server's from=now
+        // head lookup with one coalesced refresh after the stream cursor is fixed.
+        if (!syncedFromNow) {
+          syncedFromNow = true;
+          dirtySessions = true;
+          dirtyAllSessionDetails = true;
+          dirtyPendingWork = true;
+          scheduleFlush();
+        }
+      },
+      onCursor: (cursor) => {
+        if (disposed) return;
+        sessionStorage.setItem(cursorKey, cursor);
+      },
+      onError: (streamError) => {
+        if (disposed) return;
+        setConnected(false);
+        setError(streamError.message);
+      },
+      onEvent: (event) => {
+        if (disposed) return;
+        setConnected(true);
+        setError(null);
+        const sessionId =
+          typeof event.publicPayload.sessionId === "string"
+            ? event.publicPayload.sessionId
+            : event.aggregateId;
+        if (event.kind === "run.state_changed") {
+          queryClient.setQueriesData<{ data: SessionSummary[] }>(
+            { queryKey: ["sessions"] },
+            (old) =>
+              old
+                ? {
+                    ...old,
+                    data: old.data.map((session) =>
+                      applyRunState(session, event),
+                    ),
+                  }
+                : old,
+          );
+          queryClient.setQueryData<SessionDetail>(
+            ["session", sessionId],
+            (old) => (old ? applyRunState(old, event) : old),
+          );
+        }
+        dirtySessions = true;
+        if (!dirtyAllSessionDetails) {
+          dirtySessionIds.add(sessionId);
+          if (dirtySessionIds.size > MAX_COALESCED_SESSION_IDS) {
+            dirtyAllSessionDetails = true;
+            dirtySessionIds.clear();
+          }
+        }
+        // A delegate's calls count towards the sessions above it too, and
+        // its events don't name them.
+        if (
+          event.kind === "model.invocation_completed" ||
+          event.kind === "model.invocation_failed" ||
+          event.kind === "run.state_changed"
+        ) {
+          dirtyUsage = true;
+        }
+        if (
+          event.kind.startsWith("tool_call.") ||
+          event.kind.startsWith("approval.")
+        ) {
+          dirtyPendingWork = true;
+        }
+        scheduleFlush();
+      },
+    });
+
+    return () => {
+      disposed = true;
+      if (flushTimer !== undefined) clearTimeout(flushTimer);
+      controller.abort();
+      connection.close();
+    };
+  }, [api, projectId, queryClient]);
+
+  const contextError =
+    !context.data && context.isError
+      ? context.error instanceof Error
+        ? context.error.message
+        : "Unable to load project context"
+      : null;
+
+  return {
+    connected: contextError ? false : connected,
+    error: contextError ?? error,
+  };
 }
 
 export { DemoConsoleApi };

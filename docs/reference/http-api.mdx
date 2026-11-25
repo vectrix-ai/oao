@@ -1011,7 +1011,8 @@ The session detail is the most expensive read in the API: `debug` alone holds
 every product event, model call, tool call, and sandbox command of the session.
 To follow a run until it settles, poll `GET /runs/{runId}` (or use
 `waitForRunSettled`), subscribe to the [project event
-stream](/reference/events), or receive [event
+stream](/reference/events) (using `?from=now` when starting a live UI without a
+saved cursor), or receive [event
 webhooks](/integrations/event-webhooks), and read the session detail once
 afterwards.
 
