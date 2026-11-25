@@ -5732,6 +5732,82 @@ describe("management console", () => {
     expect(listSessions).toHaveBeenCalledTimes(2);
   });
 
+  it("serializes overlapping SSE refreshes and flushes events that arrive mid-refresh", async () => {
+    const api = new DemoConsoleApi({ eventDelayMs: 60_000 });
+    const initialPage = await api.listSessions({});
+    const finalPage = {
+      ...initialPage,
+      data: initialPage.data.map((session, index) =>
+        index === 0 ? { ...session, title: "Picked up after flush" } : session,
+      ),
+    };
+
+    let eventCallbacks:
+      Parameters<DemoConsoleApi["connectEvents"]>[0] | undefined;
+    vi.spyOn(api, "connectEvents").mockImplementation((input) => {
+      eventCallbacks = input;
+      return { close: () => undefined };
+    });
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let callCount = 0;
+    let resolveHeldRefresh: ((value: typeof initialPage) => void) | undefined;
+    const listSessions = vi
+      .spyOn(api, "listSessions")
+      .mockImplementation(async () => {
+        callCount += 1;
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        try {
+          if (callCount === 1) return initialPage;
+          if (callCount === 2) {
+            return await new Promise<typeof initialPage>((resolve) => {
+              resolveHeldRefresh = resolve;
+            });
+          }
+          return finalPage;
+        } finally {
+          inFlight -= 1;
+        }
+      });
+
+    renderConsole("/sessions", api);
+    expect(
+      await screen.findByText("Q3 contract extraction"),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(eventCallbacks).toBeDefined());
+    expect(listSessions).toHaveBeenCalledTimes(1);
+
+    // First event triggers refresh #1, which we hold open.
+    eventCallbacks?.onEvent({
+      kind: "run.state_changed",
+      aggregateId: "run-1",
+      publicPayload: { sessionId: "session-1", state: "running" },
+    } as unknown as ProductEvent);
+    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(2));
+    expect(inFlight).toBe(1);
+
+    // Another event arrives while refresh #1 is still in flight: it must not
+    // start an overlapping request even after the 250ms coalesce window passes.
+    eventCallbacks?.onEvent({
+      kind: "run.state_changed",
+      aggregateId: "run-2",
+      publicPayload: { sessionId: "session-2", state: "completed" },
+    } as unknown as ProductEvent);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(listSessions).toHaveBeenCalledTimes(2);
+    expect(maxInFlight).toBe(1);
+
+    // Releasing refresh #1 schedules one follow-up flush that picks up event #2.
+    resolveHeldRefresh?.(initialPage);
+    expect(
+      await screen.findByText("Picked up after flush"),
+    ).toBeInTheDocument();
+    expect(listSessions).toHaveBeenCalledTimes(3);
+    expect(maxInFlight).toBe(1);
+  });
+
   it("reconnects SSE to the new project from 'now' on A -> B -> A even with a saved cursor", async () => {
     const user = userEvent.setup();
     const projectA = "22222222-2222-4222-8222-222222222222";
