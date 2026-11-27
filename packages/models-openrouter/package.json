@@ -16,7 +16,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "1.6.0",
+    "@earendil-works/pi-ai": "1.6.1",
     "@oao/contracts": "workspace:*",
     "valibot": "1.5.0"
   }
