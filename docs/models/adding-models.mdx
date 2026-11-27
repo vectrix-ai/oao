@@ -684,7 +684,10 @@ unbound presets are history only.
 
 ## Bundled model catalog
 
-The runtime uses pi-ai 1.6.0. Its catalog adds GPT-6.2 Astra and GPT-6.2 Sol
+The runtime uses pi-ai 1.6.1. This patch improves retries for temporary provider
+failures and recognizes additional Google error finish reasons. Its catalog
+removes retired Groq models and corrects Mistral Medium 3.5 identifiers.
+OpenRouter routing continues to use the Responses API. Its catalog adds GPT-6.2 Astra and GPT-6.2 Sol
 (272,000-token context window, 128,000-token output limit) to the OpenAI and
 Bedrock catalogs, and newer OpenRouter chat models. Several existing OpenRouter
 entries changed their catalog context window or output limit; a preset without

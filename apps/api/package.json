@@ -38,7 +38,7 @@
     "@oao/provider-credentials": "workspace:*",
     "@oao/sandbox-daytona": "workspace:*",
     "@oao/sdk-js": "workspace:*",
-    "hono": "4.13.19",
+    "hono": "4.13.23",
     "pg": "8.23.1"
   },
   "devDependencies": {

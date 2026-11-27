@@ -158,7 +158,7 @@ export const FLUE_PACKAGE_VERSIONS = Object.freeze({
   runtime: "2.3.1",
   postgres: "2.3.1",
   opentelemetry: "2.3.1",
-  piAi: "1.6.0",
+  piAi: "1.6.1",
 });
 
 import {

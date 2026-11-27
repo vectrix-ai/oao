@@ -16,7 +16,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "1.6.0",
+    "@earendil-works/pi-ai": "1.6.1",
     "@flue/opentelemetry": "2.3.1",
     "@flue/postgres": "2.3.1",
     "@flue/runtime": "2.3.1",
@@ -31,10 +31,10 @@
     "@oao/queue-postgres": "workspace:*",
     "@oao/sdk-js": "workspace:*",
     "@oao/tool-broker": "workspace:*",
-    "@opentelemetry/api": "1.9.1",
-    "@opentelemetry/exporter-trace-otlp-http": "0.223.0",
+    "@opentelemetry/api": "1.10.0",
+    "@opentelemetry/exporter-trace-otlp-http": "0.301.2",
     "@opentelemetry/resources": "2.12.1",
-    "@opentelemetry/sdk-node": "0.223.0",
+    "@opentelemetry/sdk-node": "0.301.2",
     "pg": "8.23.1",
     "valibot": "1.5.0"
   },
