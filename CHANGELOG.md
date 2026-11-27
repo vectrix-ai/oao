@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.2](https://github.com/vectrix-ai/oao/compare/v0.17.1...v0.17.2) (2026-11-27)
+
+
+### Miscellaneous Chores
+
+* **deps:** refresh weekly dependencies ([#76](https://github.com/vectrix-ai/oao/issues/76)) ([7368db3](https://github.com/vectrix-ai/oao/commit/7368db348bd66287e4dd74c08ab555c2864fb17d))
+* **release:** bump version on all Conventional Commit PRs ([#77](https://github.com/vectrix-ai/oao/issues/77)) ([6b7a185](https://github.com/vectrix-ai/oao/commit/6b7a1859e5406e7ebece64564168968c8434cf60))
+
 ## [0.17.1](https://github.com/vectrix-ai/oao/compare/v0.17.0...v0.17.1) (2026-11-25)
 
 
