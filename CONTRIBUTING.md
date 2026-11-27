@@ -125,8 +125,11 @@ run locally, state exactly what was not run and why in the pull request.
 ## Pull requests
 
 - Keep a pull request focused and link the issue it addresses.
-- Use a Conventional Commit-style title such as `fix: ...`, `feat: ...`, or
-  `docs: ...`; include a known issue or ticket identifier.
+- Use a Conventional Commit title such as `fix: ...`, `feat: ...`,
+  `chore(deps): ...`, or `docs: ...`; include a known issue or ticket
+  identifier. The **Pull request title** workflow checks titles targeting `main`
+  so squash-merged pull requests land with a releasable commit subject (retitle
+  GitHub revert PRs to `revert: ...`).
 - Describe the problem, the chosen approach, user-visible and API effects,
   privacy or migration implications, and the validation performed.
 - Include documentation and migration or rollback guidance in the same pull

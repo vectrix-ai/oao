@@ -278,13 +278,16 @@ callback/webhook URLs, and operator identity provisioning.
 Release Please, which creates or updates one rolling release pull request from
 the Conventional Commits merged since the previous release.
 
-Use a Conventional Commit pull request title so the release effect is clear:
+Use a Conventional Commit pull request title (checked on PRs targeting `main`)
+and squash-merge with that title as the commit subject so each merged PR is
+releasable on its own and contributes to the rolling release proposal:
 
-- `fix:` and `perf:` create a patch increment.
-- `feat:` creates a minor increment.
-- `feat!:` or a `BREAKING CHANGE:` footer creates a major increment.
-- Documentation, test, build, and chore-only changes do not increment the
-  version by themselves.
+- `fix:`, `perf:`, `revert:`, `deps:`, `chore:`, `docs:`, `build:`, `ci:`,
+  `refactor:`, `test:`, and `style:` trigger at least a patch increment
+  (including package-only updates such as `chore(deps):`).
+- `feat:` triggers a minor increment.
+- `feat!:` or a `BREAKING CHANGE:` footer triggers a minor increment while on
+  `0.x` and a major increment from `1.0.0` onward.
 
 Merging the `chore: release x.y.z` pull request synchronizes the root and
 workspace package versions, updates `CHANGELOG.md`, and publishes the matching

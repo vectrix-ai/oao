@@ -10,23 +10,33 @@ release pull request.
 
 ## Version changes
 
-Use a Conventional Commit title on each pull request so the merge commit has a
-predictable release effect:
+Pull requests targeting `main` should use a Conventional Commit title (checked
+by the **Pull request title** workflow). Release Please reads the commit
+messages that land on `main`, so squash-merge using the validated Conventional
+Commit PR title as the commit subject (or ensure the landed commit(s) carry a
+Conventional Commit prefix; retitle GitHub revert PRs to `revert: ...`).
 
-| Prefix                                  | Version effect | Example                                     |
-| --------------------------------------- | -------------- | ------------------------------------------- |
-| `fix:` or `perf:`                       | Patch          | `fix: renew leases before they expire`      |
-| `feat:`                                 | Minor          | `feat: add project-scoped model presets`    |
-| `feat!:` or a `BREAKING CHANGE:` footer | Major          | `feat!: replace the session event envelope` |
+Every recognized Conventional Commit type is releasable on its own and
+contributes to the next rolling release proposal in `CHANGELOG.md`:
 
-Documentation, test, build, and chore-only commits do not cause a version bump
-on their own. They can still be included in the next release pull request when
-Release Please associates them with a releasable change.
+| Prefix                                                                                                     | Version effect                | Example                                     |
+| ---------------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------------------------------- |
+| `fix:`, `perf:`, `revert:`, `deps:`, `chore:`, `docs:`, `build:`, `ci:`, `refactor:`, `test:`, or `style:` | Patch                         | `chore(deps): refresh weekly dependencies`  |
+| `feat:` or `feature:`                                                                                      | Minor                         | `feat: add project-scoped model presets`    |
+| `feat!:` (or any type with `!`) or a `BREAKING CHANGE:` footer                                             | Minor (`0.x`), Major (`1.0+`) | `feat!: replace the session event envelope` |
 
-The repository starts from `0.0.0`. The first releasable change creates the
-first release proposal. Release Please updates the root `package.json`, every
-workspace package version, the MCP server's advertised version, the version
-manifest, and `CHANGELOG.md` together.
+Dependency-only updates (`chore(deps):`, `deps:`, `fix(deps):`), documentation
+changes, test updates, build/CI changes, and other chores can each trigger a
+patch version increment on their own. When multiple pull requests merge before
+the rolling release pull request is published, Release Please batches them into
+one version increment calculated from the accumulated commits since the last
+release.
+
+The repository starts from `0.0.0`. While on `0.x`, breaking changes increment
+the minor version (`bump-minor-pre-major: true` in `.release-please-config.json`);
+from `1.0.0` onward they increment the major version. Release Please updates the
+root `package.json`, every workspace package version, the MCP server's advertised
+version, the version manifest, and `CHANGELOG.md` together.
 
 ## Publishing a release
 
