@@ -1,0 +1,30 @@
+name: Pull request title
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  title:
+    # Matches ci.yml and public-identifiers.yml: skip release-please branches
+    # in this repository (release PRs only bump versions and already use
+    # `chore(main): release <version>`), while still checking forks.
+    if: >-
+      ${{
+        !(startsWith(github.head_ref, 'release-please--') && github.event.pull_request.head.repo.full_name == github.repository)
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Check Conventional Commit title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node scripts/check-pr-title.mjs
